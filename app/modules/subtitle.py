@@ -1,0 +1,227 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+from app.modules.speech import SpeechSegment
+from app.modules.story_builder import StoryClip
+
+
+@dataclass(frozen=True)
+class SubtitleStyle:
+    font_name: str = "Malgun Gothic"  # Windows 기본 한글 폰트
+    font_size: int = 52
+    primary_color: str = "&H00FFFFFF"
+    outline_color: str = "&H00000000"
+    outline: int = 2
+    shadow: int = 0
+    margin_v: int = 260
+
+
+def build_ass(
+    clips: list[StoryClip],
+    output_path: Path,
+    style: SubtitleStyle,
+    original_subtitles: list[SpeechSegment] | None = None,
+) -> None:
+    """ASS 자막 파일을 생성합니다.
+    
+    Args:
+        clips: StoryClip 리스트 (편집된 자막)
+        output_path: 출력 파일 경로
+        style: 자막 스타일
+        original_subtitles: 원본 음성 자막 (선택사항)
+    """
+    header = _ass_header(style)
+    
+    # StoryClip 자막 이벤트
+    clip_events = "\n".join(_ass_line(idx, clip, style) for idx, clip in enumerate(clips))
+    
+    # 원본 음성 자막 이벤트 (있는 경우)
+    original_events = ""
+    if original_subtitles:
+        # 원본 자막은 다른 레이어(1)에 배치하여 구분
+        original_events = "\n".join(
+            _ass_line_original(seg, style) for seg in original_subtitles
+        )
+    
+    # 이벤트 합치기
+    events = clip_events
+    if original_events:
+        events = clip_events + "\n" + original_events
+    
+    # 출력 디렉토리가 존재하는지 확인하고 생성
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    # UTF-8 BOM 추가하여 한글 깨짐 방지
+    content = header + events
+    output_path.write_bytes(content.encode("utf-8-sig"))  # UTF-8 BOM
+
+
+def build_ass_from_segments(
+    segments: list[SpeechSegment],
+    output_path: Path,
+    style: SubtitleStyle,
+) -> None:
+    """ASS 자막 파일을 생성합니다(전사/세그먼트 기반)."""
+    header = _ass_header(style)
+    events = "".join(_ass_line_segment(seg) for seg in segments)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    content = header + events
+    output_path.write_bytes(content.encode("utf-8-sig"))
+
+
+def remap_transcript_to_edited_timeline(
+    clips: list[StoryClip],
+    transcript_segments: list[SpeechSegment],
+    *,
+    tts_only_when_no_orig: bool = True,
+) -> list[SpeechSegment]:
+    """원본 타임라인 전사를 편집본 타임라인으로 재매핑합니다.
+
+    - clip.use_original_audio=True: (clip.start_sec~clip.end_sec)와 겹치는 전사 세그먼트를 클리핑 후, 누적 offset만큼 이동
+    - clip.use_original_audio=False: 전사 대신 TTS 문장(없으면 clip.subtitle)을 clip 전체 구간에 1개 이벤트로 생성
+    """
+    out: list[SpeechSegment] = []
+    t = 0.0
+
+    # 전사 세그먼트는 보통 시간순이지만, 안전하게 정렬
+    transcript_sorted = sorted(transcript_segments, key=lambda s: (s.start_sec, s.end_sec))
+
+    for clip in clips:
+        clip_dur = max(0.0, clip.end_sec - clip.start_sec)
+        if clip_dur <= 0:
+            continue
+
+        if clip.use_original_audio:
+            for seg in transcript_sorted:
+                if seg.end_sec <= clip.start_sec:
+                    continue
+                if seg.start_sec >= clip.end_sec:
+                    break
+                s = max(seg.start_sec, clip.start_sec)
+                e = min(seg.end_sec, clip.end_sec)
+                if e - s < 0.05:
+                    continue
+                out.append(
+                    SpeechSegment(
+                        start_sec=(s - clip.start_sec) + t,
+                        end_sec=(e - clip.start_sec) + t,
+                        text=seg.text.strip(),
+                    )
+                )
+        else:
+            if tts_only_when_no_orig:
+                text = (clip.tts_line or "").strip() or (clip.subtitle or "").strip()
+                if text:
+                    out.append(SpeechSegment(start_sec=t, end_sec=t + clip_dur, text=text))
+
+        t += clip_dur
+
+    return out
+
+
+def merge_subtitle_segments(
+    segments: list[SpeechSegment],
+    *,
+    max_gap_sec: float = 0.25,
+    max_total_chars: int = 44,
+    max_duration_sec: float = 6.0,
+    min_duration_sec: float = 0.6,
+) -> list[SpeechSegment]:
+    """자막 이벤트 수를 줄여(렌더 부담 감소) 가독성을 개선합니다."""
+    if not segments:
+        return []
+
+    segs = sorted(segments, key=lambda s: (s.start_sec, s.end_sec))
+    merged: list[SpeechSegment] = []
+
+    cur = SpeechSegment(
+        start_sec=segs[0].start_sec,
+        end_sec=segs[0].end_sec,
+        text=segs[0].text.replace("\n", " ").strip(),
+    )
+
+    for seg in segs[1:]:
+        seg_text = seg.text.replace("\n", " ").strip()
+        if not seg_text:
+            continue
+
+        gap = max(0.0, seg.start_sec - cur.end_sec)
+        combined_text = (cur.text + " " + seg_text).strip()
+        combined_dur = max(seg.end_sec, cur.end_sec) - cur.start_sec
+
+        should_merge = (
+            gap <= max_gap_sec
+            and len(combined_text) <= max_total_chars
+            and combined_dur <= max_duration_sec
+        )
+        # 너무 짧은 자막은 되도록 합치기(가독성/렌더 부담 개선)
+        if (cur.end_sec - cur.start_sec) < min_duration_sec and gap <= max_gap_sec:
+            should_merge = should_merge or len(combined_text) <= max_total_chars
+
+        if should_merge:
+            cur = SpeechSegment(
+                start_sec=cur.start_sec,
+                end_sec=max(cur.end_sec, seg.end_sec),
+                text=combined_text,
+            )
+        else:
+            merged.append(cur)
+            cur = SpeechSegment(
+                start_sec=seg.start_sec,
+                end_sec=seg.end_sec,
+                text=seg_text,
+            )
+
+    merged.append(cur)
+    return merged
+
+
+def _ass_header(style: SubtitleStyle) -> str:
+    return (
+        "[Script Info]\n"
+        "ScriptType: v4.00+\n"
+        "PlayResX: 1080\n"
+        "PlayResY: 1920\n"
+        "\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Default,{style.font_name},{style.font_size},{style.primary_color},{style.outline_color},0,0,1,{style.outline},{style.shadow},2,80,80,{style.margin_v},0\n"
+        "\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    )
+
+
+def _ass_line(index: int, clip: StoryClip, style: SubtitleStyle) -> str:
+    start = _format_time(clip.start_sec)
+    end = _format_time(clip.end_sec)
+    text = clip.subtitle.replace("\n", " ")
+    return f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}\n"
+
+
+def _ass_line_original(segment: SpeechSegment, style: SubtitleStyle) -> str:
+    """원본 음성 자막 라인 생성 (레이어 1 사용)"""
+    start = _format_time(segment.start_sec)
+    end = _format_time(segment.end_sec)
+    text = segment.text.replace("\n", " ")
+    # 원본 자막은 레이어 1에 배치하고 약간 다른 스타일 적용 가능
+    return f"Dialogue: 1,{start},{end},Default,,0,0,0,,{text}\n"
+
+
+def _ass_line_segment(segment: SpeechSegment) -> str:
+    start = _format_time(segment.start_sec)
+    end = _format_time(segment.end_sec)
+    text = segment.text.replace("\n", " ")
+    return f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}\n"
+
+
+def _format_time(seconds: float) -> str:
+    total_ms = int(seconds * 1000)
+    ms = total_ms % 1000
+    total_sec = total_ms // 1000
+    s = total_sec % 60
+    total_min = total_sec // 60
+    m = total_min % 60
+    h = total_min // 60
+    return f"{h:d}:{m:02d}:{s:02d}.{ms // 10:02d}"
