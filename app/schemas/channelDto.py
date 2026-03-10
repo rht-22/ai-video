@@ -3,7 +3,6 @@ from pydantic import BaseModel
 #채널 생성
 class ChanneCreatelRequest(BaseModel):
     channel_name: str
-    authKey: str
     user_id:str
 
     class Config:

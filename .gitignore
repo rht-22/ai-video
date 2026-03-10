@@ -187,3 +187,4 @@ env/
 Thumbs.db
 
 alembic.ini
+memo

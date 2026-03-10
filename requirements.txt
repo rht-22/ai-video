@@ -3,3 +3,28 @@ gTTS>=2.5.1
 opencv-python>=4.9.0.80
 openai-whisper>=20231117
 python-dotenv>=1.0.0
+
+# Web Framework & Server
+fastapi==0.135.1
+uvicorn[standard]==0.41.0
+
+# Database & Migration
+SQLAlchemy==2.0.48
+PyMySQL==1.1.2
+alembic==1.18.4
+
+# Environment Settings
+pydantic==2.12.5
+pydantic-settings==2.13.1
+python-dotenv==1.2.2
+
+# Security & Authentication
+python-jose[cryptography]==3.5.0
+passlib==1.7.4
+python-multipart==0.0.22
+
+# Utilities
+typing-extensions==4.15.0
+watchfiles==1.1.1
+
+python-dotenv>=1.0.0

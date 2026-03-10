@@ -78,7 +78,7 @@ def run_migrations_online() -> None:
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection, target_metadata=target_metadata, rendar_as_batch=True,compare_type=True
         )
 
         with context.begin_transaction():

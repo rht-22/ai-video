@@ -1,4 +1,4 @@
-# from sqlalchemy import Column, Integer, String, create_engine
+import uuid
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import Column, Integer, String, Text, DateTime,Enum,ForeignKey
 from sqlalchemy.orm import relationship
@@ -16,6 +16,8 @@ import enum
 # 영상 상태 정의
 class VideoStatus(str, enum.Enum):
     READY = "READY"
+    PROCESSING ="PROCESSING"
+    COMPLETED ="COMPLETED"
     FAILED = "FAILED"
 
 class VideoSourceType(str, enum.Enum):
@@ -25,15 +27,16 @@ class VideoSourceType(str, enum.Enum):
 class Video(Base):
     __tablename__ = "videos"
 
-    id = Column(Integer, primary_key=True)
-    video_id = Column(String(10), nullable=False)
-    channel_id = Column(Integer, ForeignKey("channels.channel_id"))
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    video_id = Column(String(10), nullable=False, default=lambda: str(uuid.uuid4()))
+    channel_id = Column(String(36),ForeignKey("channels.channel_id"), nullable=False,default=lambda: str(uuid.uuid4()))
 
     status = Column(Enum(VideoStatus), default=VideoStatus.READY)
     source_type = Column(Enum(VideoSourceType), nullable=False)
 
     title = Column(String(255), nullable=False)
     thumbnail_url = Column(String(500), nullable=False)
+    topic = Column(String(50), nullable=False)
 
     format = Column(String(20), nullable=False)
     duration = Column(Integer, nullable=False)
