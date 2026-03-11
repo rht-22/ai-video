@@ -244,6 +244,74 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sort
     filters.append(_build_audio_filter(inputs, num_clip_inputs, tts_keys_sorted))
     return ";".join(filters)
 
+# [_build_filtergraph : api 호출 테스트, 위에가 원본]
+# def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sorted: list[int]) -> str:
+#     # 캔버스 전체는 표준 9:16 (1080x1920) 유지
+#     W, H = 1080, 1920 
+    
+#     # 1. 영상 크기 설정: 제목 너비에 맞춘 슬림한 가로폭 (800)
+#     target_video_w = 800  
+#     target_video_h = 1100 # 세로 길이를 적절히 유지
+#     target_video_w &= ~1
+#     target_video_h &= ~1
+
+#     # 2. 영상 배치 위치 (중앙 정렬 및 아래로 이동)
+#     overlay_x = (W - target_video_w) // 2
+#     overlay_y = 450 
+
+#     font_name = "Malgun Gothic"
+#     title_font_size = 70 
+#     work_font_size = 45
+
+#     filters = []
+    
+#     # [Step A] 영상 변형 및 패딩 배치
+#     for i in range(num_clip_inputs):
+#         filters.append(
+#             f"[{i}:v]scale={target_video_w}:{target_video_h}:force_original_aspect_ratio=increase,"
+#             f"crop={target_video_w}:{target_video_h},"
+#             f"pad={W}:{H}:{overlay_x}:{overlay_y}:black[v{i}]" 
+#         )
+#         filters.append(f"[{i}:a]anull[a{i}]")
+
+#     # [Step B] 영상/오디오 합치기
+#     concat_combined = "".join([f"[v{i}][a{i}]" for i in range(num_clip_inputs)])
+#     filters.append(f"{concat_combined}concat=n={num_clip_inputs}:v=1:a=1[v_base][acat]")
+
+#     # [Step C] 제목 그리기: 상단 여백(0~500) 공간에 배치
+#     title_lines = inputs.title_textfile.read_text(encoding="utf-8-sig").strip().split("\n")
+#     current_v = "[v_base]"
+    
+#     for i, line in enumerate(title_lines):
+#         escaped_line = _escape_text_for_drawtext(line.strip())
+#         # [수정] y 위치를 영상과 겹치지 않게 상단 여백의 적절한 위치로 고정 (약 120px 지점부터 시작)
+#         line_y = 200 + (i * (title_font_size + 40)) 
+#         next_v = f"[v_title_{i}]"
+#         filters.append(
+#             f"{current_v}drawtext=font='{font_name}':fontcolor=yellow:fontsize={title_font_size}:"
+#             f"text='{escaped_line}':x=(w-text_w)/2:y={line_y}:"
+#             f"borderw=5:bordercolor=black{next_v}"
+#         )
+#         current_v = next_v
+
+#     # [Step D] 작품명: 영상 하단 여백에 배치[cite: 3]
+#     work_y = overlay_y + target_video_h + 100 
+#     filters.append(
+#         f"{current_v}drawtext=font='{font_name}':fontcolor=white:fontsize={work_font_size}:"
+#         f"text='{_escape_text_for_drawtext(f'{inputs.work_title}')}':x=(w-text_w)/2:y={work_y}:"
+#         f"borderw=2:bordercolor=black[v_texts]"
+#     )
+
+#     # 자막 처리 및 마무리[cite: 3]
+#     if inputs.subtitle_path:
+#         sub_path = str(inputs.subtitle_path.absolute()).replace("\\", "/").replace(":", "\\:")
+#         filters.append(f"[v_texts]ass='{sub_path}'[vout]")
+#     else:
+#         filters.append("[v_texts]null[vout]")
+
+#     filters.append(_build_audio_filter(inputs, num_clip_inputs, tts_keys_sorted))
+#     return ";".join(filters)
+
 
 def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sorted: list[int]) -> str:
     original_vol = f"[acat]volume={inputs.original_audio_gain_db}dB[orig_vol]"

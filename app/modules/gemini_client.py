@@ -386,109 +386,109 @@ class GeminiClient:
                 continue
         raise RuntimeError("전체 영상 분석 실패: 최대 재시도 횟수 초과")
     
-    def generate_shorts_storyline(
-        self,
-        full_summary: str,
-        key_scenes: list[dict[str, Any]],
-        emotion_arc: str,
-        work_title: str,
-    ) -> dict[str, Any]:
-        """쇼츠 영상의 여러 스토리라인을 생성하고 가장 흥미로운 것을 선택합니다.
+    # def generate_shorts_storyline(
+    #     self,
+    #     full_summary: str,
+    #     key_scenes: list[dict[str, Any]],
+    #     emotion_arc: str,
+    #     work_title: str,
+    # ) -> dict[str, Any]:
+    #     """쇼츠 영상의 여러 스토리라인을 생성하고 가장 흥미로운 것을 선택합니다.
         
-        Args:
-            full_summary: 전체 줄거리 요약
-            key_scenes: 주요 장면 리스트
-            emotion_arc: 감정 흐름 설명
-            work_title: 작품명
+    #     Args:
+    #         full_summary: 전체 줄거리 요약
+    #         key_scenes: 주요 장면 리스트
+    #         emotion_arc: 감정 흐름 설명
+    #         work_title: 작품명
         
-        Returns:
-            스토리라인 딕셔너리 (storylines, selected_storyline_index, selected_storyline 등)
-        """
-        # key_scenes를 문자열로 변환
-        key_scenes_str = "\n".join(
-            f"- {scene.get('start_sec', 0)}초~{scene.get('end_sec', 0)}초: {scene.get('description', '')}"
-            for scene in key_scenes
-        )
+    #     Returns:
+    #         스토리라인 딕셔너리 (storylines, selected_storyline_index, selected_storyline 등)
+    #     """
+    #     # key_scenes를 문자열로 변환
+    #     key_scenes_str = "\n".join(
+    #         f"- {scene.get('start_sec', 0)}초~{scene.get('end_sec', 0)}초: {scene.get('description', '')}"
+    #         for scene in key_scenes
+    #     )
         
-        prompt = STORYLINE_GENERATION_PROMPT.format(
-            work_title=work_title,
-            full_summary=full_summary,
-            key_scenes=key_scenes_str,
-            emotion_arc=emotion_arc,
-        )
+    #     prompt = STORYLINE_GENERATION_PROMPT.format(
+    #         work_title=work_title,
+    #         full_summary=full_summary,
+    #         key_scenes=key_scenes_str,
+    #         emotion_arc=emotion_arc,
+    #     )
         
-        for attempt in range(self.config.max_retries):
-            try:
-                generation_config = None
-                if self.genai_types and hasattr(self.genai_types, 'GenerateContentConfig'):
-                    generation_config = self.genai_types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                    )
+    #     for attempt in range(self.config.max_retries):
+    #         try:
+    #             generation_config = None
+    #             if self.genai_types and hasattr(self.genai_types, 'GenerateContentConfig'):
+    #                 generation_config = self.genai_types.GenerateContentConfig(
+    #                     response_mime_type="application/json",
+    #                 )
                 
-                if generation_config:
-                    response = self.model.generate_content(
-                        [prompt],
-                        generation_config=generation_config,
-                    )
-                else:
-                    response = self.model.generate_content([prompt])
+    #             if generation_config:
+    #                 response = self.model.generate_content(
+    #                     [prompt],
+    #                     generation_config=generation_config,
+    #                 )
+    #             else:
+    #                 response = self.model.generate_content([prompt])
                 
-                if not response or not response.text:
-                    if attempt == self.config.max_retries - 1:
-                        raise RuntimeError("Gemini API가 빈 응답을 반환했습니다.")
-                    continue
+    #             if not response or not response.text:
+    #                 if attempt == self.config.max_retries - 1:
+    #                     raise RuntimeError("Gemini API가 빈 응답을 반환했습니다.")
+    #                 continue
                 
-                text = response.text.strip()
-                if not text:
-                    if attempt == self.config.max_retries - 1:
-                        raise RuntimeError("Gemini API 응답이 빈 문자열입니다.")
-                    continue
+    #             text = response.text.strip()
+    #             if not text:
+    #                 if attempt == self.config.max_retries - 1:
+    #                     raise RuntimeError("Gemini API 응답이 빈 문자열입니다.")
+    #                 continue
                 
-                try:
-                    # 마크다운 코드 블록 제거
-                    json_text = _extract_json_from_markdown(text)
-                    data = json.loads(json_text)
-                except json.JSONDecodeError as json_err:
-                    if attempt == self.config.max_retries - 1:
-                        raise ValueError(
-                            f"Gemini 응답을 JSON으로 파싱할 수 없습니다.\n"
-                            f"에러: {json_err}\n"
-                            f"전체 응답:\n{text}"
-                        )
-                    continue
+    #             try:
+    #                 # 마크다운 코드 블록 제거
+    #                 json_text = _extract_json_from_markdown(text)
+    #                 data = json.loads(json_text)
+    #             except json.JSONDecodeError as json_err:
+    #                 if attempt == self.config.max_retries - 1:
+    #                     raise ValueError(
+    #                         f"Gemini 응답을 JSON으로 파싱할 수 없습니다.\n"
+    #                         f"에러: {json_err}\n"
+    #                         f"전체 응답:\n{text}"
+    #                     )
+    #                 continue
                 
-                # 스키마 검증 및 선택 로직
-                if "storylines" not in data or not isinstance(data["storylines"], list):
-                    raise ValueError("응답에 'storylines' 배열이 없습니다.")
+    #             # 스키마 검증 및 선택 로직
+    #             if "storylines" not in data or not isinstance(data["storylines"], list):
+    #                 raise ValueError("응답에 'storylines' 배열이 없습니다.")
                 
-                if len(data["storylines"]) == 0:
-                    raise ValueError("생성된 스토리라인이 없습니다.")
+    #             if len(data["storylines"]) == 0:
+    #                 raise ValueError("생성된 스토리라인이 없습니다.")
                 
-                # selected_storyline_index가 없거나 유효하지 않으면 interest_score로 자동 선택
-                selected_idx = data.get("selected_storyline_index")
-                if selected_idx is None or not isinstance(selected_idx, int) or selected_idx < 0 or selected_idx >= len(data["storylines"]):
-                    # interest_score가 가장 높은 스토리라인 선택
-                    best_idx = 0
-                    best_score = -1.0
-                    for idx, storyline in enumerate(data["storylines"]):
-                        score = storyline.get("interest_score", 0.0)
-                        if score > best_score:
-                            best_score = score
-                            best_idx = idx
-                    selected_idx = best_idx
-                    data["selected_storyline_index"] = selected_idx
+    #             # selected_storyline_index가 없거나 유효하지 않으면 interest_score로 자동 선택
+    #             selected_idx = data.get("selected_storyline_index")
+    #             if selected_idx is None or not isinstance(selected_idx, int) or selected_idx < 0 or selected_idx >= len(data["storylines"]):
+    #                 # interest_score가 가장 높은 스토리라인 선택
+    #                 best_idx = 0
+    #                 best_score = -1.0
+    #                 for idx, storyline in enumerate(data["storylines"]):
+    #                     score = storyline.get("interest_score", 0.0)
+    #                     if score > best_score:
+    #                         best_score = score
+    #                         best_idx = idx
+    #                 selected_idx = best_idx
+    #                 data["selected_storyline_index"] = selected_idx
                 
-                # 선택된 스토리라인을 별도 필드로 추가 (편의를 위해)
-                selected_storyline = data["storylines"][selected_idx]
-                data["selected_storyline"] = selected_storyline
-                data["selected_topic"] = selected_storyline.get("topic", "")
+    #             # 선택된 스토리라인을 별도 필드로 추가 (편의를 위해)
+    #             selected_storyline = data["storylines"][selected_idx]
+    #             data["selected_storyline"] = selected_storyline
+    #             data["selected_topic"] = selected_storyline.get("topic", "")
                 
-                return data
-            except Exception as e:
-                if attempt == self.config.max_retries - 1:
-                    raise RuntimeError(f"스토리라인 생성 실패: {str(e)}") from e
-                continue
-        raise RuntimeError("스토리라인 생성 실패: 최대 재시도 횟수 초과")
+    #             return data
+    #         except Exception as e:
+    #             if attempt == self.config.max_retries - 1:
+    #                 raise RuntimeError(f"스토리라인 생성 실패: {str(e)}") from e
+    #             continue
+    #     raise RuntimeError("스토리라인 생성 실패: 최대 재시도 횟수 초과")
 
 
 def load_gemini_client() -> GeminiClient:

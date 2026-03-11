@@ -2,10 +2,38 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+# @dataclass(frozen=True)
+# class DesignConfig:
+#     # 영상 프레임 (9:16, 1:1 등)
+#     aspect_ratio: str = "9:16" 
+    
+#     # 제목 설정
+#     title_font: str = "Malgun Gothic"
+#     title_size: int = 70
+#     title_color: str = "yellow"
+#     title_y: int = 120
+    
+#     # 자막 설정 (ASS 스타일 기준)
+#     subtitle_font: str = "Malgun Gothic"
+#     subtitle_size: int = 65
+#     subtitle_color: str = "&H0000FFFF" # 노란색
+#     subtitle_outline_color: str = "&H00000000"
+#     subtitle_y_margin: int = 400
+    
+#     # 작품명 및 이미지 설정
+#     work_title_y: int = 1700
+#     overlay_image_path: str | None = None # 필요 시 이미지 경로
+
+    # @classmethod
+    # def from_dict(cls, data: dict):
+    #     return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
 @dataclass(frozen=True)
 class AppConfig:
     chunk_seconds: int = 600
-    chunk_overlap: int = 5
+    # chunk_overlap: int = 5
+    chunk_overlap: int = 0
     target_duration_sec: int = 60
     target_duration_tolerance_sec: int = 10 
     min_duration_sec: int = 50  
