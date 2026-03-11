@@ -1,3 +1,4 @@
+# AI가 제안한 여러 하이라이트 후보들 중 **"어떤 것이 진짜 쇼츠로 만들기에 가장 좋은가?"**를 수학적으로 결정하는 의사결정 엔진
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -21,10 +22,11 @@ class RankedMoment:
 def rank_moments(moments: list[dict[str, Any]]) -> list[RankedMoment]:
     ranked = []
     for moment in moments:
+        # 가중치 기반 스코어링
         final_score = (
-            moment["importance"] * 0.45
-            + moment["hook_score"] * 0.25
-            + moment["topic_alignment_score"] * 0.3
+            moment["importance"] * 0.45              # 중요도 45%
+            + moment["hook_score"] * 0.25            # 후킹 포인트 25%
+            + moment["topic_alignment_score"] * 0.3  # 주제 일치도 30%
         )
         ranked.append(
             RankedMoment(
@@ -40,4 +42,5 @@ def rank_moments(moments: list[dict[str, Any]]) -> list[RankedMoment]:
                 final_score=final_score,
             )
         )
+    # 정렬 및 필터링
     return sorted(ranked, key=lambda item: item.final_score, reverse=True)

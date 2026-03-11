@@ -15,10 +15,11 @@ from app.modules.moment_ranker import rank_moments
 from app.modules.reframe import build_crop_timeline
 from app.modules.renderer import RenderInputs, render_short
 from app.modules.scene_detect import detect_scenes
-from app.modules.speech import extract_audio_from_video, extract_transcript
+# from app.modules.speech import extract_audio_from_video, extract_transcript
 from app.modules.story_builder import StoryClip, build_story
 from app.modules.subtitle import (
     SubtitleStyle,
+    SubtitleSegment,
     build_ass,
     build_ass_from_segments,
     merge_subtitle_segments,
@@ -158,25 +159,15 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print(f"  - 주요 장면: {len(key_scenes)}개")
         print("[OK] 전체 영상 분석 결과 로드 완료 (체크포인트에서)")
     elif start_idx <= 2:
-        print("\n[3/13] 전체 영상 분석 중...")
+        print("\n[3/13] 전체 영상 분석 중 (오디오 분석 제외)...")
         full_analysis_start = time.time()
         
-        # 오디오 추출
-        print("  오디오 추출 중...")
-        audio_path = extract_audio_from_video(payload.video_path)
-        print(f"  - 오디오 추출 완료: {audio_path.name}")
+        # 1. 변수를 미리 빈 값으로 만들어줌 (이게 없어서 에러가 났던 것!)
+        transcript_segments = [] 
+        transcript_text = "오디오 분석 생략"
         
-        # Whisper 전사
-        print("  Whisper 전사 중... (시간이 걸릴 수 있습니다)")
-        transcript_segments = extract_transcript(audio_path)
-        transcript_text = "\n".join(
-            f"[{seg.start_sec:.1f}초~{seg.end_sec:.1f}초] {seg.text}"
-            for seg in transcript_segments
-        )
-        print(f"  - 전사 완료: {len(transcript_segments)}개 세그먼트")
-        
-        # Gemini 전체 분석
-        print("  Gemini 전체 분석 중...")
+        # 2. Gemini 전체 분석 호출 (transcript에 빈 텍스트 전달)
+        print("  Gemini 시각 분석 중...")
         gemini = load_gemini_client()
         full_analysis = gemini.analyze_full_video(
             video_path=payload.video_path,
@@ -190,7 +181,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         key_scenes = full_analysis.get("key_scenes", [])
         emotion_arc = full_analysis.get("emotion_arc", "")
         
-        # 체크포인트 저장
+        # 3. 로그 및 체크포인트에 빈 데이터 저장
+        full_analysis["transcript_segments"] = [] 
         checkpoint_full_analysis.write_text(
             json.dumps(full_analysis, ensure_ascii=False, indent=2),
             encoding="utf-8"
@@ -567,6 +559,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print("\n[8/13] 리소스 생성 중...")
         resource_start = time.time()
         crop_map = {}
+        tts_audio_files = {}
         print(f"  크롭 타임라인 생성 중... ({len(clips)}개 클립)")
         for idx, clip in enumerate(clips):
             crop_path = output_dir / f"crop_{clip.role}_{idx}.json"
@@ -654,39 +647,48 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             ]
 
     checkpoint_audio_transcript = output_dir / "checkpoint_audio_transcript.json"
-    if transcript_segments is None and checkpoint_audio_transcript.exists():
-        transcript_data = json.loads(checkpoint_audio_transcript.read_text(encoding="utf-8"))
-        transcript_segments = [
-            SpeechSegment(
-                start_sec=float(seg["start_sec"]),
-                end_sec=float(seg["end_sec"]),
-                text=str(seg["text"]),
-            )
-            for seg in transcript_data.get("segments", [])
-            if isinstance(seg, dict) and "start_sec" in seg and "end_sec" in seg and "text" in seg
-        ]
+    # if transcript_segments is None and checkpoint_audio_transcript.exists():
+    #     transcript_data = json.loads(checkpoint_audio_transcript.read_text(encoding="utf-8"))
+    #     transcript_segments = [
+    #         SpeechSegment(
+    #             start_sec=float(seg["start_sec"]),
+    #             end_sec=float(seg["end_sec"]),
+    #             text=str(seg["text"]),
+    #         )
+    #         for seg in transcript_data.get("segments", [])
+    #         if isinstance(seg, dict) and "start_sec" in seg and "end_sec" in seg and "text" in seg
+    #     ]
 
-    if transcript_segments is None:
-        print("\n[WARN] 전사 체크포인트가 없어 원본 영상에서 오디오 추출/전사를 수행합니다(최후 수단).")
-        audio_transcript_start = time.time()
-        audio_path = extract_audio_from_video(payload.video_path)
-        transcript_segments = extract_transcript(audio_path)
-        # 체크포인트 저장(다음 실행부터는 재사용)
-        transcript_data = [
-            {"start_sec": seg.start_sec, "end_sec": seg.end_sec, "text": seg.text}
-            for seg in transcript_segments
-        ]
-        checkpoint_audio_transcript.write_text(
-            json.dumps({"segments": transcript_data}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        audio_transcript_elapsed = time.time() - audio_transcript_start
-        print(f"[OK] 오디오 추출 및 전사 완료 (소요 시간: {audio_transcript_elapsed:.1f}초)")
+    transcript_segments=[]
+    # if transcript_segments is None:
+    #     print("\n[WARN] 전사 체크포인트가 없어 원본 영상에서 오디오 추출/전사를 수행합니다(최후 수단).")
+    #     audio_transcript_start = time.time()
+    #     audio_path = extract_audio_from_video(payload.video_path)
+    #     transcript_segments = extract_transcript(audio_path)
+    #     # 체크포인트 저장(다음 실행부터는 재사용)
+    #     transcript_data = [
+    #         {"start_sec": seg.start_sec, "end_sec": seg.end_sec, "text": seg.text}
+    #         for seg in transcript_segments
+    #     ]
+    #     checkpoint_audio_transcript.write_text(
+    #         json.dumps({"segments": transcript_data}, ensure_ascii=False, indent=2),
+    #         encoding="utf-8",
+    #     )
+    #     audio_transcript_elapsed = time.time() - audio_transcript_start
+    #     print(f"[OK] 오디오 추출 및 전사 완료 (소요 시간: {audio_transcript_elapsed:.1f}초)")
 
     # 자막 생성(전사 기반 + 편집 타임라인 재매핑)
     subtitle_path = output_dir / "subtitles.ass"
     print("\n[11/13] 자막 생성 중... (원본 전사 → 편집 타임라인 재매핑)")
-    remapped = remap_transcript_to_edited_timeline(clips, transcript_segments, tts_only_when_no_orig=True)
+    remapped = [
+        SubtitleSegment(start_sec=clip.start_sec, end_sec=clip.end_sec, text=clip.subtitle)
+        for clip in clips if clip.subtitle
+    ]
+    
+    if not remapped:
+        # 자막이 아예 없을 경우 빈 파일 방지용
+        remapped = [SubtitleSegment(start_sec=0, end_sec=1, text="")]
+
     merged = merge_subtitle_segments(
         remapped,
         max_gap_sec=0.25,

@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import argparse
@@ -16,6 +17,7 @@ def _resolve_outdir(outdir: Path) -> Path:
     # 프로젝트 루트는 app/cli.py의 부모의 부모
     project_root = Path(__file__).resolve().parent.parent
     return project_root / outdir
+
 
 
 def build_parser() -> argparse.ArgumentParser:

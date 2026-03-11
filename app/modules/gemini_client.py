@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import time
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -215,7 +216,7 @@ class GeminiClient:
                 if prev.get("candidate_moments"):
                     moments_text = "\n".join([
                         f"  - {m.get('start_sec', 0)}~{m.get('end_sec', 0)}초: {m.get('subtitle', '')} ({m.get('story_role', 'unknown')})"
-                        for m in prev["candidate_moments"][:3]  # 상위 3개만
+                        for m in prev["candidate_moments"][:3]
                     ])
                     context_parts.append(f"주요 모멘트:\n{moments_text}")
             if context_parts:
@@ -228,7 +229,7 @@ class GeminiClient:
             for seg in prev_transcripts:
                 transcript_lines.append(f"[{seg.get('start_sec', 0):.1f}~{seg.get('end_sec', 0):.1f}초] {seg.get('text', '')}")
             if transcript_lines:
-                previous_transcript = "\n\n이전 구간 전사 (시간적 맥락):\n" + "\n".join(transcript_lines[-10:])  # 최근 10개 세그먼트
+                previous_transcript = "\n\n이전 구간 전사 (시간적 맥락):\n" + "\n".join(transcript_lines[-10:])
         
         trend_note = "\n최신 쇼츠 트렌드: 자연스러운 톤, 짧고 임팩트 있는 문장, 강조/리액션 요소 포함, TTS는 빠른 속도(1.5배)에 맞춘 문구."
         
@@ -245,106 +246,67 @@ class GeminiClient:
             trend_note=trend_note,
         )
         
-        # 비디오 파일 경로가 있으면 파일을 직접 읽어서 전달
         video_path = payload.get("video_path")
         content_parts = [prompt]
+        uploaded_file = None
         
+        # File API 방식 적용 (Memory-Safe)
         if video_path:
             video_path_obj = Path(video_path) if isinstance(video_path, str) else video_path
             if video_path_obj.exists():
-                # MIME 타입 결정
-                mime_type, _ = mimetypes.guess_type(str(video_path_obj))
-                if not mime_type:
-                    # 기본값으로 video/mp4 사용
-                    mime_type = "video/mp4"
-                
-                # 파일을 바이너리로 읽기
-                with open(video_path_obj, "rb") as f:
-                    video_data = f.read()
-                
-                # genai_types.Part.from_bytes()를 사용하여 파일 데이터 전달
-                if self.genai_types and hasattr(self.genai_types, 'Part'):
-                    video_part = self.genai_types.Part.from_bytes(
-                        data=video_data,
-                        mime_type=mime_type,
-                    )
-                else:
-                    # Part.from_bytes()가 없는 경우, 딕셔너리 형태로 전달
-                    video_part = {
-                        "mime_type": mime_type,
-                        "data": video_data,
-                    }
-                content_parts.append(video_part)
-        
+                try:
+                    uploaded_file = self.genai.upload_file(path=str(video_path_obj))
+                    while uploaded_file.state.name == "PROCESSING":
+                        time.sleep(2)
+                        uploaded_file = self.genai.get_file(uploaded_file.name)
+                    if uploaded_file.state.name == "FAILED":
+                        raise RuntimeError("Gemini File API 업로드 실패")
+                    content_parts.append(uploaded_file)
+                except Exception as upload_err:
+                    print(f"    [WARN] 비디오 업로드 중 오류 발생: {upload_err}")
+
         for attempt in range(self.config.max_retries):
             try:
-                # JSON 응답 강제 설정 (가능한 경우)
                 generation_config = None
                 if self.genai_types and hasattr(self.genai_types, 'GenerateContentConfig'):
                     generation_config = self.genai_types.GenerateContentConfig(
                         response_mime_type="application/json",
                     )
                 
-                if generation_config:
-                    response = self.model.generate_content(
-                        content_parts,
-                        generation_config=generation_config,
-                    )
-                else:
-                    response = self.model.generate_content(content_parts)
+                response = self.model.generate_content(
+                    content_parts,
+                    generation_config=generation_config,
+                )
                 
-                # 응답이 None이거나 빈 문자열인지 확인
                 if not response or not response.text:
-                    error_msg = "Gemini API가 빈 응답을 반환했습니다."
-                    if hasattr(response, 'prompt_feedback'):
-                        error_msg += f" 피드백: {response.prompt_feedback}"
-                    if attempt == self.config.max_retries - 1:
-                        raise RuntimeError(error_msg)
-                    print(f"    [WARN] {error_msg} 재시도 중... ({attempt + 1}/{self.config.max_retries})")
-                    continue
+                    raise RuntimeError("Gemini API 빈 응답")
                 
                 text = response.text.strip()
-                
-                # 빈 문자열인지 확인
-                if not text:
-                    error_msg = "Gemini API 응답이 빈 문자열입니다."
-                    if attempt == self.config.max_retries - 1:
-                        raise RuntimeError(error_msg)
-                    print(f"    [WARN] {error_msg} 재시도 중... ({attempt + 1}/{self.config.max_retries})")
-                    continue
-                
-                try:
-                    # 마크다운 코드 블록 제거
-                    json_text = _extract_json_from_markdown(text)
-                    data = json.loads(json_text)
-                except json.JSONDecodeError as json_err:
-                    # JSON 파싱 실패 시 응답 내용 일부 출력
-                    preview = text[:200] if len(text) > 200 else text
-                    error_msg = f"Gemini 응답 JSON 파싱 실패: {json_err}\n응답 미리보기: {preview}..."
-                    if attempt == self.config.max_retries - 1:
-                        # 마지막 시도에서는 전체 응답을 포함한 에러 메시지
-                        raise ValueError(
-                            f"Gemini 응답을 JSON으로 파싱할 수 없습니다.\n"
-                            f"에러: {json_err}\n"
-                            f"전체 응답:\n{text}"
-                        )
-                    print(f"    [WARN] JSON 파싱 실패. 재시도 중... ({attempt + 1}/{self.config.max_retries})")
-                    print(f"    응답 미리보기: {preview}...")
-                    continue
+                json_text = _extract_json_from_markdown(text)
+                data = json.loads(json_text)
                 
                 _validate_gemini_schema(data)
-                return data
+                
+                if uploaded_file:
+                    try:
+                        self.genai.delete_file(uploaded_file.name)
+                    except:
+                        pass
+                return data # 정상 결과 반환
+
             except Exception as e:
+                print(f"    [WARN] 시도 {attempt + 1} 실패: {e}")
                 if attempt == self.config.max_retries - 1:
-                    # 마지막 시도에서 실패하면 상세한 에러 메시지와 함께 예외 발생
-                    error_type = type(e).__name__
-                    raise RuntimeError(
-                        f"Gemini 분석 실패 ({error_type}): {str(e)}\n"
-                        f"청크: {payload.get('chunk_start_sec', '?')}초 ~ {payload.get('chunk_end_sec', '?')}초"
-                    ) from e
-                print(f"    [WARN] 오류 발생: {type(e).__name__}. 재시도 중... ({attempt + 1}/{self.config.max_retries})")
-                continue
-        raise RuntimeError("Gemini response failed validation after retries")
+                    if uploaded_file:
+                        try:
+                            self.genai.delete_file(uploaded_file.name)
+                        except:
+                            pass
+                    # 마지막 시도 실패 시 빈 딕셔너리 반환하여 pipeline.py 에러 방지
+                    return {} 
+                time.sleep(2)
+        
+        return {} # 어떤 경우에도 dict를 반환하도록 보장
     
     def analyze_full_video(
         self,

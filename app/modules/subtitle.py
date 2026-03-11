@@ -1,21 +1,26 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
 from pathlib import Path
-
 from app.modules.speech import SpeechSegment
 from app.modules.story_builder import StoryClip
 
+@dataclass(frozen=True)
+class SubtitleSegment:  # 이 클래스가 없어서 오류가 발생했습니다.
+    start_sec: float
+    end_sec: float
+    text: str
 
 @dataclass(frozen=True)
 class SubtitleStyle:
-    font_name: str = "Malgun Gothic"  # Windows 기본 한글 폰트
-    font_size: int = 52
-    primary_color: str = "&H00FFFFFF"
-    outline_color: str = "&H00000000"
-    outline: int = 2
-    shadow: int = 0
-    margin_v: int = 260
+
+    # 'Arial Black' 또는 '나눔스퀘어 ExtraBold' 같은 굵은 폰트 권장
+    font_name: str = "Malgun Gothic"  
+    font_size: int = 65 # 가독성을 위해 크기 상향
+    primary_color: str = "&H0000FFFF" # 밝은 노란색 (예능 트렌드)
+    outline_color: str = "&H00000000" # 검은 테두리
+    outline: int = 4 # 테두리를 두껍게 하여 눈에 띄게 함
+    shadow: int = 2
+    margin_v: int = 400
 
 
 def build_ass(

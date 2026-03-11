@@ -6,7 +6,6 @@ import shutil
 import sys
 from pathlib import Path
 
-
 def _get_windows_common_paths() -> list[Path]:
     """Windows에서 FFmpeg가 일반적으로 설치되는 경로 목록을 반환합니다."""
     paths = []
@@ -68,10 +67,10 @@ def find_ffmpeg_command(cmd_name: str) -> str:
     
     # 1. PATH에서 찾기
     for candidate in candidates:
-        found = shutil.which(candidate)
+        found = shutil.which(candidate) # 시스템 PATH 검색
         if found:
             # 경로가 실제로 존재하는지 확인
-            if os.path.exists(found) and os.access(found, os.X_OK):
+            if os.path.exists(found) and os.access(found, os.X_OK): # 실제 존재 및 실행 권한 확인(실행가능한 파일인지)
                 return found
     
     # 2. Windows에서 일반적인 설치 경로에서 찾기
