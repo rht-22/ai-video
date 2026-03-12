@@ -180,7 +180,8 @@ STORYLINE_GENERATION_PROMPT = """
 @dataclass(frozen=True)
 class GeminiConfig:
     api_key: str
-    model_name: str = "gemini-1.5-pro"
+    # model_name: str = "gemini-1.5-pro"
+    model_name: str = "gemini-1.5-flash"
     max_retries: int = 3
 
 
@@ -222,14 +223,14 @@ class GeminiClient:
             if context_parts:
                 previous_context = "\n\n이전 청크들의 분석 결과 (전체 흐름 이해용):" + "\n".join(context_parts)
         
-        previous_transcript = ""
-        if payload.get("previous_transcripts"):
-            prev_transcripts = payload["previous_transcripts"]
-            transcript_lines = []
-            for seg in prev_transcripts:
-                transcript_lines.append(f"[{seg.get('start_sec', 0):.1f}~{seg.get('end_sec', 0):.1f}초] {seg.get('text', '')}")
-            if transcript_lines:
-                previous_transcript = "\n\n이전 구간 전사 (시간적 맥락):\n" + "\n".join(transcript_lines[-10:])
+        # previous_transcript = ""
+        # if payload.get("previous_transcripts"):
+        #     prev_transcripts = payload["previous_transcripts"]
+        #     transcript_lines = []
+        #     for seg in prev_transcripts:
+        #         transcript_lines.append(f"[{seg.get('start_sec', 0):.1f}~{seg.get('end_sec', 0):.1f}초] {seg.get('text', '')}")
+        #     if transcript_lines:
+        #         previous_transcript = "\n\n이전 구간 전사 (시간적 맥락):\n" + "\n".join(transcript_lines[-10:])
         
         trend_note = "\n최신 쇼츠 트렌드: 자연스러운 톤, 짧고 임팩트 있는 문장, 강조/리액션 요소 포함, TTS는 빠른 속도(1.5배)에 맞춘 문구."
         
@@ -242,7 +243,8 @@ class GeminiClient:
             scene_boundaries=payload.get("scene_boundaries") or "없음",
             full_summary=payload.get("full_summary") or "없음",
             storyline=payload.get("storyline") or "없음",
-            previous_context=previous_context + previous_transcript,
+            # previous_context=previous_context + previous_transcript,
+            previous_context=previous_context,
             trend_note=trend_note,
         )
         
@@ -385,6 +387,49 @@ class GeminiClient:
                     raise RuntimeError(f"전체 영상 분석 실패: {str(e)}") from e
                 continue
         raise RuntimeError("전체 영상 분석 실패: 최대 재시도 횟수 초과")
+    
+    # Gemini에게 후보군 목록을 주고 최종 스토리보드를 구성
+    def compose_story_with_context(self, all_candidates: list, work_title: str, topic: str):
+        """
+        Gemini가 후보 모멘트들을 보고 전체 흐름에 맞는 스토리 구성을 다시 수행합니다.
+        """
+        # 후보 데이터를 텍스트로 정리
+        candidates_str = ""
+        for i, m in enumerate(all_candidates):
+            candidates_str += f"ID: {i}, 시간: {m['start_sec']}~{m['end_sec']}s, 역할: {m['story_role']}, 내용: {m['subtitle']}, 중요도: {m['importance']}\n"
+
+        prompt = f"""
+    당신은 최고의 숏폼 영상 편집자입니다. 제공된 하이라이트 후보들을 조합하여 영상의 흐름이 자연스럽고 기승전결이 완벽한 60초 이내의 숏츠 스토리를 구성하세요.
+
+    [영상 정보]
+    제목: {work_title}
+    주제: {topic}
+
+    [하이라이트 후보 목록]
+    {candidates_str}
+
+    [작업 지침]
+    1. 단순 점수 위주가 아닌, 영상의 '서사 흐름(Narrative Flow)'을 최우선으로 고려하세요.
+    2. 반드시 Hook(도입) -> Build(전개) -> Payoff(결정적 장면)의 순서가 논리적이어야 합니다.
+    3. 선택한 장면들의 총 합계 시간이 60초를 넘지 않도록 하세요.
+    4. 후보들 중 흐름상 불필요한 장면은 과감히 제외하세요.
+    5. 출력은 반드시 아래 JSON 형식으로만 하세요.
+
+    [출력 형식]
+    {{
+    "selected_ids": [선택한 후보 ID 리스트 (순서대로)],
+    "story_reasoning": "이 흐름으로 구성한 이유 요약"
+    }}
+    """
+        # Gemini에게 전달 (generate_content 등의 메서드 사용)
+        response = self.model.generate_content(prompt)
+        try:
+            # JSON 파싱 로직 (기존 클라이언트 내 json_loader 활용)
+            import json
+            result = json.loads(response.text.replace('```json', '').replace('```', ''))
+            return result
+        except:
+            return None
     
     # def generate_shorts_storyline(
     #     self,
@@ -543,3 +588,5 @@ def _validate_gemini_schema(data: dict[str, Any]) -> None:
                 raise ValueError(f"Missing key {key} in candidate moment")
         if moment["story_role"] not in {"hook", "build", "payoff"}:
             raise ValueError("story_role must be hook/build/payoff")
+
+
