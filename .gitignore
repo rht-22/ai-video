@@ -188,3 +188,4 @@ Thumbs.db
 
 alembic.ini
 memo
+outputs/**
