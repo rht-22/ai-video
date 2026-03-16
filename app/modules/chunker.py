@@ -9,7 +9,6 @@ from app.modules.ffmpeg_utils import find_ffmpeg_command
 
 
 @dataclass(frozen=True)
-#쪼개진 영상 조각의 정보를 담는 바구니(순서, 시작/종료 시간, 경로 등)
 class Chunk:
     index: int
     start_sec: float
@@ -17,7 +16,7 @@ class Chunk:
     path: Path
     split_path: Path | None = None  # 분할된 파일 경로 (optional)
 
-# 영상의 총 길이를 바탕으로 어떻게 쪼갤지 '계획(Timeline)'을 세우는 함수
+
 def build_chunks(video_path: Path, duration_sec: float, chunk_seconds: int, overlap_sec: int) -> list[Chunk]:
     if duration_sec <= chunk_seconds:
         return [Chunk(index=0, start_sec=0.0, end_sec=duration_sec, path=video_path)]
@@ -38,12 +37,6 @@ def build_chunks(video_path: Path, duration_sec: float, chunk_seconds: int, over
         if end >= duration_sec:
             break
         index += 1
-        # 이 부분이 핵심입니다. 만약 300초 단위로 쪼개는데 중첩이 3초라면,
-        # 1번 조각: 0~300초 / 2번 조각: 297~597초 가 됩니다.
-
-        # 왜 할까요? AI(Gemini)가 분석할 때 딱 300초에서 대사가 잘리면 문맥을 파악하기 어렵기 때문에, 
-        # 경계면의 데이터를 겹치게 하여 분석의 정확도를 높이려는 의도입니다.
-        # 중첩(Overlap) 로직
         start = end - overlap_sec
     return chunks
 

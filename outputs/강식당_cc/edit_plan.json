@@ -1,0 +1,70 @@
+{
+  "input": {
+    "video_path": "C:\\Users\\Leesumin\\3D Objects\\Downloads\\test.mp4",
+    "work_title": "강식당",
+    "topic": "예능",
+    "tone": "drama_variety",
+    "language": "ko"
+  },
+  "layout": {
+    "canvas": "1080x1920",
+    "top_title": "강사장 멘붕주의보! 5번 테이블이 왜 거기서 나와?",
+    "bottom_label": "작품명: 강식당",
+    "background_style": "blur"
+  },
+  "timeline": [
+    {
+      "role": "hook",
+      "clip_start_sec": 1204.0,
+      "clip_end_sec": 1751.760726,
+      "subtitle": "밥이 없는데 어떡하지?",
+      "tts": "예약은 남았는데 밥솥이 텅 비어버린 대참사!",
+      "use_original_audio": true,
+      "reframe": {
+        "mode": "face_track",
+        "crop_timeline_ref": "crop_hook_0.json"
+      }
+    },
+    {
+      "role": "build",
+      "clip_start_sec": 1308.0,
+      "clip_end_sec": 1857.760726,
+      "subtitle": "6번 테이블 갔는데 아닌데?",
+      "tts": "안 시켰는데요? 주문 미스로 갈 곳 잃은 김치밥!",
+      "use_original_audio": true,
+      "reframe": {
+        "mode": "face_track",
+        "crop_timeline_ref": "crop_build_1.json"
+      }
+    },
+    {
+      "role": "build",
+      "clip_start_sec": 1412.0,
+      "clip_end_sec": 1965.760726,
+      "subtitle": "이미 나갔는데?",
+      "tts": "이번엔 짜장 떡볶이가 남았습니다. 끝없는 중복 조리의 늪!",
+      "use_original_audio": true,
+      "reframe": {
+        "mode": "face_track",
+        "crop_timeline_ref": "crop_build_2.json"
+      }
+    },
+    {
+      "role": "payoff",
+      "clip_start_sec": 1434.0,
+      "clip_end_sec": 1985.760726,
+      "subtitle": "본사 직원한테 팔아!",
+      "tts": "디저트까지 실수하며 본격 적자를 맞이한 강식당. 본사 직원한테 팔아볼까요?",
+      "use_original_audio": true,
+      "reframe": {
+        "mode": "face_track",
+        "crop_timeline_ref": "crop_payoff_3.json"
+      }
+    }
+  ],
+  "audio_mix": {
+    "tts_gain_db": -2,
+    "original_gain_db": -12,
+    "bgm_gain_db": -20
+  }
+}

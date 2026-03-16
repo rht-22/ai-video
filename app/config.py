@@ -1,38 +1,40 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
 from pathlib import Path
+import requests
+import os
 
-# @dataclass(frozen=True)
-# class DesignConfig:
-#     # 영상 프레임 (9:16, 1:1 등)
-#     aspect_ratio: str = "9:16" 
+@dataclass(frozen=True)
+class DesignConfig:
+    # 영상 프레임 (9:16, 1:1 등)
+    aspect_ratio: str = "9:16" 
+    video_width: int = 800
+    video_height: int = 1100
+    video_y_pos: int = 420
     
-#     # 제목 설정
-#     title_font: str = "Malgun Gothic"
-#     title_size: int = 70
-#     title_color: str = "yellow"
-#     title_y: int = 120
+    # 제목 설정
+    title_font: str = "Malgun Gothic"
+    title_size: int = 70
+    title_color: str = "white"
+    title_y: int = 150
     
-#     # 자막 설정 (ASS 스타일 기준)
-#     subtitle_font: str = "Malgun Gothic"
-#     subtitle_size: int = 65
-#     subtitle_color: str = "&H0000FFFF" # 노란색
-#     subtitle_outline_color: str = "&H00000000"
-#     subtitle_y_margin: int = 400
+    # 자막 설정 (ASS 스타일 기준)
+    subtitle_font: str = "Malgun Gothic"
+    subtitle_size: int = 65
+    subtitle_color: str = "&H0000FFFF" # 노란색
+    subtitle_outline_color: str = "&H00000000"
+    subtitle_y_margin: int = 480
     
-#     # 작품명 및 이미지 설정
-#     work_title_y: int = 1700
-#     overlay_image_path: str | None = None # 필요 시 이미지 경로
-
-    # @classmethod
-    # def from_dict(cls, data: dict):
-    #     return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
-
+    # 작품명 및 이미지 설정
+    work_title_y: int = 1780
+    work_font_size: int = 40 
+    work_color: str = "white"
+    overlay_image_path: str | None = None # 필요 시 이미지 경로
 
 @dataclass(frozen=True)
 class AppConfig:
-    chunk_seconds: int = 600
-    # chunk_overlap: int = 5
+    chunk_seconds: int = 1800
     chunk_overlap: int = 0
     target_duration_sec: int = 60
     target_duration_tolerance_sec: int = 10 
@@ -50,7 +52,7 @@ class AppConfig:
     # 가독성을 위해 한 줄당 글자 수 제한 (줄바꿈 유도)
     subtitle_max_chars_per_line: int = 15
     subtitle_max_lines: int = 2
-    crop_sample_interval_sec: float = 0.5
+    crop_sample_interval_sec: float = 1.0
     crop_smoothing_window: int = 5
     scene_snap_threshold_sec: float = 0.8
     tts_gain_db: int = -2 # TTS를 더 또렷하게
@@ -59,12 +61,61 @@ class AppConfig:
     render_preset: str = "balanced"
     enable_hwaccel: bool = True
 
+
 @dataclass(frozen=True)
 class Paths:
     app_root: Path
+
     @property
     def assets_dir(self) -> Path:
         return self.app_root / "assets"
+
     @property
     def outputs_dir(self) -> Path:
         return self.app_root.parent / "outputs"
+
+
+def get_font_path(name: str, app_root: Path) -> str:
+    """
+    폰트 이름을 받아 로컬 경로를 반환합니다. 
+    REMOTE_FONTS에 있으면 다운로드 후 경로를 반환하고, 없으면 시스템 폰트로 간주합니다.
+    """
+    url = REMOTE_FONTS.get(name)
+    
+    # 1. URL이 없는 경우 (시스템 폰트 이름으로 간주)
+    if not url:
+        return name
+
+    # 2. 로컬 저장 폴더 설정 (assets/fonts)
+    font_dir = app_root / "assets" / "fonts"
+    font_dir.mkdir(parents=True, exist_ok=True)
+    file_path = font_dir / f"{name}.ttf"
+
+    # 3. 파일이 없으면 다운로드 진행
+    if not file_path.exists():
+        try:
+            print(f"다운로드 중인 폰트: {name}...")
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            file_path.write_bytes(response.content)
+            print(f"폰트 다운로드 완료: {file_path}")
+        except Exception as e:
+            print(f"폰트 다운로드 실패 ({name}): {e}")
+            return "Malgun Gothic"  # 실패 시 기본 폰트 반환
+
+    # 4. FFmpeg 호환을 위해 절대 경로의 역슬래시(\)를 슬래시(/)로 변환
+    return str(file_path.absolute()).replace("\\", "/")
+
+REMOTE_FONTS = {
+
+    "Jalnan": "https://raw.githubusercontent.com/rht-22/font.zip/main/Jalnan.ttf",
+
+    "JalnanGothic": "https://raw.githubusercontent.com/rht-22/font.zip/main/JalnanGothic.ttf",
+
+    "Griun": "https://raw.githubusercontent.com/rht-22/font.zip/main/Griun-Polpairness.ttf",
+
+    "Hakgyo": "https://raw.githubusercontent.com/rht-22/font.zip/main/HakgyoansimSamulhamR.ttf",
+
+    "Mulmaru": "https://raw.githubusercontent.com/rht-22/font.zip/main/mulmaru.ttf"
+
+}

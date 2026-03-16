@@ -1,0 +1,15 @@
+{
+  "crop_map": {
+    "build_1": "outputs\\강식당_cc\\crop_build_1.json",
+    "hook_0": "outputs\\강식당_cc\\crop_hook_0.json",
+    "payoff_3": "outputs\\강식당_cc\\crop_payoff_3.json",
+    "build_2": "outputs\\강식당_cc\\crop_build_2.json"
+  },
+  "tts_audio_files": {
+    "1": "outputs\\강식당_cc\\tts_1.mp3",
+    "0": "outputs\\강식당_cc\\tts_0.mp3",
+    "2": "outputs\\강식당_cc\\tts_2.mp3",
+    "3": "outputs\\강식당_cc\\tts_3.mp3"
+  },
+  "subtitle_path": ""
+}

@@ -1,26 +1,22 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
 from pathlib import Path
+
 from app.modules.speech import SpeechSegment
 from app.modules.story_builder import StoryClip
+from app.config import DesignConfig
 
-@dataclass(frozen=True)
-class SubtitleSegment:  # 이 클래스가 없어서 오류가 발생했습니다.
-    start_sec: float
-    end_sec: float
-    text: str
 
 @dataclass(frozen=True)
 class SubtitleStyle:
-
-    # 'Arial Black' 또는 '나눔스퀘어 ExtraBold' 같은 굵은 폰트 권장
-    font_name: str = "Malgun Gothic"  
-    font_size: int = 65 # 가독성을 위해 크기 상향
-    primary_color: str = "&H0000FFFF" # 밝은 노란색 (예능 트렌드)
-    outline_color: str = "&H00000000" # 검은 테두리
-    outline: int = 4 # 테두리를 두껍게 하여 눈에 띄게 함
-    shadow: int = 2
-    margin_v: int = 400
+    font_name: str = "Malgun Gothic"  # Windows 기본 한글 폰트
+    font_size: int = 52
+    primary_color: str = "&H00FFFFFF"
+    outline_color: str = "&H00000000"
+    outline: int = 2
+    shadow: int = 0
+    margin_v: int = 480
 
 
 def build_ass(
@@ -40,27 +36,40 @@ def build_ass(
     header = _ass_header(style)
     
     # StoryClip 자막 이벤트
-    clip_events = "\n".join(_ass_line(idx, clip, style) for idx, clip in enumerate(clips))
+    clip_events_list = []
+    current_timeline_sec = 0.0
     
+    for idx, clip in enumerate(clips):
+        clip_dur = clip.end_sec - clip.start_sec
+        
+        # 쇼츠의 0초부터 시작하는 상대 시간으로 변환
+        start = _format_time(current_timeline_sec)
+        end = _format_time(current_timeline_sec + clip_dur)
+        text = clip.subtitle.replace("\n", " ")
+        
+        line = f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}\n"
+        clip_events_list.append(line)
+        
+        current_timeline_sec += clip_dur # 다음 클립을 위해 시간 누적
+        
+    clip_events = "".join(clip_events_list)
     # 원본 음성 자막 이벤트 (있는 경우)
     original_events = ""
-    if original_subtitles:
-        # 원본 자막은 다른 레이어(1)에 배치하여 구분
-        original_events = "\n".join(
-            _ass_line_original(seg, style) for seg in original_subtitles
-        )
+ 
     
     # 이벤트 합치기
     events = clip_events
-    if original_events:
-        events = clip_events + "\n" + original_events
+    if original_subtitles:
+        # original_subtitles는 이미합니다.
+        original_events = "\n".join(
+            _ass_line_original(seg, style) for seg in original_subtitles
+        )
     
     # 출력 디렉토리가 존재하는지 확인하고 생성
     output_path.parent.mkdir(parents=True, exist_ok=True)
     # UTF-8 BOM 추가하여 한글 깨짐 방지
     content = header + events
     output_path.write_bytes(content.encode("utf-8-sig"))  # UTF-8 BOM
-
 
 def build_ass_from_segments(
     segments: list[SpeechSegment],

@@ -48,14 +48,13 @@ GEMINI_PROMPT_TEMPLATE = """
 - 작품명: {work_title}
 - 주제: {topic}
 - 청크 범위: {chunk_start_sec} ~ {chunk_end_sec} 초
-- 요약(있으면): {transcript_summary}
 - 씬 경계(있으면): {scene_boundaries}
 - 전체 줄거리(있으면): {full_summary}
 - 스토리라인(있으면): {storyline}
 {previous_context}
 
 요구 사항:
-- candidate_moments 최소 5개
+- candidate_moments 최소 10개
 - story_role은 hook/build/payoff 중 하나
 - 드라마/예능 톤, 짧은 리액션 문구는 가능하지만 과도 금지
 - 최신 쇼츠 트렌드 반영: 자연스러운 톤, 짧은 문장, 강조/리액션 요소
@@ -177,11 +176,12 @@ STORYLINE_GENERATION_PROMPT = """
 """.strip()
 
 
+    
+
 @dataclass(frozen=True)
 class GeminiConfig:
     api_key: str
-    # model_name: str = "gemini-1.5-pro"
-    model_name: str = "gemini-1.5-flash"
+    model_name: str = "gemini-1.5-pro"
     max_retries: int = 3
 
 
@@ -217,21 +217,13 @@ class GeminiClient:
                 if prev.get("candidate_moments"):
                     moments_text = "\n".join([
                         f"  - {m.get('start_sec', 0)}~{m.get('end_sec', 0)}초: {m.get('subtitle', '')} ({m.get('story_role', 'unknown')})"
-                        for m in prev["candidate_moments"][:3]
+                        for m in prev["candidate_moments"][:10]  # 상위 3개만
                     ])
                     context_parts.append(f"주요 모멘트:\n{moments_text}")
             if context_parts:
                 previous_context = "\n\n이전 청크들의 분석 결과 (전체 흐름 이해용):" + "\n".join(context_parts)
         
-        # previous_transcript = ""
-        # if payload.get("previous_transcripts"):
-        #     prev_transcripts = payload["previous_transcripts"]
-        #     transcript_lines = []
-        #     for seg in prev_transcripts:
-        #         transcript_lines.append(f"[{seg.get('start_sec', 0):.1f}~{seg.get('end_sec', 0):.1f}초] {seg.get('text', '')}")
-        #     if transcript_lines:
-        #         previous_transcript = "\n\n이전 구간 전사 (시간적 맥락):\n" + "\n".join(transcript_lines[-10:])
-        
+     
         trend_note = "\n최신 쇼츠 트렌드: 자연스러운 톤, 짧고 임팩트 있는 문장, 강조/리액션 요소 포함, TTS는 빠른 속도(1.5배)에 맞춘 문구."
         
         prompt = GEMINI_PROMPT_TEMPLATE.format(
@@ -239,7 +231,6 @@ class GeminiClient:
             topic=payload["topic"],
             chunk_start_sec=payload["chunk_start_sec"],
             chunk_end_sec=payload["chunk_end_sec"],
-            transcript_summary=payload.get("transcript_summary") or "없음",
             scene_boundaries=payload.get("scene_boundaries") or "없음",
             full_summary=payload.get("full_summary") or "없음",
             storyline=payload.get("storyline") or "없음",
@@ -248,9 +239,9 @@ class GeminiClient:
             trend_note=trend_note,
         )
         
+        # 비디오 파일 경로가 있으면 파일을 직접 읽어서 전달
         video_path = payload.get("video_path")
         content_parts = [prompt]
-        uploaded_file = None
         
         # File API 방식 적용 (Memory-Safe)
         if video_path:
@@ -267,48 +258,76 @@ class GeminiClient:
                 except Exception as upload_err:
                     print(f"    [WARN] 비디오 업로드 중 오류 발생: {upload_err}")
 
+        
         for attempt in range(self.config.max_retries):
             try:
+                # JSON 응답 강제 설정 (가능한 경우)
                 generation_config = None
                 if self.genai_types and hasattr(self.genai_types, 'GenerateContentConfig'):
                     generation_config = self.genai_types.GenerateContentConfig(
                         response_mime_type="application/json",
                     )
                 
-                response = self.model.generate_content(
-                    content_parts,
-                    generation_config=generation_config,
-                )
+                if generation_config:
+                    response = self.model.generate_content(
+                        content_parts,
+                        generation_config=generation_config,
+                    )
+                else:
+                    response = self.model.generate_content(content_parts)
                 
+                # 응답이 None이거나 빈 문자열인지 확인
                 if not response or not response.text:
-                    raise RuntimeError("Gemini API 빈 응답")
+                    error_msg = "Gemini API가 빈 응답을 반환했습니다."
+                    if hasattr(response, 'prompt_feedback'):
+                        error_msg += f" 피드백: {response.prompt_feedback}"
+                    if attempt == self.config.max_retries - 1:
+                        raise RuntimeError(error_msg)
+                    print(f"    [WARN] {error_msg} 재시도 중... ({attempt + 1}/{self.config.max_retries})")
+                    continue
                 
                 text = response.text.strip()
-                json_text = _extract_json_from_markdown(text)
-                data = json.loads(json_text)
+                
+                # 빈 문자열인지 확인
+                if not text:
+                    error_msg = "Gemini API 응답이 빈 문자열입니다."
+                    if attempt == self.config.max_retries - 1:
+                        raise RuntimeError(error_msg)
+                    print(f"    [WARN] {error_msg} 재시도 중... ({attempt + 1}/{self.config.max_retries})")
+                    continue
+                
+                try:
+                    # 마크다운 코드 블록 제거
+                    json_text = _extract_json_from_markdown(text)
+                    data = json.loads(json_text)
+                except json.JSONDecodeError as json_err:
+                    # JSON 파싱 실패 시 응답 내용 일부 출력
+                    preview = text[:200] if len(text) > 200 else text
+                    error_msg = f"Gemini 응답 JSON 파싱 실패: {json_err}\n응답 미리보기: {preview}..."
+                    if attempt == self.config.max_retries - 1:
+                        # 마지막 시도에서는 전체 응답을 포함한 에러 메시지
+                        raise ValueError(
+                            f"Gemini 응답을 JSON으로 파싱할 수 없습니다.\n"
+                            f"에러: {json_err}\n"
+                            f"전체 응답:\n{text}"
+                        )
+                    print(f"    [WARN] JSON 파싱 실패. 재시도 중... ({attempt + 1}/{self.config.max_retries})")
+                    print(f"    응답 미리보기: {preview}...")
+                    continue
                 
                 _validate_gemini_schema(data)
-                
-                if uploaded_file:
-                    try:
-                        self.genai.delete_file(uploaded_file.name)
-                    except:
-                        pass
-                return data # 정상 결과 반환
-
+                return data
             except Exception as e:
-                print(f"    [WARN] 시도 {attempt + 1} 실패: {e}")
                 if attempt == self.config.max_retries - 1:
-                    if uploaded_file:
-                        try:
-                            self.genai.delete_file(uploaded_file.name)
-                        except:
-                            pass
-                    # 마지막 시도 실패 시 빈 딕셔너리 반환하여 pipeline.py 에러 방지
-                    return {} 
-                time.sleep(2)
-        
-        return {} # 어떤 경우에도 dict를 반환하도록 보장
+                    # 마지막 시도에서 실패하면 상세한 에러 메시지와 함께 예외 발생
+                    error_type = type(e).__name__
+                    raise RuntimeError(
+                        f"Gemini 분석 실패 ({error_type}): {str(e)}\n"
+                        f"청크: {payload.get('chunk_start_sec', '?')}초 ~ {payload.get('chunk_end_sec', '?')}초"
+                    ) from e
+                print(f"    [WARN] 오류 발생: {type(e).__name__}. 재시도 중... ({attempt + 1}/{self.config.max_retries})")
+                continue
+        raise RuntimeError("Gemini response failed validation after retries")
     
     def analyze_full_video(
         self,
@@ -388,7 +407,112 @@ class GeminiClient:
                 continue
         raise RuntimeError("전체 영상 분석 실패: 최대 재시도 횟수 초과")
     
-    # Gemini에게 후보군 목록을 주고 최종 스토리보드를 구성
+    def generate_shorts_storyline(
+        self,
+        full_summary: str,
+        key_scenes: list[dict[str, Any]],
+        emotion_arc: str,
+        work_title: str,
+    ) -> dict[str, Any]:
+        """쇼츠 영상의 여러 스토리라인을 생성하고 가장 흥미로운 것을 선택합니다.
+        
+        Args:
+            full_summary: 전체 줄거리 요약
+            key_scenes: 주요 장면 리스트
+            emotion_arc: 감정 흐름 설명
+            work_title: 작품명
+        
+        Returns:
+            스토리라인 딕셔너리 (storylines, selected_storyline_index, selected_storyline 등)
+        """
+        # key_scenes를 문자열로 변환
+        key_scenes_str = "\n".join(
+            f"- {scene.get('start_sec', 0)}초~{scene.get('end_sec', 0)}초: {scene.get('description', '')}"
+            for scene in key_scenes
+        )
+        
+        prompt = STORYLINE_GENERATION_PROMPT.format(
+            work_title=work_title,
+            full_summary=full_summary,
+            key_scenes=key_scenes_str,
+            emotion_arc=emotion_arc,
+        )
+        
+        for attempt in range(self.config.max_retries):
+            try:
+                generation_config = None
+                if self.genai_types and hasattr(self.genai_types, 'GenerateContentConfig'):
+                    generation_config = self.genai_types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                    )
+                
+                if generation_config:
+                    response = self.model.generate_content(
+                        [prompt],
+                        generation_config=generation_config,
+                    )
+                else:
+                    response = self.model.generate_content([prompt])
+                
+                if not response or not response.text:
+                    if attempt == self.config.max_retries - 1:
+                        raise RuntimeError("Gemini API가 빈 응답을 반환했습니다.")
+                    continue
+                
+                text = response.text.strip()
+                if not text:
+                    if attempt == self.config.max_retries - 1:
+                        raise RuntimeError("Gemini API 응답이 빈 문자열입니다.")
+                    continue
+                
+                try:
+                    # 마크다운 코드 블록 제거
+                    json_text = _extract_json_from_markdown(text)
+                    data = json.loads(json_text)
+                except json.JSONDecodeError as json_err:
+                    if attempt == self.config.max_retries - 1:
+                        raise ValueError(
+                            f"Gemini 응답을 JSON으로 파싱할 수 없습니다.\n"
+                            f"에러: {json_err}\n"
+                            f"전체 응답:\n{text}"
+                        )
+                    continue
+                
+                # 스키마 검증 및 선택 로직
+                if "storylines" not in data or not isinstance(data["storylines"], list):
+                    raise ValueError("응답에 'storylines' 배열이 없습니다.")
+                
+                if len(data["storylines"]) == 0:
+                    raise ValueError("생성된 스토리라인이 없습니다.")
+                
+                # selected_storyline_index가 없거나 유효하지 않으면 interest_score로 자동 선택
+                selected_idx = data.get("selected_storyline_index")
+                if selected_idx is None or not isinstance(selected_idx, int) or selected_idx < 0 or selected_idx >= len(data["storylines"]):
+                    # interest_score가 가장 높은 스토리라인 선택
+                    best_idx = 0
+                    best_score = -1.0
+                    for idx, storyline in enumerate(data["storylines"]):
+                        score = storyline.get("interest_score", 0.0)
+                        if score > best_score:
+                            best_score = score
+                            best_idx = idx
+                    selected_idx = best_idx
+                    data["selected_storyline_index"] = selected_idx
+                
+                # 선택된 스토리라인을 별도 필드로 추가 (편의를 위해)
+                selected_storyline = data["storylines"][selected_idx]
+                data["selected_storyline"] = selected_storyline
+                data["selected_topic"] = selected_storyline.get("topic", "")
+                
+                return data
+            except Exception as e:
+                if attempt == self.config.max_retries - 1:
+                    raise RuntimeError(f"스토리라인 생성 실패: {str(e)}") from e
+                continue
+        raise RuntimeError("스토리라인 생성 실패: 최대 재시도 횟수 초과")
+    
+
+
     def compose_story_with_context(self, all_candidates: list, work_title: str, topic: str):
         """
         Gemini가 후보 모멘트들을 보고 전체 흐름에 맞는 스토리 구성을 다시 수행합니다.
@@ -430,110 +554,6 @@ class GeminiClient:
             return result
         except:
             return None
-    
-    # def generate_shorts_storyline(
-    #     self,
-    #     full_summary: str,
-    #     key_scenes: list[dict[str, Any]],
-    #     emotion_arc: str,
-    #     work_title: str,
-    # ) -> dict[str, Any]:
-    #     """쇼츠 영상의 여러 스토리라인을 생성하고 가장 흥미로운 것을 선택합니다.
-        
-    #     Args:
-    #         full_summary: 전체 줄거리 요약
-    #         key_scenes: 주요 장면 리스트
-    #         emotion_arc: 감정 흐름 설명
-    #         work_title: 작품명
-        
-    #     Returns:
-    #         스토리라인 딕셔너리 (storylines, selected_storyline_index, selected_storyline 등)
-    #     """
-    #     # key_scenes를 문자열로 변환
-    #     key_scenes_str = "\n".join(
-    #         f"- {scene.get('start_sec', 0)}초~{scene.get('end_sec', 0)}초: {scene.get('description', '')}"
-    #         for scene in key_scenes
-    #     )
-        
-    #     prompt = STORYLINE_GENERATION_PROMPT.format(
-    #         work_title=work_title,
-    #         full_summary=full_summary,
-    #         key_scenes=key_scenes_str,
-    #         emotion_arc=emotion_arc,
-    #     )
-        
-    #     for attempt in range(self.config.max_retries):
-    #         try:
-    #             generation_config = None
-    #             if self.genai_types and hasattr(self.genai_types, 'GenerateContentConfig'):
-    #                 generation_config = self.genai_types.GenerateContentConfig(
-    #                     response_mime_type="application/json",
-    #                 )
-                
-    #             if generation_config:
-    #                 response = self.model.generate_content(
-    #                     [prompt],
-    #                     generation_config=generation_config,
-    #                 )
-    #             else:
-    #                 response = self.model.generate_content([prompt])
-                
-    #             if not response or not response.text:
-    #                 if attempt == self.config.max_retries - 1:
-    #                     raise RuntimeError("Gemini API가 빈 응답을 반환했습니다.")
-    #                 continue
-                
-    #             text = response.text.strip()
-    #             if not text:
-    #                 if attempt == self.config.max_retries - 1:
-    #                     raise RuntimeError("Gemini API 응답이 빈 문자열입니다.")
-    #                 continue
-                
-    #             try:
-    #                 # 마크다운 코드 블록 제거
-    #                 json_text = _extract_json_from_markdown(text)
-    #                 data = json.loads(json_text)
-    #             except json.JSONDecodeError as json_err:
-    #                 if attempt == self.config.max_retries - 1:
-    #                     raise ValueError(
-    #                         f"Gemini 응답을 JSON으로 파싱할 수 없습니다.\n"
-    #                         f"에러: {json_err}\n"
-    #                         f"전체 응답:\n{text}"
-    #                     )
-    #                 continue
-                
-    #             # 스키마 검증 및 선택 로직
-    #             if "storylines" not in data or not isinstance(data["storylines"], list):
-    #                 raise ValueError("응답에 'storylines' 배열이 없습니다.")
-                
-    #             if len(data["storylines"]) == 0:
-    #                 raise ValueError("생성된 스토리라인이 없습니다.")
-                
-    #             # selected_storyline_index가 없거나 유효하지 않으면 interest_score로 자동 선택
-    #             selected_idx = data.get("selected_storyline_index")
-    #             if selected_idx is None or not isinstance(selected_idx, int) or selected_idx < 0 or selected_idx >= len(data["storylines"]):
-    #                 # interest_score가 가장 높은 스토리라인 선택
-    #                 best_idx = 0
-    #                 best_score = -1.0
-    #                 for idx, storyline in enumerate(data["storylines"]):
-    #                     score = storyline.get("interest_score", 0.0)
-    #                     if score > best_score:
-    #                         best_score = score
-    #                         best_idx = idx
-    #                 selected_idx = best_idx
-    #                 data["selected_storyline_index"] = selected_idx
-                
-    #             # 선택된 스토리라인을 별도 필드로 추가 (편의를 위해)
-    #             selected_storyline = data["storylines"][selected_idx]
-    #             data["selected_storyline"] = selected_storyline
-    #             data["selected_topic"] = selected_storyline.get("topic", "")
-                
-    #             return data
-    #         except Exception as e:
-    #             if attempt == self.config.max_retries - 1:
-    #                 raise RuntimeError(f"스토리라인 생성 실패: {str(e)}") from e
-    #             continue
-    #     raise RuntimeError("스토리라인 생성 실패: 최대 재시도 횟수 초과")
 
 
 def load_gemini_client() -> GeminiClient:
@@ -588,5 +608,3 @@ def _validate_gemini_schema(data: dict[str, Any]) -> None:
                 raise ValueError(f"Missing key {key} in candidate moment")
         if moment["story_role"] not in {"hook", "build", "payoff"}:
             raise ValueError("story_role must be hook/build/payoff")
-
-
