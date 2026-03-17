@@ -207,7 +207,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     gemini = load_gemini_client()
     print("[OK] Gemini 클라이언트 로드 완료")
 
-    # Gemini 분석 단계
     checkpoint_gemini = output_dir / "checkpoint_gemini.json"
     if start_idx <= 5 and checkpoint_gemini.exists() and from_step != "gemini":
         print("\n[6/13] Gemini 분석 결과 로드 중...")
@@ -217,38 +216,40 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print(f"  - 총 {len(all_candidates)}개 후보 모멘트")
         print(f"  - {len(title_candidates)}개 제목 후보")
         print("[OK] Gemini 분석 결과 로드 완료 (체크포인트에서)")
-    elif start_idx <= 5:
+    elif start_idx <= 7:
         print("\n[6/13] Gemini 분석 진행 중...")
         all_candidates: list[dict[str, Any]] = []
         title_candidates: list[str] = []
         gemini_start = time.time()
         gemini = load_gemini_client()
-
+    
+        
         # 이전 분석 결과 누적 저장
         previous_analyses: list[dict[str, Any]] = []
         
         for idx, chunk in enumerate(chunks, 1):
             print(f"  청크 {idx}/{len(chunks)} 분석 중... ({chunk.start_sec:.1f}초 ~ {chunk.end_sec:.1f}초)")
             chunk_start = time.time()
-            analysis_video_path = chunk.split_path.parent / f"analysis_{chunk.split_path.name}"
-
-            scenes = detect_scenes(analysis_video_path, media_info.fps, chunk.end_sec - chunk.start_sec)
+            scenes = detect_scenes(payload.video_path, media_info.fps, chunk.end_sec - chunk.start_sec)
             scene_boundaries = [scene.start_sec + chunk.start_sec for scene in scenes]
+            
             # 분할된 파일 경로 가져오기
             split_path = chunk.split_path if chunk.split_path else None
             
+            
+            # 이전 청크들의 전사 세그먼트 추출 (시간 범위 기반)
+            previous_transcripts: list[dict[str, Any]] = []
             
             prompt_payload = {
                 "work_title": payload.work_title,
                 "topic": payload.topic,
                 "chunk_start_sec": chunk.start_sec,
                 "chunk_end_sec": chunk.end_sec,
+                "transcript_summary": None,
                 "scene_boundaries": scene_boundaries,
-                "video_path": analysis_video_path,
+                "video_path": str(split_path) if split_path else None,
                 "full_summary": full_summary or "없음",
-                # "storyline": storyline_summary or "없음",
                 "previous_analyses": previous_analyses.copy(),  # 이전 분석 결과 전달
-                # "previous_transcripts": previous_transcripts,  # 이전 전사 전달
             }
             
             # 분석 및 파일 삭제를 try-finally로 보장
@@ -291,6 +292,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         gemini_data = json.loads(checkpoint_gemini.read_text(encoding="utf-8"))
         all_candidates = gemini_data["all_candidates"]
         title_candidates = gemini_data["title_candidates"]
+
 
     # 스토리 구성 단계
     checkpoint_story = output_dir / "checkpoint_story.json"
@@ -691,4 +693,3 @@ def _build_edit_plan(
             "bgm_gain_db": config.bgm_gain_db,
         },
     }
-

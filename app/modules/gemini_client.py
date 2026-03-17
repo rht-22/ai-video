@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import mimetypes
-import time
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -48,13 +48,14 @@ GEMINI_PROMPT_TEMPLATE = """
 - 작품명: {work_title}
 - 주제: {topic}
 - 청크 범위: {chunk_start_sec} ~ {chunk_end_sec} 초
+- 요약(있으면): {transcript_summary}
 - 씬 경계(있으면): {scene_boundaries}
 - 전체 줄거리(있으면): {full_summary}
 - 스토리라인(있으면): {storyline}
 {previous_context}
 
 요구 사항:
-- candidate_moments 최소 10개
+- candidate_moments 최소 5개
 - story_role은 hook/build/payoff 중 하나
 - 드라마/예능 톤, 짧은 리액션 문구는 가능하지만 과도 금지
 - 최신 쇼츠 트렌드 반영: 자연스러운 톤, 짧은 문장, 강조/리액션 요소
@@ -176,8 +177,6 @@ STORYLINE_GENERATION_PROMPT = """
 """.strip()
 
 
-    
-
 @dataclass(frozen=True)
 class GeminiConfig:
     api_key: str
@@ -217,13 +216,21 @@ class GeminiClient:
                 if prev.get("candidate_moments"):
                     moments_text = "\n".join([
                         f"  - {m.get('start_sec', 0)}~{m.get('end_sec', 0)}초: {m.get('subtitle', '')} ({m.get('story_role', 'unknown')})"
-                        for m in prev["candidate_moments"][:10]  # 상위 3개만
+                        for m in prev["candidate_moments"][:3]  # 상위 3개만
                     ])
                     context_parts.append(f"주요 모멘트:\n{moments_text}")
             if context_parts:
                 previous_context = "\n\n이전 청크들의 분석 결과 (전체 흐름 이해용):" + "\n".join(context_parts)
         
-     
+        previous_transcript = ""
+        if payload.get("previous_transcripts"):
+            prev_transcripts = payload["previous_transcripts"]
+            transcript_lines = []
+            for seg in prev_transcripts:
+                transcript_lines.append(f"[{seg.get('start_sec', 0):.1f}~{seg.get('end_sec', 0):.1f}초] {seg.get('text', '')}")
+            if transcript_lines:
+                previous_transcript = "\n\n이전 구간 전사 (시간적 맥락):\n" + "\n".join(transcript_lines[-10:])  # 최근 10개 세그먼트
+        
         trend_note = "\n최신 쇼츠 트렌드: 자연스러운 톤, 짧고 임팩트 있는 문장, 강조/리액션 요소 포함, TTS는 빠른 속도(1.5배)에 맞춘 문구."
         
         prompt = GEMINI_PROMPT_TEMPLATE.format(
@@ -231,103 +238,82 @@ class GeminiClient:
             topic=payload["topic"],
             chunk_start_sec=payload["chunk_start_sec"],
             chunk_end_sec=payload["chunk_end_sec"],
+            transcript_summary=payload.get("transcript_summary") or "없음",
             scene_boundaries=payload.get("scene_boundaries") or "없음",
             full_summary=payload.get("full_summary") or "없음",
             storyline=payload.get("storyline") or "없음",
-            # previous_context=previous_context + previous_transcript,
-            previous_context=previous_context,
+            previous_context=previous_context + previous_transcript,
             trend_note=trend_note,
         )
         
         # 비디오 파일 경로가 있으면 파일을 직접 읽어서 전달
         video_path = payload.get("video_path")
         content_parts = [prompt]
+        uploaded_file = None
         
         # File API 방식 적용 (Memory-Safe)
         if video_path:
             video_path_obj = Path(video_path) if isinstance(video_path, str) else video_path
             if video_path_obj.exists():
                 try:
+                    print(f" [INFO] Gemini File API 업로드 중: {video_path_obj.name}")
                     uploaded_file = self.genai.upload_file(path=str(video_path_obj))
+                    
+                    # 업로드 완료 대기 (PROCESSING -> ACTIVE)
                     while uploaded_file.state.name == "PROCESSING":
                         time.sleep(2)
                         uploaded_file = self.genai.get_file(uploaded_file.name)
+                    
                     if uploaded_file.state.name == "FAILED":
                         raise RuntimeError("Gemini File API 업로드 실패")
+                    
                     content_parts.append(uploaded_file)
                 except Exception as upload_err:
-                    print(f"    [WARN] 비디오 업로드 중 오류 발생: {upload_err}")
+                    print(f"    [WARN] 비디오 업로드 중 오류 발생: {upload_err}")
 
-        
-        for attempt in range(self.config.max_retries):
-            try:
-                # JSON 응답 강제 설정 (가능한 경우)
-                generation_config = None
-                if self.genai_types and hasattr(self.genai_types, 'GenerateContentConfig'):
-                    generation_config = self.genai_types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                    )
-                
-                if generation_config:
+        # 2. 분석 수행 및 파일 삭제 보장
+        try:
+            for attempt in range(self.config.max_retries):
+                try:
+                    generation_config = None
+                    if self.genai_types and hasattr(self.genai_types, 'GenerateContentConfig'):
+                        generation_config = self.genai_types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                        )
+                    
                     response = self.model.generate_content(
                         content_parts,
-                        generation_config=generation_config,
+                        generation_config=generation_config
                     )
-                else:
-                    response = self.model.generate_content(content_parts)
-                
-                # 응답이 None이거나 빈 문자열인지 확인
-                if not response or not response.text:
-                    error_msg = "Gemini API가 빈 응답을 반환했습니다."
-                    if hasattr(response, 'prompt_feedback'):
-                        error_msg += f" 피드백: {response.prompt_feedback}"
-                    if attempt == self.config.max_retries - 1:
-                        raise RuntimeError(error_msg)
-                    print(f"    [WARN] {error_msg} 재시도 중... ({attempt + 1}/{self.config.max_retries})")
-                    continue
-                
-                text = response.text.strip()
-                
-                # 빈 문자열인지 확인
-                if not text:
-                    error_msg = "Gemini API 응답이 빈 문자열입니다."
-                    if attempt == self.config.max_retries - 1:
-                        raise RuntimeError(error_msg)
-                    print(f"    [WARN] {error_msg} 재시도 중... ({attempt + 1}/{self.config.max_retries})")
-                    continue
-                
-                try:
-                    # 마크다운 코드 블록 제거
+                    
+                    if not response or not response.text:
+                        if attempt == self.config.max_retries - 1:
+                            raise RuntimeError("Gemini API 빈 응답 반환")
+                        continue
+                    
+                    text = response.text.strip()
                     json_text = _extract_json_from_markdown(text)
                     data = json.loads(json_text)
-                except json.JSONDecodeError as json_err:
-                    # JSON 파싱 실패 시 응답 내용 일부 출력
-                    preview = text[:200] if len(text) > 200 else text
-                    error_msg = f"Gemini 응답 JSON 파싱 실패: {json_err}\n응답 미리보기: {preview}..."
+                    
+                    _validate_gemini_schema(data)
+                    return data # 성공 시 반환
+                    
+                except Exception as e:
                     if attempt == self.config.max_retries - 1:
-                        # 마지막 시도에서는 전체 응답을 포함한 에러 메시지
-                        raise ValueError(
-                            f"Gemini 응답을 JSON으로 파싱할 수 없습니다.\n"
-                            f"에러: {json_err}\n"
-                            f"전체 응답:\n{text}"
-                        )
-                    print(f"    [WARN] JSON 파싱 실패. 재시도 중... ({attempt + 1}/{self.config.max_retries})")
-                    print(f"    응답 미리보기: {preview}...")
+                        raise e
+                    time.sleep(2 ** attempt) # 지수 백오프
                     continue
-                
-                _validate_gemini_schema(data)
-                return data
-            except Exception as e:
-                if attempt == self.config.max_retries - 1:
-                    # 마지막 시도에서 실패하면 상세한 에러 메시지와 함께 예외 발생
-                    error_type = type(e).__name__
-                    raise RuntimeError(
-                        f"Gemini 분석 실패 ({error_type}): {str(e)}\n"
-                        f"청크: {payload.get('chunk_start_sec', '?')}초 ~ {payload.get('chunk_end_sec', '?')}초"
-                    ) from e
-                print(f"    [WARN] 오류 발생: {type(e).__name__}. 재시도 중... ({attempt + 1}/{self.config.max_retries})")
-                continue
-        raise RuntimeError("Gemini response failed validation after retries")
+            
+            raise RuntimeError("Gemini 분석 시도 횟수 초과")
+
+        finally:
+            # 3. 분석 성공 여부와 관계없이 서버에서 파일 삭제 (Cleanup)
+            if uploaded_file:
+                try:
+                    uploaded_file.delete()
+                    print(f" [INFO] Gemini File API 서버 파일 삭제 완료: {uploaded_file.name}")
+                except Exception as del_err:
+                    print(f" [WARN] Gemini File API 서버 파일 삭제 실패: {del_err}")
     
     def analyze_full_video(
         self,
@@ -510,8 +496,6 @@ class GeminiClient:
                     raise RuntimeError(f"스토리라인 생성 실패: {str(e)}") from e
                 continue
         raise RuntimeError("스토리라인 생성 실패: 최대 재시도 횟수 초과")
-    
-
 
     def compose_story_with_context(self, all_candidates: list, work_title: str, topic: str):
         """
@@ -554,6 +538,8 @@ class GeminiClient:
             return result
         except:
             return None
+
+
 
 
 def load_gemini_client() -> GeminiClient:

@@ -36,8 +36,8 @@ async def generate_shorts(
     # renderer.py에서 사용하는 필드명과 일치시켜줍니다.
     design = DesignConfig(
         aspect_ratio=req.video_config.get("aspect_ratio", "9:16"),
-        video_width=req.video_config.get("width", 800),
-        video_height=req.video_config.get("height", 1100),
+        video_width=req.video_config.get("width",  800),
+        video_height=req.video_config.get("height", 720),
         video_y_pos=req.video_config.get("y_pos", 450),
         
         title_font=req.title_config.get("font", "Malgun Gothic"),
@@ -51,7 +51,8 @@ async def generate_shorts(
         subtitle_y_margin=req.subtitle_config.get("margin_v", 400),
         
         work_font_size=req.work_config.get("size", 45),
-        work_color=req.work_config.get("color", "white")
+        work_color=req.work_config.get("color", "white"),
+        work_title_y=req.work_config.get("y", 1260)
     )
 
     # 2. 파이프라인 실행용 페이로드 구성

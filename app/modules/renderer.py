@@ -78,26 +78,11 @@ def render_short(inputs: RenderInputs) -> list[str]:
     title_file = inputs.title_textfile or (output_dir / "title.txt")
     work_file = inputs.work_title_textfile or (output_dir / "work_title.txt")
 
-    # wrapped_title_for_file = _wrap_text(inputs.title_text, inputs.canvas_width - 80, title_font)
-    # title_file.write_bytes((wrapped_title_for_file + "\n").encode("utf-8-sig"))
-    # work_file.write_bytes((f"작품명: {inputs.work_title}" + "\n").encode("utf-8-sig"))
     title_file.write_bytes((wrapped_title + "\n").encode("utf-8-sig"))
     work_file.write_bytes((f"작품명: {inputs.work_title}" + "\n").encode("utf-8-sig"))
 
-
-    # inputs = replace(inputs, title_textfile=title_file, work_title_textfile=work_file)
-
-    # # TTS 입력 순서(커맨드 -i 추가 순서)와 오디오 필터 인덱스 계산을 일치시킵니다.
-    # tts_keys_sorted: list[int] = sorted(inputs.tts_audio_files.keys()) if inputs.tts_audio_files else []
-
     inputs = replace(inputs, title_textfile=title_file, work_title_textfile=work_file)
     tts_keys_sorted: list[int] = sorted(inputs.tts_audio_files.keys()) if inputs.tts_audio_files else []
-
-
-    # filter_script = _build_filtergraph(inputs, num_clip_inputs=len(inputs.clips), tts_keys_sorted=tts_keys_sorted)
-    # filter_path = inputs.output_path.with_suffix(".filter.txt")
-    # filter_path.write_text(filter_script, encoding="utf-8")
-
     filter_script = _build_filtergraph(inputs, num_clip_inputs=len(inputs.clips), tts_keys_sorted=tts_keys_sorted)
     filter_path = inputs.output_path.with_suffix(".filter.txt")
     filter_path.write_text(filter_script, encoding="utf-8")
@@ -201,7 +186,7 @@ def _video_encoder_args(encoder: str, preset: str) -> list[str]:
         if preset == "quality":
             return ["-preset", "p6", "-rc", "vbr", "-cq", "19", "-b:v", "0"]
         # balanced
-        return ["-preset", "p4", "-rc", "vbr", "-cq", "21", "-b:v", "0"]
+        return ["-preset", "p4", "-rc", "vbr", "-cq", "17", "-b:v", "0"]
 
     if encoder == "h264_amf":
         # AMF는 드라이버/버전 편차가 커서 보수적으로 유지
@@ -275,12 +260,14 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sort
     d = inputs.design 
 
     # [1] 비디오 레이아웃 설정
-    scaled_w = d.video_width
+    # scaled_w = d.video_width
+    scaled_w = W
     scaled_h = d.video_height
     scaled_w -= scaled_w % 2
     scaled_h -= scaled_h % 2
     
-    overlay_x = int((W - scaled_w) / 2)
+    # overlay_x = int((W - scaled_w) / 2)
+    overlay_x = 0
     overlay_y = d.video_y_pos 
 
     filters: list[str] = []
@@ -300,11 +287,18 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sort
                     crop_filter = f"crop={cw}:{ch}:{avg_cx}-{cw}/2:{cy}-{ch}/2,"
             except: pass
 
+        # v_filter = (
+        #     f"[{i}:v]{crop_filter}"
+        #     f"scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=decrease,"
+        #     f"setsar=1,"
+        #     f"pad={W}:{H}:{overlay_x}:{overlay_y}:black[v{i}]"
+        # )
         v_filter = (
             f"[{i}:v]{crop_filter}"
-            f"scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=decrease,"
+            f"scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=increase," # decrease를 increase로 변경하여 꽉 채움
             f"setsar=1,"
-            f"pad={W}:{H}:{overlay_x}:{overlay_y}:black[v{i}]"
+            f"crop={W}:{scaled_h}," # 혹시 비율 차이로 삐져나온 부분 절삭
+            f"pad={W}:{H}:0:{overlay_y}:black[v{i}]"
         )
         filters.append(v_filter)
         filters.append(f"[{i}:a]anull[a{i}]")
@@ -338,9 +332,15 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sort
         next_label = f"[title_{idx}]"
         y_pos = d.title_y + (idx * (d.title_size + 20))
         escaped_line = _escape_text_for_drawtext(line.strip())
+        # filters.append(
+        #     f"{last_v_label}drawtext=fontfile='{font_arg}':text='{escaped_line}':"
+        #     f"fontcolor={d.title_color}:fontsize={d.title_size}:x=(w-text_w)/2:y={y_pos}{next_label}"
+        # )
+        # last_v_label = next_label
         filters.append(
             f"{last_v_label}drawtext=fontfile='{font_arg}':text='{escaped_line}':"
-            f"fontcolor={d.title_color}:fontsize={d.title_size}:x=(w-text_w)/2:y={y_pos}{next_label}"
+            f"fontcolor={d.title_color}:fontsize={d.title_size}:x=(w-text_w)/2:y={y_pos}:"
+            f"box=1:boxcolor=black@0.6:boxw={W}:boxh={d.title_size + 40}{next_label}" # 박스 가로를 1080으로 고정
         )
         last_v_label = next_label
 
