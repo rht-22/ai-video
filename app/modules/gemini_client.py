@@ -345,7 +345,7 @@ class GeminiClient:
             video_path_obj = Path(video_path) if isinstance(video_path, str) else video_path
             if video_path_obj.exists():
                 try:
-                    uploaded_file = self.client.files.upload(path=str(video_path_obj))
+                    uploaded_file = self.client.files.upload(file=str(video_path_obj))
                     while uploaded_file.state.name == "PROCESSING":
                         time.sleep(2)
                         uploaded_file = self.client.files.get(name=uploaded_file.name)
