@@ -156,7 +156,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         
         subprocess.run([
             ffmpeg_exe, '-y', '-i', str(payload.video_path.resolve()),
-            '-vf', 'scale=-2:480,fps=30', 
+            '-vf', 'scale=-2:480,fps=24',
+
             '-c:v', 'libx264', 
             '-preset', 'ultrafast', 
             '-crf', '30',

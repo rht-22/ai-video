@@ -357,7 +357,7 @@ class GeminiClient:
                             file_uri=uploaded_file.uri,
                             mime_type="video/mp4",
                         ),
-                        video_metadata=self.types.VideoMetadata(fps=30),
+                        video_metadata=self.types.VideoMetadata(fps=24),
                     ))
                 except Exception as upload_err:
                     print(f" [WARN] 비디오 업로드 중 오류 발생: {upload_err}")
