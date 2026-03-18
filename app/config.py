@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass,field
 from pathlib import Path
 import requests
 import os
@@ -11,25 +11,30 @@ class DesignConfig:
     aspect_ratio: str = "9:16" 
     video_width: int = 800
     video_height: int = 1100
-    video_y_pos: int = 420
+    video_y_pos: int = 480
     
     # 제목 설정
-    title_font: str = "Malgun Gothic"
-    title_size: int = 70
+    title_font: str = "Jalnan"
+    title_size: int = 90
     title_color: str = "white"
+    title_colors: list[str] = field(default_factory=lambda: ["white", "white"])
     title_y: int = 150
     
     # 자막 설정 (ASS 스타일 기준)
-    subtitle_font: str = "Malgun Gothic"
+    subtitle_font: str = "NanumGothicBold"
     subtitle_size: int = 65
-    subtitle_color: str = "&H0000FFFF" # 노란색
-    subtitle_outline_color: str = "&H00000000"
-    subtitle_y_margin: int = 480
+    subtitle_color: str = "&H0000FFFF" 
+    subtitle_y_margin: int = 450
     
     # 작품명 및 이미지 설정
-    work_title_y: int = 1780
-    work_font_size: int = 40 
+    work_title_y: int = 1500
+    work_font_size: int = 35 
     work_color: str = "white"
+
+    work_type: str = "text"             
+    work_value: str | None = None        
+    work_image_width: int = 200         
+
     overlay_image_path: str | None = None # 필요 시 이미지 경로
 
 @dataclass(frozen=True)

@@ -308,8 +308,7 @@ def _detect_faces(
     keyframes = []
     frame_idx = start_frame
 
-    # [중요] 자르지 않고 원본 그대로 사용하기 위해 
-    # crop_w와 crop_h를 원본 width, height와 동일하게 설정
+  
     crop_w = width
     crop_h = height
 
@@ -319,8 +318,6 @@ def _detect_faces(
             break
         
         if (frame_idx - start_frame) % frame_interval == 0:
-            # 인물 인식을 하지 않고 항상 영상의 정중앙(width/2, height/2)을 반환
-            # crop_w/h가 원본과 같으므로 결과적으로 전체 화면이 다 나옵니다.
             keyframes.append(
                 CropKeyframe(
                     time_sec=frame_idx / fps,
