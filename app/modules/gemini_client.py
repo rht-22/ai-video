@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import time
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,27 +39,90 @@ def _extract_json_from_markdown(text: str) -> str:
 
 
 GEMINI_PROMPT_TEMPLATE = """
-너는 드라마/예능 톤의 하이라이트 편집 어시스턴트다.
+[ROLE]
+당신은 한국 최고의 숏폼 전문 AI 에디터이자 멀티모달 스토리 분석 전문가다.
+텍스트, 영상, 오디오를 통합적으로 이해하여
+바이럴 가능성이 높은 쇼츠 콘텐츠를 기획하고 분석한다.
 반드시 JSON만 출력한다. 코드블록 금지.
 영상에 없는 내용은 절대 창작하지 말 것.
-{trend_note}
+
+---
 
 입력 정보:
+
 - 작품명: {work_title}
 - 주제: {topic}
 - 청크 범위: {chunk_start_sec} ~ {chunk_end_sec} 초
 - 요약(있으면): {transcript_summary}
 - 씬 경계(있으면): {scene_boundaries}
 - 전체 줄거리(있으면): {full_summary}
-- 스토리라인(있으면): {storyline}
-{previous_context}
+- 스토리라인(있으면): {storyline} {previous_context}
 
-요구 사항:
-- candidate_moments 최소 5개
-- story_role은 hook/build/payoff 중 하나
-- 드라마/예능 톤, 짧은 리액션 문구는 가능하지만 과도 금지
+---
+
+[인물 식별 단계]
+
+- 분석 시작 전, 아래 수단을 통해 등장 인물의 이름을 먼저 파악한다:
+    - 화면 자막 또는 이름 자막 (예능/드라마 자막 포함)
+    - 대사 내 호칭 (예: "야 민준아~")
+    - 화면 내 텍스트 (명찰, 이름표 등 OCR 가능한 텍스트)
+- 위 수단으로 이름 확인이 불가능한 인물은 "인물A", "인물B" 등 고유 레이블을 부여한다.
+- 이후 모든 분석 항목에서 확정된 이름 또는 레이블을 일관되게 사용한다.
+
+---
+
+[멀티모달 분석 필수 출력 항목]
+
+아래 항목을 모두 포함하여 구조화된 형태로 출력하라.
+
+- main_plot: 영상의 핵심 서사를 80자 이내 한국어 요약
+- characters_relations: 인물 간 관계 및 권력/감정 역학 설명
+- characters_tracking: 인물별 등장 타임스탬프 및 주요 행동/발화 요약
+    - 인물명 또는 레이블
+    - appearances:
+        - start_sec / end_sec: 등장 구간
+        - action: 해당 구간 행동/발화 요약
+- sub_plots: 영상 내 서브 플롯 목록 (타임스탬프 포함)
+- emotion_curve: 타임스탬프별 감정 변화 리스트 (emotion, intensity 0~1)
+- tension_score: 평균 긴장도 / 최고 긴장도 / 최고점 타임스탬프
+- conflicts_and_twists: 갈등 및 반전 발생 지점과 내용
+- humor_points: 유머 발생 지점 및 웃음 강도
+- love_points: 인물 간 명확한 플러팅 대사 또는 감정 교환이 발생하는 지점 및 강도
+- relatability_points: 많은 시청자가 공감할 수 있는 지점 및 강도
+- saida_points: 사이다 전개로 대리만족이 발생하는 포인트 및 강도
+- goguma_points: 답답함이나 분노를 유발하는 포인트 및 강도
+- audio_tempo: BPM 추정치 / 분위기 변화 키워드
+- overall_vibe: 영상 전체 분위기 요약
+
+---
+
+[SHORTS TYPE DEFINITION]
+
+아래 두 가지 쇼츠 유형을 모두 고려하여 candidate_moments를 생성하라.
+
+[유형 1: 하이라이트 쇼츠]
+
+- hook_score 기준:
+    - 0.8~1.0: 결과 선공개형 훅으로 적합
+    - 0.4~0.7: 여정 몰입형 초반 빌드에 적합
+    - 0.0~0.3: 훅보다는 중후반 맥락용 장면
+- 하나의 강렬한 장면 중심, 맥락 설명 최소화
+- story_role: hook / build / payoff
+
+[유형 2: 서사형 쇼츠]
+
+- 가장 드라마틱한 씬을 중심으로 서사가 자연스럽게 흐르도록 구성
+- story_role: hook / build / payoff
+
+---
+
+[TONE & RULES]
+
+- 모든 출력은 한국어 사용
 - 최신 쇼츠 트렌드 반영: 자연스러운 톤, 짧은 문장, 강조/리액션 요소
+- candidate_moments 최소 5개
 - JSON 스키마 강제
+- 분석 결과 해당 항목이 없을 경우 빈 배열 대신 null로 출력한다.
 
 다음 스키마로만 응답:
 {{
@@ -66,6 +130,45 @@ GEMINI_PROMPT_TEMPLATE = """
   "chunk_start_sec": 0,
   "chunk_end_sec": 300,
   "summary": "요약",
+  "main_plot": "영상의 핵심 서사 80자 이내",
+  "characters_relations": "인물 간 관계 및 권력/감정 역학 설명",
+  "characters_tracking": [
+    {{
+      "character": "인물명 또는 레이블",
+      "appearances": [
+        {{
+          "start_sec": 0.0,
+          "end_sec": 32.0,
+          "action": "해당 구간 행동/발화 요약"
+        }}
+      ]
+    }}
+  ],
+  "sub_plots": [
+    {{
+      "start_sec": 0.0,
+      "description": "서브플롯 설명"
+    }}
+  ],
+  "emotion_curve": [
+    {{
+      "start_sec": 0.0,
+      "end_sec": 10.0,
+      "emotion": "감정",
+      "intensity": 0.8
+    }}
+  ],
+  "tension_score": {{
+    "average": 0.6,
+    "peak": 0.95,
+    "peak_start_sec": 0.0,
+    "peak_end_sec": 10.0
+  }},
+  "audio_tempo": {{
+    "bpm": 120,
+    "vibe_keywords": ["키워드1", "키워드2"]
+  }},
+  "overall_vibe": "영상 전체 분위기 요약",
   "candidate_moments": [
     {{
       "start_sec": 12.4,
@@ -76,7 +179,15 @@ GEMINI_PROMPT_TEMPLATE = """
       "story_role": "hook|build|payoff",
       "reason": "선정 이유",
       "subtitle": "자막(짧게)",
-      "tts_line": "TTS 한 문장"
+      "tts_line": "TTS 한 문장",
+      "points": {{
+        "humor": {{"description": "유머 내용", "intensity": 0.7}},
+        "love": null,
+        "relatability": null,
+        "saida": {{"description": "사이다 포인트", "intensity": 0.9}},
+        "goguma": null,
+        "conflict_twist": null
+      }}
     }}
   ],
   "title_candidates": ["제목1", "제목2", "제목3"]
@@ -176,6 +287,8 @@ STORYLINE_GENERATION_PROMPT = """
 """.strip()
 
 
+    
+
 @dataclass(frozen=True)
 class GeminiConfig:
     api_key: str
@@ -186,21 +299,10 @@ class GeminiConfig:
 class GeminiClient:
     def __init__(self, config: GeminiConfig) -> None:
         self.config = config
-        import google.generativeai as genai
-        try:
-            from google.generativeai import types as genai_types
-        except ImportError:
-            # google-generativeai 패키지의 경우 types 모듈 경로가 다를 수 있음
-            try:
-                import google.generativeai.types as genai_types
-            except ImportError:
-                # types를 직접 사용할 수 없는 경우, Part 클래스를 직접 생성
-                genai_types = None
-
-        genai.configure(api_key=config.api_key)
-        self.model = genai.GenerativeModel(config.model_name)
-        self.genai = genai
-        self.genai_types = genai_types
+        from google import genai
+        from google.genai import types
+        self.client = genai.Client(api_key=config.api_key)
+        self.types = types
 
     def analyze_chunk(self, payload: dict[str, Any]) -> dict[str, Any]:
         # 이전 분석 결과와 전사를 컨텍스트로 준비
@@ -215,23 +317,13 @@ class GeminiClient:
                 if prev.get("candidate_moments"):
                     moments_text = "\n".join([
                         f"  - {m.get('start_sec', 0)}~{m.get('end_sec', 0)}초: {m.get('subtitle', '')} ({m.get('story_role', 'unknown')})"
-                        for m in prev["candidate_moments"][:3]  # 상위 3개만
+                        for m in prev["candidate_moments"][:10]  # 상위 3개만
                     ])
                     context_parts.append(f"주요 모멘트:\n{moments_text}")
             if context_parts:
                 previous_context = "\n\n이전 청크들의 분석 결과 (전체 흐름 이해용):" + "\n".join(context_parts)
         
-        previous_transcript = ""
-        if payload.get("previous_transcripts"):
-            prev_transcripts = payload["previous_transcripts"]
-            transcript_lines = []
-            for seg in prev_transcripts:
-                transcript_lines.append(f"[{seg.get('start_sec', 0):.1f}~{seg.get('end_sec', 0):.1f}초] {seg.get('text', '')}")
-            if transcript_lines:
-                previous_transcript = "\n\n이전 구간 전사 (시간적 맥락):\n" + "\n".join(transcript_lines[-10:])  # 최근 10개 세그먼트
-        
-        trend_note = "\n최신 쇼츠 트렌드: 자연스러운 톤, 짧고 임팩트 있는 문장, 강조/리액션 요소 포함, TTS는 빠른 속도(1.5배)에 맞춘 문구."
-        
+     
         prompt = GEMINI_PROMPT_TEMPLATE.format(
             work_title=payload["work_title"],
             topic=payload["topic"],
@@ -241,57 +333,44 @@ class GeminiClient:
             scene_boundaries=payload.get("scene_boundaries") or "없음",
             full_summary=payload.get("full_summary") or "없음",
             storyline=payload.get("storyline") or "없음",
-            previous_context=previous_context + previous_transcript,
-            trend_note=trend_note,
+            previous_context=previous_context,
         )
         
         # 비디오 파일 경로가 있으면 파일을 직접 읽어서 전달
         video_path = payload.get("video_path")
         content_parts = [prompt]
-        
+
+        # File API 방식 적용 (Memory-Safe)
         if video_path:
             video_path_obj = Path(video_path) if isinstance(video_path, str) else video_path
             if video_path_obj.exists():
-                # MIME 타입 결정
-                mime_type, _ = mimetypes.guess_type(str(video_path_obj))
-                if not mime_type:
-                    # 기본값으로 video/mp4 사용
-                    mime_type = "video/mp4"
-                
-                # 파일을 바이너리로 읽기
-                with open(video_path_obj, "rb") as f:
-                    video_data = f.read()
-                
-                # genai_types.Part.from_bytes()를 사용하여 파일 데이터 전달
-                if self.genai_types and hasattr(self.genai_types, 'Part'):
-                    video_part = self.genai_types.Part.from_bytes(
-                        data=video_data,
-                        mime_type=mime_type,
-                    )
-                else:
-                    # Part.from_bytes()가 없는 경우, 딕셔너리 형태로 전달
-                    video_part = {
-                        "mime_type": mime_type,
-                        "data": video_data,
-                    }
-                content_parts.append(video_part)
-        
+                try:
+                    uploaded_file = self.client.files.upload(path=str(video_path_obj))
+                    while uploaded_file.state.name == "PROCESSING":
+                        time.sleep(2)
+                        uploaded_file = self.client.files.get(name=uploaded_file.name)
+                    if uploaded_file.state.name == "FAILED":
+                        raise RuntimeError("Gemini File API 업로드 실패")
+                    content_parts.append(self.types.Part(
+                        file_data=self.types.FileData(
+                            file_uri=uploaded_file.uri,
+                            mime_type="video/mp4",
+                        ),
+                        video_metadata=self.types.VideoMetadata(fps=30),
+                    ))
+                except Exception as upload_err:
+                    print(f"    [WARN] 비디오 업로드 중 오류 발생: {upload_err}")
+
+
         for attempt in range(self.config.max_retries):
             try:
-                # JSON 응답 강제 설정 (가능한 경우)
-                generation_config = None
-                if self.genai_types and hasattr(self.genai_types, 'GenerateContentConfig'):
-                    generation_config = self.genai_types.GenerateContentConfig(
+                response = self.client.models.generate_content(
+                    model=self.config.model_name,
+                    contents=content_parts,
+                    config=self.types.GenerateContentConfig(
                         response_mime_type="application/json",
-                    )
-                
-                if generation_config:
-                    response = self.model.generate_content(
-                        content_parts,
-                        generation_config=generation_config,
-                    )
-                else:
-                    response = self.model.generate_content(content_parts)
+                    ),
+                )
                 
                 # 응답이 None이거나 빈 문자열인지 확인
                 if not response or not response.text:
@@ -376,22 +455,16 @@ class GeminiClient:
         # 전체 영상 분석은 전사 결과만 사용 (영상 파일은 너무 크거나 전송 오류가 발생할 수 있음)
         # 전사 결과만으로도 충분히 전체 줄거리와 주요 장면을 분석할 수 있음
         content_parts = [prompt]
-        
+
         for attempt in range(self.config.max_retries):
             try:
-                generation_config = None
-                if self.genai_types and hasattr(self.genai_types, 'GenerateContentConfig'):
-                    generation_config = self.genai_types.GenerateContentConfig(
+                response = self.client.models.generate_content(
+                    model=self.config.model_name,
+                    contents=content_parts,
+                    config=self.types.GenerateContentConfig(
                         response_mime_type="application/json",
-                    )
-                
-                if generation_config:
-                    response = self.model.generate_content(
-                        content_parts,
-                        generation_config=generation_config,
-                    )
-                else:
-                    response = self.model.generate_content(content_parts)
+                    ),
+                )
                 
                 if not response or not response.text:
                     if attempt == self.config.max_retries - 1:
@@ -457,19 +530,13 @@ class GeminiClient:
         
         for attempt in range(self.config.max_retries):
             try:
-                generation_config = None
-                if self.genai_types and hasattr(self.genai_types, 'GenerateContentConfig'):
-                    generation_config = self.genai_types.GenerateContentConfig(
+                response = self.client.models.generate_content(
+                    model=self.config.model_name,
+                    contents=[prompt],
+                    config=self.types.GenerateContentConfig(
                         response_mime_type="application/json",
-                    )
-                
-                if generation_config:
-                    response = self.model.generate_content(
-                        [prompt],
-                        generation_config=generation_config,
-                    )
-                else:
-                    response = self.model.generate_content([prompt])
+                    ),
+                )
                 
                 if not response or not response.text:
                     if attempt == self.config.max_retries - 1:
@@ -527,6 +594,53 @@ class GeminiClient:
                     raise RuntimeError(f"스토리라인 생성 실패: {str(e)}") from e
                 continue
         raise RuntimeError("스토리라인 생성 실패: 최대 재시도 횟수 초과")
+    
+
+
+    def compose_story_with_context(self, all_candidates: list, work_title: str, topic: str):
+        """
+        Gemini가 후보 모멘트들을 보고 전체 흐름에 맞는 스토리 구성을 다시 수행합니다.
+        """
+        # 후보 데이터를 텍스트로 정리
+        candidates_str = ""
+        for i, m in enumerate(all_candidates):
+            candidates_str += f"ID: {i}, 시간: {m['start_sec']}~{m['end_sec']}s, 역할: {m['story_role']}, 내용: {m['subtitle']}, 중요도: {m['importance']}\n"
+
+        prompt = f"""
+    당신은 최고의 숏폼 영상 편집자입니다. 제공된 하이라이트 후보들을 조합하여 영상의 흐름이 자연스럽고 기승전결이 완벽한 60초 이내의 숏츠 스토리를 구성하세요.
+
+    [영상 정보]
+    제목: {work_title}
+    주제: {topic}
+
+    [하이라이트 후보 목록]
+    {candidates_str}
+
+    [작업 지침]
+    1. 단순 점수 위주가 아닌, 영상의 '서사 흐름(Narrative Flow)'을 최우선으로 고려하세요.
+    2. 반드시 Hook(도입) -> Build(전개) -> Payoff(결정적 장면)의 순서가 논리적이어야 합니다.
+    3. 선택한 장면들의 총 합계 시간이 60초를 넘지 않도록 하세요.
+    4. 후보들 중 흐름상 불필요한 장면은 과감히 제외하세요.
+    5. 출력은 반드시 아래 JSON 형식으로만 하세요.
+
+    [출력 형식]
+    {{
+    "selected_ids": [선택한 후보 ID 리스트 (순서대로)],
+    "story_reasoning": "이 흐름으로 구성한 이유 요약"
+    }}
+    """
+        # Gemini에게 전달 (generate_content 등의 메서드 사용)
+        response = self.client.models.generate_content(
+            model=self.config.model_name,
+            contents=prompt,
+        )
+        try:
+            # JSON 파싱 로직 (기존 클라이언트 내 json_loader 활용)
+            import json
+            result = json.loads(response.text.replace('```json', '').replace('```', ''))
+            return result
+        except:
+            return None
 
 
 def load_gemini_client() -> GeminiClient:

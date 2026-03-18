@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from dataclasses import dataclass
+import subprocess
+from dataclasses import dataclass,field
 from pathlib import Path
 from typing import Any
 
-from app.config import AppConfig, Paths
+
+from app.config import AppConfig, Paths,DesignConfig,get_font_path
 from app.modules.chunker import build_chunks, split_video_chunk
 from app.modules.gemini_client import load_gemini_client
 from app.modules.media_probe import probe_media
@@ -26,7 +28,8 @@ from app.modules.subtitle import (
 )
 from app.modules.tts import synthesize_tts
 from app.modules.validator import validate_output
-
+from app.modules.ffmpeg_utils import find_ffmpeg_command
+from types import SimpleNamespace
 
 @dataclass(frozen=True)
 class PipelineInput:
@@ -34,6 +37,7 @@ class PipelineInput:
     work_title: str
     topic: str
     outdir: Path
+    design: DesignConfig = field(default_factory=DesignConfig)
     tone: str = "drama_variety"
     language: str = "ko"
 
@@ -81,7 +85,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             }
     else:
         # 새 작업 시작
-        job_id = uuid.uuid4().hex[:8]
+        job_id = f"{payload.work_title}_{uuid.uuid4().hex[:2]}"
         output_dir = payload.outdir / job_id
         output_dir.mkdir(parents=True, exist_ok=True)
         run_log = {
@@ -142,150 +146,38 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         from app.modules.media_probe import MediaInfo
         media_info = MediaInfo(**probe_data)
 
-    # 전체 영상 분석 단계
-    checkpoint_full_analysis = output_dir / "checkpoint_full_analysis.json"
-    full_summary = None
-    key_scenes = None
-    emotion_arc = None
-    
-    if start_idx <= 2 and checkpoint_full_analysis.exists() and from_step != "full_analysis":
-        print("\n[3/13] 전체 영상 분석 결과 로드 중...")
-        full_analysis_data = json.loads(checkpoint_full_analysis.read_text(encoding="utf-8"))
-        full_summary = full_analysis_data.get("summary", "")
-        key_scenes = full_analysis_data.get("key_scenes", [])
-        emotion_arc = full_analysis_data.get("emotion_arc", "")
-        print(f"  - 줄거리 요약 로드 완료")
-        print(f"  - 주요 장면: {len(key_scenes)}개")
-        print("[OK] 전체 영상 분석 결과 로드 완료 (체크포인트에서)")
-    elif start_idx <= 2:
-        print("\n[3/13] 전체 영상 분석 중...")
-        full_analysis_start = time.time()
+    # 3. 프록시 생성 (분석용)
+    proxy_video_path = output_dir / f"{payload.work_title}_480.mp4"
+    if not proxy_video_path.exists():
+        probe_start = time.time()
+        print("\n[3/13] 분석용 프록시 영상 생성 중...")
+        ffmpeg_exe = find_ffmpeg_command("ffmpeg")
         
-        # 오디오 추출
-        print("  오디오 추출 중...")
-        audio_path = extract_audio_from_video(payload.video_path)
-        print(f"  - 오디오 추출 완료: {audio_path.name}")
-        
-        # Whisper 전사
-        print("  Whisper 전사 중... (시간이 걸릴 수 있습니다)")
-        transcript_segments = extract_transcript(audio_path)
-        transcript_text = "\n".join(
-            f"[{seg.start_sec:.1f}초~{seg.end_sec:.1f}초] {seg.text}"
-            for seg in transcript_segments
-        )
-        print(f"  - 전사 완료: {len(transcript_segments)}개 세그먼트")
-        
-        # Gemini 전체 분석
-        print("  Gemini 전체 분석 중...")
-        gemini = load_gemini_client()
-        full_analysis = gemini.analyze_full_video(
-            video_path=payload.video_path,
-            transcript=transcript_text,
-            work_title=payload.work_title,
-            topic=payload.topic,
-            duration_sec=media_info.duration_sec,
-        )
-        
-        full_summary = full_analysis.get("summary", "")
-        key_scenes = full_analysis.get("key_scenes", [])
-        emotion_arc = full_analysis.get("emotion_arc", "")
-        
-        # 체크포인트 저장
-        checkpoint_full_analysis.write_text(
-            json.dumps(full_analysis, ensure_ascii=False, indent=2),
-            encoding="utf-8"
-        )
-        
-        full_analysis_elapsed = time.time() - full_analysis_start
-        print(f"  - 줄거리 요약 완료")
-        print(f"  - 주요 장면: {len(key_scenes)}개")
-        print(f"[OK] 전체 영상 분석 완료 (소요 시간: {full_analysis_elapsed:.1f}초)")
-        
-        # 전사 결과 저장 (나중에 자막으로 사용)
-        transcript_segments_data = [
-            {"start_sec": seg.start_sec, "end_sec": seg.end_sec, "text": seg.text}
-            for seg in transcript_segments
-        ]
-        full_analysis["transcript_segments"] = transcript_segments_data
-        
-        # 체크포인트 다시 저장 (전사 결과 포함)
-        checkpoint_full_analysis.write_text(
-            json.dumps(full_analysis, ensure_ascii=False, indent=2),
-            encoding="utf-8"
-        )
-        
-        # 임시 오디오 파일 삭제
-        try:
-            audio_path.unlink()
-        except Exception:
-            pass
-    else:
-        # 이전 단계에서 로드 (필수)
-        if not checkpoint_full_analysis.exists():
-            raise FileNotFoundError(f"체크포인트 파일을 찾을 수 없습니다: {checkpoint_full_analysis}. 이전 단계를 먼저 실행하세요.")
-        full_analysis_data = json.loads(checkpoint_full_analysis.read_text(encoding="utf-8"))
-        full_summary = full_analysis_data.get("summary", "")
-        key_scenes = full_analysis_data.get("key_scenes", [])
-        emotion_arc = full_analysis_data.get("emotion_arc", "")
+        subprocess.run([
+            ffmpeg_exe, '-y', '-i', str(payload.video_path.resolve()),
+            '-vf', 'scale=-2:480,fps=15', 
+            '-c:v', 'libx264', 
+            '-preset', 'ultrafast', 
+            '-crf', '30',
+            '-c:a', 'aac', '-ac', '1', '-ar', '22050', 
+            '-threads', '4',
+            str(proxy_video_path)
+        ], check=True, capture_output=True)
 
-    # 스토리라인 생성 단계
-    checkpoint_storyline = output_dir / "checkpoint_storyline.json"
-    storyline_data = None
-    selected_storyline = None
-    
-    if start_idx <= 3 and checkpoint_storyline.exists() and from_step != "storyline":
-        print("\n[4/13] 스토리라인 로드 중...")
-        storyline_data = json.loads(checkpoint_storyline.read_text(encoding="utf-8"))
-        all_storylines = storyline_data.get("storylines", [])
-        selected_idx = storyline_data.get("selected_storyline_index", 0)
-        selected_storyline = storyline_data.get("selected_storyline") or (all_storylines[selected_idx] if selected_idx < len(all_storylines) else None)
-        print(f"  - 생성된 스토리라인 수: {len(all_storylines)}개")
-        print(f"  - 선택된 주제: {selected_storyline.get('topic', 'N/A') if selected_storyline else 'N/A'}")
-        print(f"  - 흥미도 점수: {selected_storyline.get('interest_score', 0.0):.2f}" if selected_storyline else "")
-        print("[OK] 스토리라인 로드 완료 (체크포인트에서)")
-    elif start_idx <= 3:
-        print("\n[4/13] 스토리라인 생성 중...")
-        storyline_start = time.time()
-        
-        gemini = load_gemini_client()
-        storyline_data = gemini.generate_shorts_storyline(
-            full_summary=full_summary or "",
-            key_scenes=key_scenes or [],
-            emotion_arc=emotion_arc or "",
-            work_title=payload.work_title,
-        )
-        
-        # 선택된 스토리라인 추출
-        all_storylines = storyline_data.get("storylines", [])
-        selected_idx = storyline_data.get("selected_storyline_index", 0)
-        selected_storyline = storyline_data.get("selected_storyline") or (all_storylines[selected_idx] if selected_idx < len(all_storylines) else None)
-        
-        # 체크포인트 저장
-        checkpoint_storyline.write_text(
-            json.dumps(storyline_data, ensure_ascii=False, indent=2),
-            encoding="utf-8"
-        )
-        
-        storyline_elapsed = time.time() - storyline_start
-        print(f"  - 생성된 스토리라인 수: {len(all_storylines)}개")
-        print(f"  - 선택된 주제: {selected_storyline.get('topic', 'N/A') if selected_storyline else 'N/A'}")
-        print(f"  - 흥미도 점수: {selected_storyline.get('interest_score', 0.0):.2f}" if selected_storyline else "")
-        print(f"[OK] 스토리라인 생성 완료 (소요 시간: {storyline_elapsed:.1f}초)")
-    else:
-        # 이전 단계에서 로드
-        if checkpoint_storyline.exists():
-            storyline_data = json.loads(checkpoint_storyline.read_text(encoding="utf-8"))
-            all_storylines = storyline_data.get("storylines", [])
-            selected_idx = storyline_data.get("selected_storyline_index", 0)
-            selected_storyline = storyline_data.get("selected_storyline") or (all_storylines[selected_idx] if selected_idx < len(all_storylines) else None)
-        else:
-            storyline_data = None
-            selected_storyline = None
+        probe_elapsed = time.time() - probe_start
+        print(f"[OK] 분석용 프록시 영상 생성 완료 (소요 시간: {probe_elapsed:.1f}초)")
+
+    # 전체 영상 분석 단계
+    transcript_segments = [] 
+    full_summary = "분석 생략"
+    key_scenes = []
+    emotion_arc = ""
+    transcript_segments_data = []
 
     # 청크 분할 단계
     print("\n[5/13] 영상 청크 분할 중...")
     chunks = build_chunks(
-        payload.video_path,
+        proxy_video_path,
         media_info.duration_sec,
         config.chunk_seconds,
         config.chunk_overlap,
@@ -298,7 +190,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     for i, chunk in enumerate(chunks, 1):
         print(f"    청크 {i} 분할 중... ({chunk.start_sec:.1f}초 ~ {chunk.end_sec:.1f}초)")
         split_path = split_video_chunk(
-            payload.video_path,
+            proxy_video_path,
             chunk.start_sec,
             chunk.end_sec,
         )
@@ -325,78 +217,38 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print(f"  - 총 {len(all_candidates)}개 후보 모멘트")
         print(f"  - {len(title_candidates)}개 제목 후보")
         print("[OK] Gemini 분석 결과 로드 완료 (체크포인트에서)")
-    elif start_idx <= 7:
+    elif start_idx <= 5:
         print("\n[6/13] Gemini 분석 진행 중...")
         all_candidates: list[dict[str, Any]] = []
         title_candidates: list[str] = []
         gemini_start = time.time()
         gemini = load_gemini_client()
-        
-        # 전사 세그먼트를 미리 로드 (연속 컨텍스트 전달용)
-        from app.modules.speech import SpeechSegment
-        transcript_segments_for_context: list[SpeechSegment] | None = None
-        if checkpoint_full_analysis.exists():
-            data = json.loads(checkpoint_full_analysis.read_text(encoding="utf-8"))
-            segs = data.get("transcript_segments")
-            if isinstance(segs, list):
-                transcript_segments_for_context = [
-                    SpeechSegment(
-                        start_sec=float(seg["start_sec"]),
-                        end_sec=float(seg["end_sec"]),
-                        text=str(seg["text"]),
-                    )
-                    for seg in segs
-                    if isinstance(seg, dict) and "start_sec" in seg and "end_sec" in seg and "text" in seg
-                ]
-        
+
         # 이전 분석 결과 누적 저장
         previous_analyses: list[dict[str, Any]] = []
         
         for idx, chunk in enumerate(chunks, 1):
             print(f"  청크 {idx}/{len(chunks)} 분석 중... ({chunk.start_sec:.1f}초 ~ {chunk.end_sec:.1f}초)")
             chunk_start = time.time()
-            scenes = detect_scenes(payload.video_path, media_info.fps, chunk.end_sec - chunk.start_sec)
+            analysis_video_path = chunk.split_path.parent / f"analysis_{chunk.split_path.name}"
+
+            scenes = detect_scenes(analysis_video_path, media_info.fps, chunk.end_sec - chunk.start_sec)
             scene_boundaries = [scene.start_sec + chunk.start_sec for scene in scenes]
-            
             # 분할된 파일 경로 가져오기
             split_path = chunk.split_path if chunk.split_path else None
             
-            # 전체 줄거리와 선택된 스토리라인 정보 준비
-            storyline_summary = ""
-            if selected_storyline:
-                storyline_obj = selected_storyline.get("storyline", {})
-                storyline_summary = (
-                    f"선택된 주제: {selected_storyline.get('topic', 'N/A')}\n"
-                    f"주제 선택 이유: {selected_storyline.get('topic_reason', 'N/A')}\n"
-                    f"Hook: {storyline_obj.get('hook', {}).get('description', 'N/A')}\n"
-                    f"Build: {storyline_obj.get('build', {}).get('description', 'N/A')}\n"
-                    f"Payoff: {storyline_obj.get('payoff', {}).get('description', 'N/A')}"
-                )
-            
-            # 이전 청크들의 전사 세그먼트 추출 (시간 범위 기반)
-            previous_transcripts: list[dict[str, Any]] = []
-            if transcript_segments_for_context:
-                for seg in transcript_segments_for_context:
-                    # 이전 청크들(chunk.start_sec 이전)에 해당하는 전사만
-                    if seg.start_sec < chunk.start_sec:
-                        previous_transcripts.append({
-                            "start_sec": seg.start_sec,
-                            "end_sec": seg.end_sec,
-                            "text": seg.text,
-                        })
             
             prompt_payload = {
                 "work_title": payload.work_title,
                 "topic": payload.topic,
                 "chunk_start_sec": chunk.start_sec,
                 "chunk_end_sec": chunk.end_sec,
-                "transcript_summary": None,
                 "scene_boundaries": scene_boundaries,
-                "video_path": str(split_path) if split_path else None,
+                "video_path": analysis_video_path,
                 "full_summary": full_summary or "없음",
-                "storyline": storyline_summary or "없음",
+                # "storyline": storyline_summary or "없음",
                 "previous_analyses": previous_analyses.copy(),  # 이전 분석 결과 전달
-                "previous_transcripts": previous_transcripts,  # 이전 전사 전달
+                # "previous_transcripts": previous_transcripts,  # 이전 전사 전달
             }
             
             # 분석 및 파일 삭제를 try-finally로 보장
@@ -452,73 +304,32 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print("[OK] 스토리 구성 결과 로드 완료 (체크포인트에서)")
     elif start_idx <= 6:
         print("\n[7/13] 스토리 구성 중...")
+        # from app.modules.gemini_client import load_gemini_client
+        gemini = load_gemini_client()
         story_start = time.time()
-        ranked = rank_moments(all_candidates)
-        print(f"  - 모멘트 랭킹 완료 ({len(ranked)}개)")
-        
-        # 후보 3~5개 생성: 상위 후보만 사용하여 여러 스토리 시도
-        # hook/build/payoff 각각 상위 후보만 사용하도록 필터링
-        top_hooks = [m for m in ranked if m.story_role == "hook"][:5]
-        top_builds = [m for m in ranked if m.story_role == "build"][:5]
-        top_payoffs = [m for m in ranked if m.story_role == "payoff"][:5]
-        
-        # 최대 3~5개의 스토리 조합 시도 (hook 1개 × build 3~4개 × payoff 1개)
-        story_candidates: list[tuple[list[StoryClip], float]] = []
-        for hook in top_hooks[:3]:  # hook 상위 3개만 시도
-            for payoff in top_payoffs[:2]:  # payoff 상위 2개만 시도
-                # build는 점수 순으로 선택
-                for build_count in [3, 4, 5]:
-                    if len(top_builds) < build_count:
-                        continue
-                    selected_builds = top_builds[:build_count]
-                    candidate_ranked = [hook] + selected_builds + [payoff]
-                    
-                    try:
-                        candidate_clips = build_story(
-                            candidate_ranked,
-                            config.target_duration_sec,
-                            config.target_duration_tolerance_sec,
-                            min_duration_sec=config.min_duration_sec,
-                            max_duration_sec=config.max_duration_sec,
-                        )
-                        # 스토리 품질 점수 계산 (평균 점수)
-                        avg_score = sum(m.final_score for m in candidate_ranked) / len(candidate_ranked)
-                        story_candidates.append((candidate_clips, avg_score))
-                    except ValueError:
-                        continue
-                    if len(story_candidates) >= 5:  # 최대 5개까지만
-                        break
-                if len(story_candidates) >= 5:
-                    break
-            if len(story_candidates) >= 5:
-                break
-        
-        # 최고 점수 스토리 선택
-        if story_candidates:
-            story_candidates.sort(key=lambda x: x[1], reverse=True)
-            clips = story_candidates[0][0]
-            print(f"  - {len(story_candidates)}개 스토리 후보 생성, 최고 점수 {story_candidates[0][1]:.2f} 선택")
-        else:
-            # 후보 생성 실패 시 기본 방식 사용
-            print("  [WARN] 스토리 후보 생성 실패, 기본 방식 사용")
-            clips = build_story(
-                ranked,
-                config.target_duration_sec,
-                config.target_duration_tolerance_sec,
-                min_duration_sec=config.min_duration_sec,
-                max_duration_sec=config.max_duration_sec,
-            )
-        
+        ranked_candidates = rank_moments(all_candidates)
+        gemini = load_gemini_client()
+        ranked_dicts = [m.__dict__ for m in ranked_candidates]
+        story_plan = gemini.compose_story_with_context(ranked_dicts, payload.work_title, payload.topic)
+        selected_moments = [ranked_dicts[idx] for idx in story_plan["selected_ids"]]
+        clips = []
+        for m in selected_moments:
+            clips.append(StoryClip(
+                role=m.get('story_role', 'build'), 
+                start_sec=m['start_sec'], 
+                end_sec=m['end_sec'], 
+                subtitle=m.get('subtitle', ""), 
+                tts_line=m.get('tts_line', ""), 
+                use_original_audio=True
+            ))
         print(f"  - 스토리 클립 생성 완료 ({len(clips)}개 클립)")
-        clips = _snap_to_scenes(clips, detect_scenes(payload.video_path, media_info.fps, media_info.duration_sec), config.scene_snap_threshold_sec)
         story_elapsed = time.time() - story_start
-        title_text = title_candidates[0] if title_candidates else payload.topic
-        checkpoint_story.write_text(
-            json.dumps({"clips": [clip.__dict__ for clip in clips], "title_text": title_text}, ensure_ascii=False, indent=2),
-            encoding="utf-8"
-        )
+        title_text = title_candidates[0] if title_candidates else payload.work_title
+        checkpoint_story.write_text(json.dumps({"clips": [c.__dict__ for c in clips], "title_text": title_text}, ensure_ascii=False, 
+        indent=2), encoding="utf-8")
         print(f"[OK] 스토리 구성 완료 (소요 시간: {story_elapsed:.1f}초)")
         print(f"  - 선택된 제목: {title_text}")
+    
     else:
         # 이전 단계에서 로드
         # 체크포인트가 없으면 edit_plan.json에서 복원 시도
@@ -555,12 +366,12 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print("\n[8/13] 리소스 로드 중...")
         resources_data = json.loads(checkpoint_resources.read_text(encoding="utf-8"))
         crop_map = {k: Path(v) for k, v in resources_data["crop_map"].items()}
-        subtitle_path = Path(resources_data["subtitle_path"])
+        # subtitle_path = Path(/resources_data["subtitle_path"])
         tts_audio_files = {
             int(k): Path(v) for k, v in resources_data.get("tts_audio_files", {}).items()
         } if "tts_audio_files" in resources_data else {}
         print(f"  - 크롭 타임라인: {len(crop_map)}개")
-        print(f"  - 자막 파일: {subtitle_path}")
+        # print(f"  - 자막 파일: {subtitle_path}")
         print(f"  - TTS 오디오: {len(tts_audio_files)}개")
         print("[OK] 리소스 로드 완료 (체크포인트에서)")
     elif start_idx <= 7:
@@ -570,7 +381,16 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print(f"  크롭 타임라인 생성 중... ({len(clips)}개 클립)")
         for idx, clip in enumerate(clips):
             crop_path = output_dir / f"crop_{clip.role}_{idx}.json"
-            build_crop_timeline(payload.video_path, crop_path, media_info.width, media_info.height, config.crop_sample_interval_sec)
+            # build_crop_timeline(payload.video_path, crop_path, media_info.width, media_info.height, config.crop_sample_interval_sec)
+            build_crop_timeline(
+                payload.video_path.resolve(), 
+                crop_path, 
+                media_info.width, 
+                media_info.height, 
+                config.crop_sample_interval_sec,
+                start_sec=clip.start_sec,
+                end_sec=clip.end_sec      
+            )
             crop_map[f"{clip.role}_{idx}"] = crop_path
             if (idx + 1) % 5 == 0 or (idx + 1) == len(clips):
                 print(f"    진행 중... ({idx + 1}/{len(clips)})")
@@ -628,76 +448,68 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         edit_plan_path.write_text(json.dumps(edit_plan, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"  - 편집 계획 저장: {edit_plan_path}")
 
-    # (기존) 임시 렌더/재전사 단계를 제거하고, 전체 분석 단계의 전사를 재활용합니다.
-    # - temp_render/extract_audio는 대용량 인코딩/전사로 이어져 전체 시간이 크게 늘어납니다.
-
-    # 전사 세그먼트 로드 우선순위:
-    # 1) checkpoint_full_analysis.json의 transcript_segments (권장)
-    # 2) checkpoint_audio_transcript.json (구버전 호환)
-    # 3) 최후 수단: 원본 영상에서 오디오 추출/전사
-    from app.modules.speech import SpeechSegment
-
-    transcript_segments: list[SpeechSegment] | None = None
-    checkpoint_full_analysis = output_dir / "checkpoint_full_analysis.json"
-    if checkpoint_full_analysis.exists():
-        data = json.loads(checkpoint_full_analysis.read_text(encoding="utf-8"))
-        segs = data.get("transcript_segments")
-        if isinstance(segs, list):
-            transcript_segments = [
-                SpeechSegment(
-                    start_sec=float(seg["start_sec"]),
-                    end_sec=float(seg["end_sec"]),
-                    text=str(seg["text"]),
-                )
-                for seg in segs
-                if isinstance(seg, dict) and "start_sec" in seg and "end_sec" in seg and "text" in seg
-            ]
-
-    checkpoint_audio_transcript = output_dir / "checkpoint_audio_transcript.json"
-    if transcript_segments is None and checkpoint_audio_transcript.exists():
-        transcript_data = json.loads(checkpoint_audio_transcript.read_text(encoding="utf-8"))
-        transcript_segments = [
-            SpeechSegment(
-                start_sec=float(seg["start_sec"]),
-                end_sec=float(seg["end_sec"]),
-                text=str(seg["text"]),
-            )
-            for seg in transcript_data.get("segments", [])
-            if isinstance(seg, dict) and "start_sec" in seg and "end_sec" in seg and "text" in seg
-        ]
-
-    if transcript_segments is None:
-        print("\n[WARN] 전사 체크포인트가 없어 원본 영상에서 오디오 추출/전사를 수행합니다(최후 수단).")
-        audio_transcript_start = time.time()
-        audio_path = extract_audio_from_video(payload.video_path)
-        transcript_segments = extract_transcript(audio_path)
-        # 체크포인트 저장(다음 실행부터는 재사용)
-        transcript_data = [
-            {"start_sec": seg.start_sec, "end_sec": seg.end_sec, "text": seg.text}
-            for seg in transcript_segments
-        ]
-        checkpoint_audio_transcript.write_text(
-            json.dumps({"segments": transcript_data}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        audio_transcript_elapsed = time.time() - audio_transcript_start
-        print(f"[OK] 오디오 추출 및 전사 완료 (소요 시간: {audio_transcript_elapsed:.1f}초)")
-
-    # 자막 생성(전사 기반 + 편집 타임라인 재매핑)
+    
+    # [11/13] 자막 생성 단계 (전사 기반 재매핑)
     subtitle_path = output_dir / "subtitles.ass"
-    print("\n[11/13] 자막 생성 중... (원본 전사 → 편집 타임라인 재매핑)")
-    remapped = remap_transcript_to_edited_timeline(clips, transcript_segments, tts_only_when_no_orig=True)
-    merged = merge_subtitle_segments(
+    print("\n[11/13] 자막 생성 중... (Whisper 전사 데이터 매핑)")
+
+    # 1. 오디오 추출 및 Whisper 전사 (이미 앞 단계에서 했다면 해당 변수 사용)
+    # 이미 full_audio나 transcript 데이터가 있다면 재사용하고, 없다면 실행합니다.
+    print("   자막용 오디오 추출 및 전사 수행 중...")
+    full_audio = extract_audio_from_video(payload.video_path)
+    current_transcript_segments = extract_transcript(full_audio)
+
+    # 2. 편집 타임라인에 맞게 자막 매핑 (이 함수가 원본 시간 -> 숏츠 시간으로 변환함)
+    print("   타임라인 재매핑 중...")
+    remapped = remap_transcript_to_edited_timeline(
+        clips, 
+        current_transcript_segments, 
+        tts_only_when_no_orig=True
+    )
+    
+    # 3. 너무 짧게 쪼개진 자막들을 합쳐서 보기 좋게 만듦
+    merged_segments = merge_subtitle_segments(
         remapped,
         max_gap_sec=0.25,
         max_total_chars=int(config.subtitle_max_chars_per_line * config.subtitle_max_lines),
     )
-    build_ass_from_segments(
-        merged,
-        subtitle_path,
-        SubtitleStyle(margin_v=config.subtitle_margin_bottom),
-    )
-    print(f"[OK] 자막 생성 완료: {subtitle_path} (events={len(merged)})")
+
+    # 4. [중요] dict 데이터를 build_ass_from_segments가 원하는 객체(SimpleNamespace)로 변환
+    from types import SimpleNamespace
+    final_segments = []
+    for seg in merged_segments:
+        # 만약 데이터가 이미 dict라면 객체로 변환하여 AttributeError 방지
+        if isinstance(seg, dict):
+            final_segments.append(SimpleNamespace(
+                start_sec=seg.get('start', seg.get('start_sec')),
+                end_sec=seg.get('end', seg.get('end_sec')),
+                text=seg.get('text', "")
+            ))
+        else:
+            final_segments.append(seg)
+
+    # 5. 디자인 설정 및 자막 파일 생성
+    if final_segments:
+        sub_style = SubtitleStyle(
+            font_name=payload.design.subtitle_font,      
+            font_size=payload.design.subtitle_size,      
+            primary_color=payload.design.subtitle_color, 
+            margin_v=payload.design.subtitle_y_margin 
+        )
+
+        build_ass_from_segments(
+            final_segments,
+            subtitle_path,
+            sub_style, 
+        )
+        print(f"[OK] 자막 생성 완료: {subtitle_path} ({len(final_segments)} segments)")
+    else:
+        print("[경고] 재매핑된 자막 데이터가 없습니다. 자막 없이 렌더링합니다.")
+        subtitle_path = None
+
+    # 임시 오디오 삭제
+    if full_audio.exists():
+        full_audio.unlink()
 
     # 최종 렌더링 단계 (자막 포함, 1회만)
     output_video = output_dir / "shorts.mp4"
@@ -710,6 +522,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         # TTS 오디오 파일 맵 준비
         tts_files_map = tts_audio_files if "tts_audio_files" in locals() else {}
 
+        # 1. 사용자가 요청한 폰트(예: "Jalnan")를 실제 파일 경로로 변환
+        actual_font_path = get_font_path(payload.design.title_font, paths.app_root)
+
+        # 2. DesignConfig 복사본 생성 (폰트 경로 업데이트)
+        updated_design = replace(payload.design, title_font=actual_font_path)
         render_inputs = RenderInputs(
             video_path=payload.video_path,
             clips=clips,
@@ -717,6 +534,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             crop_timeline_map=crop_map,
             title_text=title_text,
             work_title=payload.work_title,
+            design=updated_design,
             output_path=output_video,
             canvas_width=config.canvas_width,
             canvas_height=config.canvas_height,
@@ -873,3 +691,4 @@ def _build_edit_plan(
             "bgm_gain_db": config.bgm_gain_db,
         },
     }
+

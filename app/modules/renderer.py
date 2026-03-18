@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import subprocess
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, field
 from pathlib import Path
 from typing import Any, Iterable
 
 from app.modules.ffmpeg_utils import find_ffmpeg_command
 from app.modules.story_builder import StoryClip
+from app.config import DesignConfig,AppConfig
 
 _VIDEO_ENCODER_CACHE: str | None = None
 
@@ -25,6 +26,7 @@ class RenderInputs:
     canvas_height: int
     top_title_height: int
     bottom_label_height: int
+    design: DesignConfig = field(default_factory=DesignConfig)
     tts_audio_files: dict[int, Path] | None = None  # clip_idx -> tts mp3 path
     original_audio_gain_db: int = -10
     tts_audio_gain_db: int = -4
@@ -50,29 +52,51 @@ def render_short(inputs: RenderInputs) -> list[str]:
     # 제목 자동 줄바꿈 처리 (캔버스 너비 초과 시)
     def _wrap_text(text: str, max_width_px: int, font_size: int) -> str:
         """텍스트를 최대 너비에 맞춰 줄바꿈 처리 (한글 기준 대략적 계산)"""
-        # 한글 기준: 폰트 크기 * 문자수 * 0.8 (대략적 너비)
-        chars_per_line = int(max_width_px / (font_size * 0.8))
-        if len(text) <= chars_per_line:
+   
+
+        if len(text) <= max_width_px:
             return text
-        # 단어 단위로 분할하지 않고 문자 단위로 줄바꿈
+        
+        # 공백 기준으로 단어 분리
+        words = text.split()
         lines = []
-        for i in range(0, len(text), chars_per_line):
-            lines.append(text[i:i + chars_per_line])
+        current_line = ""
+        
+        for word in words:
+            if len(current_line) + len(word) <= max_width_px:
+                current_line = (current_line + " " + word).strip()
+            else:
+                if current_line:
+                    lines.append(current_line)
+                current_line = word
+        if current_line:
+            lines.append(current_line)
         return "\n".join(lines)
     
-    # drawtext 한글/특수문자 안정화를 위해 textfile 사용 (UTF-8 BOM)
-    # title_font 값은 _build_filtergraph에서도 사용되므로 여기서 정의
-    title_font = 54
+    wrapped_title = _wrap_text(inputs.title_text, 14, inputs.design.title_size)
+
     title_file = inputs.title_textfile or (output_dir / "title.txt")
     work_file = inputs.work_title_textfile or (output_dir / "work_title.txt")
-    wrapped_title_for_file = _wrap_text(inputs.title_text, inputs.canvas_width - 80, title_font)
-    title_file.write_bytes((wrapped_title_for_file + "\n").encode("utf-8-sig"))
+
+    # wrapped_title_for_file = _wrap_text(inputs.title_text, inputs.canvas_width - 80, title_font)
+    # title_file.write_bytes((wrapped_title_for_file + "\n").encode("utf-8-sig"))
+    # work_file.write_bytes((f"작품명: {inputs.work_title}" + "\n").encode("utf-8-sig"))
+    title_file.write_bytes((wrapped_title + "\n").encode("utf-8-sig"))
     work_file.write_bytes((f"작품명: {inputs.work_title}" + "\n").encode("utf-8-sig"))
 
-    inputs = replace(inputs, title_textfile=title_file, work_title_textfile=work_file)
 
-    # TTS 입력 순서(커맨드 -i 추가 순서)와 오디오 필터 인덱스 계산을 일치시킵니다.
+    # inputs = replace(inputs, title_textfile=title_file, work_title_textfile=work_file)
+
+    # # TTS 입력 순서(커맨드 -i 추가 순서)와 오디오 필터 인덱스 계산을 일치시킵니다.
+    # tts_keys_sorted: list[int] = sorted(inputs.tts_audio_files.keys()) if inputs.tts_audio_files else []
+
+    inputs = replace(inputs, title_textfile=title_file, work_title_textfile=work_file)
     tts_keys_sorted: list[int] = sorted(inputs.tts_audio_files.keys()) if inputs.tts_audio_files else []
+
+
+    # filter_script = _build_filtergraph(inputs, num_clip_inputs=len(inputs.clips), tts_keys_sorted=tts_keys_sorted)
+    # filter_path = inputs.output_path.with_suffix(".filter.txt")
+    # filter_path.write_text(filter_script, encoding="utf-8")
 
     filter_script = _build_filtergraph(inputs, num_clip_inputs=len(inputs.clips), tts_keys_sorted=tts_keys_sorted)
     filter_path = inputs.output_path.with_suffix(".filter.txt")
@@ -83,25 +107,18 @@ def render_short(inputs: RenderInputs) -> list[str]:
     # output_dir 기준 상대경로로 실행 (ass 필터 안정화)
     output_relative = _relpath_or_abs(inputs.output_path, output_dir)
 
+
+
     def _build_input_args(hwaccel: str | None) -> list[str]:
-        args: list[str] = []
-        # 원본 컨테이너에 data/subtitle stream이 섞여 있어도 무시 (타임스탬프/길이 이상 방지)
-        args.extend(["-dn", "-sn"])
-        # 클립별 입력: -ss/-to를 입력 앞에 두어(입력 seeking) 속도를 우선합니다.
+        args: list[str] = ["-dn", "-sn"]
         for clip in inputs.clips:
             if hwaccel:
                 args.extend(["-hwaccel", hwaccel])
-            args.extend(
-                [
-                    "-ss",
-                    f"{clip.start_sec}",
-                    "-to",
-                    f"{clip.end_sec}",
-                    "-i",
-                    str(_relpath_or_abs(inputs.video_path, output_dir)),
-                ]
-            )
-        # TTS 오디오 파일들을 입력으로 추가 (입력 N..N+M-1)
+            args.extend([
+                "-ss", f"{clip.start_sec}",
+                "-to", f"{clip.end_sec}",
+                "-i", str(_relpath_or_abs(inputs.video_path, output_dir)),
+            ])
         if inputs.tts_audio_files:
             for clip_idx in tts_keys_sorted:
                 tts_path = inputs.tts_audio_files[clip_idx]
@@ -117,31 +134,20 @@ def render_short(inputs: RenderInputs) -> list[str]:
         candidates.append("libx264")
 
     last_err: Exception | None = None
-    hwaccel_candidates: list[str | None] = [None]
-    if inputs.enable_hwaccel:
-        # Windows에서 흔히 성공하는 순서: d3d11va → cuda → none
-        hwaccel_candidates = ["d3d11va", "cuda", None]
+    # hwaccel_candidates: list[str | None] = [None]
+    hwaccel_candidates = ["d3d11va", "cuda", None] if inputs.enable_hwaccel else [None]
 
     for video_encoder in candidates:
         encoder_args = _video_encoder_args(video_encoder, inputs.render_preset)
         for hwaccel in hwaccel_candidates:
-            cmd_try: list[str] = [
-                ffmpeg_cmd,
-                "-y",
+            cmd_try = [
+                ffmpeg_cmd, "-y",
                 *_build_input_args(hwaccel),
-                "-filter_complex",
-                filter_script,
-                "-map",
-                "[vout]",
-                "-map",
-                "[aout]",
-                "-c:v",
-                video_encoder,
-                *encoder_args,
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
+                "-filter_complex", filter_script,
+                "-map", "[vout]", "-map", "[aout]",
+                "-c:v", video_encoder, *encoder_args,
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k",
                 str(output_relative),
             ]
             try:
@@ -151,7 +157,7 @@ def render_short(inputs: RenderInputs) -> list[str]:
                 last_err = e
                 continue
 
-    raise RuntimeError(f"렌더링 실패: 사용 가능한 인코더로 출력하지 못했습니다. 마지막 오류: {last_err}")
+    raise RuntimeError(f"렌더링 실패. 마지막 오류: {last_err}")
 
 
 def _pick_video_encoder(ffmpeg_path: str) -> str:
@@ -262,156 +268,101 @@ def _probe_video_dims(video_path: Path) -> tuple[int, int]:
     return w, h
 
 
+
 def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sorted: list[int]) -> str:
-    """
-    요구사항 반영:
-    - 중앙 영상은 '원본 비율 유지'로 통째로 보이게 배치(필요 시 다운스케일만, 업스케일 X)
-    - 남는 영역은 검은색
-    - 제목/작품명은 중앙 영상 바로 위/아래에 작은 마진으로 배치
-    - 자막은 optional (subtitle_path가 있을 때만 ass 적용)
-    """
     W = inputs.canvas_width
     H = inputs.canvas_height
+    d = inputs.design 
 
-    src_w, src_h = _probe_video_dims(inputs.video_path)
-
-    # 텍스트/마진(고정) — 요청대로 "조금만"
-    margin = 20
-    title_font = 54
-    work_font = 44
-    font_name = "Malgun Gothic"
-
-    # 텍스트 영역을 확보하기 위해 상/하 여유를 잡고 그 안에서 영상이 '통째로' 들어가게 fit
-    # (업스케일은 하지 않음)
-    reserve_h = int(title_font * 1.6) + int(work_font * 1.6) + margin * 4
-    avail_h = max(1, H - reserve_h)
-    scale = min(W / src_w, avail_h / src_h, 1.0)
-
-    scaled_w = int(src_w * scale)
-    scaled_h = int(src_h * scale)
-    # x264 안정성을 위해 짝수로
+    # [1] 비디오 레이아웃 설정
+    scaled_w = d.video_width
+    scaled_h = d.video_height
     scaled_w -= scaled_w % 2
     scaled_h -= scaled_h % 2
-    scaled_w = max(2, scaled_w)
-    scaled_h = max(2, scaled_h)
-
-    overlay_x = int((W - scaled_w) / 2)
-    overlay_y = int((H - scaled_h) / 2)
-
-    escaped_title = _escape_text_for_drawtext(inputs.title_text)
-    escaped_work_title = _escape_text_for_drawtext(f"작품명: {inputs.work_title}")
-
-    # 자막 경로(있으면 상대경로 우선)
-    output_dir = inputs.output_path.parent
-    subtitle_path_escaped: str | None = None
-    if inputs.subtitle_path:
-        try:
-            subtitle_path_relative = inputs.subtitle_path.relative_to(output_dir)
-            subtitle_path_escaped = str(subtitle_path_relative).replace("\\", "/")
-        except ValueError:
-            subtitle_path_escaped = str(inputs.subtitle_path.resolve()).replace("\\", "/")
-
-    # 제목/작품명 y 위치: 영상 경계 기준
-    # 제목: 영상 위쪽 경계 - margin - text_h
-    title_y_expr = f"{overlay_y - margin}-text_h"
-    # 작품명: 영상 아래쪽 경계 + margin
-    work_y = overlay_y + scaled_h + margin
-
-    # drawtext는 textfile을 우선 사용 (한글/따옴표 안정성)
-    # 여러 줄 제목은 각 줄마다 별도 drawtext 필터 생성 (줄바꿈 지원, "..." 생략 금지)
-    title_draw_parts: list[str] = []
-    last_output_label: str | None = None
     
-    if inputs.title_textfile:
-        title_path = _relpath_or_abs(inputs.title_textfile, output_dir)
-        # 파일에서 줄바꿈된 텍스트 읽기
-        title_lines = inputs.title_textfile.read_text(encoding="utf-8-sig").strip().split("\n")
-        current_input = "[vcat]"
-        line_idx = 0
-        for line in title_lines:
-            if not line.strip():
-                continue
-            escaped_line = _escape_text_for_drawtext(line.strip())
-            line_y_offset = line_idx * (title_font + 10)  # 줄 간격
-            output_label = f"[title_line{line_idx}]"
-            title_draw_parts.append(
-                f"{current_input}drawtext=font='{font_name}':fontcolor=white:fontsize={title_font}:"
-                f"text='{escaped_line}':x=(w-text_w)/2:y={title_y_expr}+{line_y_offset}{output_label}"
-            )
-            current_input = output_label
-            last_output_label = output_label
-            line_idx += 1
-        
-        if not title_draw_parts:
-            title_draw = "[vcat]null[with_title]"
-        else:
-            # 마지막 출력을 with_title로 변경
-            title_draw = ";".join(title_draw_parts).replace(last_output_label, "[with_title]")
-    else:
-        # textfile 없으면 직접 텍스트 사용 (줄바꿈 처리)
-        title_lines = inputs.title_text.split("\n")
-        current_input = "[vcat]"
-        line_idx = 0
-        for line in title_lines:
-            if not line.strip():
-                continue
-            escaped_line = _escape_text_for_drawtext(line.strip())
-            line_y_offset = line_idx * (title_font + 10)
-            output_label = f"[title_line{line_idx}]"
-            title_draw_parts.append(
-                f"{current_input}drawtext=font='{font_name}':fontcolor=white:fontsize={title_font}:"
-                f"text='{escaped_line}':x=(w-text_w)/2:y={title_y_expr}+{line_y_offset}{output_label}"
-            )
-            current_input = output_label
-            last_output_label = output_label
-            line_idx += 1
-        
-        if not title_draw_parts:
-            title_draw = "[vcat]null[with_title]"
-        else:
-            title_draw = ";".join(title_draw_parts).replace(last_output_label, "[with_title]")
+    overlay_x = int((W - scaled_w) / 2)
+    overlay_y = d.video_y_pos 
 
-    if inputs.work_title_textfile:
-        work_path = _relpath_or_abs(inputs.work_title_textfile, output_dir)
-        work_draw = (
-            f"[with_title]drawtext=font='{font_name}':fontcolor=white:fontsize={work_font}:"
-            f"textfile='{str(work_path).replace('\\\\', '/')}':reload=0:x=(w-text_w)/2:y={work_y}[with_work]"
-        )
-    else:
-        work_draw = (
-            f"[with_title]drawtext=font='{font_name}':fontcolor=white:fontsize={work_font}:"
-            f"text='{escaped_work_title}':x=(w-text_w)/2:y={work_y}[with_work]"
-        )
-
-    # 각 입력(클립)마다 scale+pad로 캔버스(검정)까지 완성 → concat filter로 이어붙임
     filters: list[str] = []
-    for i in range(num_clip_inputs):
-        filters.append(
-            f"[{i}:v]scale={scaled_w}:{scaled_h},"
+
+    # [2] 클립별 스케일 및 패딩 (배경 검은색)
+    for i, clip in enumerate(inputs.clips):
+        crop_key = f"{clip.role}_{i}"
+        crop_data_path = inputs.crop_timeline_map.get(crop_key)
+        crop_filter = ""
+        if crop_data_path and crop_data_path.exists():
+            try:
+                crop_json = json.loads(crop_data_path.read_text(encoding="utf-8"))
+                if crop_json and len(crop_json) > 0:
+                    avg_cx = sum(kf['x_center'] for kf in crop_json) / len(crop_json)
+                    cw, ch = crop_json[0]['crop_w'], crop_json[0]['crop_h']
+                    cy = crop_json[0]['y_center']
+                    crop_filter = f"crop={cw}:{ch}:{avg_cx}-{cw}/2:{cy}-{ch}/2,"
+            except: pass
+
+        v_filter = (
+            f"[{i}:v]{crop_filter}"
+            f"scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=decrease,"
+            f"setsar=1,"
             f"pad={W}:{H}:{overlay_x}:{overlay_y}:black[v{i}]"
         )
+        filters.append(v_filter)
         filters.append(f"[{i}:a]anull[a{i}]")
 
-    # concat filter: [v0][a0][v1][a1]...concat=n=..:v=1:a=1[vcat][acat]
-    concat_inputs: list[str] = []
+    # [3] 연결(Concat) - 비디오/오디오 쌍을 맞춰서 입력
+    concat_inputs = []
     for i in range(num_clip_inputs):
         concat_inputs.append(f"[v{i}]")
         concat_inputs.append(f"[a{i}]")
+    
+    filters.append(f"{''.join(concat_inputs)}concat=n={num_clip_inputs}:v=1:a=1[vcat][acat]")
+
+    # [4] 제목(Title) 필터 - 스마트 줄바꿈 적용
+    def split_text_smart(text: str, max_chars: int = 14) -> list[str]:
+        words = text.split()
+        res_lines, current_line = [], ""
+        for word in words:
+            if len(current_line) + len(word) <= max_chars:
+                current_line = (current_line + " " + word).strip()
+            else:
+                if current_line: res_lines.append(current_line)
+                current_line = word
+        if current_line: res_lines.append(current_line)
+        return res_lines
+
+    title_lines = split_text_smart(inputs.title_text, 14)
+    font_arg = str(d.title_font).replace("\\", "/").replace(":", "\\:")
+    
+    last_v_label = "[vcat]" 
+    for idx, line in enumerate(title_lines):
+        next_label = f"[title_{idx}]"
+        y_pos = d.title_y + (idx * (d.title_size + 20))
+        escaped_line = _escape_text_for_drawtext(line.strip())
+        filters.append(
+            f"{last_v_label}drawtext=fontfile='{font_arg}':text='{escaped_line}':"
+            f"fontcolor={d.title_color}:fontsize={d.title_size}:x=(w-text_w)/2:y={y_pos}{next_label}"
+        )
+        last_v_label = next_label
+
+    # [5] 작품명(Work Title) 필터
+    work_label = "[with_work]"
     filters.append(
-        f"{''.join(concat_inputs)}concat=n={num_clip_inputs}:v=1:a=1[vcat][acat]"
+        f"{last_v_label}drawtext=fontfile='{font_arg}':text='작품명\\: {inputs.work_title}':"
+        f"fontcolor={d.work_color}:fontsize={d.work_font_size}:"
+        f"x=(w-text_w)/2:y={d.work_title_y}{work_label}"
     )
 
-    filters.extend([title_draw, work_draw])
-
-    if subtitle_path_escaped:
-        filters.append(f"[with_work]ass='{subtitle_path_escaped}'[vout]")
+    # [6] 자막(ASS) 적용 - 영상 내부(작품명 레이어 위)에 오버레이
+    if inputs.subtitle_path:
+        sub_path = str(inputs.subtitle_path.resolve()).replace("\\", "/").replace(":", "\\:")
+        filters.append(f"{work_label}ass='{sub_path}'[vout]")
     else:
-        # 자막 없으면 identity
-        filters.append("[with_work]null[vout]")
+        filters.append(f"{work_label}null[vout]")
 
-    filters.append(_build_audio_filter(inputs, num_clip_inputs=num_clip_inputs, tts_keys_sorted=tts_keys_sorted))
+    # [7] 오디오 필터
+    filters.append(_build_audio_filter(inputs, num_clip_inputs, tts_keys_sorted))
+    
     return ";".join(filters)
-
 
 def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sorted: list[int]) -> str:
     # concat된 원본 오디오 볼륨 조절
