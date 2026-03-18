@@ -299,21 +299,10 @@ class GeminiConfig:
 class GeminiClient:
     def __init__(self, config: GeminiConfig) -> None:
         self.config = config
-        import google.generativeai as genai
-        try:
-            from google.generativeai import types as genai_types
-        except ImportError:
-            # google-generativeai 패키지의 경우 types 모듈 경로가 다를 수 있음
-            try:
-                import google.generativeai.types as genai_types
-            except ImportError:
-                # types를 직접 사용할 수 없는 경우, Part 클래스를 직접 생성
-                genai_types = None
-
-        genai.configure(api_key=config.api_key)
-        self.model = genai.GenerativeModel(config.model_name)
-        self.genai = genai
-        self.genai_types = genai_types
+        from google import genai
+        from google.genai import types
+        self.client = genai.Client(api_key=config.api_key)
+        self.types = types
 
     def analyze_chunk(self, payload: dict[str, Any]) -> dict[str, Any]:
         # 이전 분석 결과와 전사를 컨텍스트로 준비
@@ -350,39 +339,32 @@ class GeminiClient:
         # 비디오 파일 경로가 있으면 파일을 직접 읽어서 전달
         video_path = payload.get("video_path")
         content_parts = [prompt]
-        
+
         # File API 방식 적용 (Memory-Safe)
         if video_path:
             video_path_obj = Path(video_path) if isinstance(video_path, str) else video_path
             if video_path_obj.exists():
                 try:
-                    uploaded_file = self.genai.upload_file(path=str(video_path_obj))
+                    uploaded_file = self.client.files.upload(path=str(video_path_obj))
                     while uploaded_file.state.name == "PROCESSING":
                         time.sleep(2)
-                        uploaded_file = self.genai.get_file(uploaded_file.name)
+                        uploaded_file = self.client.files.get(name=uploaded_file.name)
                     if uploaded_file.state.name == "FAILED":
                         raise RuntimeError("Gemini File API 업로드 실패")
                     content_parts.append(uploaded_file)
                 except Exception as upload_err:
                     print(f"    [WARN] 비디오 업로드 중 오류 발생: {upload_err}")
 
-        
+
         for attempt in range(self.config.max_retries):
             try:
-                # JSON 응답 강제 설정 (가능한 경우)
-                generation_config = None
-                if self.genai_types and hasattr(self.genai_types, 'GenerateContentConfig'):
-                    generation_config = self.genai_types.GenerateContentConfig(
+                response = self.client.models.generate_content(
+                    model=self.config.model_name,
+                    contents=content_parts,
+                    config=self.types.GenerateContentConfig(
                         response_mime_type="application/json",
-                    )
-                
-                if generation_config:
-                    response = self.model.generate_content(
-                        content_parts,
-                        generation_config=generation_config,
-                    )
-                else:
-                    response = self.model.generate_content(content_parts)
+                    ),
+                )
                 
                 # 응답이 None이거나 빈 문자열인지 확인
                 if not response or not response.text:
@@ -467,22 +449,16 @@ class GeminiClient:
         # 전체 영상 분석은 전사 결과만 사용 (영상 파일은 너무 크거나 전송 오류가 발생할 수 있음)
         # 전사 결과만으로도 충분히 전체 줄거리와 주요 장면을 분석할 수 있음
         content_parts = [prompt]
-        
+
         for attempt in range(self.config.max_retries):
             try:
-                generation_config = None
-                if self.genai_types and hasattr(self.genai_types, 'GenerateContentConfig'):
-                    generation_config = self.genai_types.GenerateContentConfig(
+                response = self.client.models.generate_content(
+                    model=self.config.model_name,
+                    contents=content_parts,
+                    config=self.types.GenerateContentConfig(
                         response_mime_type="application/json",
-                    )
-                
-                if generation_config:
-                    response = self.model.generate_content(
-                        content_parts,
-                        generation_config=generation_config,
-                    )
-                else:
-                    response = self.model.generate_content(content_parts)
+                    ),
+                )
                 
                 if not response or not response.text:
                     if attempt == self.config.max_retries - 1:
@@ -548,19 +524,13 @@ class GeminiClient:
         
         for attempt in range(self.config.max_retries):
             try:
-                generation_config = None
-                if self.genai_types and hasattr(self.genai_types, 'GenerateContentConfig'):
-                    generation_config = self.genai_types.GenerateContentConfig(
+                response = self.client.models.generate_content(
+                    model=self.config.model_name,
+                    contents=[prompt],
+                    config=self.types.GenerateContentConfig(
                         response_mime_type="application/json",
-                    )
-                
-                if generation_config:
-                    response = self.model.generate_content(
-                        [prompt],
-                        generation_config=generation_config,
-                    )
-                else:
-                    response = self.model.generate_content([prompt])
+                    ),
+                )
                 
                 if not response or not response.text:
                     if attempt == self.config.max_retries - 1:
@@ -654,7 +624,10 @@ class GeminiClient:
     }}
     """
         # Gemini에게 전달 (generate_content 등의 메서드 사용)
-        response = self.model.generate_content(prompt)
+        response = self.client.models.generate_content(
+            model=self.config.model_name,
+            contents=prompt,
+        )
         try:
             # JSON 파싱 로직 (기존 클라이언트 내 json_loader 활용)
             import json
