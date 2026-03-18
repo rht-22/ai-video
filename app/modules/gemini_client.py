@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import json
@@ -126,72 +127,72 @@ GEMINI_PROMPT_TEMPLATE = """
 
 다음 스키마로만 응답:
 {{
-  "chunk_index": 0,
-  "chunk_start_sec": 0,
-  "chunk_end_sec": 300,
-  "summary": "요약",
-  "main_plot": "영상의 핵심 서사 80자 이내",
-  "characters_relations": "인물 간 관계 및 권력/감정 역학 설명",
-  "characters_tracking": [
-    {{
-      "character": "인물명 또는 레이블",
-      "appearances": [
-        {{
-          "start_sec": 0.0,
-          "end_sec": 32.0,
-          "action": "해당 구간 행동/발화 요약"
-        }}
-      ]
-    }}
-  ],
-  "sub_plots": [
-    {{
-      "start_sec": 0.0,
-      "description": "서브플롯 설명"
-    }}
-  ],
-  "emotion_curve": [
-    {{
-      "start_sec": 0.0,
-      "end_sec": 10.0,
-      "emotion": "감정",
-      "intensity": 0.8
-    }}
-  ],
-  "tension_score": {{
-    "average": 0.6,
-    "peak": 0.95,
-    "peak_start_sec": 0.0,
-    "peak_end_sec": 10.0
-  }},
-  "audio_tempo": {{
-    "bpm": 120,
-    "vibe_keywords": ["키워드1", "키워드2"]
-  }},
-  "overall_vibe": "영상 전체 분위기 요약",
-  "candidate_moments": [
-    {{
-      "candidate_index": 0,
-      "start_sec": 12.4,
-      "end_sec": 25.8,
-      "importance": 0.0,
-      "hook_score": 0.0,
-      "topic_alignment_score": 0.0,
-      "story_role": "hook|build|payoff",
-      "reason": "선정 이유",
-      "subtitle": "자막(짧게)",
-      "tts_line": "TTS 한 문장",
-      "points": {{
-        "humor": {{"description": "유머 내용", "intensity": 0.7}},
-        "love": null,
-        "relatability": null,
-        "saida": {{"description": "사이다 포인트", "intensity": 0.9}},
-        "goguma": null,
-        "conflict_twist": null
-      }}
-    }}
-  ],
-  "title_candidates": ["제목1", "제목2", "제목3"]
+  "chunk_index": 0,
+  "chunk_start_sec": 0,
+  "chunk_end_sec": 300,
+  "summary": "요약",
+  "main_plot": "영상의 핵심 서사 80자 이내",
+  "characters_relations": "인물 간 관계 및 권력/감정 역학 설명",
+  "characters_tracking": [
+    {{
+      "character": "인물명 또는 레이블",
+      "appearances": [
+        {{
+          "start_sec": 0.0,
+          "end_sec": 32.0,
+          "action": "해당 구간 행동/발화 요약"
+        }}
+      ]
+    }}
+  ],
+  "sub_plots": [
+    {{
+      "start_sec": 0.0,
+      "description": "서브플롯 설명"
+    }}
+  ],
+  "emotion_curve": [
+    {{
+      "start_sec": 0.0,
+      "end_sec": 10.0,
+      "emotion": "감정",
+      "intensity": 0.8
+    }}
+  ],
+  "tension_score": {{
+    "average": 0.6,
+    "peak": 0.95,
+    "peak_start_sec": 0.0,
+    "peak_end_sec": 10.0
+  }},
+  "audio_tempo": {{
+    "bpm": 120,
+    "vibe_keywords": ["키워드1", "키워드2"]
+  }},
+  "overall_vibe": "영상 전체 분위기 요약",
+  "candidate_moments": [
+    {{
+      "candidate_index": 0,
+      "start_sec": 12.4,
+      "end_sec": 25.8,
+      "importance": 0.0,
+      "hook_score": 0.0,
+      "topic_alignment_score": 0.0,
+      "story_role": "hook|build|payoff",
+      "reason": "선정 이유",
+      "subtitle": "자막(짧게)",
+      "tts_line": "TTS 한 문장",
+      "points": {{
+        "humor": {{"description": "유머 내용", "intensity": 0.7}},
+        "love": null,
+        "relatability": null,
+        "saida": {{"description": "사이다 포인트", "intensity": 0.9}},
+        "goguma": null,
+        "conflict_twist": null
+      }}
+    }}
+  ],
+  "title_candidates": ["제목1", "제목2", "제목3"]
 }}
 """.strip()
 
@@ -345,7 +346,7 @@ class GeminiClient:
             video_path_obj = Path(video_path) if isinstance(video_path, str) else video_path
             if video_path_obj.exists():
                 try:
-                    uploaded_file = self.client.files.upload(path=str(video_path_obj))
+                    uploaded_file = self.client.files.upload(file=str(video_path_obj))
                     while uploaded_file.state.name == "PROCESSING":
                         time.sleep(2)
                         uploaded_file = self.client.files.get(name=uploaded_file.name)
