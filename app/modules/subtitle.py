@@ -47,7 +47,7 @@ def build_ass(
         end = _format_time(current_timeline_sec + clip_dur)
         text = clip.subtitle.replace("\n", " ")
         
-        line = f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}\n"
+        line = f"Dialogue: 0,{start},{end},Default,,,,, {text}\n"
         clip_events_list.append(line)
         
         current_timeline_sec += clip_dur # 다음 클립을 위해 시간 누적
@@ -211,7 +211,7 @@ def _ass_line(index: int, clip: StoryClip, style: SubtitleStyle) -> str:
     start = _format_time(clip.start_sec)
     end = _format_time(clip.end_sec)
     text = clip.subtitle.replace("\n", " ")
-    return f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}\n"
+    return f"Dialogue: 0,{start},{end},Default,,,,, {text}\n"
 
 
 def _ass_line_original(segment: SpeechSegment, style: SubtitleStyle) -> str:
@@ -220,14 +220,14 @@ def _ass_line_original(segment: SpeechSegment, style: SubtitleStyle) -> str:
     end = _format_time(segment.end_sec)
     text = segment.text.replace("\n", " ")
     # 원본 자막은 레이어 1에 배치하고 약간 다른 스타일 적용 가능
-    return f"Dialogue: 1,{start},{end},Default,,0,0,0,,{text}\n"
+    return f"Dialogue: 1,{start},{end},Default,,,,, {text}\n"
 
 
 def _ass_line_segment(segment: SpeechSegment) -> str:
     start = _format_time(segment.start_sec)
     end = _format_time(segment.end_sec)
     text = segment.text.replace("\n", " ")
-    return f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}\n"
+    return f"Dialogue: 0,{start},{end},Default,,,,, {text}\n"
 
 
 def _format_time(seconds: float) -> str:

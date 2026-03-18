@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import mimetypes
-import time
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -120,77 +120,78 @@ GEMINI_PROMPT_TEMPLATE = """
 
 - 모든 출력은 한국어 사용
 - 최신 쇼츠 트렌드 반영: 자연스러운 톤, 짧은 문장, 강조/리액션 요소
-- candidate_moments 최소 5개
+- candidate_moments 최소 10개
 - JSON 스키마 강제
 - 분석 결과 해당 항목이 없을 경우 빈 배열 대신 null로 출력한다.
 
 다음 스키마로만 응답:
 {{
-  "chunk_index": 0,
-  "chunk_start_sec": 0,
-  "chunk_end_sec": 300,
-  "summary": "요약",
-  "main_plot": "영상의 핵심 서사 80자 이내",
-  "characters_relations": "인물 간 관계 및 권력/감정 역학 설명",
-  "characters_tracking": [
-    {{
-      "character": "인물명 또는 레이블",
-      "appearances": [
-        {{
-          "start_sec": 0.0,
-          "end_sec": 32.0,
-          "action": "해당 구간 행동/발화 요약"
-        }}
-      ]
-    }}
-  ],
-  "sub_plots": [
-    {{
-      "start_sec": 0.0,
-      "description": "서브플롯 설명"
-    }}
-  ],
-  "emotion_curve": [
-    {{
-      "start_sec": 0.0,
-      "end_sec": 10.0,
-      "emotion": "감정",
-      "intensity": 0.8
-    }}
-  ],
-  "tension_score": {{
-    "average": 0.6,
-    "peak": 0.95,
-    "peak_start_sec": 0.0,
-    "peak_end_sec": 10.0
-  }},
-  "audio_tempo": {{
-    "bpm": 120,
-    "vibe_keywords": ["키워드1", "키워드2"]
-  }},
-  "overall_vibe": "영상 전체 분위기 요약",
-  "candidate_moments": [
-    {{
-      "start_sec": 12.4,
-      "end_sec": 25.8,
-      "importance": 0.0,
-      "hook_score": 0.0,
-      "topic_alignment_score": 0.0,
-      "story_role": "hook|build|payoff",
-      "reason": "선정 이유",
-      "subtitle": "자막(짧게)",
-      "tts_line": "TTS 한 문장",
-      "points": {{
-        "humor": {{"description": "유머 내용", "intensity": 0.7}},
-        "love": null,
-        "relatability": null,
-        "saida": {{"description": "사이다 포인트", "intensity": 0.9}},
-        "goguma": null,
-        "conflict_twist": null
-      }}
-    }}
-  ],
-  "title_candidates": ["제목1", "제목2", "제목3"]
+  "chunk_index": 0,
+  "chunk_start_sec": 0,
+  "chunk_end_sec": 300,
+  "summary": "요약",
+  "main_plot": "영상의 핵심 서사 80자 이내",
+  "characters_relations": "인물 간 관계 및 권력/감정 역학 설명",
+  "characters_tracking": [
+    {{
+      "character": "인물명 또는 레이블",
+      "appearances": [
+        {{
+          "start_sec": 0.0,
+          "end_sec": 32.0,
+          "action": "해당 구간 행동/발화 요약"
+        }}
+      ]
+    }}
+  ],
+  "sub_plots": [
+    {{
+      "start_sec": 0.0,
+      "description": "서브플롯 설명"
+    }}
+  ],
+  "emotion_curve": [
+    {{
+      "start_sec": 0.0,
+      "end_sec": 10.0,
+      "emotion": "감정",
+      "intensity": 0.8
+    }}
+  ],
+  "tension_score": {{
+    "average": 0.6,
+    "peak": 0.95,
+    "peak_start_sec": 0.0,
+    "peak_end_sec": 10.0
+  }},
+  "audio_tempo": {{
+    "bpm": 120,
+    "vibe_keywords": ["키워드1", "키워드2"]
+  }},
+  "overall_vibe": "영상 전체 분위기 요약",
+  "candidate_moments": [
+    {{
+      "candidate_index": 0,
+      "start_sec": 12.4,
+      "end_sec": 25.8,
+      "importance": 0.0,
+      "hook_score": 0.0,
+      "topic_alignment_score": 0.0,
+      "story_role": "hook|build|payoff",
+      "reason": "선정 이유",
+      "subtitle": "자막(짧게)",
+      "tts_line": "TTS 한 문장",
+      "points": {{
+        "humor": {{"description": "유머 내용", "intensity": 0.7}},
+        "love": null,
+        "relatability": null,
+        "saida": {{"description": "사이다 포인트", "intensity": 0.9}},
+        "goguma": null,
+        "conflict_twist": null
+      }}
+    }}
+  ],
+  "title_candidates": ["제목1", "제목2", "제목3"]
 }}
 """.strip()
 
@@ -287,8 +288,6 @@ STORYLINE_GENERATION_PROMPT = """
 """.strip()
 
 
-    
-
 @dataclass(frozen=True)
 class GeminiConfig:
     api_key: str
@@ -317,7 +316,7 @@ class GeminiClient:
                 if prev.get("candidate_moments"):
                     moments_text = "\n".join([
                         f"  - {m.get('start_sec', 0)}~{m.get('end_sec', 0)}초: {m.get('subtitle', '')} ({m.get('story_role', 'unknown')})"
-                        for m in prev["candidate_moments"][:10]  # 상위 3개만
+                        for m in prev["candidate_moments"][:3]  # 상위 3개만
                     ])
                     context_parts.append(f"주요 모멘트:\n{moments_text}")
             if context_parts:
@@ -339,7 +338,8 @@ class GeminiClient:
         # 비디오 파일 경로가 있으면 파일을 직접 읽어서 전달
         video_path = payload.get("video_path")
         content_parts = [prompt]
-
+        uploaded_file = None
+        
         # File API 방식 적용 (Memory-Safe)
         if video_path:
             video_path_obj = Path(video_path) if isinstance(video_path, str) else video_path
@@ -359,71 +359,57 @@ class GeminiClient:
                         video_metadata=self.types.VideoMetadata(fps=30),
                     ))
                 except Exception as upload_err:
-                    print(f"    [WARN] 비디오 업로드 중 오류 발생: {upload_err}")
+                    print(f" [WARN] 비디오 업로드 중 오류 발생: {upload_err}")
 
 
-        for attempt in range(self.config.max_retries):
-            try:
-                response = self.client.models.generate_content(
-                    model=self.config.model_name,
-                    contents=content_parts,
-                    config=self.types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                    ),
-                )
-                
-                # 응답이 None이거나 빈 문자열인지 확인
-                if not response or not response.text:
-                    error_msg = "Gemini API가 빈 응답을 반환했습니다."
-                    if hasattr(response, 'prompt_feedback'):
-                        error_msg += f" 피드백: {response.prompt_feedback}"
-                    if attempt == self.config.max_retries - 1:
-                        raise RuntimeError(error_msg)
-                    print(f"    [WARN] {error_msg} 재시도 중... ({attempt + 1}/{self.config.max_retries})")
-                    continue
-                
-                text = response.text.strip()
-                
-                # 빈 문자열인지 확인
-                if not text:
-                    error_msg = "Gemini API 응답이 빈 문자열입니다."
-                    if attempt == self.config.max_retries - 1:
-                        raise RuntimeError(error_msg)
-                    print(f"    [WARN] {error_msg} 재시도 중... ({attempt + 1}/{self.config.max_retries})")
-                    continue
-                
+        try:
+            for attempt in range(self.config.max_retries):
                 try:
-                    # 마크다운 코드 블록 제거
+                    response = self.client.models.generate_content(
+                        model=self.config.model_name,
+                        contents=content_parts,
+                        config=self.types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                        ),
+                    )
+
+                    if not response or not response.text:
+                        error_msg = "Gemini API가 빈 응답을 반환했습니다."
+                        if attempt == self.config.max_retries - 1:
+                            raise RuntimeError(error_msg)
+                        print(f"    [WARN] {error_msg} 재시도 중... ({attempt + 1}/{self.config.max_retries})")
+                        continue
+
+                    text = response.text.strip()
+                    if not text:
+                        error_msg = "Gemini API 응답이 빈 문자열입니다."
+                        if attempt == self.config.max_retries - 1:
+                            raise RuntimeError(error_msg)
+                        print(f"    [WARN] {error_msg} 재시도 중... ({attempt + 1}/{self.config.max_retries})")
+                        continue
+
                     json_text = _extract_json_from_markdown(text)
                     data = json.loads(json_text)
-                except json.JSONDecodeError as json_err:
-                    # JSON 파싱 실패 시 응답 내용 일부 출력
-                    preview = text[:200] if len(text) > 200 else text
-                    error_msg = f"Gemini 응답 JSON 파싱 실패: {json_err}\n응답 미리보기: {preview}..."
+                    data["chunk_start_sec"] = payload["chunk_start_sec"]
+                    data["chunk_end_sec"] = payload["chunk_end_sec"]
+                    _validate_gemini_schema(data)
+                    return data
+
+                except Exception as e:
                     if attempt == self.config.max_retries - 1:
-                        # 마지막 시도에서는 전체 응답을 포함한 에러 메시지
-                        raise ValueError(
-                            f"Gemini 응답을 JSON으로 파싱할 수 없습니다.\n"
-                            f"에러: {json_err}\n"
-                            f"전체 응답:\n{text}"
-                        )
-                    print(f"    [WARN] JSON 파싱 실패. 재시도 중... ({attempt + 1}/{self.config.max_retries})")
-                    print(f"    응답 미리보기: {preview}...")
+                        raise e
+                    time.sleep(2 ** attempt)
                     continue
-                
-                _validate_gemini_schema(data)
-                return data
-            except Exception as e:
-                if attempt == self.config.max_retries - 1:
-                    # 마지막 시도에서 실패하면 상세한 에러 메시지와 함께 예외 발생
-                    error_type = type(e).__name__
-                    raise RuntimeError(
-                        f"Gemini 분석 실패 ({error_type}): {str(e)}\n"
-                        f"청크: {payload.get('chunk_start_sec', '?')}초 ~ {payload.get('chunk_end_sec', '?')}초"
-                    ) from e
-                print(f"    [WARN] 오류 발생: {type(e).__name__}. 재시도 중... ({attempt + 1}/{self.config.max_retries})")
-                continue
-        raise RuntimeError("Gemini response failed validation after retries")
+
+            raise RuntimeError("Gemini 분석 시도 횟수 초과")
+
+        finally:
+            if uploaded_file:
+                try:
+                    self.client.files.delete(name=uploaded_file.name)
+                    print(f" [INFO] Gemini File API 서버 파일 삭제 완료: {uploaded_file.name}")
+                except Exception as del_err:
+                    print(f" [WARN] Gemini File API 서버 파일 삭제 실패: {del_err}")
     
     def analyze_full_video(
         self,
@@ -594,53 +580,96 @@ class GeminiClient:
                     raise RuntimeError(f"스토리라인 생성 실패: {str(e)}") from e
                 continue
         raise RuntimeError("스토리라인 생성 실패: 최대 재시도 횟수 초과")
-    
-
 
     def compose_story_with_context(self, all_candidates: list, work_title: str, topic: str):
-        """
-        Gemini가 후보 모멘트들을 보고 전체 흐름에 맞는 스토리 구성을 다시 수행합니다.
-        """
-        # 후보 데이터를 텍스트로 정리
-        candidates_str = ""
-        for i, m in enumerate(all_candidates):
-            candidates_str += f"ID: {i}, 시간: {m['start_sec']}~{m['end_sec']}s, 역할: {m['story_role']}, 내용: {m['subtitle']}, 중요도: {m['importance']}\n"
+            """
+            Gemini가 후보 모멘트들을 보고 전체 흐름에 맞는 스토리 구성을 다시 수행합니다.
+            """
+            # 후보 데이터를 텍스트로 정리
+            candidates_str = ""
+            for i, m in enumerate(all_candidates):
+                candidates_str += f"ID: {i}, 시간: {m['start_sec']}~{m['end_sec']}s, 역할: {m['story_role']}, 내용: {m['subtitle']}, 중요도: {m['importance']}\n"
 
-        prompt = f"""
-    당신은 최고의 숏폼 영상 편집자입니다. 제공된 하이라이트 후보들을 조합하여 영상의 흐름이 자연스럽고 기승전결이 완벽한 60초 이내의 숏츠 스토리를 구성하세요.
+            prompt = f"""
+    # Role
+    너는 쇼츠 영상 편집 전문가다. 전체 영상 분석 결과를 바탕으로 여러 개의 쇼츠 스토리라인을 생성해라.
 
-    [영상 정보]
-    제목: {work_title}
-    주제: {topic}
+    # Task
+    제공된 영상 분석 데이터를 기반으로 
+    시청자의 몰입을 극대화할 수 있는 2가지 타입의 스토리라인(하이라이트형, 서사형)을 3개씩 구성하고, 
+    그중 가장 성공 가능성이 높은 하나를 최종 선정하여 출력하라.
 
-    [하이라이트 후보 목록]
+    # Input Data
+    - 제목: {work_title}
+    - 주제: {topic}
+    - 후보 장면 및 분석 데이터:
     {candidates_str}
 
-    [작업 지침]
-    1. 단순 점수 위주가 아닌, 영상의 '서사 흐름(Narrative Flow)'을 최우선으로 고려하세요.
-    2. 반드시 Hook(도입) -> Build(전개) -> Payoff(결정적 장면)의 순서가 논리적이어야 합니다.
-    3. 선택한 장면들의 총 합계 시간이 60초를 넘지 않도록 하세요.
-    4. 후보들 중 흐름상 불필요한 장면은 과감히 제외하세요.
-    5. 출력은 반드시 아래 JSON 형식으로만 하세요.
+    # Constraints & Rules
+    1. Highlight Type: 
+    - 모든 chunk의 candidate_moments들 중, 맥락 설명 없이 가장 자극적이고 강렬한 장면(Peak Tension) 하나를 중심으로 구성할 것.
+    - viral_type: 해당되는 것 모두 기재.
 
-    [출력 형식]
+    2. Storytelling Type: 
+    - 모든 chunk의 candidate_moments 중에서 여러 장면들을 선정해 기승전결이 있도록 여러 장면을 유기적으로 연결할 것.
+    - 캐릭터의 행적을 조명하거나 영상의 주요 서사를 요약.
+    - 각 storyline 내에서는 가장 눈길을 끄는 장면을 hook으로 사용하고, hook이 전개상 앞부분이면 "여정몰입형", 전개상 뒷부분이면 "결과선공개형"으로 분류.
+    - key_source 작성 규칙: 서사 구성에 실제로 활용된 재료만 선택적으로 포함할 것. (전부 다 쓸 필요 없음)
+
+    3. Common: 
+    각 장면의 `start_sec`, `end_sec`를 명시하고, 영상의 '후킹'을 위한 TTS 라인을 반드시 포함할 것.
+
+    다음 JSON 스키마로만 응답:
     {{
-    "selected_ids": [선택한 후보 ID 리스트 (순서대로)],
-    "story_reasoning": "이 흐름으로 구성한 이유 요약"
+    "storylines": [
+        {{
+        "storyline_index": 0,
+        "chunk_index": 0,
+        "candidate_index": 0,
+        "shorts_type": "highlight",
+        "topic": "주제명",
+        "viral_type": "conflicts_and_twists|humor_points|love_points|relatability_points|saida_points|goguma_points",
+        "topic_reason": "선정 이유",
+        "score": 0.0,
+        "start_sec": 0.0,
+        "end_sec": 0.0
+        }},
+        {{
+        "storyline_index": 1,
+        "shorts_type": "storytelling",
+        "sequence_type": "여정몰입형|결과선공개형",
+        "topic": "주제명",
+        "key_source": {{
+            "main_plot": "선택적: 활용한 경우만 요약 작성",
+            "sub_plots": "선택적: 활용한 경우만 요약 작성",
+            "focus_characters": ["선택적: 캐릭터 이름 리스트"]
+        }},
+        "topic_reason": "서사 구성 이유",
+        "score": 0.0,
+        "storyline": {{
+            "hook": {{ "chunk_index": 0, "candidate_index": 0, "start_sec": 0.0, "end_sec": 0.0, "description": "장면 설명", "tts_line": "", "use_original_audio": true }},
+            "build": [ {{ "chunk_index": 0, "candidate_index": 0, "start_sec": 0.0, "end_sec": 0.0, "description": "장면 설명", "tts_line": "", "use_original_audio": true }} ],
+            "payoff": {{ "chunk_index": 0, "candidate_index": 0, "start_sec": 0.0, "end_sec": 0.0, "description": "장면 설명", "tts_line": "", "use_original_audio": true }}
+        }}
+        }}
+    ],
+    "selected_storyline_index": 0,
+    "title_txt":"적절한 제목 정하기",
+    "selected_storyline": {{ "이곳에 선정된 인덱스의 객체를 그대로 복사해서 출력": "" }}
     }}
     """
-        # Gemini에게 전달 (generate_content 등의 메서드 사용)
-        response = self.client.models.generate_content(
-            model=self.config.model_name,
-            contents=prompt,
-        )
-        try:
-            # JSON 파싱 로직 (기존 클라이언트 내 json_loader 활용)
-            import json
-            result = json.loads(response.text.replace('```json', '').replace('```', ''))
-            return result
-        except:
-            return None
+            # Gemini에게 전달 (generate_content 등의 메서드 사용)
+            response = self.client.models.generate_content(
+                model=self.config.model_name,
+                contents=prompt,
+            )
+            try:
+                # JSON 파싱 로직 (기존 클라이언트 내 json_loader 활용)
+                import json
+                result = json.loads(response.text.replace('```json', '').replace('```', ''))
+                return result
+            except:
+                return None
 
 
 def load_gemini_client() -> GeminiClient:

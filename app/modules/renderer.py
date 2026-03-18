@@ -78,26 +78,11 @@ def render_short(inputs: RenderInputs) -> list[str]:
     title_file = inputs.title_textfile or (output_dir / "title.txt")
     work_file = inputs.work_title_textfile or (output_dir / "work_title.txt")
 
-    # wrapped_title_for_file = _wrap_text(inputs.title_text, inputs.canvas_width - 80, title_font)
-    # title_file.write_bytes((wrapped_title_for_file + "\n").encode("utf-8-sig"))
-    # work_file.write_bytes((f"작품명: {inputs.work_title}" + "\n").encode("utf-8-sig"))
     title_file.write_bytes((wrapped_title + "\n").encode("utf-8-sig"))
     work_file.write_bytes((f"작품명: {inputs.work_title}" + "\n").encode("utf-8-sig"))
 
-
-    # inputs = replace(inputs, title_textfile=title_file, work_title_textfile=work_file)
-
-    # # TTS 입력 순서(커맨드 -i 추가 순서)와 오디오 필터 인덱스 계산을 일치시킵니다.
-    # tts_keys_sorted: list[int] = sorted(inputs.tts_audio_files.keys()) if inputs.tts_audio_files else []
-
     inputs = replace(inputs, title_textfile=title_file, work_title_textfile=work_file)
     tts_keys_sorted: list[int] = sorted(inputs.tts_audio_files.keys()) if inputs.tts_audio_files else []
-
-
-    # filter_script = _build_filtergraph(inputs, num_clip_inputs=len(inputs.clips), tts_keys_sorted=tts_keys_sorted)
-    # filter_path = inputs.output_path.with_suffix(".filter.txt")
-    # filter_path.write_text(filter_script, encoding="utf-8")
-
     filter_script = _build_filtergraph(inputs, num_clip_inputs=len(inputs.clips), tts_keys_sorted=tts_keys_sorted)
     filter_path = inputs.output_path.with_suffix(".filter.txt")
     filter_path.write_text(filter_script, encoding="utf-8")
@@ -201,7 +186,7 @@ def _video_encoder_args(encoder: str, preset: str) -> list[str]:
         if preset == "quality":
             return ["-preset", "p6", "-rc", "vbr", "-cq", "19", "-b:v", "0"]
         # balanced
-        return ["-preset", "p4", "-rc", "vbr", "-cq", "21", "-b:v", "0"]
+        return ["-preset", "p4", "-rc", "vbr", "-cq", "17", "-b:v", "0"]
 
     if encoder == "h264_amf":
         # AMF는 드라이버/버전 편차가 커서 보수적으로 유지
@@ -269,23 +254,284 @@ def _probe_video_dims(video_path: Path) -> tuple[int, int]:
 
 
 
+# def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sorted: list[int]) -> str:
+#     W = inputs.canvas_width
+#     H = inputs.canvas_height
+#     d = inputs.design 
+
+#     # [1] 비디오 레이아웃 설정
+#     # scaled_w = d.video_width
+#     scaled_w = W
+#     scaled_h = d.video_height
+#     scaled_w -= scaled_w % 2
+#     scaled_h -= scaled_h % 2
+    
+#     # overlay_x = int((W - scaled_w) / 2)
+#     overlay_x = 0
+#     overlay_y = d.video_y_pos 
+
+#     filters: list[str] = []
+
+#     # [2] 클립별 스케일 및 패딩 (배경 검은색)
+#     for i, clip in enumerate(inputs.clips):
+#         crop_key = f"{clip.role}_{i}"
+#         crop_data_path = inputs.crop_timeline_map.get(crop_key)
+#         crop_filter = ""
+#         if crop_data_path and crop_data_path.exists():
+#             try:
+#                 crop_json = json.loads(crop_data_path.read_text(encoding="utf-8"))
+#                 if crop_json and len(crop_json) > 0:
+#                     avg_cx = sum(kf['x_center'] for kf in crop_json) / len(crop_json)
+#                     cw, ch = crop_json[0]['crop_w'], crop_json[0]['crop_h']
+#                     cy = crop_json[0]['y_center']
+#                     crop_filter = f"crop={cw}:{ch}:{avg_cx}-{cw}/2:{cy}-{ch}/2,"
+#             except: pass
+
+#         # v_filter = (
+#         #     f"[{i}:v]{crop_filter}"
+#         #     f"scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=decrease,"
+#         #     f"setsar=1,"
+#         #     f"pad={W}:{H}:{overlay_x}:{overlay_y}:black[v{i}]"
+#         # )
+#         v_filter = (
+#             f"[{i}:v]{crop_filter}"
+#             f"scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=increase," # decrease를 increase로 변경하여 꽉 채움
+#             f"setsar=1,"
+#             f"crop={W}:{scaled_h}," # 혹시 비율 차이로 삐져나온 부분 절삭
+#             f"pad={W}:{H}:0:{overlay_y}:black[v{i}]"
+#         )
+#         filters.append(v_filter)
+#         filters.append(f"[{i}:a]anull[a{i}]")
+
+#     # [3] 연결(Concat) - 비디오/오디오 쌍을 맞춰서 입력
+#     concat_inputs = []
+#     for i in range(num_clip_inputs):
+#         concat_inputs.append(f"[v{i}]")
+#         concat_inputs.append(f"[a{i}]")
+    
+#     filters.append(f"{''.join(concat_inputs)}concat=n={num_clip_inputs}:v=1:a=1[vcat][acat]")
+
+#     # [4] 제목(Title) 필터 - 스마트 줄바꿈 적용
+#     # def split_text_smart(text: str, max_chars: int = 14) -> list[str]:
+#     #     words = text.split()
+#     #     res_lines, current_line = [], ""
+#     #     for word in words:
+#     #         if len(current_line) + len(word) <= max_chars:
+#     #             current_line = (current_line + " " + word).strip()
+#     #         else:
+#     #             if current_line: res_lines.append(current_line)
+#     #             current_line = word
+#     #     if current_line: res_lines.append(current_line)
+#     #     return res_lines
+
+#     # title_lines = split_text_smart(inputs.title_text, 14)
+#     # font_arg = str(d.title_font).replace("\\", "/").replace(":", "\\:")
+    
+#     # last_v_label = "[vcat]" 
+#     # for idx, line in enumerate(title_lines):
+#     #     next_label = f"[title_{idx}]"
+#     #     y_pos = d.title_y + (idx * (d.title_size + 20))
+#     #     escaped_line = _escape_text_for_drawtext(line.strip())
+#     #     # filters.append(
+#     #     #     f"{last_v_label}drawtext=fontfile='{font_arg}':text='{escaped_line}':"
+#     #     #     f"fontcolor={d.title_color}:fontsize={d.title_size}:x=(w-text_w)/2:y={y_pos}{next_label}"
+#     #     # )
+#     #     # last_v_label = next_label
+#     #     filters.append(
+#     #         f"{last_v_label}drawtext=fontfile='{font_arg}':text='{escaped_line}':"
+#     #         f"fontcolor={d.title_color}:fontsize={d.title_size}:x=(w-text_w)/2:y={y_pos}:"
+#     #         # f"box=1:boxcolor=black@0.6:boxw={W}:boxh={d.title_size + 40}{next_label}" 
+#     #     )
+#     #     last_v_label = next_label
+#     def split_text_smart(text: str, max_chars: int = 14) -> list[str]:
+#         words = text.split()
+#         res_lines, current_line = [], ""
+#         for word in words:
+#             # 색상 태그 {단어:색상}는 길이에 포함하지 않도록 처리
+#             display_word = word.split(':')[0].replace('{', '').replace('}', '') if ':' in word else word
+#             if len(current_line) + len(display_word) <= max_chars:
+#                 current_line = (current_line + " " + word).strip()
+#             else:
+#                 if current_line: res_lines.append(current_line)
+#                 current_line = word
+#         if current_line: res_lines.append(current_line)
+#         return res_lines
+
+#     title_lines = split_text_smart(inputs.title_text, 14)
+#     font_arg = str(d.title_font).replace("\\", "/").replace(":", "\\:")
+    
+#     # JSON에서 colors 리스트를 가져옴 (없으면 기본값 사용)
+#     custom_colors = getattr(d, 'title_colors', ["white"])
+    
+#     # 영상 위치 계산 (제목 영역 하단 1cm 여백)
+#     title_total_height = len(title_lines) * (d.title_size + 30)
+#     overlay_y = d.title_y + title_total_height + 180 
+
+#     last_v_label = "[vcat]"
+    
+#     import re
+    
+#     for idx, raw_line in enumerate(title_lines):
+#         # 1. 줄 기본 색상 결정 (JSON의 colors 리스트 순서대로, 모자라면 마지막 색상)
+#         base_color = custom_colors[idx] if idx < len(custom_colors) else custom_colors[-1]
+#         y_pos = d.title_y + (idx * (d.title_size + 30))
+        
+#         # 2. 태그 분석 {단어:색상}
+#         # 예: "오늘 {강식당:yellow} 오픈" -> [("오늘 ", None), ("강식당", "yellow"), (" 오픈", None)]
+#         parts = []
+#         last_end = 0
+#         for match in re.finditer(r"\{([^:]+):([^}]+)\}", raw_line):
+#             if match.start() > last_end:
+#                 parts.append((raw_line[last_end:match.start()], base_color))
+#             parts.append((match.group(1), match.group(2)))
+#             last_end = match.end()
+#         if last_end < len(raw_line):
+#             parts.append((raw_line[last_end:], base_color))
+            
+#         if not parts: # 태그가 없는 경우 전체 줄 출력
+#             parts = [(raw_line, base_color)]
+
+#         # 3. 한 줄 내의 파트별로 drawtext 생성 (좌표 계산)
+#         # FFmpeg의 drawtext는 x=(w-text_w)/2로 중앙 정렬을 하므로, 
+#         # 한 줄 내 부분 색상은 전체 텍스트 길이를 고려한 상대 좌표가 필요함
+#         full_text_plain = "".join([p[0] for p in parts]).strip()
+#         escaped_full = _escape_text_for_drawtext(full_text_plain)
+        
+#         current_x_offset = 0
+#         for p_idx, (p_text, p_color) in enumerate(parts):
+#             next_label = f"[title_{idx}_{p_idx}]"
+#             escaped_p = _escape_text_for_drawtext(p_text.strip())
+            
+#             # 첫 번째 파트는 전체 텍스트를 투명하게 깔고 그 위에 텍스트를 그림 (중앙 정렬 기준점)
+#             # 이후 파트는 이전 파트의 너비만큼 x축으로 이동
+#             if p_idx == 0:
+#                 # 전체 줄의 시작 x좌표: (w - 전체너비)/2
+#                 start_x = f"(w-text_w)/2"
+#             else:
+#                 # 이전 파트의 너비를 알기 어렵기에, 실제로는 필터를 중첩해서 그림
+#                 pass
+
+#             # 한 줄 내 부분 색상은 구현이 매우 복잡하므로, 
+#             # 여기서는 '줄별 색상' 기능을 우선 완벽하게 제공하고, 
+#             # 단어별 색상은 {단어:색상} 입력 시 해당 줄 전체에 우선순위 색상으로 적용되게 함
+#             # (만약 한 줄 내 혼합 색상이 필수라면 더 복잡한 좌표 계산 로직을 추가하겠습니다)
+            
+#             display_color = p_color if p_color else base_color
+            
+#             filters.append(
+#                 f"{last_v_label}drawtext=fontfile='{font_arg}':text='{escaped_full}':"
+#                 f"fontcolor={display_color}:fontsize={d.title_size}:x=(w-text_w)/2:y={y_pos}{next_label}"
+#             )
+#             last_v_label = next_label
+
+#     # [5] 작품명(Work Title) 필터
+#     # work_label = "[with_work]"
+#     # filters.append(
+#     #     f"{last_v_label}drawtext=fontfile='{font_arg}':text=' {inputs.work_title}':"
+#     #     f"fontcolor={d.work_color}:fontsize={d.work_font_size}:"
+#     #     f"x=(w-text_w)/2:y={d.work_title_y}{work_label}"
+#     # )
+
+#     # [5] 작품명(Work Title/Logo)
+#     work_label = "[with_work]"
+#     work_type = getattr(d, 'work_type', 'text')
+#     # work_config에서 value가 없으면 기본 work_title 텍스트 사용
+#     work_value = getattr(d, 'work_value', inputs.work_title)
+
+#     if work_type == "image" and work_value:
+#         logo_path = Path(work_value).resolve()
+#         if logo_path.exists():
+#             logo_path_str = str(logo_path).replace("\\", "/").replace(":", "\\:")
+#             logo_w = getattr(d, 'work_image_width', 200)
+            
+#             # Y좌표를 직접 입력하는 대신, 자막(ASS)보다 아래에 오도록 큰 값 설정
+#             # 혹은 JSON의 y값을 1700 이상으로 높게 잡아야 합니다.
+#             filters.append(
+#                 f"movie='{logo_path_str}',scale={logo_w}:-1[logo];"
+#                 f"{last_v_label}[logo]overlay=(W-w)/2:{d.work_title_y}{work_label}"
+#             )
+#         else:
+#             # 이미지 경로 오류 시 경고 텍스트 표시
+#             escaped_val = _escape_text_for_drawtext(f"Logo Missing: {work_value}")
+#             filters.append(f"{last_v_label}drawtext=text='{escaped_val}':fontcolor=red:fontsize=30:x=(w-text_w)/2:y={d.work_title_y}{work_label}")
+#     else:
+#         # 일반 텍스트 모드
+#         escaped_val = _escape_text_for_drawtext(work_value if work_value else inputs.work_title)
+#         filters.append(
+#             f"{last_v_label}drawtext=fontfile='{font_arg}':text='{escaped_val}':"
+#             f"fontcolor={d.work_color}:fontsize={d.work_font_size}:x=(w-text_w)/2:y={d.work_title_y}{work_label}"
+#         )
+
+#     # [6] 자막(ASS) 적용 - 영상 내부(작품명 레이어 위)에 오버레이
+#     if inputs.subtitle_path:
+#         sub_path = str(inputs.subtitle_path.resolve()).replace("\\", "/").replace(":", "\\:")
+#         filters.append(f"{work_label}ass='{sub_path}'[vout]")
+#     else:
+#         filters.append(f"{work_label}null[vout]")
+
+#     # [7] 오디오 필터
+#     filters.append(_build_audio_filter(inputs, num_clip_inputs, tts_keys_sorted))
+    
+#     return ";".join(filters)
 def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sorted: list[int]) -> str:
     W = inputs.canvas_width
     H = inputs.canvas_height
     d = inputs.design 
 
-    # [1] 비디오 레이아웃 설정
-    scaled_w = d.video_width
-    scaled_h = d.video_height
+    ratio = getattr(d, 'aspect_ratio', '16:9')
+
+    # [1] 제목 줄바꿈 로직 (기존 유지)
+    def split_text_smart(text: str, max_chars: int = 14) -> list[str]:
+        if not text: return []
+        lines = text.split('\n')
+        res_lines = []
+        for line in lines:
+            words = line.split()
+            current_line = ""
+            for word in words:
+                clean_word = word.split(':')[0].replace('{', '').replace('}', '') if ':' in word else word
+                if len(current_line) + len(clean_word) <= max_chars:
+                    current_line = (current_line + " " + word).strip()
+                else:
+                    if current_line: res_lines.append(current_line)
+                    current_line = word
+            if current_line: res_lines.append(current_line)
+        return res_lines
+
+
+    
+
+
+    title_lines = split_text_smart(inputs.title_text, 14)
+
+    # [2] 비디오 레이아웃 설정
+    scaled_w = W
+    # scaled_h = d.video_height
+    
+    line_spacing = 30
+    title_total_height = (len(title_lines) * d.title_size) + ((len(title_lines) - 1) * line_spacing)
+    title_bottom_y = d.title_y + title_total_height
+    overlay_y = title_bottom_y + 20 # 제목 아래 50px 여백
+
+    try:
+        r_w, r_h = map(int, ratio.split(':'))
+        scaled_h = int(W * r_h / r_w)
+    except:
+        scaled_h = W
+
+    # scaled_w -= scaled_w % 2
+    # scaled_h -= scaled_h % 2
+
+    overlay_y = (H - scaled_h) // 2
+
+    # FFmpeg 짝수 보정
     scaled_w -= scaled_w % 2
     scaled_h -= scaled_h % 2
-    
-    overlay_x = int((W - scaled_w) / 2)
-    overlay_y = d.video_y_pos 
+    overlay_y = max(0, overlay_y)
 
     filters: list[str] = []
 
-    # [2] 클립별 스케일 및 패딩 (배경 검은색)
+    # [3] 클립별 스케일 및 패딩 (여백 및 자막 위치 수정)
     for i, clip in enumerate(inputs.clips):
         crop_key = f"{clip.role}_{i}"
         crop_data_path = inputs.crop_timeline_map.get(crop_key)
@@ -302,66 +548,56 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sort
 
         v_filter = (
             f"[{i}:v]{crop_filter}"
-            f"scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=decrease,"
+            f"scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=increase,"
             f"setsar=1,"
-            f"pad={W}:{H}:{overlay_x}:{overlay_y}:black[v{i}]"
+            f"crop={W}:{scaled_h},"
+            f"pad={W}:{H}:0:{overlay_y}:black[v{i}]"
         )
         filters.append(v_filter)
         filters.append(f"[{i}:a]anull[a{i}]")
 
-    # [3] 연결(Concat) - 비디오/오디오 쌍을 맞춰서 입력
+    # [4] 연결(Concat)
     concat_inputs = []
     for i in range(num_clip_inputs):
         concat_inputs.append(f"[v{i}]")
         concat_inputs.append(f"[a{i}]")
-    
     filters.append(f"{''.join(concat_inputs)}concat=n={num_clip_inputs}:v=1:a=1[vcat][acat]")
 
-    # [4] 제목(Title) 필터 - 스마트 줄바꿈 적용
-    def split_text_smart(text: str, max_chars: int = 14) -> list[str]:
-        words = text.split()
-        res_lines, current_line = [], ""
-        for word in words:
-            if len(current_line) + len(word) <= max_chars:
-                current_line = (current_line + " " + word).strip()
-            else:
-                if current_line: res_lines.append(current_line)
-                current_line = word
-        if current_line: res_lines.append(current_line)
-        return res_lines
-
-    title_lines = split_text_smart(inputs.title_text, 14)
+    # [5] 제목(Title) 필터
     font_arg = str(d.title_font).replace("\\", "/").replace(":", "\\:")
-    
-    last_v_label = "[vcat]" 
-    for idx, line in enumerate(title_lines):
+    custom_colors = getattr(d, 'title_colors', ["white"])
+    last_v_label = "[vcat]"
+    for idx, raw_line in enumerate(title_lines):
+        base_color = custom_colors[idx] if idx < len(custom_colors) else custom_colors[-1]
+        y_pos = d.title_y + (idx * (d.title_size + line_spacing))
+        escaped_full = _escape_text_for_drawtext(raw_line)
         next_label = f"[title_{idx}]"
-        y_pos = d.title_y + (idx * (d.title_size + 20))
-        escaped_line = _escape_text_for_drawtext(line.strip())
-        filters.append(
-            f"{last_v_label}drawtext=fontfile='{font_arg}':text='{escaped_line}':"
-            f"fontcolor={d.title_color}:fontsize={d.title_size}:x=(w-text_w)/2:y={y_pos}{next_label}"
-        )
+        filters.append(f"{last_v_label}drawtext=fontfile='{font_arg}':text='{escaped_full}':fontcolor={base_color}:fontsize={d.title_size}:x=(w-text_w)/2:y={y_pos}{next_label}")
         last_v_label = next_label
 
-    # [5] 작품명(Work Title) 필터
+    # [6] 작품명(Logo)
     work_label = "[with_work]"
-    filters.append(
-        f"{last_v_label}drawtext=fontfile='{font_arg}':text='작품명\\: {inputs.work_title}':"
-        f"fontcolor={d.work_color}:fontsize={d.work_font_size}:"
-        f"x=(w-text_w)/2:y={d.work_title_y}{work_label}"
-    )
+    work_type = getattr(d, 'work_type', 'text')
+    work_value = getattr(d, 'work_value', inputs.work_title)
+    if work_type == "image" and work_value:
+        logo_path_str = str(Path(work_value).resolve()).replace("\\", "/").replace(":", "\\:")
+        logo_w = getattr(d, 'work_image_width', 200)
+        filters.append(f"movie='{logo_path_str}',scale={logo_w}:-1[logo];{last_v_label}[logo]overlay=(W-w)/2:{d.work_title_y}{work_label}")
+    else:
+        escaped_val = _escape_text_for_drawtext(work_value if work_value else inputs.work_title)
+        filters.append(f"{last_v_label}drawtext=fontfile='{font_arg}':text='{escaped_val}':fontcolor={d.work_color}:fontsize={d.work_font_size}:x=(w-text_w)/2:y={d.work_title_y}{work_label}")
 
-    # [6] 자막(ASS) 적용 - 영상 내부(작품명 레이어 위)에 오버레이
+    # [7] 자막(ASS) 적용
     if inputs.subtitle_path:
         sub_path = str(inputs.subtitle_path.resolve()).replace("\\", "/").replace(":", "\\:")
-        filters.append(f"{work_label}ass='{sub_path}'[vout]")
+        # filters.append(f"{work_label}ass='{sub_path}'[vout]")
+        filters.append(f"{work_label}ass='{sub_path}':original_size={W}x{H}[vout]")
     else:
         filters.append(f"{work_label}null[vout]")
+   
+   
 
-    # [7] 오디오 필터
     filters.append(_build_audio_filter(inputs, num_clip_inputs, tts_keys_sorted))
-    
     return ";".join(filters)
 
 def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sorted: list[int]) -> str:
