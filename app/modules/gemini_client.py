@@ -351,7 +351,13 @@ class GeminiClient:
                         uploaded_file = self.client.files.get(name=uploaded_file.name)
                     if uploaded_file.state.name == "FAILED":
                         raise RuntimeError("Gemini File API 업로드 실패")
-                    content_parts.append(uploaded_file)
+                    content_parts.append(self.types.Part(
+                        file_data=self.types.FileData(
+                            file_uri=uploaded_file.uri,
+                            mime_type="video/mp4",
+                        ),
+                        video_metadata=self.types.VideoMetadata(fps=30),
+                    ))
                 except Exception as upload_err:
                     print(f"    [WARN] 비디오 업로드 중 오류 발생: {upload_err}")
 

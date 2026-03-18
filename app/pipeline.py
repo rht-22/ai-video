@@ -504,8 +504,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         )
         print(f"[OK] 자막 생성 완료: {subtitle_path} ({len(final_segments)} segments)")
     else:
-        print("[경고] 재매핑된 자막 데이터가 없습니다.")
-        subtitle_path.write_text("", encoding="utf-8")
+        print("[경고] 재매핑된 자막 데이터가 없습니다. 자막 없이 렌더링합니다.")
+        subtitle_path = None
 
     # 임시 오디오 삭제
     if full_audio.exists():
