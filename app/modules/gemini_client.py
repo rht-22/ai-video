@@ -53,7 +53,8 @@ GEMINI_PROMPT_TEMPLATE = """
 
 - 작품명: {work_title}
 - 주제: {topic}
-- 청크 범위: {chunk_start_sec} ~ {chunk_end_sec} 초
+- 청크 범위: {chunk_start_sec} ~ {chunk_end_sec} 초 (원본 영상 기준 참고용, 타임스탬프 계산에 사용 금지)
+- ⚠️ 모든 start_sec / end_sec는 반드시 첨부된 영상 파일의 시작(0초)을 기준으로 한 상대값으로 반환할 것 (절대 원본 영상 기준 절대값 사용 금지)
 - 요약(있으면): {transcript_summary}
 - 씬 경계(있으면): {scene_boundaries}
 - 전체 줄거리(있으면): {full_summary}
