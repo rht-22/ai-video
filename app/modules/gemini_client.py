@@ -98,26 +98,6 @@ GEMINI_PROMPT_TEMPLATE = """
 
 ---
 
-[SHORTS TYPE DEFINITION]
-
-아래 두 가지 쇼츠 유형을 모두 고려하여 candidate_moments를 생성하라.
-
-[유형 1: 하이라이트 쇼츠]
-
-- hook_score 기준:
-    - 0.8~1.0: 결과 선공개형 훅으로 적합
-    - 0.4~0.7: 여정 몰입형 초반 빌드에 적합
-    - 0.0~0.3: 훅보다는 중후반 맥락용 장면
-- 하나의 강렬한 장면 중심, 맥락 설명 최소화
-- story_role: hook / build / payoff
-
-[유형 2: 서사형 쇼츠]
-
-- 가장 드라마틱한 씬을 중심으로 서사가 자연스럽게 흐르도록 구성
-- story_role: hook / build / payoff
-
----
-
 [TONE & RULES]
 
 - 모든 출력은 한국어 사용
