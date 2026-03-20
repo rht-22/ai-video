@@ -591,8 +591,9 @@ class GeminiClient:
             # 후보 데이터를 텍스트로 정리
             candidates_str = ""
             for i, m in enumerate(all_candidates):
-                candidates_str += f"ID: {i}, 시간: {m['start_sec']}~{m['end_sec']}s, 역할: {m['story_role']}, 내용: {m['subtitle']}, 중요도: {m['importance']}\n"
-
+                m['candidate_index'] = i 
+    
+                candidates_str += f"- {json.dumps(m, ensure_ascii=False)}\n"
             prompt = f"""
     # Role
     너는 쇼츠 영상 편집 전문가다. 전체 영상 분석 결과를 바탕으로 여러 개의 쇼츠 스토리라인을 생성해라.
