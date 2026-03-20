@@ -56,6 +56,23 @@ def main() -> None:
     if args.command == "create_shorts":
         if args.from_step and not args.job_id:
             parser.error("--from-step requires --job-id")
+            
+        # 명령어 실행 직후(영상을 올리고 나서) 사용자에게 톤(장르)을 인터랙티브하게 물어봅니다.
+        print("\n🎬 어떤 스타일(톤)의 쇼츠를 만드시겠습니까?")
+        print("  1) 드라마 (묵직한 서사, 갈등, 반전, 긴장감 위주)")
+        print("  2) 예능 (티키타카, 빵 터지는 리액션, 유머 위주)")
+        while True:
+            choice = input("원하는 번호를 선택하세요 (1 또는 2): ").strip()
+            if choice == "1":
+                selected_tone = "drama"
+                print(">> [드라마] 버전으로 분석을 시작합니다!\n")
+                break
+            elif choice == "2":
+                selected_tone = "variety"
+                print(">> [예능] 버전으로 분석을 시작합니다!\n")
+                break
+            else:
+                print("❌ 잘못된 입력입니다. 1 또는 2를 입력해 주세요.")
         
         output = run_pipeline(
             PipelineInput(
@@ -63,6 +80,7 @@ def main() -> None:
                 work_title=args.title,
                 topic=args.topic,
                 outdir=_resolve_outdir(Path(args.outdir)),
+                tone=selected_tone,
             ),
             from_step=args.from_step,
             job_id=args.job_id,
