@@ -53,7 +53,7 @@ GEMINI_PROMPT_TEMPLATE = """
 - 작품명: {work_title}
 - 주제: {topic}
 - 청크 범위: {chunk_start_sec} ~ {chunk_end_sec} 초
-- 요약(있으면): {transcript_summary}
+- 자막(있으면): {transcript_text}
 - 씬 경계(있으면): {scene_boundaries}
 - 전체 줄거리(있으면): {full_summary}
 - 스토리라인(있으면): {storyline} {previous_context}
@@ -328,7 +328,7 @@ class GeminiClient:
             topic=payload["topic"],
             chunk_start_sec=payload["chunk_start_sec"],
             chunk_end_sec=payload["chunk_end_sec"],
-            transcript_summary=payload.get("transcript_summary") or "없음",
+            transcript_text=payload.get("transcript_text") or "없음",
             scene_boundaries=payload.get("scene_boundaries") or "없음",
             full_summary=payload.get("full_summary") or "없음",
             storyline=payload.get("storyline") or "없음",

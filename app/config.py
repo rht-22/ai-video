@@ -8,20 +8,20 @@ import os
 @dataclass(frozen=True)
 class DesignConfig:
     # 영상 프레임 (9:16, 1:1 등)
-    aspect_ratio: str = "9:16" 
+    aspect_ratio: str = "16:9" 
     video_width: int = 800
     video_height: int = 1100
     video_y_pos: int = 480
     
     # 제목 설정
-    title_font: str = "Jalnan"
+    title_font: str = "NanumGothicBold"
     title_size: int = 90
     title_color: str = "white"
     title_colors: list[str] = field(default_factory=lambda: ["white", "white"])
     title_y: int = 150
     
     # 자막 설정 (ASS 스타일 기준)
-    subtitle_font: str = "NanumGothicBold"
+    subtitle_font: str = "여기어때 잘난체 2 TTF"
     subtitle_size: int = 65
     subtitle_color: str = "&H0000FFFF" 
     subtitle_y_margin: int = 450
@@ -79,7 +79,6 @@ class Paths:
     def outputs_dir(self) -> Path:
         return self.app_root.parent / "outputs"
 
-
 def get_font_path(name: str, app_root: Path) -> str:
     """
     폰트 이름을 받아 로컬 경로를 반환합니다. 
@@ -113,7 +112,7 @@ def get_font_path(name: str, app_root: Path) -> str:
 
 REMOTE_FONTS = {
 
-    "Jalnan": "https://raw.githubusercontent.com/rht-22/font.zip/main/Jalnan.ttf",
+    "여기어때 잘난체 2 TTF": "https://raw.githubusercontent.com/rht-22/font.zip/main/Jalnan.ttf",
 
     "JalnanGothic": "https://raw.githubusercontent.com/rht-22/font.zip/main/JalnanGothic.ttf",
 
@@ -121,6 +120,6 @@ REMOTE_FONTS = {
 
     "Hakgyo": "https://raw.githubusercontent.com/rht-22/font.zip/main/HakgyoansimSamulhamR.ttf",
 
-    "Mulmaru": "https://raw.githubusercontent.com/rht-22/font.zip/main/mulmaru.ttf"
+    "물마루": "https://raw.githubusercontent.com/rht-22/font.zip/main/mulmaru.ttf"
 
 }

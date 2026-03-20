@@ -105,7 +105,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     print("[OK] 초기화 완료")
     
     # 단계별 실행 플래그
-    step_order = ["init", "probe", "full_analysis", "storyline", "chunk", "gemini", "story", "resources", "temp_render", "extract_audio", "regenerate_subtitles", "final_render", "validate"]
+    step_order = ["init", "probe", "full_audio", "storyline", "chunk", "gemini", "story", "resources", "temp_render", "extract_audio", "regenerate_subtitles", "final_render", "validate"]
     if from_step:
         start_idx = step_order.index(from_step)
         print(f"\n[WARN] {from_step} 단계부터 재시작합니다.")
@@ -168,12 +168,39 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         probe_elapsed = time.time() - probe_start
         print(f"[OK] 분석용 프록시 영상 생성 완료 (소요 시간: {probe_elapsed:.1f}초)")
 
+
+#   오디오
+    full_audio_path =output_dir / "full_audio.json"
+    subtitle_path = output_dir / "subtitles.ass"
+    
+    final_segments = [] 
+    transcript_text_data=[]
+    transcript_text=[]
+
+    if start_idx <= 3 and full_audio_path.exists() and from_step != "full_audio":
+        
+        loaded_data = json.loads(full_audio_path.read_text(encoding="utf-8"))
+        from types import SimpleNamespace
+        transcript_text = [SimpleNamespace(**seg) for seg in loaded_data]
+        print(f"  - {len(transcript_text)}개 세그먼트 로드 완료")
+    elif start_idx <= 3:
+        audio_start = time.time()
+        audio_path = extract_audio_from_video(payload.video_path)
+        print(f"  - 오디오 추출 완료: {audio_path.name}")
+        
+        # Whisper 전사
+        print("  Whisper 전사 중... (시간이 걸릴 수 있습니다)")
+        transcript_text = extract_transcript(audio_path)
+        save_data = [{"start_sec": s.start_sec, "end_sec": s.end_sec, "text": s.text} for s in transcript_text]
+        full_audio_path.write_text(json.dumps(save_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        if audio_path.exists(): audio_path.unlink()
+        audio_elapsed = time.time() - audio_start
+        print(f"  - 전사 완료: {len(transcript_text)}개 세그먼트, (소요 시간: {audio_elapsed:.1f}초)")
+    
     # 전체 영상 분석 단계
-    transcript_segments = [] 
     full_summary = "분석 생략"
     key_scenes = []
     emotion_arc = ""
-    transcript_segments_data = []
 
     # 청크 분할 단계
     print("\n[5/13] 영상 청크 분할 중...")
@@ -210,8 +237,14 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         gemini_data = json.loads(checkpoint_gemini.read_text(encoding="utf-8"))
         all_candidates = gemini_data["all_candidates"]
         title_candidates = gemini_data["title_candidates"]
+
+        if not transcript_text and full_audio_path.exists():
+            raw_audio = json.loads(full_audio_path.read_text(encoding="utf-8"))
+            transcript_text = [SimpleNamespace(**seg) for seg in raw_audio]
+
         print(f"  - 총 {len(all_candidates)}개 후보 모멘트")
         print(f"  - {len(title_candidates)}개 제목 후보")
+        print(f"  - {len(raw_audio)}개 자막")
         print("[OK] Gemini 분석 결과 로드 완료 (체크포인트에서)")
     elif start_idx <= 5:
         print("\n[6/13] Gemini 분석 준비 중...")
@@ -245,7 +278,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 "topic": payload.topic,
                 "chunk_start_sec": chunk.start_sec,
                 "chunk_end_sec": chunk.end_sec,
-                "transcript_summary": None,
+                "transcript_text": transcript_text,
                 "scene_boundaries": scene_boundaries,
                 "video_path": str(split_path) if split_path else None,
                 "full_summary": full_summary or "없음",
@@ -306,7 +339,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print("[OK] 스토리 구성 결과 로드 완료 (체크포인트에서)")
     elif start_idx <= 6:
             print("\n[7/13] 스토리 구성 중...")
-            # from app.modules.gemini_client import load_gemini_client
             gemini = load_gemini_client()
             story_start = time.time()
             
@@ -407,37 +439,27 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         else:
             raise FileNotFoundError(f"체크포인트 파일이나 edit_plan.json을 찾을 수 없습니다: {checkpoint_story}. 이전 단계를 먼저 실행하세요.")
 
-    
-    
-   # [8/13] 자막 데이터 처리 단계
-    subtitle_path = output_dir / "subtitles.ass"
-    segments_cache_path = output_dir / "subtitle_segments.json"  # <--- 중간 데이터 저장용 경로 추가
-    
-    final_segments = [] # 11단계에서 사용하기 위해 미리 선언
 
-    # 조건: 전사 데이터(JSON)가 존재하고, 강제 전사 단계가 아닌 경우 로드만 수행
+    # 1. 전사 데이터 추출 및 자막 데이터 생성
+    print("\n[8/13] 자막 데이터 처리 중... (Whisper 전사 및 타임라인 매핑)")
+    final_segments = []
+    segments_cache_path = output_dir / "subtitle_segments.json"
     if start_idx <= 7 and segments_cache_path.exists() and from_step != "extract_audio":
         print("\n[8/13] 기존 자막 데이터(JSON) 로드 중... (전사 건너뛰기)")
 
-        from types import SimpleNamespace
-        
         cached_data = json.loads(segments_cache_path.read_text(encoding="utf-8"))
-        for seg in cached_data:
-            final_segments.append(SimpleNamespace(**seg))
-            
+        final_segments = [SimpleNamespace(**seg) for seg in cached_data]
+
         print(f"[OK] {len(final_segments)}개의 세그먼트 복원 완료.")
-        
+
     elif start_idx <= 7:
         # 1. 전사 데이터 추출 및 자막 데이터 생성
         print("\n[8/13] 자막 데이터 처리 중... (Whisper 전사 및 타임라인 매핑)")
         
-        full_audio = extract_audio_from_video(payload.video_path)
-        current_transcript_segments = extract_transcript(full_audio)
-
         # 2. 편집 타임라인에 맞게 자막 매핑
         remapped = remap_transcript_to_edited_timeline(
             clips, 
-            current_transcript_segments, 
+            transcript_text, 
             tts_only_when_no_orig=True
         )
         
@@ -447,6 +469,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             max_gap_sec=0.25,
             max_total_chars=int(config.subtitle_max_chars_per_line * config.subtitle_max_lines),
         )
+
 
         # 4. 객체화 및 캐시 저장
         from types import SimpleNamespace
@@ -463,14 +486,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 
         # [중요] 나중을 위해 JSON으로 저장해둡니다.
         segments_cache_path.write_text(json.dumps(save_data, ensure_ascii=False, indent=2), encoding="utf-8")
-        
-        # 임시 오디오 삭제
-        if full_audio.exists():
-            full_audio.unlink()
-            
         print(f"[OK] 자막 데이터 준비 완료 및 캐시 저장됨 ({len(final_segments)} segments)")
     else:
         print("\n[8/13] 자막 단계 건너뜀")
+    
+    
     
     # 리소스 생성 단계
     checkpoint_resources = output_dir / "checkpoint_resources.json"
@@ -579,8 +599,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 from types import SimpleNamespace
                 cached_data = json.loads(segments_cache_path.read_text(encoding="utf-8"))
                 final_segments = [SimpleNamespace(**seg) for seg in cached_data]
-            else:
-                final_segments = []
+            
 
         if final_segments:
         

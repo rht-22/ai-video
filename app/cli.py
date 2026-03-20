@@ -32,7 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[
             "init",
             "probe",
-            "full_analysis",
+            "full_audio",
             "storyline",
             "chunk",
             "gemini",
