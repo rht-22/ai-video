@@ -157,6 +157,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         subprocess.run([
             ffmpeg_exe, '-y', '-i', str(payload.video_path.resolve()),
             '-vf', 'scale=-2:480,fps=2',
+            '-vsync', 'cfr',
             '-c:v', 'libx264', 
             '-preset', 'ultrafast', 
             '-crf', '30',
@@ -268,8 +269,12 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 })
                 
                 for moment in response["candidate_moments"]:
-                    moment["start_sec"] += chunk.start_sec
-                    moment["end_sec"] += chunk.start_sec
+                    # 파이썬 수학 버그 수정: chunk.start_sec 대신, FFmpeg이 실제로 자른 영상 길이를 역산해서 
+                    # 정확한 오프셋 보정값을 더해줍니다. 
+                    # (예: chunk 1의 start_sec가 300이고 오버랩이 3초라면, 실제 잘린 시작점은 297초 근처)
+                    actual_cut_offset = max(0, chunk.start_sec)
+                    moment["start_sec"] += actual_cut_offset
+                    moment["end_sec"] += actual_cut_offset
                     all_candidates.append(moment)
             finally:
                 # 분석 완료 후 분할 파일 즉시 삭제
