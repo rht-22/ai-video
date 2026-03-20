@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import json
@@ -52,8 +53,10 @@ GEMINI_PROMPT_TEMPLATE = """
 
 - 작품명: {work_title}
 - 주제: {topic}
-- 청크 범위: {chunk_start_sec} ~ {chunk_end_sec} 초
+- 청크 범위: {chunk_start_sec} ~ {chunk_end_sec} 초 (원본 영상 기준 참고용, 타임스탬프 계산에 사용 금지)
+- ⚠️ 모든 start_sec / end_sec는 반드시 첨부된 영상 파일의 시작(0초)을 기준으로 한 상대값으로 반환할 것 (절대 원본 영상 기준 절대값 사용 금지)
 - 자막(있으면): {transcript_text}
+
 - 씬 경계(있으면): {scene_boundaries}
 - 전체 줄거리(있으면): {full_summary}
 - 스토리라인(있으면): {storyline} {previous_context}
@@ -63,9 +66,9 @@ GEMINI_PROMPT_TEMPLATE = """
 [인물 식별 단계]
 
 - 분석 시작 전, 아래 수단을 통해 등장 인물의 이름을 먼저 파악한다:
-    - 화면 자막 또는 이름 자막 (예능/드라마 자막 포함)
-    - 대사 내 호칭 (예: "야 민준아~")
-    - 화면 내 텍스트 (명찰, 이름표 등 OCR 가능한 텍스트)
+    - 화면 자막 또는 이름 자막 (예능/드라마 자막 포함)
+    - 대사 내 호칭 (예: "야 민준아~")
+    - 화면 내 텍스트 (명찰, 이름표 등 OCR 가능한 텍스트)
 - 위 수단으로 이름 확인이 불가능한 인물은 "인물A", "인물B" 등 고유 레이블을 부여한다.
 - 이후 모든 분석 항목에서 확정된 이름 또는 레이블을 일관되게 사용한다.
 
@@ -78,10 +81,11 @@ GEMINI_PROMPT_TEMPLATE = """
 - main_plot: 영상의 핵심 서사를 80자 이내 한국어 요약
 - characters_relations: 인물 간 관계 및 권력/감정 역학 설명
 - characters_tracking: 인물별 등장 타임스탬프 및 주요 행동/발화 요약
-    - 인물명 또는 레이블
-    - appearances:
-        - start_sec / end_sec: 등장 구간
-        - action: 해당 구간 행동/발화 요약
+    - 인물명 또는 레이블
+    - appearances:
+        - start_sec / end_sec: 등장 구간
+        - action: 해당 구간 행동/발화 요약
+- sub_plots: 영상 내 서브 플롯 목록 (타임스탬프 포함)
 - emotion_curve: 타임스탬프별 감정 변화 리스트 (emotion, intensity 0~1)
 - tension_score: 평균 긴장도 / 최고 긴장도 / 최고점 타임스탬프
 - conflicts_and_twists: 갈등 및 반전 발생 지점과 내용
@@ -95,6 +99,26 @@ GEMINI_PROMPT_TEMPLATE = """
 
 ---
 
+[SHORTS TYPE DEFINITION]
+
+아래 두 가지 쇼츠 유형을 모두 고려하여 candidate_moments를 생성하라.
+
+[유형 1: 하이라이트 쇼츠]
+
+- hook_score 기준:
+    - 0.8~1.0: 결과 선공개형 훅으로 적합
+    - 0.4~0.7: 여정 몰입형 초반 빌드에 적합
+    - 0.0~0.3: 훅보다는 중후반 맥락용 장면
+- 하나의 강렬한 장면 중심, 맥락 설명 최소화
+- story_role: hook / build / payoff
+
+[유형 2: 서사형 쇼츠]
+
+- 가장 드라마틱한 씬을 중심으로 서사가 자연스럽게 흐르도록 구성
+- story_role: hook / build / payoff
+
+---
+
 [TONE & RULES]
 
 - 모든 출력은 한국어 사용
@@ -105,72 +129,72 @@ GEMINI_PROMPT_TEMPLATE = """
 
 다음 스키마로만 응답:
 {{
-  "chunk_index": 0,
-  "chunk_start_sec": 0,
-  "chunk_end_sec": 300,
-  "summary": "요약",
-  "main_plot": "영상의 핵심 서사 80자 이내",
-  "characters_relations": "인물 간 관계 및 권력/감정 역학 설명",
-  "characters_tracking": [
-    {{
-      "character": "인물명 또는 레이블",
-      "appearances": [
-        {{
-          "start_sec": 0.0,
-          "end_sec": 32.0,
-          "action": "해당 구간 행동/발화 요약"
-        }}
-      ]
-    }}
-  ],
-  "sub_plots": [
-    {{
-      "start_sec": 0.0,
-      "description": "서브플롯 설명"
-    }}
-  ],
-  "emotion_curve": [
-    {{
-      "start_sec": 0.0,
-      "end_sec": 10.0,
-      "emotion": "감정",
-      "intensity": 0.8
-    }}
-  ],
-  "tension_score": {{
-    "average": 0.6,
-    "peak": 0.95,
-    "peak_start_sec": 0.0,
-    "peak_end_sec": 10.0
-  }},
-  "audio_tempo": {{
-    "bpm": 120,
-    "vibe_keywords": ["키워드1", "키워드2"]
-  }},
-  "overall_vibe": "영상 전체 분위기 요약",
-  "candidate_moments": [
-    {{
-      "candidate_index": 0,
-      "start_sec": 12.4,
-      "end_sec": 25.8,
-      "importance": 0.0,
-      "hook_score": 0.0,
-      "topic_alignment_score": 0.0,
-      "story_role": "hook|build|payoff",
-      "reason": "선정 이유",
-      "subtitle": "자막(짧게)",
-      "tts_line": "TTS 한 문장",
-      "points": {{
-        "humor": {{"description": "유머 내용", "intensity": 0.7}},
-        "love": null,
-        "relatability": null,
-        "saida": {{"description": "사이다 포인트", "intensity": 0.9}},
-        "goguma": null,
-        "conflict_twist": null
-      }}
-    }}
-  ],
-  "title_candidates": ["제목1", "제목2", "제목3"]
+  "chunk_index": 0,
+  "chunk_start_sec": 0,
+  "chunk_end_sec": 300,
+  "summary": "요약",
+  "main_plot": "영상의 핵심 서사 80자 이내",
+  "characters_relations": "인물 간 관계 및 권력/감정 역학 설명",
+  "characters_tracking": [
+    {{
+      "character": "인물명 또는 레이블",
+      "appearances": [
+        {{
+          "start_sec": 0.0,
+          "end_sec": 32.0,
+          "action": "해당 구간 행동/발화 요약"
+        }}
+      ]
+    }}
+  ],
+  "sub_plots": [
+    {{
+      "start_sec": 0.0,
+      "description": "서브플롯 설명"
+    }}
+  ],
+  "emotion_curve": [
+    {{
+      "start_sec": 0.0,
+      "end_sec": 10.0,
+      "emotion": "감정",
+      "intensity": 0.8
+    }}
+  ],
+  "tension_score": {{
+    "average": 0.6,
+    "peak": 0.95,
+    "peak_start_sec": 0.0,
+    "peak_end_sec": 10.0
+  }},
+  "audio_tempo": {{
+    "bpm": 120,
+    "vibe_keywords": ["키워드1", "키워드2"]
+  }},
+  "overall_vibe": "영상 전체 분위기 요약",
+  "candidate_moments": [
+    {{
+      "candidate_index": 0,
+      "start_sec": 12.4,
+      "end_sec": 25.8,
+      "importance": 0.0,
+      "hook_score": 0.0,
+      "topic_alignment_score": 0.0,
+      "story_role": "hook|build|payoff",
+      "reason": "선정 이유",
+      "subtitle": "자막(짧게)",
+      "tts_line": "TTS 한 문장",
+      "points": {{
+        "humor": {{"description": "유머 내용", "intensity": 0.7}},
+        "love": null,
+        "relatability": null,
+        "saida": {{"description": "사이다 포인트", "intensity": 0.9}},
+        "goguma": null,
+        "conflict_twist": null
+      }}
+    }}
+  ],
+  "title_candidates": ["제목1", "제목2", "제목3"]
 }}
 """.strip()
 
@@ -277,21 +301,10 @@ class GeminiConfig:
 class GeminiClient:
     def __init__(self, config: GeminiConfig) -> None:
         self.config = config
-        import google.generativeai as genai
-        try:
-            from google.generativeai import types as genai_types
-        except ImportError:
-            # google-generativeai 패키지의 경우 types 모듈 경로가 다를 수 있음
-            try:
-                import google.generativeai.types as genai_types
-            except ImportError:
-                # types를 직접 사용할 수 없는 경우, Part 클래스를 직접 생성
-                genai_types = None
-
-        genai.configure(api_key=config.api_key)
-        self.model = genai.GenerativeModel(config.model_name)
-        self.genai = genai
-        self.genai_types = genai_types
+        from google import genai
+        from google.genai import types
+        self.client = genai.Client(api_key=config.api_key)
+        self.types = types
 
     def analyze_chunk(self, payload: dict[str, Any]) -> dict[str, Any]:
         # 이전 분석 결과와 전사를 컨텍스트로 준비
@@ -312,17 +325,7 @@ class GeminiClient:
             if context_parts:
                 previous_context = "\n\n이전 청크들의 분석 결과 (전체 흐름 이해용):" + "\n".join(context_parts)
         
-        # previous_transcript = ""
-        # if payload.get("previous_transcripts"):
-        #     prev_transcripts = payload["previous_transcripts"]
-        #     transcript_lines = []
-        #     for seg in prev_transcripts:
-        #         transcript_lines.append(f"[{seg.get('start_sec', 0):.1f}~{seg.get('end_sec', 0):.1f}초] {seg.get('text', '')}")
-        #     if transcript_lines:
-        #         previous_transcript = "\n\n이전 구간 전사 (시간적 맥락):\n" + "\n".join(transcript_lines[-10:])  # 최근 10개 세그먼트
-        
-        trend_note = "\n최신 쇼츠 트렌드: 자연스러운 톤, 짧고 임팩트 있는 문장, 강조/리액션 요소 포함, TTS는 빠른 속도(1.5배)에 맞춘 문구."
-        
+     
         prompt = GEMINI_PROMPT_TEMPLATE.format(
             work_title=payload["work_title"],
             topic=payload["topic"],
@@ -333,7 +336,6 @@ class GeminiClient:
             full_summary=payload.get("full_summary") or "없음",
             storyline=payload.get("storyline") or "없음",
             previous_context=previous_context,
-            trend_note=trend_note,
         )
         
         # 비디오 파일 경로가 있으면 파일을 직접 읽어서 전달
@@ -346,63 +348,68 @@ class GeminiClient:
             video_path_obj = Path(video_path) if isinstance(video_path, str) else video_path
             if video_path_obj.exists():
                 try:
-                    print(f" [INFO] Gemini File API 업로드 중: {video_path_obj.name}")
-                    uploaded_file = self.genai.upload_file(path=str(video_path_obj))
-                    
-                    # 업로드 완료 대기 (PROCESSING -> ACTIVE)
+                    uploaded_file = self.client.files.upload(file=str(video_path_obj))
                     while uploaded_file.state.name == "PROCESSING":
                         time.sleep(2)
-                        uploaded_file = self.genai.get_file(uploaded_file.name)
-                    
+                        uploaded_file = self.client.files.get(name=uploaded_file.name)
                     if uploaded_file.state.name == "FAILED":
                         raise RuntimeError("Gemini File API 업로드 실패")
-                    
-                    content_parts.append(uploaded_file)
+                    content_parts.append(self.types.Part(
+                        file_data=self.types.FileData(
+                            file_uri=uploaded_file.uri,
+                            mime_type="video/mp4",
+                        ),
+                        video_metadata=self.types.VideoMetadata(fps=2),
+                    ))
                 except Exception as upload_err:
                     print(f" [WARN] 비디오 업로드 중 오류 발생: {upload_err}")
 
-        # 2. 분석 수행 및 파일 삭제 보장
+
         try:
             for attempt in range(self.config.max_retries):
                 try:
-                    generation_config = None
-                    if self.genai_types and hasattr(self.genai_types, 'GenerateContentConfig'):
-                        generation_config = self.genai_types.GenerateContentConfig(
+                    response = self.client.models.generate_content(
+                        model=self.config.model_name,
+                        contents=content_parts,
+                        config=self.types.GenerateContentConfig(
                             response_mime_type="application/json",
-                        )
-                    
-                    response = self.model.generate_content(
-                        content_parts,
-                        generation_config=generation_config
+                        ),
                     )
-                    
+
                     if not response or not response.text:
+                        error_msg = "Gemini API가 빈 응답을 반환했습니다."
                         if attempt == self.config.max_retries - 1:
-                            raise RuntimeError("Gemini API 빈 응답 반환")
+                            raise RuntimeError(error_msg)
+                        print(f"    [WARN] {error_msg} 재시도 중... ({attempt + 1}/{self.config.max_retries})")
                         continue
-                    
+
                     text = response.text.strip()
+                    if not text:
+                        error_msg = "Gemini API 응답이 빈 문자열입니다."
+                        if attempt == self.config.max_retries - 1:
+                            raise RuntimeError(error_msg)
+                        print(f"    [WARN] {error_msg} 재시도 중... ({attempt + 1}/{self.config.max_retries})")
+                        continue
+
                     json_text = _extract_json_from_markdown(text)
                     data = json.loads(json_text)
                     data["chunk_start_sec"] = payload["chunk_start_sec"]
                     data["chunk_end_sec"] = payload["chunk_end_sec"]
-                    
                     _validate_gemini_schema(data)
-                    return data # 성공 시 반환
-                    
+                    return data
+
                 except Exception as e:
                     if attempt == self.config.max_retries - 1:
                         raise e
-                    time.sleep(2 ** attempt) # 지수 백오프
+                    time.sleep(2 ** attempt)
                     continue
-            
+
             raise RuntimeError("Gemini 분석 시도 횟수 초과")
 
         finally:
-            # 3. 분석 성공 여부와 관계없이 서버에서 파일 삭제 (Cleanup)
             if uploaded_file:
                 try:
-                    uploaded_file.delete()
+                    self.client.files.delete(name=uploaded_file.name)
                     print(f" [INFO] Gemini File API 서버 파일 삭제 완료: {uploaded_file.name}")
                 except Exception as del_err:
                     print(f" [WARN] Gemini File API 서버 파일 삭제 실패: {del_err}")
@@ -437,22 +444,16 @@ class GeminiClient:
         # 전체 영상 분석은 전사 결과만 사용 (영상 파일은 너무 크거나 전송 오류가 발생할 수 있음)
         # 전사 결과만으로도 충분히 전체 줄거리와 주요 장면을 분석할 수 있음
         content_parts = [prompt]
-        
+
         for attempt in range(self.config.max_retries):
             try:
-                generation_config = None
-                if self.genai_types and hasattr(self.genai_types, 'GenerateContentConfig'):
-                    generation_config = self.genai_types.GenerateContentConfig(
+                response = self.client.models.generate_content(
+                    model=self.config.model_name,
+                    contents=content_parts,
+                    config=self.types.GenerateContentConfig(
                         response_mime_type="application/json",
-                    )
-                
-                if generation_config:
-                    response = self.model.generate_content(
-                        content_parts,
-                        generation_config=generation_config,
-                    )
-                else:
-                    response = self.model.generate_content(content_parts)
+                    ),
+                )
                 
                 if not response or not response.text:
                     if attempt == self.config.max_retries - 1:
@@ -518,19 +519,13 @@ class GeminiClient:
         
         for attempt in range(self.config.max_retries):
             try:
-                generation_config = None
-                if self.genai_types and hasattr(self.genai_types, 'GenerateContentConfig'):
-                    generation_config = self.genai_types.GenerateContentConfig(
+                response = self.client.models.generate_content(
+                    model=self.config.model_name,
+                    contents=[prompt],
+                    config=self.types.GenerateContentConfig(
                         response_mime_type="application/json",
-                    )
-                
-                if generation_config:
-                    response = self.model.generate_content(
-                        [prompt],
-                        generation_config=generation_config,
-                    )
-                else:
-                    response = self.model.generate_content([prompt])
+                    ),
+                )
                 
                 if not response or not response.text:
                     if attempt == self.config.max_retries - 1:
@@ -666,9 +661,11 @@ class GeminiClient:
     "selected_storyline": {{ "이곳에 선정된 인덱스의 객체를 그대로 복사해서 출력": "" }}
     }}
     """
-
             # Gemini에게 전달 (generate_content 등의 메서드 사용)
-            response = self.model.generate_content(prompt)
+            response = self.client.models.generate_content(
+                model=self.config.model_name,
+                contents=prompt,
+            )
             try:
                 # JSON 파싱 로직 (기존 클라이언트 내 json_loader 활용)
                 import json
@@ -676,8 +673,6 @@ class GeminiClient:
                 return result
             except:
                 return None
-
-
 
 
 def load_gemini_client() -> GeminiClient:
