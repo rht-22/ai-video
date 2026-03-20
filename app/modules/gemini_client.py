@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -14,143 +13,54 @@ import re
 
 
 def _extract_json_from_markdown(text: str) -> str:
-    """마크다운 코드 블록에서 JSON을 추출합니다.
-    
-    Args:
-        text: 마크다운 코드 블록으로 감싸진 JSON 문자열
-    
-    Returns:
-        순수 JSON 문자열
-    """
-    # ```json ... ``` 또는 ``` ... ``` 패턴 제거
+    """마크다운 코드 블록에서 JSON을 추출합니다."""
     text = text.strip()
-    
-    # ```json으로 시작하고 ```로 끝나는 경우
     if text.startswith("```"):
-        # 첫 번째 ``` 제거
         lines = text.split("\n")
         if lines[0].startswith("```"):
             lines = lines[1:]
-        # 마지막 ``` 제거
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         text = "\n".join(lines)
-    
     return text.strip()
 
 
-GEMINI_PROMPT_TEMPLATE = """
-[ROLE]
-당신은 한국 최고의 숏폼 전문 AI 에디터이자 멀티모달 스토리 분석 전문가다.
-텍스트, 영상, 오디오를 통합적으로 이해하여
-바이럴 가능성이 높은 쇼츠 콘텐츠를 기획하고 분석한다.
-반드시 JSON만 출력한다. 코드블록 금지.
-영상에 없는 내용은 절대 창작하지 말 것.
-
----
-
-입력 정보:
-
+COMMON_INPUT_INFO = """
+[입력 정보]
 - 작품명: {work_title}
 - 주제: {topic}
-- 청크 범위: {chunk_start_sec} ~ {chunk_end_sec} 초 (원본 영상 기준 참고용, 타임스탬프 계산에 사용 금지)
-- ⚠️ 모든 start_sec / end_sec는 반드시 첨부된 영상 파일의 시작(0초)을 기준으로 한 상대값으로 반환할 것 (절대 원본 영상 기준 절대값 사용 금지)
+- 청크 범위: {chunk_start_sec} ~ {chunk_end_sec} 초
+- ⚠️ 모든 start_sec / end_sec는 반드시 첨부된 영상 파일의 시작(0초)을 기준으로 한 상대값으로 반환할 것
 - 자막(있으면): {transcript_text}
-
 - 씬 경계(있으면): {scene_boundaries}
 - 전체 줄거리(있으면): {full_summary}
 - 스토리라인(있으면): {storyline} {previous_context}
+"""
 
----
+COMMON_JSON_SCHEMA = """
+[멀티모달 분석 필수 출력 항목 및 스키마 강제 규칙]
+아래 JSON 스키마 구조를 100% 동일하게 유지하여 출력하라. 
+분석 결과 해당 항목이 없을 경우 빈 배열 대신 null로 출력한다.
 
-[인물 식별 단계]
-
-- 분석 시작 전, 아래 수단을 통해 등장 인물의 이름을 먼저 파악한다:
-    - 화면 자막 또는 이름 자막 (예능/드라마 자막 포함)
-    - 대사 내 호칭 (예: "야 민준아~")
-    - 화면 내 텍스트 (명찰, 이름표 등 OCR 가능한 텍스트)
-- 위 수단으로 이름 확인이 불가능한 인물은 "인물A", "인물B" 등 고유 레이블을 부여한다.
-- 이후 모든 분석 항목에서 확정된 이름 또는 레이블을 일관되게 사용한다.
-
----
-
-[멀티모달 분석 필수 출력 항목]
-
-아래 항목을 모두 포함하여 구조화된 형태로 출력하라.
-
-- main_plot: 영상의 핵심 서사를 80자 이내 한국어 요약
-- characters_relations: 인물 간 관계 및 권력/감정 역학 설명
-- characters_tracking: 인물별 등장 타임스탬프 및 주요 행동/발화 요약
-    - 인물명 또는 레이블
-    - appearances:
-        - start_sec / end_sec: 등장 구간
-        - action: 해당 구간 행동/발화 요약
-- sub_plots: 영상 내 서브 플롯 목록 (타임스탬프 포함)
-- emotion_curve: 타임스탬프별 감정 변화 리스트 (emotion, intensity 0~1)
-- tension_score: 평균 긴장도 / 최고 긴장도 / 최고점 타임스탬프
-- conflicts_and_twists: 갈등 및 반전 발생 지점과 내용
-- humor_points: 유머 발생 지점 및 웃음 강도
-- love_points: 인물 간 명확한 플러팅 대사 또는 감정 교환이 발생하는 지점 및 강도
-- relatability_points: 많은 시청자가 공감할 수 있는 지점 및 강도
-- saida_points: 사이다 전개로 대리만족이 발생하는 포인트 및 강도
-- goguma_points: 답답함이나 분노를 유발하는 포인트 및 강도
-- audio_tempo: BPM 추정치 / 분위기 변화 키워드
-- overall_vibe: 영상 전체 분위기 요약
-
----
-
-[TONE & RULES]
-
-- 모든 출력은 한국어 사용
-- 최신 쇼츠 트렌드 반영: 자연스러운 톤, 짧은 문장, 강조/리액션 요소
-- candidate_moments 최소 10개
-- JSON 스키마 강제
-- 분석 결과 해당 항목이 없을 경우 빈 배열 대신 null로 출력한다.
-
-다음 스키마로만 응답:
 {{
   "chunk_index": 0,
   "chunk_start_sec": 0,
   "chunk_end_sec": 300,
-  "summary": "요약",
+  "summary": "해당 청크 전체의 핵심 내용 요약",
   "main_plot": "영상의 핵심 서사 80자 이내",
-  "characters_relations": "인물 간 관계 및 권력/감정 역학 설명",
+  "characters_relations": "인물 간 관계 및 감정 역학",
   "characters_tracking": [
     {{
       "character": "인물명 또는 레이블",
       "appearances": [
-        {{
-          "start_sec": 0.0,
-          "end_sec": 32.0,
-          "action": "해당 구간 행동/발화 요약"
-        }}
+        {{"start_sec": 0.0, "end_sec": 32.0, "action": "행동 요약"}}
       ]
     }}
   ],
-  "sub_plots": [
-    {{
-      "start_sec": 0.0,
-      "description": "서브플롯 설명"
-    }}
-  ],
-  "emotion_curve": [
-    {{
-      "start_sec": 0.0,
-      "end_sec": 10.0,
-      "emotion": "감정",
-      "intensity": 0.8
-    }}
-  ],
-  "tension_score": {{
-    "average": 0.6,
-    "peak": 0.95,
-    "peak_start_sec": 0.0,
-    "peak_end_sec": 10.0
-  }},
-  "audio_tempo": {{
-    "bpm": 120,
-    "vibe_keywords": ["키워드1", "키워드2"]
-  }},
+  "sub_plots": [{{"start_sec": 0.0, "description": "서브플롯 설명"}}],
+  "emotion_curve": [{{"start_sec": 0.0, "end_sec": 10.0, "emotion": "감정", "intensity": 0.8}}],
+  "tension_score": {{"average": 0.6, "peak": 0.95, "peak_start_sec": 0.0, "peak_end_sec": 10.0}},
+  "audio_tempo": {{"bpm": 120, "vibe_keywords": ["키워드"]}},
   "overall_vibe": "영상 전체 분위기 요약",
   "candidate_moments": [
     {{
@@ -162,13 +72,13 @@ GEMINI_PROMPT_TEMPLATE = """
       "topic_alignment_score": 0.0,
       "story_role": "hook|build|payoff",
       "reason": "선정 이유",
-      "subtitle": "자막(짧게)",
-      "tts_line": "TTS 한 문장",
+      "subtitle": "대표 자막",
+      "tts_line": "TTS 대사",
       "points": {{
-        "humor": {{"description": "유머 내용", "intensity": 0.7}},
+        "humor": null,
         "love": null,
         "relatability": null,
-        "saida": {{"description": "사이다 포인트", "intensity": 0.9}},
+        "saida": null,
         "goguma": null,
         "conflict_twist": null
       }}
@@ -176,6 +86,52 @@ GEMINI_PROMPT_TEMPLATE = """
   ],
   "title_candidates": ["제목1", "제목2", "제목3"]
 }}
+"""
+
+DRAMA_PROMPT_TEMPLATE = f"""
+[ROLE]
+당신은 최고의 영화/드라마 예고편 편집자이자 스토리텔러입니다. 
+주어진 영상 조각(청크)에서 시청자의 이목을 사로잡을 핵심 서사(Drama) 모멘트 최소 10개를 선별하세요.
+반드시 JSON만 출력합니다.
+
+{{COMMON_INPUT_INFO}}
+
+[편집 핵심 타겟]
+- 갈등과 대립: 인물 간의 날 선 대화, 언쟁, 분위기가 싸늘해지는 긴장감 넘치는 씬
+- 반전과 진실: 중요한 떡밥이 회수되거나, 몰랐던 사실이 밝혀지는 충격적인 순간
+- 감정의 폭발: 오열, 분노, 절망, 혹은 짜릿한 카타르시스가 터지는 하이라이트
+- 텐션 빌드업: 아무 말 없이 표정이나 시선 교환만으로도 숨 막히는 긴장감을 유발하는 순간
+
+[주의사항]
+1. 자잘한 농담, 의미 없는 잡담이나 이동 장면은 철저히 배제하고 '묵직한 스토리/서사' 위주로만 골라내시오.
+2. 대사나 액션의 흐름이 중간에 뚝 끊기지 않도록, 말이 완전히 끝나는 순간(호흡)까지 여유 있게 길이를 확보하시오.
+3. 인물이 말을 꺼내기 직전이나 핵심 동작이 일어나는 순간을 0.1초 단위로 정확하게 파악하여 start_sec와 end_sec에 작성하시오. (대충 뭉뚱그린 초 단위 사용 절대 금지)
+4. points 내의 세부 항목(humor, love 등)은 드라마 서사에 맞는 점수만 남기고 나머지는 null 처리하시오.
+
+{{COMMON_JSON_SCHEMA}}
+""".strip()
+
+VARIETY_PROMPT_TEMPLATE = f"""
+[ROLE]
+당신은 수백만 구독자를 거느린 트렌디한 유튜브 숏폼(예능/버라이어티) 전문 PD입니다. 
+주어진 영상 조각(청크)에서 시청자의 도파민을 터뜨리고 빵 터질 수 있는 유머/리액션 모멘트 최소 10개를 선별하세요.
+반드시 JSON만 출력합니다.
+
+{{COMMON_INPUT_INFO}}
+
+[편집 핵심 타겟]
+- 티키타카와 말대꾸: 출연자들 간의 쉴 새 없이 주고받는 재치 있는 대화나 찰진 멘트
+- 돌발 상황과 리액션: 예상치 못한 황당한 상황이 발생했을 때 튀어나오는 찐 리액션이나 표정 변화
+- 밈(Meme)과 펀치라인: 쇼츠에서 템포감 있게 터지는 핵심 드립이나 웃음 포인트
+- 하찮은 몸개그나 엉뚱한 실수: 시청자가 가볍게 보고 웃을 수 있는 순간
+
+[주의사항]
+1. 분위기가 무겁거나 진지하고 지루한 대화 장면(빌드업)은 철저히 버리고, 무조건 '웃음, 텐션, 재미, 리액션' 위주로만 짧고 굵게 골라내시오.
+2. 쇼츠 포맷에 맞게 템포가 빠르고 타격감이 살아있도록 찰진 클립들을 여러 개 찾아내시오.
+3. 인물이 폭소하거나 재미있는 대사를 던지는 찰나의 순간을 0.1초 단위로 정확하게 파악하여 start_sec와 end_sec에 작성하시오. (대충 뭉뚱그린 초 단위 사용 절대 금지)
+4. points 내의 세부 항목(conflict_twist 등)은 예능 성격에 맞는 점수만 남기고 나머지는 null 처리하시오.
+
+{{COMMON_JSON_SCHEMA}}
 """.strip()
 
 FULL_VIDEO_ANALYSIS_PROMPT = """
@@ -287,7 +243,6 @@ class GeminiClient:
         self.types = types
 
     def analyze_chunk(self, payload: dict[str, Any]) -> dict[str, Any]:
-        # 이전 분석 결과와 전사를 컨텍스트로 준비
         previous_context = ""
         if payload.get("previous_analyses"):
             prev_analyses = payload["previous_analyses"]
@@ -299,14 +254,26 @@ class GeminiClient:
                 if prev.get("candidate_moments"):
                     moments_text = "\n".join([
                         f"  - {m.get('start_sec', 0)}~{m.get('end_sec', 0)}초: {m.get('subtitle', '')} ({m.get('story_role', 'unknown')})"
-                        for m in prev["candidate_moments"][:3]  # 상위 3개만
+                        for m in prev["candidate_moments"][:3]
                     ])
                     context_parts.append(f"주요 모멘트:\n{moments_text}")
             if context_parts:
                 previous_context = "\n\n이전 청크들의 분석 결과 (전체 흐름 이해용):" + "\n".join(context_parts)
         
-     
-        prompt = GEMINI_PROMPT_TEMPLATE.format(
+        tone = payload.get("tone", "drama_variety")
+        
+        if tone == "variety":
+            template = VARIETY_PROMPT_TEMPLATE.format(
+                COMMON_INPUT_INFO=COMMON_INPUT_INFO,
+                COMMON_JSON_SCHEMA=COMMON_JSON_SCHEMA
+            )
+        else:
+            template = DRAMA_PROMPT_TEMPLATE.format(
+                COMMON_INPUT_INFO=COMMON_INPUT_INFO,
+                COMMON_JSON_SCHEMA=COMMON_JSON_SCHEMA
+            )
+            
+        prompt = template.format(
             work_title=payload["work_title"],
             topic=payload["topic"],
             chunk_start_sec=payload["chunk_start_sec"],
@@ -318,12 +285,10 @@ class GeminiClient:
             previous_context=previous_context,
         )
         
-        # 비디오 파일 경로가 있으면 파일을 직접 읽어서 전달
         video_path = payload.get("video_path")
         content_parts = [prompt]
         uploaded_file = None
         
-        # File API 방식 적용 (Memory-Safe)
         if video_path:
             video_path_obj = Path(video_path) if isinstance(video_path, str) else video_path
             if video_path_obj.exists():
@@ -343,7 +308,6 @@ class GeminiClient:
                     ))
                 except Exception as upload_err:
                     print(f" [WARN] 비디오 업로드 중 오류 발생: {upload_err}")
-
 
         try:
             for attempt in range(self.config.max_retries):
@@ -402,27 +366,12 @@ class GeminiClient:
         topic: str,
         duration_sec: float,
     ) -> dict[str, Any]:
-        """전체 영상의 줄거리와 주요 장면을 분석합니다.
-        
-        Args:
-            video_path: 영상 파일 경로
-            transcript: Whisper 전사 결과 (전체 텍스트)
-            work_title: 작품명
-            topic: 주제
-            duration_sec: 영상 길이 (초)
-        
-        Returns:
-            분석 결과 딕셔너리 (summary, key_scenes, emotion_arc 등)
-        """
         prompt = FULL_VIDEO_ANALYSIS_PROMPT.format(
             work_title=work_title,
             topic=topic,
             duration_sec=duration_sec,
             transcript=transcript,
         )
-        
-        # 전체 영상 분석은 전사 결과만 사용 (영상 파일은 너무 크거나 전송 오류가 발생할 수 있음)
-        # 전사 결과만으로도 충분히 전체 줄거리와 주요 장면을 분석할 수 있음
         content_parts = [prompt]
 
         for attempt in range(self.config.max_retries):
@@ -447,7 +396,6 @@ class GeminiClient:
                     continue
                 
                 try:
-                    # 마크다운 코드 블록 제거
                     json_text = _extract_json_from_markdown(text)
                     data = json.loads(json_text)
                 except json.JSONDecodeError as json_err:
@@ -473,18 +421,6 @@ class GeminiClient:
         emotion_arc: str,
         work_title: str,
     ) -> dict[str, Any]:
-        """쇼츠 영상의 여러 스토리라인을 생성하고 가장 흥미로운 것을 선택합니다.
-        
-        Args:
-            full_summary: 전체 줄거리 요약
-            key_scenes: 주요 장면 리스트
-            emotion_arc: 감정 흐름 설명
-            work_title: 작품명
-        
-        Returns:
-            스토리라인 딕셔너리 (storylines, selected_storyline_index, selected_storyline 등)
-        """
-        # key_scenes를 문자열로 변환
         key_scenes_str = "\n".join(
             f"- {scene.get('start_sec', 0)}초~{scene.get('end_sec', 0)}초: {scene.get('description', '')}"
             for scene in key_scenes
@@ -519,7 +455,6 @@ class GeminiClient:
                     continue
                 
                 try:
-                    # 마크다운 코드 블록 제거
                     json_text = _extract_json_from_markdown(text)
                     data = json.loads(json_text)
                 except json.JSONDecodeError as json_err:
@@ -531,17 +466,14 @@ class GeminiClient:
                         )
                     continue
                 
-                # 스키마 검증 및 선택 로직
                 if "storylines" not in data or not isinstance(data["storylines"], list):
                     raise ValueError("응답에 'storylines' 배열이 없습니다.")
                 
                 if len(data["storylines"]) == 0:
                     raise ValueError("생성된 스토리라인이 없습니다.")
                 
-                # selected_storyline_index가 없거나 유효하지 않으면 interest_score로 자동 선택
                 selected_idx = data.get("selected_storyline_index")
                 if selected_idx is None or not isinstance(selected_idx, int) or selected_idx < 0 or selected_idx >= len(data["storylines"]):
-                    # interest_score가 가장 높은 스토리라인 선택
                     best_idx = 0
                     best_score = -1.0
                     for idx, storyline in enumerate(data["storylines"]):
@@ -552,7 +484,6 @@ class GeminiClient:
                     selected_idx = best_idx
                     data["selected_storyline_index"] = selected_idx
                 
-                # 선택된 스토리라인을 별도 필드로 추가 (편의를 위해)
                 selected_storyline = data["storylines"][selected_idx]
                 data["selected_storyline"] = selected_storyline
                 data["selected_topic"] = selected_storyline.get("topic", "")
@@ -565,14 +496,9 @@ class GeminiClient:
         raise RuntimeError("스토리라인 생성 실패: 최대 재시도 횟수 초과")
 
     def compose_story_with_context(self, all_candidates: list, work_title: str, topic: str):
-            """
-            Gemini가 후보 모멘트들을 보고 전체 흐름에 맞는 스토리 구성을 다시 수행합니다.
-            """
-            # 후보 데이터를 텍스트로 정리
             candidates_str = ""
             for i, m in enumerate(all_candidates):
                 m['candidate_index'] = i 
-    
                 candidates_str += f"- {json.dumps(m, ensure_ascii=False)}\n"
             prompt = f"""
     # Role
@@ -642,13 +568,11 @@ class GeminiClient:
     "selected_storyline": {{ "이곳에 선정된 인덱스의 객체를 그대로 복사해서 출력": "" }}
     }}
     """
-            # Gemini에게 전달 (generate_content 등의 메서드 사용)
             response = self.client.models.generate_content(
                 model=self.config.model_name,
                 contents=prompt,
             )
             try:
-                # JSON 파싱 로직 (기존 클라이언트 내 json_loader 활용)
                 import json
                 result = json.loads(response.text.replace('```json', '').replace('```', ''))
                 return result
@@ -657,14 +581,11 @@ class GeminiClient:
 
 
 def load_gemini_client() -> GeminiClient:
-    # .env 파일 로드 (프로젝트 루트에서 찾기)
-    # gemini_client.py는 app/modules/에 있으므로 프로젝트 루트는 parent.parent
     project_root = Path(__file__).resolve().parent.parent.parent
     env_path = project_root / ".env"
     if env_path.exists():
         load_dotenv(env_path)
     else:
-        # 프로젝트 루트에 없으면 현재 디렉토리에서도 시도
         load_dotenv()
     
     api_key = os.getenv("GEMINI_API_KEY")
