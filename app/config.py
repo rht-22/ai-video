@@ -24,7 +24,7 @@ class DesignConfig:
     subtitle_font: str = "여기어때 잘난체 2 TTF"
     subtitle_size: int = 65
     subtitle_color: str = "&H0000FFFF" 
-    subtitle_y_margin: int = 450
+    subtitle_y_margin: int = 0
     
     # 작품명 및 이미지 설정
     work_title_y: int = 1500
@@ -45,22 +45,18 @@ class AppConfig:
     target_duration_tolerance_sec: int = 10 
     min_duration_sec: int = 50  
     max_duration_sec: int = 60  
-    # 유튜브 숏츠 표준 규격 (9:16)
     canvas_width: int = 1080
     canvas_height: int = 1920
-    # 제목 및 레이블 높이 최적화
     top_title_height: int = 550
     bottom_label_height: int = 450
-    # 자막 위치 조정 (알고리즘을 방해하지 않는 위치)
     subtitle_margin_top: int = 320
     subtitle_margin_bottom: int = 400 
-    # 가독성을 위해 한 줄당 글자 수 제한 (줄바꿈 유도)
     subtitle_max_chars_per_line: int = 15
     subtitle_max_lines: int = 2
     crop_sample_interval_sec: float = 1.0
     crop_smoothing_window: int = 5
     scene_snap_threshold_sec: float = 0.8
-    tts_gain_db: int = -2 # TTS를 더 또렷하게
+    tts_gain_db: int = -2
     original_gain_db: int = -12
     bgm_gain_db: int = -20
     render_preset: str = "balanced"
@@ -79,47 +75,43 @@ class Paths:
     def outputs_dir(self) -> Path:
         return self.app_root.parent / "outputs"
 
-def get_font_path(name: str, app_root: Path) -> str:
-    """
-    폰트 이름을 받아 로컬 경로를 반환합니다. 
-    REMOTE_FONTS에 있으면 다운로드 후 경로를 반환하고, 없으면 시스템 폰트로 간주합니다.
-    """
-    url = REMOTE_FONTS.get(name)
-    
-    # 1. URL이 없는 경우 (시스템 폰트 이름으로 간주)
-    if not url:
-        return name
 
-    # 2. 로컬 저장 폴더 설정 (assets/fonts)
+def get_font_path(name: str, app_root: Path) -> str:
     font_dir = app_root / "assets" / "fonts"
     font_dir.mkdir(parents=True, exist_ok=True)
-    file_path = font_dir / f"{name}.ttf"
 
-    # 3. 파일이 없으면 다운로드 진행
-    if not file_path.exists():
+    safe_name = FONT_NAME_MAP.get(name, name.replace(" ", "_"))
+    
+    file_path = font_dir / f"{safe_name}.ttf"
+
+    if file_path.exists():
+        return str(file_path.absolute()).replace("\\", "/")
+
+    url = REMOTE_FONTS.get(name)
+    if url:
         try:
-            print(f"다운로드 중인 폰트: {name}...")
+            print(f"폰트 다운로드 시도: {name} -> {safe_name}.ttf")
             response = requests.get(url, timeout=10)
             response.raise_for_status()
             file_path.write_bytes(response.content)
-            print(f"폰트 다운로드 완료: {file_path}")
+            return str(file_path.absolute()).replace("\\", "/")
         except Exception as e:
-            print(f"폰트 다운로드 실패 ({name}): {e}")
-            return "Malgun Gothic"  # 실패 시 기본 폰트 반환
+            print(f"다운로드 실패: {e}")
+            return "Malgun Gothic"
 
-    # 4. FFmpeg 호환을 위해 절대 경로의 역슬래시(\)를 슬래시(/)로 변환
-    return str(file_path.absolute()).replace("\\", "/")
+    return name
 
 REMOTE_FONTS = {
-
-    "여기어때 잘난체 2 TTF": "https://raw.githubusercontent.com/rht-22/font.zip/main/Jalnan.ttf",
-
+    "Jalnan": "https://raw.githubusercontent.com/rht-22/font.zip/main/Jalnan.ttf",
     "JalnanGothic": "https://raw.githubusercontent.com/rht-22/font.zip/main/JalnanGothic.ttf",
-
+    "mulmaru": "https://raw.githubusercontent.com/rht-22/font.zip/main/mulmaru.ttf",
     "Griun": "https://raw.githubusercontent.com/rht-22/font.zip/main/Griun-Polpairness.ttf",
+    "Hakgyo": "https://raw.githubusercontent.com/rht-22/font.zip/main/HakgyoansimSamulhamR.ttf"
+}
 
-    "Hakgyo": "https://raw.githubusercontent.com/rht-22/font.zip/main/HakgyoansimSamulhamR.ttf",
-
-    "물마루": "https://raw.githubusercontent.com/rht-22/font.zip/main/mulmaru.ttf"
-
+FONT_NAME_MAP = {
+    "여기어때 잘난체 2 TTF": "Jalnan",
+    "물마루": "mulmaru",
+    "여기어때 잘난체 고딕 TTF": "JalnanGothic",
+    "그리운 경찰공평체": "Griun"
 }

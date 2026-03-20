@@ -835,49 +835,76 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sort
     font_folder = project_root / "assets" / "fonts"
     
     # [5] 제목(Title) 필터
-    # font_folder = Path("app/assets/fonts")
-    requested_font_name = str(d.title_font)
+    # font_arg = str(d.title_font).replace("\\", "/").replace(":", "\\:")
+    # custom_colors = getattr(d, 'title_colors', [DesignConfig.title_color])
+    # last_v_label = "[vcat]"
+    # for idx, raw_line in enumerate(title_lines):
+    #     base_color = custom_colors[idx] if idx < len(custom_colors) else custom_colors[-1]
+    #     y_pos = d.title_y + (idx * (d.title_size + line_spacing))
+    #     escaped_full = _escape_text_for_drawtext(raw_line)
+    #     next_label = f"[title_{idx}]"
+    #     filters.append(f"{last_v_label}drawtext=fontfile='{font_arg}':text='{escaped_full}':fontcolor={base_color}:fontsize={d.title_size}:x=(w-text_w)/2:y={y_pos}{next_label}")
+    #     last_v_label = next_label
+    # [5] 제목(Title) 필터 수정본
+    # actual_font = str(d.title_font)
     
-    # 확장자 .ttf 자동 체크
-    font_filename = requested_font_name if requested_font_name.lower().endswith(".ttf") else f"{requested_font_name}.ttf"
-    font_file_path = font_folder / font_filename
-    last_v_label = "[vcat]" 
-    if font_file_path.exists():
-        # FFmpeg drawtext용 경로 처리 (절대경로 + 슬래시 통일 + 콜론 이스케이프)
-        abs_path = str(font_file_path.resolve()).replace("\\", "/")
-        font_arg = abs_path.replace(":", "\\:")
-        # 경로에 공백이 있을 수 있으므로 반드시 작은따옴표(')로 감쌈
-        font_param = f"fontfile='{font_arg}'"
-    else:
-        # 로컬에 파일이 없으면 시스템 설치 폰트명 사용 시도
-        font_param = f"font='{requested_font_name}'"
+    # # 1. 경로인지 일반 폰트명인지 구분 (get_font_path의 결과에 따라)
+    # if "/" in actual_font or "\\" in actual_font:
+    #     # 파일 경로인 경우: 콜론(:) 이스케이프 후 fontfile 사용
+    #     font_arg = actual_font.replace(":", "\\:")
+    #     font_param = f"fontfile='{font_arg}'"
+    # else:
+    #     # 시스템 폰트명인 경우 (예: Malgun Gothic): font 사용
+    #     font_param = f"font='{actual_font}'"
 
-    # 2. 제목 줄바꿈 처리 및 드로우텍스트 필터 생성
-    title_lines = [line.strip() for line in inputs.title_text.split("\n") if line.strip()]
-    custom_colors = getattr(d, 'title_colors', ["white"])
-    line_spacing = 20  # 줄 간격
+    # # 기본 색상 설정 (DesignConfig 클래스 상수가 아닌 인스턴스 d의 값을 참조하도록 수정)
+    # custom_colors = getattr(d, 'title_colors', [d.title_color])
     
-    # 이전 단계의 비디오 라벨 (vcat 이후부터 시작)
-    # last_v_label은 이전 코드 문맥에 맞춰 "[vcat]" 또는 적절한 라벨로 설정되어 있어야 합니다.
+    # last_v_label = "[vcat]"
+    # for idx, raw_line in enumerate(title_lines):
+    #     # 색상 선택 (라인별 색상이 지정되어 있으면 사용, 없으면 마지막 색상 사용)
+    #     base_color = custom_colors[idx] if idx < len(custom_colors) else custom_colors[-1]
+        
+    #     # y축 위치 계산 (라인별 높이 + 간격)
+    #     y_pos = d.title_y + (idx * (d.title_size + line_spacing))
+        
+    #     # 텍스트 이스케이프 (따옴표, 콜론 등 특수문자 처리)
+    #     escaped_full = _escape_text_for_drawtext(raw_line)
+        
+    #     next_label = f"[title_{idx}]"
+        
+    #     # [핵심 수정] fontfile= 대신 위에서 생성한 {font_param}을 통째로 삽입
+    #     filters.append(
+    #         f"{last_v_label}drawtext={font_param}:text='{escaped_full}':"
+    #         f"fontcolor={base_color}:fontsize={d.title_size}:"
+    #         f"x=(w-text_w)/2:y={y_pos}{next_label}"
+    #     )
+    #     last_v_label = next_label
+    # [5] 제목(Title) 필터 
+    actual_font = str(d.title_font)
+    
+    font_arg = actual_font 
+    last_v_label = "[vcat]"
+    custom_colors = getattr(d, 'title_colors', ["white"])
+    if "/" in actual_font or "\\" in actual_font:
+        # 윈도우 경로 필수 처리: 백슬래시를 슬래시로, 콜론은 이스케이프
+        clean_path = actual_font.replace("\\", "/").replace(":", "\\:")
+        font_arg = clean_path
+
     for idx, raw_line in enumerate(title_lines):
-        # 색상 결정: 설정된 색상 리스트를 순서대로 쓰되, 부족하면 마지막 색상 반복
         base_color = custom_colors[idx] if idx < len(custom_colors) else custom_colors[-1]
-        
-        # y축 위치 계산 (기본 d.title_y부터 시작하여 순차적으로 내려옴)
         y_pos = d.title_y + (idx * (d.title_size + line_spacing))
-        
-        # 텍스트 내 특수문자(' : 등) 탈출 처리 (별도 정의된 함수 사용)
         escaped_full = _escape_text_for_drawtext(raw_line)
-        
         next_label = f"[title_{idx}]"
         
-        # drawtext 필터 조립
+        # [핵심] fontfile='{font_arg}' 로 감싸서 한글 경로 인식률 극대화
         filters.append(
-            f"{last_v_label}drawtext={font_param}:text='{escaped_full}':"
+            f"{last_v_label}drawtext=fontfile='{font_arg}':text='{escaped_full}':"
             f"fontcolor={base_color}:fontsize={d.title_size}:"
             f"x=(w-text_w)/2:y={y_pos}{next_label}"
         )
         last_v_label = next_label
+
 
     # [6] 작품명(Logo)
     work_label = "[with_work]"
@@ -885,41 +912,38 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sort
     work_value = getattr(d, 'work_value', inputs.work_title)
     if work_type == "image" and work_value:
         logo_path_str = str(Path(work_value).resolve()).replace("\\", "/").replace(":", "\\:")
-        logo_w = getattr(d, 'work_image_width', 200)
+        logo_w = getattr(d, 'work_image_width', 300)
         filters.append(f"movie='{logo_path_str}',scale={logo_w}:-1[logo];{last_v_label}[logo]overlay=(W-w)/2:{d.work_title_y}{work_label}")
     else:
         escaped_val = _escape_text_for_drawtext(work_value if work_value else inputs.work_title)
         filters.append(f"{last_v_label}drawtext=fontfile='{font_arg}':text='{escaped_val}':fontcolor={d.work_color}:fontsize={d.work_font_size}:x=(w-text_w)/2:y={d.work_title_y}{work_label}")
 
+  
     # [7] 자막(ASS) 적용
-    
     if inputs.subtitle_path:
-        # 1. 클래스 기본값(DesignConfig.subtitle_font) 가져오기
         default_font = DesignConfig.subtitle_font
-        # 2. API로 받은 실제 이름 (예: "여기어때 잘난체 2 TTF")
         requested_font = d.subtitle_font
         
         ass_path = inputs.subtitle_path.resolve()
         ass_content = ass_path.read_text(encoding="utf-8")
         
-        # 3. 파일 안의 기본 이름을 실제 이름으로 치환
         ass_content = ass_content.replace(default_font, requested_font)
         ass_path.write_text(ass_content, encoding="utf-8")
 
         sub_path_fixed = str(ass_path).replace("\\", "/").replace(":", "\\:")
         font_dir_fixed = str(font_folder.resolve()).replace("\\", "/").replace(":", "\\:")
         
-        filters.append(f"{work_label}ass='{sub_path_fixed}':original_size={W}x{H}:fontsdir='{font_dir_fixed}'[vout]")
+        # filters.append(f"{work_label}ass='{sub_path_fixed}':original_size={W}x{H}:fontsdir='{font_dir_fixed}'[vout]")
+        filters.append(f"{work_label}ass='{sub_path_fixed}':fontsdir='{font_dir_fixed}'[vout]")
+        last_v_label = "[vout]"
     else:
         filters.append(f"{work_label}null[vout]")
-   
-   
+        last_v_label = "[vout]"
 
     filters.append(_build_audio_filter(inputs, num_clip_inputs, tts_keys_sorted))
     return ";".join(filters)
 
 def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sorted: list[int]) -> str:
-    # concat된 원본 오디오 볼륨 조절
     original_vol = f"[acat]volume={inputs.original_audio_gain_db}dB[orig_vol]"
 
     if not inputs.tts_audio_files:

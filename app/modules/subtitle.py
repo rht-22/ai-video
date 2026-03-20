@@ -78,10 +78,43 @@ def build_ass_from_segments(
 ) -> None:
     """ASS 자막 파일을 생성합니다(전사/세그먼트 기반)."""
     header = _ass_header(style)
-    events = "".join(_ass_line_segment(seg) for seg in segments)
+    
+    clip_events_list = []
+    
+    print("\n" + "="*50)
+    print(f"DEBUG: [segments 기반] 자막 생성 시작 (총 {len(segments)}개)")
+
+    for idx, seg in enumerate(segments):
+        start_str = _format_time(seg.start_sec)
+        end_str = _format_time(seg.end_sec)
+        
+        # 1. 텍스트 정리 및 줄바꿈 처리
+        raw_text = seg.text.replace("\n", " ").strip()
+        
+        # 15자 기준 자동 줄바꿈
+        if len(raw_text) > 15:
+            words = raw_text.split()
+            mid = len(words) // 2
+            text = " ".join(words[:mid]) + r"\N" + " ".join(words[mid:])
+        else:
+            text = raw_text
+            
+        # 2. 터미널 출력 (이제 정상적으로 찍힐 겁니다)
+        print(f"[{idx+1}] {start_str} ~ {end_str} | {text}")
+        
+        # 3. 라인 생성 (쉼표 5개 구조)
+        line = f"Dialogue: 0,{start_str},{end_str},Default,,,,, {text}\n"
+        clip_events_list.append(line)
+
+    events = "".join(clip_events_list)
+    
+    # 4. 파일 저장
     output_path.parent.mkdir(parents=True, exist_ok=True)
     content = header + events
     output_path.write_bytes(content.encode("utf-8-sig"))
+    
+    print(f"DEBUG: 자막 저장 완료 -> {output_path}")
+    print("="*50 + "\n")
 
 
 def remap_transcript_to_edited_timeline(
@@ -192,15 +225,21 @@ def merge_subtitle_segments(
 
 
 def _ass_header(style: SubtitleStyle) -> str:
+    margin_v = style.margin_v if style.margin_v > 0 else 480
+    
+
+    alignment = 5 
+
     return (
         "[Script Info]\n"
         "ScriptType: v4.00+\n"
         "PlayResX: 1080\n"
         "PlayResY: 1920\n"
+        "ScaledBorderAndShadow: yes\n"  # 테두리와 그림자가 해상도에 맞게 스케일링되도록 추가
         "\n"
         "[V4+ Styles]\n"
         "Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Default,{style.font_name},{style.font_size},{style.primary_color},{style.outline_color},0,0,1,{style.outline},{style.shadow},2,80,80,{style.margin_v},0\n"
+        f"Style: Default,{style.font_name},{style.font_size},{style.primary_color},{style.outline_color},0,0,1,{style.outline},{style.shadow},{alignment},80,80,{margin_v},0\n"
         "\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
