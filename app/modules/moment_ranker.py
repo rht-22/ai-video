@@ -12,9 +12,9 @@ class RankedMoment:
     hook_score: float
     topic_alignment_score: float
     story_role: str
+    description: str
     reason: str
-    subtitle: str
-    tts_line: str
+    transcript: str
     final_score: float
 
 
@@ -34,9 +34,9 @@ def rank_moments(moments: list[dict[str, Any]]) -> list[RankedMoment]:
                 hook_score=float(moment["hook_score"]),
                 topic_alignment_score=float(moment["topic_alignment_score"]),
                 story_role=moment["story_role"],
+                description=moment["description"],
                 reason=moment["reason"],
-                subtitle=moment["subtitle"],
-                tts_line=moment["tts_line"],
+                transcript=moment["transcript"],
                 final_score=final_score,
             )
         )

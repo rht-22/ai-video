@@ -237,14 +237,12 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print("\n[6/13] Gemini 분석 결과 로드 중...")
         gemini_data = json.loads(checkpoint_gemini.read_text(encoding="utf-8"))
         all_candidates = gemini_data["all_candidates"]
-        title_candidates = gemini_data["title_candidates"]
 
         if not transcript_text and full_audio_path.exists():
             raw_audio = json.loads(full_audio_path.read_text(encoding="utf-8"))
             transcript_text = [SimpleNamespace(**seg) for seg in raw_audio]
 
         print(f"  - 총 {len(all_candidates)}개 후보 모멘트")
-        print(f"  - {len(title_candidates)}개 제목 후보")
         print(f"  - {len(raw_audio)}개 자막")
         print("[OK] Gemini 분석 결과 로드 완료 (체크포인트에서)")
     elif start_idx <= 5:
@@ -253,7 +251,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print("[OK] Gemini 클라이언트 로드 완료")
         print("\n[6/13] Gemini 분석 진행 중...")
         all_candidates: list[dict[str, Any]] = []
-        title_candidates: list[str] = []
         gemini_start = time.time()
         gemini = load_gemini_client()
     
@@ -279,7 +276,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 "topic": payload.topic,
                 "chunk_start_sec": chunk.start_sec,
                 "chunk_end_sec": chunk.end_sec,
-                "transcript_text": transcript_text,
+                #"transcript_text": transcript_text,
                 "scene_boundaries": scene_boundaries,
                 "video_path": str(split_path) if split_path else None,
                 "full_summary": full_summary or "없음",
@@ -293,7 +290,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 run_log["steps"].append({"step": "gemini", "chunk": chunk.index, "response": response})
                 moment_count = len(response.get("candidate_moments", []))
                 print(f"    → {moment_count}개 후보 모멘트 발견 (소요 시간: {chunk_elapsed:.1f}초)")
-                title_candidates.extend(response.get("title_candidates", []))
                 
                 # 이전 분석 결과에 현재 결과 추가 (다음 청크를 위해)
                 previous_analyses.append({
@@ -319,7 +315,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                         print(f"    [WARN] 분할 파일 삭제 실패: {split_path.name} ({e})")
         gemini_elapsed = time.time() - gemini_start
         checkpoint_gemini.write_text(
-            json.dumps({"all_candidates": all_candidates, "title_candidates": title_candidates}, ensure_ascii=False, indent=2),
+            json.dumps({"all_candidates": all_candidates}, ensure_ascii=False, indent=2),
             encoding="utf-8"
         )
         print(f"[OK] Gemini 분석 완료 (총 {len(all_candidates)}개 후보, 소요 시간: {gemini_elapsed:.1f}초)")
@@ -329,7 +325,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             raise FileNotFoundError(f"체크포인트 파일을 찾을 수 없습니다: {checkpoint_gemini}. 이전 단계를 먼저 실행하세요.")
         gemini_data = json.loads(checkpoint_gemini.read_text(encoding="utf-8"))
         all_candidates = gemini_data["all_candidates"]
-        title_candidates = gemini_data["title_candidates"]
 
 
     # 스토리 구성 단계
@@ -505,12 +500,12 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print("\n[8/13] 리소스 로드 중...")
         resources_data = json.loads(checkpoint_resources.read_text(encoding="utf-8"))
         crop_map = {k: Path(v) for k, v in resources_data["crop_map"].items()}
-        # subtitle_path = Path(/resources_data["subtitle_path"])
+        #subtitle_path = Path(/resources_data["subtitle_path"])
         tts_audio_files = {
             int(k): Path(v) for k, v in resources_data.get("tts_audio_files", {}).items()
         } if "tts_audio_files" in resources_data else {}
         print(f"  - 크롭 타임라인: {len(crop_map)}개")
-        # print(f"  - 자막 파일: {subtitle_path}")
+        #print(f"  - 자막 파일: {subtitle_path}")
         print(f"  - TTS 오디오: {len(tts_audio_files)}개")
         print("[OK] 리소스 로드 완료 (체크포인트에서)")
     elif start_idx <= 8:

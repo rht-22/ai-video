@@ -13,7 +13,15 @@ import re
 
 
 def _extract_json_from_markdown(text: str) -> str:
-    """마크다운 코드 블록에서 JSON을 추출합니다."""
+    """마크다운 코드 블록에서 JSON을 추출합니다.
+    
+    Args:
+        text: 마크다운 코드 블록으로 감싸진 JSON 문자열
+    
+    Returns:
+        순수 JSON 문자열
+    """
+    # ```json ... ``` 또는 ``` ... ``` 패턴 제거
     text = text.strip()
     if text.startswith("```"):
         lines = text.split("\n")
@@ -25,22 +33,26 @@ def _extract_json_from_markdown(text: str) -> str:
     return text.strip()
 
 
-COMMON_INPUT_INFO = """
+GEMINI_PROMPT_TEMPLATE = """
+너는 드라마/예능 톤의 하이라이트 편집 어시스턴트다.
+반드시 JSON만 출력한다. 코드블록 금지.
+영상에 없는 내용은 절대 창작하지 말 것.
+
 [입력 정보]
 - 작품명: {work_title}
 - 주제: {topic}
 - 청크 범위: {chunk_start_sec} ~ {chunk_end_sec} 초
 - ⚠️ 모든 start_sec / end_sec는 반드시 첨부된 영상 파일의 시작(0초)을 기준으로 한 상대값으로 반환할 것
-- 자막(있으면): {transcript_text}
+
 - 씬 경계(있으면): {scene_boundaries}
 - 전체 줄거리(있으면): {full_summary}
 - 스토리라인(있으면): {storyline} {previous_context}
-"""
 
-COMMON_JSON_SCHEMA = """
-[멀티모달 분석 필수 출력 항목 및 스키마 강제 규칙]
-아래 JSON 스키마 구조를 100% 동일하게 유지하여 출력하라. 
-분석 결과 해당 항목이 없을 경우 빈 배열 대신 null로 출력한다.
+[규칙]
+- 아래 JSON 스키마 구조를 100% 동일하게 유지하여 출력 
+- 분석 결과 해당 항목이 없을 경우 빈 배열 대신 null로 출력
+- candidate_moments 최소 10개
+- story_role은 hook/build/payoff 중 하나
 
 {{
   "chunk_index": 0,
@@ -57,7 +69,6 @@ COMMON_JSON_SCHEMA = """
       ]
     }}
   ],
-  "sub_plots": [{{"start_sec": 0.0, "description": "서브플롯 설명"}}],
   "emotion_curve": [{{"start_sec": 0.0, "end_sec": 10.0, "emotion": "감정", "intensity": 0.8}}],
   "tension_score": {{"average": 0.6, "peak": 0.95, "peak_start_sec": 0.0, "peak_end_sec": 10.0}},
   "audio_tempo": {{"bpm": 120, "vibe_keywords": ["키워드"]}},
@@ -71,9 +82,9 @@ COMMON_JSON_SCHEMA = """
       "hook_score": 0.0,
       "topic_alignment_score": 0.0,
       "story_role": "hook|build|payoff",
+      "description": "장면 설명",
       "reason": "선정 이유",
-      "subtitle": "대표 자막",
-      "tts_line": "TTS 대사",
+      "transcript": "해당 구간에서 가장 핵심이 되는 '단 한 명'의 주요 대사",
       "points": {{
         "humor": null,
         "love": null,
@@ -83,56 +94,9 @@ COMMON_JSON_SCHEMA = """
         "conflict_twist": null
       }}
     }}
-  ],
-  "title_candidates": ["제목1", "제목2", "제목3"]
+  ]
 }}
 """
-
-DRAMA_PROMPT_TEMPLATE = f"""
-[ROLE]
-당신은 최고의 영화/드라마 예고편 편집자이자 스토리텔러입니다. 
-주어진 영상 조각(청크)에서 시청자의 이목을 사로잡을 핵심 서사(Drama) 모멘트 최소 10개를 선별하세요.
-반드시 JSON만 출력합니다.
-
-{{COMMON_INPUT_INFO}}
-
-[편집 핵심 타겟]
-- 갈등과 대립: 인물 간의 날 선 대화, 언쟁, 분위기가 싸늘해지는 긴장감 넘치는 씬
-- 반전과 진실: 중요한 떡밥이 회수되거나, 몰랐던 사실이 밝혀지는 충격적인 순간
-- 감정의 폭발: 오열, 분노, 절망, 혹은 짜릿한 카타르시스가 터지는 하이라이트
-- 텐션 빌드업: 아무 말 없이 표정이나 시선 교환만으로도 숨 막히는 긴장감을 유발하는 순간
-
-[주의사항]
-1. 자잘한 농담, 의미 없는 잡담이나 이동 장면은 철저히 배제하고 '묵직한 스토리/서사' 위주로만 골라내시오.
-2. 대사나 액션의 흐름이 중간에 뚝 끊기지 않도록, 말이 완전히 끝나는 순간(호흡)까지 여유 있게 길이를 확보하시오.
-3. 인물이 말을 꺼내기 직전이나 핵심 동작이 일어나는 순간을 0.1초 단위로 정확하게 파악하여 start_sec와 end_sec에 작성하시오. (대충 뭉뚱그린 초 단위 사용 절대 금지)
-4. points 내의 세부 항목(humor, love 등)은 드라마 서사에 맞는 점수만 남기고 나머지는 null 처리하시오.
-
-{{COMMON_JSON_SCHEMA}}
-""".strip()
-
-VARIETY_PROMPT_TEMPLATE = f"""
-[ROLE]
-당신은 수백만 구독자를 거느린 트렌디한 유튜브 숏폼(예능/버라이어티) 전문 PD입니다. 
-주어진 영상 조각(청크)에서 시청자의 도파민을 터뜨리고 빵 터질 수 있는 유머/리액션 모멘트 최소 10개를 선별하세요.
-반드시 JSON만 출력합니다.
-
-{{COMMON_INPUT_INFO}}
-
-[편집 핵심 타겟]
-- 티키타카와 말대꾸: 출연자들 간의 쉴 새 없이 주고받는 재치 있는 대화나 찰진 멘트
-- 돌발 상황과 리액션: 예상치 못한 황당한 상황이 발생했을 때 튀어나오는 찐 리액션이나 표정 변화
-- 밈(Meme)과 펀치라인: 쇼츠에서 템포감 있게 터지는 핵심 드립이나 웃음 포인트
-- 하찮은 몸개그나 엉뚱한 실수: 시청자가 가볍게 보고 웃을 수 있는 순간
-
-[주의사항]
-1. 분위기가 무겁거나 진지하고 지루한 대화 장면(빌드업)은 철저히 버리고, 무조건 '웃음, 텐션, 재미, 리액션' 위주로만 짧고 굵게 골라내시오.
-2. 쇼츠 포맷에 맞게 템포가 빠르고 타격감이 살아있도록 찰진 클립들을 여러 개 찾아내시오.
-3. 인물이 폭소하거나 재미있는 대사를 던지는 찰나의 순간을 0.1초 단위로 정확하게 파악하여 start_sec와 end_sec에 작성하시오. (대충 뭉뚱그린 초 단위 사용 절대 금지)
-4. points 내의 세부 항목(conflict_twist 등)은 예능 성격에 맞는 점수만 남기고 나머지는 null 처리하시오.
-
-{{COMMON_JSON_SCHEMA}}
-""".strip()
 
 FULL_VIDEO_ANALYSIS_PROMPT = """
 너는 영상 분석 전문가다. 주어진 영상과 전사 결과를 바탕으로 전체 줄거리와 주요 장면을 분석해라.
@@ -253,32 +217,19 @@ class GeminiClient:
                     context_parts.append(f"요약: {prev['summary']}")
                 if prev.get("candidate_moments"):
                     moments_text = "\n".join([
-                        f"  - {m.get('start_sec', 0)}~{m.get('end_sec', 0)}초: {m.get('subtitle', '')} ({m.get('story_role', 'unknown')})"
+                        f"  - {m.get('start_sec', 0)}~{m.get('end_sec', 0)}초: {m.get('description', '')} ({m.get('story_role', 'unknown')})"
                         for m in prev["candidate_moments"][:3]
                     ])
                     context_parts.append(f"주요 모멘트:\n{moments_text}")
             if context_parts:
                 previous_context = "\n\n이전 청크들의 분석 결과 (전체 흐름 이해용):" + "\n".join(context_parts)
         
-        tone = payload.get("tone", "drama_variety")
-        
-        if tone == "variety":
-            template = VARIETY_PROMPT_TEMPLATE.format(
-                COMMON_INPUT_INFO=COMMON_INPUT_INFO,
-                COMMON_JSON_SCHEMA=COMMON_JSON_SCHEMA
-            )
-        else:
-            template = DRAMA_PROMPT_TEMPLATE.format(
-                COMMON_INPUT_INFO=COMMON_INPUT_INFO,
-                COMMON_JSON_SCHEMA=COMMON_JSON_SCHEMA
-            )
-            
-        prompt = template.format(
+        prompt = GEMINI_PROMPT_TEMPLATE.format(
             work_title=payload["work_title"],
             topic=payload["topic"],
             chunk_start_sec=payload["chunk_start_sec"],
             chunk_end_sec=payload["chunk_end_sec"],
-            transcript_text=payload.get("transcript_text") or "없음",
+            #transcript_text=payload.get("transcript_text") or "없음",
             scene_boundaries=payload.get("scene_boundaries") or "없음",
             full_summary=payload.get("full_summary") or "없음",
             storyline=payload.get("storyline") or "없음",
@@ -496,6 +447,7 @@ class GeminiClient:
         raise RuntimeError("스토리라인 생성 실패: 최대 재시도 횟수 초과")
 
     def compose_story_with_context(self, all_candidates: list, work_title: str, topic: str):
+            import json
             candidates_str = ""
             for i, m in enumerate(all_candidates):
                 m['candidate_index'] = i 
@@ -518,16 +470,16 @@ class GeminiClient:
     # Constraints & Rules
     1. Highlight Type: 
     - 모든 chunk의 candidate_moments들 중, 맥락 설명 없이 가장 자극적이고 강렬한 장면(Peak Tension) 하나를 중심으로 구성할 것.
-    - viral_type: 해당되는 것 모두 기재.
+    - viral_type: "points"를 참고하여, 해당되는 것 모두 기재.
 
     2. Storytelling Type: 
-    - 모든 chunk의 candidate_moments 중에서 여러 장면들을 선정해 기승전결이 있도록 여러 장면을 유기적으로 연결할 것.
+    - 모든 chunk의 candidate_moments 중에서 여러 장면들을 선정해 원본 스토리에 맞게 기승전결이 있도록 유기적으로 연결할 것.
     - 캐릭터의 행적을 조명하거나 영상의 주요 서사를 요약.
-    - 각 storyline 내에서는 가장 눈길을 끄는 장면을 hook으로 사용하고, hook이 전개상 앞부분이면 "여정몰입형", 전개상 뒷부분이면 "결과선공개형"으로 분류.
-    - key_source 작성 규칙: 서사 구성에 실제로 활용된 재료만 선택적으로 포함할 것. (전부 다 쓸 필요 없음)
+    - 각 storyline 내에서는 가장 눈길을 끄는 장면을 hook으로 사용하고, hook이 전개상 앞부분이면 "여정몰입형", 
+      전개상 뒷부분이면 "결과선공개형"으로 분류.
 
     3. Common: 
-    각 장면의 `start_sec`, `end_sec`를 명시하고, 영상의 '후킹'을 위한 TTS 라인을 반드시 포함할 것.
+    각 장면의 'start_sec', 'end_sec'를 명시하고, 영상의 '후킹'을 위한 TTS 라인을 반드시 포함할 것.
 
     다음 JSON 스키마로만 응답:
     {{
@@ -549,11 +501,6 @@ class GeminiClient:
         "shorts_type": "storytelling",
         "sequence_type": "여정몰입형|결과선공개형",
         "topic": "주제명",
-        "key_source": {{
-            "main_plot": "선택적: 활용한 경우만 요약 작성",
-            "sub_plots": "선택적: 활용한 경우만 요약 작성",
-            "focus_characters": ["선택적: 캐릭터 이름 리스트"]
-        }},
         "topic_reason": "서사 구성 이유",
         "score": 0.0,
         "storyline": {{
@@ -605,8 +552,7 @@ def _validate_gemini_schema(data: dict[str, Any]) -> None:
         "chunk_start_sec",
         "chunk_end_sec",
         "summary",
-        "candidate_moments",
-        "title_candidates",
+        "candidate_moments"
     }
     missing = required_keys - data.keys()
     if missing:
@@ -621,9 +567,9 @@ def _validate_gemini_schema(data: dict[str, Any]) -> None:
             "hook_score",
             "topic_alignment_score",
             "story_role",
+            "description",
             "reason",
-            "subtitle",
-            "tts_line",
+            "transcript"
         ]:
             if key not in moment:
                 raise ValueError(f"Missing key {key} in candidate moment")
