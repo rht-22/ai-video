@@ -24,12 +24,14 @@ from app.modules.subtitle import (
     build_ass,
     build_ass_from_segments,
     merge_subtitle_segments,
+    parse_srt,
     remap_transcript_to_edited_timeline,
 )
 from app.modules.tts import synthesize_tts
 from app.modules.validator import validate_output
 from app.modules.ffmpeg_utils import find_ffmpeg_command
 from types import SimpleNamespace
+from app.modules.silence_cutter import cut_silence_from_clips, flatten_to_clips, print_silence_cut_summary
 
 @dataclass(frozen=True)
 class PipelineInput:
@@ -40,6 +42,8 @@ class PipelineInput:
     design: DesignConfig = field(default_factory=DesignConfig)
     tone: str = "drama_variety"
     language: str = "ko"
+    previous_episodes_context: str | None = None  # 이전 맥락 부여 테스트
+    srt_path: Path | None = None  # 외부 SRT 파일 경로 (없으면 Whisper 사용)
 
 
 @dataclass(frozen=True)
@@ -178,23 +182,35 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     transcript_text_data=[]
     transcript_text=[]
 
+    # 어느 단계에서 시작하든 전사 데이터가 있으면 항상 로드  ← 추가된 부분
+    if full_audio_path.exists() and not transcript_text:
+        loaded_data = json.loads(full_audio_path.read_text(encoding="utf-8"))
+        transcript_text = [SimpleNamespace(**seg) for seg in loaded_data]
+        print(f"  - 전사 데이터 로드 완료: {len(transcript_text)}개 세그먼트")
+
     if start_idx <= 3 and full_audio_path.exists() and from_step != "full_audio":
         
         loaded_data = json.loads(full_audio_path.read_text(encoding="utf-8"))
-        from types import SimpleNamespace
         transcript_text = [SimpleNamespace(**seg) for seg in loaded_data]
         print(f"  - {len(transcript_text)}개 세그먼트 로드 완료")
     elif start_idx <= 3:
         audio_start = time.time()
-        audio_path = extract_audio_from_video(payload.video_path)
-        print(f"  - 오디오 추출 완료: {audio_path.name}")
-        
-        # Whisper 전사
-        print("  Whisper 전사 중... (시간이 걸릴 수 있습니다)")
-        transcript_text = extract_transcript(audio_path)
+
+        if payload.srt_path:
+            # SRT 파일이 제공된 경우 오디오 추출 및 Whisper 생략
+            print(f"  SRT 파일 사용 중: {payload.srt_path}")
+            transcript_text = parse_srt(payload.srt_path)
+            print(f"  - SRT 파싱 완료: {len(transcript_text)}개 세그먼트")
+        else:
+            # Whisper 전사
+            audio_path = extract_audio_from_video(payload.video_path)
+            print(f"  - 오디오 추출 완료: {audio_path.name}")
+            print("  Whisper 전사 중... (시간이 걸릴 수 있습니다)")
+            transcript_text = extract_transcript(audio_path)
+            if audio_path.exists(): audio_path.unlink()
+
         save_data = [{"start_sec": s.start_sec, "end_sec": s.end_sec, "text": s.text} for s in transcript_text]
         full_audio_path.write_text(json.dumps(save_data, ensure_ascii=False, indent=2), encoding="utf-8")
-        if audio_path.exists(): audio_path.unlink()
         audio_elapsed = time.time() - audio_start
         print(f"  - 전사 완료: {len(transcript_text)}개 세그먼트, (소요 시간: {audio_elapsed:.1f}초)")
     
@@ -217,15 +233,15 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     split_chunks = []
     for i, chunk in enumerate(chunks, 1):
         print(f"    청크 {i} 분할 중... ({chunk.start_sec:.1f}초 ~ {chunk.end_sec:.1f}초)")
-        split_path = split_video_chunk(
+        split_path, actual_start_sec = split_video_chunk(
             proxy_video_path,
             chunk.start_sec,
             chunk.end_sec,
         )
-        # Chunk 객체에 분할된 파일 경로 추가
-        split_chunk = replace(chunk, split_path=split_path)
+        # Chunk 객체에 분할된 파일 경로 및 실제 시작 시간 추가
+        split_chunk = replace(chunk, split_path=split_path, actual_start_sec=actual_start_sec)
         split_chunks.append(split_chunk)
-        print(f"      → {split_path.name} 생성 완료")
+        print(f"      → {split_path.name} 생성 완료 (실제 시작: {actual_start_sec:.2f}초)")
     
     chunks = split_chunks
     print("[OK] 청크 분할 완료")
@@ -243,7 +259,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             transcript_text = [SimpleNamespace(**seg) for seg in raw_audio]
 
         print(f"  - 총 {len(all_candidates)}개 후보 모멘트")
-        print(f"  - {len(raw_audio)}개 자막")
+        print(f"  - {len(transcript_text)}개 자막")
         print("[OK] Gemini 분석 결과 로드 완료 (체크포인트에서)")
     elif start_idx <= 5:
         print("\n[6/13] Gemini 분석 준비 중...")
@@ -261,22 +277,23 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         for idx, chunk in enumerate(chunks, 1):
             print(f"  청크 {idx}/{len(chunks)} 분석 중... ({chunk.start_sec:.1f}초 ~ {chunk.end_sec:.1f}초)")
             chunk_start = time.time()
-            scenes = detect_scenes(payload.video_path, media_info.fps, chunk.end_sec - chunk.start_sec)
-            scene_boundaries = [scene.start_sec + chunk.start_sec for scene in scenes]
-            
-            # 분할된 파일 경로 가져오기
+
+            # 분할된 파일 경로 가져오기 (detect_scenes보다 먼저 설정해야 함)
             split_path = chunk.split_path if chunk.split_path else None
-            
-            
+
+            scenes = detect_scenes(split_path, media_info.fps, chunk.end_sec - chunk.start_sec)
+            scene_boundaries = [scene.start_sec for scene in scenes]
+
             # 이전 청크들의 전사 세그먼트 추출 (시간 범위 기반)
             previous_transcripts: list[dict[str, Any]] = []
             
             prompt_payload = {
                 "work_title": payload.work_title,
                 "topic": payload.topic,
+                "previous_episodes_context": payload.previous_episodes_context,  # 이전 맥락 부여 테스트
                 "chunk_start_sec": chunk.start_sec,
                 "chunk_end_sec": chunk.end_sec,
-                #"transcript_text": transcript_text,
+                "transcript_text": transcript_text,
                 "scene_boundaries": scene_boundaries,
                 "video_path": str(split_path) if split_path else None,
                 "full_summary": full_summary or "없음",
@@ -298,12 +315,13 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 })
                 
                 for moment in response["candidate_moments"]:
-                    # 파이썬 수학 버그 수정: chunk.start_sec 대신, FFmpeg이 실제로 자른 영상 길이를 역산해서 
-                    # 정확한 오프셋 보정값을 더해줍니다. 
-                    # (예: chunk 1의 start_sec가 300이고 오버랩이 3초라면, 실제 잘린 시작점은 297초 근처)
-                    actual_cut_offset = max(0, chunk.start_sec)
+                    # ffprobe로 확인한 실제 시작 시간을 오프셋으로 사용
+                    # (-c copy는 키프레임 단위로 잘리므로 chunk.start_sec보다 일찍 시작될 수 있음)
+                    # Gemini는 파일 내 상대적 위치를 보고하므로, 실제 파일 시작 PTS를 더해야 원본 시간이 됨
+                    actual_cut_offset = chunk.actual_start_sec if chunk.actual_start_sec is not None else chunk.start_sec
                     moment["start_sec"] += actual_cut_offset
                     moment["end_sec"] += actual_cut_offset
+                    moment["chunk_index"] = chunk.index
                     all_candidates.append(moment)
             finally:
                 # 분석 완료 후 분할 파일 즉시 삭제
@@ -355,44 +373,67 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             
             # 2. 클립 파싱 (전체 JSON에서 'selected_storyline'만 추출해서 편집에 사용)
             selected_data = story_plan.get("selected_storyline", {})
-            actual_storyline = selected_data.get("storyline", {})
 
-            # Hook (도입부) 클립 추가
-            if "hook" in actual_storyline:
-                h = actual_storyline["hook"]
-                clips.append(StoryClip(
-                    role="hook",
-                    start_sec=h["start_sec"],
-                    end_sec=h["end_sec"],
-                    subtitle=h.get("description", ""), 
-                    tts_line=h.get("tts_line", ""),
-                    use_original_audio=h.get("use_original_audio", True)
-                ))
-
-            # Build (전개부) 클립들 추가 (리스트 형태이므로 for문 사용)
-            if "build" in actual_storyline:
-                for b in actual_storyline["build"]:
-                    clips.append(StoryClip(
-                        role="build",
-                        start_sec=b["start_sec"],
-                        end_sec=b["end_sec"],
-                        subtitle=b.get("description", ""),
-                        tts_line=b.get("tts_line", ""),
-                        use_original_audio=b.get("use_original_audio", True)
-                    ))
-
-            # Payoff (결정적 장면) 클립 추가
-            if "payoff" in actual_storyline:
-                p = actual_storyline["payoff"]
+            if selected_data.get("shorts_type") == "highlight":
+                # highlight 타입: hook/build/payoff 없이 start_sec/end_sec 직접 사용
+                tts_line_val = selected_data.get("tts_line", "")
                 clips.append(StoryClip(
                     role="payoff",
-                    start_sec=p["start_sec"],
-                    end_sec=p["end_sec"],
-                    subtitle=p.get("description", ""),
-                    tts_line=p.get("tts_line", ""),
-                    use_original_audio=p.get("use_original_audio", True)
+                    start_sec=selected_data["start_sec"],
+                    end_sec=selected_data["end_sec"],
+                    subtitle=tts_line_val if tts_line_val else selected_data.get("topic", ""),
+                    tts_line=tts_line_val,
+                    use_original_audio=selected_data.get("use_original_audio", True)
                 ))
+            else:
+                # storytelling 타입: hook / build / payoff 구조
+                actual_storyline = selected_data.get("storyline", {})
 
+                # Hook (도입부) 클립 추가
+                if "hook" in actual_storyline:
+                    h = actual_storyline["hook"]
+                    tts_line_val = h.get("tts_line", "")
+                    clips.append(StoryClip(
+                        role="hook",
+                        start_sec=h["start_sec"],
+                        end_sec=h["end_sec"],
+                        subtitle=tts_line_val if tts_line_val else h.get("description", ""),
+                        tts_line=h.get("tts_line", ""),
+                        use_original_audio=h.get("use_original_audio", True)
+                    ))
+
+                # Build (전개부) 클립들 추가
+                if "build" in actual_storyline:
+                    for b in actual_storyline["build"]:
+                        tts_line_val = b.get("tts_line", "")
+                        clips.append(StoryClip(
+                            role="build",
+                            start_sec=b["start_sec"],
+                            end_sec=b["end_sec"],
+                            subtitle=tts_line_val if tts_line_val else b.get("description", ""),
+                            tts_line=b.get("tts_line", ""),
+                            use_original_audio=b.get("use_original_audio", True)
+                        ))
+
+                # Payoff (결정적 장면) 클립 추가
+                if "payoff" in actual_storyline:
+                    p = actual_storyline["payoff"]
+                    tts_line_val = p.get("tts_line", "")
+                    clips.append(StoryClip(
+                        role="payoff",
+                        start_sec=p["start_sec"],
+                        end_sec=p["end_sec"],
+                        subtitle=tts_line_val if tts_line_val else p.get("description", ""),
+                        tts_line=p.get("tts_line", ""),
+                        use_original_audio=p.get("use_original_audio", True)
+                    ))
+
+
+            # tts_line이 없는 클립은 원본 오디오 사용으로 강제
+            clips = [
+                replace(c, use_original_audio=True) if not c.tts_line else c
+                for c in clips
+            ]
 
             print(f"  - 스토리 클립 생성 완료 ({len(clips)}개 클립)")
             story_elapsed = time.time() - story_start
@@ -409,6 +450,21 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             )
             
             print(f"[OK] 스토리 구성 완료 (소요 시간: {story_elapsed:.1f}초)")
+            print("\n[7.5/13] 침묵 구간 제거 중...")
+            silence_start = time.time()
+
+            cut_results = cut_silence_from_clips(
+                clips,
+                transcript_text,
+                max_gap_sec=0.8,
+                padding_sec=0.15,
+            )
+            print_silence_cut_summary(cut_results)
+
+            clips = flatten_to_clips(cut_results)
+
+            silence_elapsed = time.time() - silence_start
+            print(f"[OK] 침묵 제거 완료 (소요 시간: {silence_elapsed:.1f}초, 총 {len(clips)}개 클립)")
             print(f"  - 선택된 제목: {title_text}")
             
     else:
@@ -455,11 +511,18 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     elif start_idx <= 7:
         # 1. 전사 데이터 추출 및 자막 데이터 생성
         print("\n[8/13] 자막 데이터 처리 중... (Whisper 전사 및 타임라인 매핑)")
+
+         # 2. 편집 타임라인에 맞게 자막 매핑
+        remapped = remap_transcript_to_edited_timeline(
+            clips,
+            transcript_text,
+            tts_only_when_no_orig=True
+        )
         
         # 2. 편집 타임라인에 맞게 자막 매핑
         remapped = remap_transcript_to_edited_timeline(
-            clips, 
-            transcript_text, 
+            clips,
+            transcript_text,
             tts_only_when_no_orig=True
         )
         
@@ -472,7 +535,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
 
         # 4. 객체화 및 캐시 저장
-        from types import SimpleNamespace
         
         save_data = []
         for seg in merged_segments:
@@ -596,7 +658,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         if 'final_segments' not in locals() or not final_segments:
             if segments_cache_path.exists():
                 print("  - JSON 캐시에서 자막 데이터를 로드합니다.")
-                from types import SimpleNamespace
                 cached_data = json.loads(segments_cache_path.read_text(encoding="utf-8"))
                 final_segments = [SimpleNamespace(**seg) for seg in cached_data]
             
@@ -623,7 +684,12 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         render_start = time.time()
         tts_files_map = tts_audio_files if "tts_audio_files" in locals() else {}
         actual_font_path = get_font_path(payload.design.title_font, paths.app_root)
-        updated_design = replace(payload.design, title_font=actual_font_path)
+        actual_subtitle_font_path = get_font_path(payload.design.subtitle_font, paths.app_root)
+        updated_design = replace(
+            payload.design,
+            title_font=actual_font_path,
+            subtitle_font=actual_subtitle_font_path,
+        )
 
         render_inputs = RenderInputs(
             video_path=payload.video_path,

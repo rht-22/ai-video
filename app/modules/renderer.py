@@ -455,7 +455,7 @@
 #             continue
 #         tts_input_idx = num_clip_inputs + tts_pos[clip_idx]
 #         # TTS 속도 1.5배 적용 (최신 트렌드)
-#         tts_speed = f"[{tts_input_idx}:a]atempo=1.5[tts{clip_idx}_speed]"
+#         tts_speed = f"[{tts_input_idx}:a]atempo=1.2[tts{clip_idx}_speed]"
 #         tts_filters.append(tts_speed)
 #         tts_vol = f"[tts{clip_idx}_speed]volume={inputs.tts_audio_gain_db}dB[tts{clip_idx}_vol]"
 #         tts_filters.append(tts_vol)
@@ -584,6 +584,7 @@ def render_short(inputs: RenderInputs) -> list[str]:
             if hwaccel:
                 args.extend(["-hwaccel", hwaccel])
             args.extend([
+                "-thread_queue_size", "512",
                 "-ss", f"{clip.start_sec}",
                 "-to", f"{clip.end_sec}",
                 "-i", str(_relpath_or_abs(inputs.video_path, output_dir)),
@@ -612,7 +613,7 @@ def render_short(inputs: RenderInputs) -> list[str]:
             cmd_try = [
                 ffmpeg_cmd, "-y",
                 *_build_input_args(hwaccel),
-                "-filter_complex", filter_script,
+                "-filter_complex_script", str(filter_path),
                 "-map", "[vout]", "-map", "[aout]",
                 "-c:v", video_encoder, *encoder_args,
                 "-pix_fmt", "yuv420p",
@@ -696,6 +697,17 @@ def _relpath_or_abs(p: Path, base: Path) -> Path:
         return p.relative_to(base)
     except ValueError:
         return p
+
+
+def _to_short_path(path: str) -> str:
+    """Windows에서 한글 등 유니코드 경로를 FFmpeg이 인식할 수 있는 8.3 단축 경로로 변환."""
+    import os
+    if os.name != 'nt':
+        return path
+    import ctypes
+    buf = ctypes.create_unicode_buffer(32768)
+    ctypes.windll.kernel32.GetShortPathNameW(path, buf, 32768)
+    return buf.value or path
 
 
 def _escape_text_for_drawtext(text: str) -> str:
@@ -882,13 +894,14 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sort
     #     last_v_label = next_label
     # [5] 제목(Title) 필터 
     actual_font = str(d.title_font)
-    
-    font_arg = actual_font 
+
+    font_arg = actual_font
     last_v_label = "[vcat]"
     custom_colors = getattr(d, 'title_colors', ["white"])
     if "/" in actual_font or "\\" in actual_font:
-        # 윈도우 경로 필수 처리: 백슬래시를 슬래시로, 콜론은 이스케이프
-        clean_path = actual_font.replace("\\", "/").replace(":", "\\:")
+        # 유니코드 경로(한글 등)를 FFmpeg이 인식할 수 있도록 8.3 단축 경로로 변환
+        short_path = _to_short_path(actual_font.replace("/", "\\"))
+        clean_path = short_path.replace("\\", "/").replace(":", "\\:")
         font_arg = clean_path
 
     for idx, raw_line in enumerate(title_lines):
@@ -930,8 +943,8 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sort
         ass_content = ass_content.replace(default_font, requested_font)
         ass_path.write_text(ass_content, encoding="utf-8")
 
-        sub_path_fixed = str(ass_path).replace("\\", "/").replace(":", "\\:")
-        font_dir_fixed = str(font_folder.resolve()).replace("\\", "/").replace(":", "\\:")
+        sub_path_fixed = _to_short_path(str(ass_path)).replace("\\", "/").replace(":", "\\:")
+        font_dir_fixed = _to_short_path(str(font_folder.resolve())).replace("\\", "/").replace(":", "\\:")
         
         # filters.append(f"{work_label}ass='{sub_path_fixed}':original_size={W}x{H}:fontsdir='{font_dir_fixed}'[vout]")
         filters.append(f"{work_label}ass='{sub_path_fixed}':fontsdir='{font_dir_fixed}'[vout]")
@@ -943,33 +956,81 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sort
     filters.append(_build_audio_filter(inputs, num_clip_inputs, tts_keys_sorted))
     return ";".join(filters)
 
+def _get_audio_duration(path: Path) -> float:
+    """ffprobe로 오디오 파일 길이를 측정합니다."""
+    ffprobe = find_ffmpeg_command("ffprobe")
+    try:
+        result = subprocess.check_output([
+            ffprobe, "-v", "quiet",
+            "-print_format", "json",
+            "-show_streams",
+            str(path)
+        ], stderr=subprocess.DEVNULL)
+        data = json.loads(result)
+        for stream in data.get("streams", []):
+            if "duration" in stream:
+                return float(stream["duration"])
+    except Exception:
+        pass
+    return 0.0
+
 def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sorted: list[int]) -> str:
-    original_vol = f"[acat]volume={inputs.original_audio_gain_db}dB[orig_vol]"
-
+ 
     if not inputs.tts_audio_files:
-        return original_vol.replace("[orig_vol]", "[aout]")
-
-    # 각 클립의 시작 시간(편집 타임라인 기준) 계산
+        # TTS 없으면 원본 오디오 그대로
+        return f"[acat]volume={inputs.original_audio_gain_db}dB[aout]"
+ 
+    # 각 클립의 편집 타임라인 기준 시작 시간 계산
     clip_times: list[tuple[float, StoryClip]] = []
     current = 0.0
     for clip in inputs.clips:
         clip_times.append((current, clip))
         current += clip.end_sec - clip.start_sec
-
-    tts_filters: list[str] = []
-    mix_inputs: list[str] = ["[orig_vol]"]
-
-    # 입력 인덱스: 0..(num_clip_inputs-1)=클립, num_clip_inputs..=tts (tts_keys_sorted 순서)
+ 
+    # TTS가 재생되는 구간 계산 → 원본 오디오 음소거 구간
+    # atempo=1.5 적용 후 실제 재생 길이 = 원본 길이 / 1.5
+    mute_ranges: list[tuple[float, float]] = []
     tts_pos = {clip_idx: pos for pos, clip_idx in enumerate(tts_keys_sorted)}
     for clip_idx, (start_time, _) in enumerate(clip_times):
         if clip_idx not in inputs.tts_audio_files:
             continue
+        tts_path = inputs.tts_audio_files[clip_idx]
+        raw_dur = _get_audio_duration(tts_path)
+        if raw_dur > 0:
+            # atempo=1.5이므로 실제 재생 길이는 짧아짐
+            actual_dur = raw_dur / 1.2
+            mute_end = start_time + actual_dur
+            mute_ranges.append((start_time, mute_end))
+ 
+    # 원본 오디오: TTS 구간만 음소거, 나머지는 정상 볼륨
+    if mute_ranges:
+        # volume 필터의 enable 표현식: TTS 재생 구간에서 volume=0
+        mute_expr = "+".join(
+            f"between(t,{s:.3f},{e:.3f})" for s, e in mute_ranges
+        )
+        original_vol = (
+            f"[acat]volume=enable='{mute_expr}':volume=0,"
+            f"volume={inputs.original_audio_gain_db}dB[orig_vol]"
+        )
+    else:
+        original_vol = f"[acat]volume={inputs.original_audio_gain_db}dB[orig_vol]"
+ 
+    tts_filters: list[str] = []
+    mix_inputs: list[str] = ["[orig_vol]"]
+ 
+    # 입력 인덱스: 0..(num_clip_inputs-1)=클립, num_clip_inputs..=tts
+    for clip_idx, (start_time, _) in enumerate(clip_times):
+        if clip_idx not in inputs.tts_audio_files:
+            continue
         tts_input_idx = num_clip_inputs + tts_pos[clip_idx]
-        # TTS 속도 1.5배 적용 (최신 트렌드)
-        tts_speed = f"[{tts_input_idx}:a]atempo=1.5[tts{clip_idx}_speed]"
+ 
+        # TTS 속도 1.5배
+        tts_speed = f"[{tts_input_idx}:a]atempo=1.2[tts{clip_idx}_speed]"
         tts_filters.append(tts_speed)
+ 
         tts_vol = f"[tts{clip_idx}_speed]volume={inputs.tts_audio_gain_db}dB[tts{clip_idx}_vol]"
         tts_filters.append(tts_vol)
+ 
         if start_time > 0:
             delay_ms = int(start_time * 1000)
             tts_delayed = (
@@ -979,11 +1040,11 @@ def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sor
             mix_inputs.append(f"[tts{clip_idx}_delayed]")
         else:
             mix_inputs.append(f"[tts{clip_idx}_vol]")
-
+ 
     if len(mix_inputs) <= 1:
         return original_vol.replace("[orig_vol]", "[aout]")
-
-    # amix 입력은 공백 없이 연결해야 함: [a][b][c]amix=...
+ 
+    # amix로 원본 + TTS 믹싱
     mix_inputs_str = "".join(mix_inputs)
     mix_filter = (
         f"{';'.join(tts_filters)};{mix_inputs_str}"

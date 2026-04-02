@@ -42,6 +42,7 @@ GEMINI_PROMPT_TEMPLATE = """
 - 작품명: {work_title}
 - 주제: {topic}
 - 청크 범위: {chunk_start_sec} ~ {chunk_end_sec} 초
+{previous_episodes_context_block}
 - ⚠️ 모든 start_sec / end_sec는 반드시 첨부된 영상 파일의 시작(0초)을 기준으로 한 상대값으로 반환할 것
 
 - 씬 경계(있으면): {scene_boundaries}
@@ -49,10 +50,14 @@ GEMINI_PROMPT_TEMPLATE = """
 - 스토리라인(있으면): {storyline} {previous_context}
 
 [규칙]
-- 아래 JSON 스키마 구조를 100% 동일하게 유지하여 출력 
+- 아래 JSON 스키마 구조를 100% 동일하게 유지하여 출력
 - 분석 결과 해당 항목이 없을 경우 빈 배열 대신 null로 출력
 - candidate_moments 최소 10개
 - story_role은 hook/build/payoff 중 하나
+- 타이틀 시퀀스, 엔딩 크레딧은 제외하기
+- 앞 장면이 나중 내용에 의해 재해석되는 경우 그 의미를 반영하라
+- 확실하지 않은 내용은 넣지 마라
+- 완결되지 않은 부분(엔딩)은 이후 전개에 대한 궁금증을 유발하는 장면일 수 있으므로 확정된 전개로 장담하지 말 것
 
 {{
   "chunk_index": 0,
@@ -75,14 +80,16 @@ GEMINI_PROMPT_TEMPLATE = """
   "overall_vibe": "영상 전체 분위기 요약",
   "candidate_moments": [
     {{
-      "candidate_index": 0,
+      
+      "chunk_index": 0,
+      "candidate_index":0,
       "start_sec": 12.4,
       "end_sec": 25.8,
       "importance": 0.0,
       "hook_score": 0.0,
       "topic_alignment_score": 0.0,
       "story_role": "hook|build|payoff",
-      "description": "장면 설명",
+      "description": "장면 설명(묘사 위주)",
       "reason": "선정 이유",
       "transcript": "해당 구간에서 가장 핵심이 되는 '단 한 명'의 주요 대사",
       "points": {{
@@ -207,6 +214,18 @@ class GeminiClient:
         self.types = types
 
     def analyze_chunk(self, payload: dict[str, Any]) -> dict[str, Any]:
+        # 이전 맥락 부여 테스트
+        previous_episodes_context_block = ""
+        if payload.get("previous_episodes_context"):
+            ctx = payload["previous_episodes_context"]
+            previous_episodes_context_block = (
+                f"\n[이전 에피소드 배경 정보 — 오해 방지 전용]\n{ctx}\n"
+                "⚠️ 위 정보는 인물명·관계·사건을 올바르게 식별하기 위한 참고용입니다.\n"
+                "장면 선택 기준은 오직 현재 첨부 영상 안에서의 재미·흥미도·화제성입니다.\n"
+                "이전 화와의 연관성이 높다는 이유만으로 장면을 선택하거나 높게 평가하지 마세요.\n"
+                "타임스탬프는 반드시 현재 첨부 영상의 시작(0초) 기준으로 계산하세요.\n"
+            )
+
         previous_context = ""
         if payload.get("previous_analyses"):
             prev_analyses = payload["previous_analyses"]
@@ -229,11 +248,12 @@ class GeminiClient:
             topic=payload["topic"],
             chunk_start_sec=payload["chunk_start_sec"],
             chunk_end_sec=payload["chunk_end_sec"],
-            #transcript_text=payload.get("transcript_text") or "없음",
+            transcript_text=payload.get("transcript_text") or "없음",
             scene_boundaries=payload.get("scene_boundaries") or "없음",
             full_summary=payload.get("full_summary") or "없음",
             storyline=payload.get("storyline") or "없음",
             previous_context=previous_context,
+            previous_episodes_context_block=previous_episodes_context_block,  # 이전 맥락 부여 테스트
         )
         
         video_path = payload.get("video_path")
@@ -243,22 +263,31 @@ class GeminiClient:
         if video_path:
             video_path_obj = Path(video_path) if isinstance(video_path, str) else video_path
             if video_path_obj.exists():
-                try:
-                    uploaded_file = self.client.files.upload(file=str(video_path_obj))
-                    while uploaded_file.state.name == "PROCESSING":
-                        time.sleep(2)
-                        uploaded_file = self.client.files.get(name=uploaded_file.name)
-                    if uploaded_file.state.name == "FAILED":
-                        raise RuntimeError("Gemini File API 업로드 실패")
-                    content_parts.append(self.types.Part(
-                        file_data=self.types.FileData(
-                            file_uri=uploaded_file.uri,
-                            mime_type="video/mp4",
-                        ),
-                        video_metadata=self.types.VideoMetadata(fps=2),
-                    ))
-                except Exception as upload_err:
-                    print(f" [WARN] 비디오 업로드 중 오류 발생: {upload_err}")
+                for upload_attempt in range(self.config.max_retries):
+                    try:
+                        uploaded_file = self.client.files.upload(file=str(video_path_obj))
+                        while uploaded_file.state.name == "PROCESSING":
+                            time.sleep(2)
+                            uploaded_file = self.client.files.get(name=uploaded_file.name)
+                        if uploaded_file.state.name == "FAILED":
+                            raise RuntimeError("Gemini File API 업로드 실패")
+                        content_parts.append(self.types.Part(
+                            file_data=self.types.FileData(
+                                file_uri=uploaded_file.uri,
+                                mime_type="video/mp4",
+                            ),
+                            # video_metadata=self.types.VideoMetadata(fps=2),
+                        ))
+                        break  # 업로드 성공
+                    except Exception as upload_err:
+                        if upload_attempt == self.config.max_retries - 1:
+                            raise RuntimeError(
+                                f"비디오 업로드 {self.config.max_retries}회 모두 실패 — 분석을 중단합니다.\n"
+                                f"원인: {upload_err}"
+                            )
+                        wait = 2 ** upload_attempt
+                        print(f" [WARN] 업로드 오류 (시도 {upload_attempt + 1}/{self.config.max_retries}), {wait}초 후 재시도: {upload_err}")
+                        time.sleep(wait)
 
         try:
             for attempt in range(self.config.max_retries):
@@ -288,6 +317,9 @@ class GeminiClient:
 
                     json_text = _extract_json_from_markdown(text)
                     data = json.loads(json_text)
+                    # 0324 오류 확인용
+                    print("data의 타입:", type(data), "/ 내용:", data)
+                    print("payload의 타입:", type(payload))
                     data["chunk_start_sec"] = payload["chunk_start_sec"]
                     data["chunk_end_sec"] = payload["chunk_end_sec"]
                     _validate_gemini_schema(data)
@@ -460,6 +492,7 @@ class GeminiClient:
     제공된 영상 분석 데이터를 기반으로 
     시청자의 몰입을 극대화할 수 있는 2가지 타입의 스토리라인(하이라이트형, 서사형)을 3개씩 구성하고, 
     그중 가장 성공 가능성이 높은 하나를 최종 선정하여 출력하라.
+    작품의 전체 맥락을 모르는 사람도 한 번 보고 재미를 느낄 수 있는 장면을 선정하라.
 
     # Input Data
     - 제목: {work_title}
@@ -471,49 +504,47 @@ class GeminiClient:
     1. Highlight Type: 
     - 모든 chunk의 candidate_moments들 중, 맥락 설명 없이 가장 자극적이고 강렬한 장면(Peak Tension) 하나를 중심으로 구성할 것.
     - viral_type: "points"를 참고하여, 해당되는 것 모두 기재.
-
     2. Storytelling Type: 
-    - 모든 chunk의 candidate_moments 중에서 여러 장면들을 선정해 원본 스토리에 맞게 기승전결이 있도록 유기적으로 연결할 것.
-    - 캐릭터의 행적을 조명하거나 영상의 주요 서사를 요약.
-    - 각 storyline 내에서는 가장 눈길을 끄는 장면을 hook으로 사용하고, hook이 전개상 앞부분이면 "여정몰입형", 
-      전개상 뒷부분이면 "결과선공개형"으로 분류.
+    - 모든 chunk의 candidate_moments 중에서 여러개를 연결해 영상 속 사건 하나를 요약.
+    - 각 storyline 내에서는 가장 눈길을 끄는 장면을 hook으로 사용하고, hook이 전개상 앞부분이면 "여정몰입형", 전개상 뒷부분이면 "결과선공개형"으로 분류.
 
     3. Common: 
     각 장면의 'start_sec', 'end_sec'를 명시하고, 영상의 '후킹'을 위한 TTS 라인을 반드시 포함할 것.
+    제목은 30자 이내로.
 
     다음 JSON 스키마로만 응답:
     {{
     "storylines": [
-        {{
-        "storyline_index": 0,
-        "chunk_index": 0,
-        "candidate_index": 0,
-        "shorts_type": "highlight",
-        "topic": "주제명",
-        "viral_type": "conflicts_and_twists|humor_points|love_points|relatability_points|saida_points|goguma_points",
-        "topic_reason": "선정 이유",
-        "score": 0.0,
-        "start_sec": 0.0,
-        "end_sec": 0.0
-        }},
-        {{
-        "storyline_index": 1,
-        "shorts_type": "storytelling",
-        "sequence_type": "여정몰입형|결과선공개형",
-        "topic": "주제명",
-        "topic_reason": "서사 구성 이유",
-        "score": 0.0,
-        "storyline": {{
-            "hook": {{ "chunk_index": 0, "candidate_index": 0, "start_sec": 0.0, "end_sec": 0.0, "description": "장면 설명", "tts_line": "", "use_original_audio": true }},
-            "build": [ {{ "chunk_index": 0, "candidate_index": 0, "start_sec": 0.0, "end_sec": 0.0, "description": "장면 설명", "tts_line": "", "use_original_audio": true }} ],
-            "payoff": {{ "chunk_index": 0, "candidate_index": 0, "start_sec": 0.0, "end_sec": 0.0, "description": "장면 설명", "tts_line": "", "use_original_audio": true }}
-        }}
-        }}
-    ],
-    "selected_storyline_index": 0,
-    "title_txt":"적절한 제목 정하기",
-    "selected_storyline": {{ "이곳에 선정된 인덱스의 객체를 그대로 복사해서 출력": "" }}
-    }}
+        {{
+        "storyline_index": 0,
+        "chunk_index": 0,
+        "candidate_index": 0,
+        "shorts_type": "highlight",
+        "topic": "주제명",
+        "viral_type": "conflicts_and_twists|humor_points|love_points|relatability_points|saida_points|goguma_points",
+        "topic_reason": "선정 이유",
+        "score": 0.0,
+        "start_sec": 0.0,
+        "end_sec": 0.0
+        }},
+        {{
+        "storyline_index": 1,
+        "shorts_type": "storytelling",
+        "sequence_type": "여정몰입형|결과선공개형",
+        "topic": "주제명",
+        "topic_reason": "서사 구성 이유",
+        "score": 0.0,
+        "storyline": {{
+            "hook": {{ "chunk_index": 0, "candidate_index": 0, "start_sec": 0.0, "end_sec": 0.0, "description": "장면 설명", "tts_line": "", "use_original_audio": true }},
+            "build": [ {{ "chunk_index": 0, "candidate_index": 0, "start_sec": 0.0, "end_sec": 0.0, "description": "장면 설명", "tts_line": "", "use_original_audio": true }} ],
+            "payoff": {{ "chunk_index": 0, "candidate_index": 0, "start_sec": 0.0, "end_sec": 0.0, "description": "장면 설명", "tts_line": "", "use_original_audio": true }}
+        }}
+        }}
+    ],
+    "selected_storyline_index": 0,
+    "title_txt":"적절한 제목 정하기",
+    "selected_storyline": {{ "이곳에 선정된 인덱스의 객체를 그대로 복사해서 출력": "" }}
+    }}
     """
             response = self.client.models.generate_content(
                 model=self.config.model_name,
@@ -541,7 +572,7 @@ def load_gemini_client() -> GeminiClient:
             "GEMINI_API_KEY environment variable is required. "
             "Please set it in .env file or as an environment variable."
         )
-    model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-3-pro-preview")
+    model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-3.1-pro-preview")
     max_retries = int(os.getenv("GEMINI_MAX_RETRIES", "3"))
     return GeminiClient(GeminiConfig(api_key=api_key, model_name=model_name, max_retries=max_retries))
 

@@ -46,6 +46,9 @@ def build_parser() -> argparse.ArgumentParser:
         ],
                        help="Start from specific step (requires --job-id)")
     create.add_argument("--job-id", help="Job ID to resume from (for --from-step)")
+    create.add_argument("--previous-context", help="이전 에피소드 요약 텍스트 (직접 입력)")  # 이전 맥락 부여 테스트
+    create.add_argument("--previous-context-file", help="이전 에피소드 요약이 담긴 텍스트 파일 경로")  # 이전 맥락 부여 테스트
+    create.add_argument("--srt-file", help="외부 SRT 자막 파일 경로 (제공 시 Whisper 음성인식 생략)")
     return parser
 
 
@@ -56,7 +59,14 @@ def main() -> None:
     if args.command == "create_shorts":
         if args.from_step and not args.job_id:
             parser.error("--from-step requires --job-id")
-            
+
+        # 이전 맥락 부여 테스트: --previous-context 또는 --previous-context-file 처리
+        previous_episodes_context: str | None = None
+        if getattr(args, "previous_context_file", None):
+            previous_episodes_context = Path(args.previous_context_file).read_text(encoding="utf-8").strip()
+        elif getattr(args, "previous_context", None):
+            previous_episodes_context = args.previous_context
+
         # # 명령어 실행 직후(영상을 올리고 나서) 사용자에게 톤(장르)을 인터랙티브하게 물어봅니다.
         # print("\n🎬 어떤 스타일(톤)의 쇼츠를 만드시겠습니까?")
         # print("  1) 드라마 (묵직한 서사, 갈등, 반전, 긴장감 위주)")
@@ -74,12 +84,16 @@ def main() -> None:
         #     else:
         #         print("❌ 잘못된 입력입니다. 1 또는 2를 입력해 주세요.")
         
+        srt_path = Path(args.srt_file) if getattr(args, "srt_file", None) else None
+
         output = run_pipeline(
             PipelineInput(
                 video_path=Path(args.video),
                 work_title=args.title,
                 topic=args.topic,
-                outdir=_resolve_outdir(Path(args.outdir))
+                outdir=_resolve_outdir(Path(args.outdir)),
+                previous_episodes_context=previous_episodes_context,  # 이전 맥락 부여 테스트
+                srt_path=srt_path,
             ),
             from_step=args.from_step,
             job_id=args.job_id,

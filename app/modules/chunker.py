@@ -15,6 +15,7 @@ class Chunk:
     end_sec: float
     path: Path
     split_path: Path | None = None  # 분할된 파일 경로 (optional)
+    actual_start_sec: float | None = None  # ffprobe로 확인한 실제 시작 시간
 
 
 def build_chunks(video_path: Path, duration_sec: float, chunk_seconds: int, overlap_sec: int) -> list[Chunk]:
@@ -41,12 +42,29 @@ def build_chunks(video_path: Path, duration_sec: float, chunk_seconds: int, over
     return chunks
 
 
+def get_actual_start_time(video_path: Path) -> float:
+    """ffprobe로 영상의 실제 시작 타임스탬프를 읽습니다."""
+    ffprobe_cmd = find_ffmpeg_command("ffprobe")
+    cmd = [
+        ffprobe_cmd,
+        "-v", "quiet",
+        "-show_entries", "format=start_time",
+        "-of", "csv=p=0",
+        str(video_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        return float(result.stdout.strip())
+    except (ValueError, AttributeError):
+        return 0.0
+
+
 def split_video_chunk(
     video_path: Path,
     start_sec: float,
     end_sec: float,
     output_path: Path | None = None,
-) -> Path:
+) -> tuple[Path, float]:
     """ffmpeg를 사용해 영상의 특정 구간을 분할합니다.
     
     Args:
@@ -84,5 +102,8 @@ def split_video_chunk(
     
     # ffmpeg 실행
     subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
-    return output_path
+
+    # 실제로 잘린 시작 시간 확인 (키프레임 정렬로 인해 start_sec와 다를 수 있음)
+    actual_start = get_actual_start_time(output_path)
+
+    return output_path, actual_start

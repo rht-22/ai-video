@@ -1,11 +1,69 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from app.modules.speech import SpeechSegment
 from app.modules.story_builder import StoryClip
 from app.config import DesignConfig
+
+
+def parse_srt(srt_path: Path) -> list[SpeechSegment]:
+    """SRT 파일을 SpeechSegment 리스트로 변환합니다.
+
+    SRT 형식:
+        1
+        00:00:01,000 --> 00:00:04,000
+        자막 텍스트
+
+    Returns:
+        SpeechSegment 리스트 (start_sec, end_sec, text)
+    """
+    def _ts_to_sec(ts: str) -> float:
+        # HH:MM:SS,mmm 또는 HH:MM:SS.mmm
+        ts = ts.replace(",", ".")
+        h, m, rest = ts.split(":")
+        s, ms = rest.split(".")
+        return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
+
+    text = srt_path.read_text(encoding="utf-8-sig")
+    blocks = re.split(r"\n{2,}", text.strip())
+
+    segments: list[SpeechSegment] = []
+    for block in blocks:
+        lines = block.strip().splitlines()
+        if len(lines) < 3:
+            continue
+        # 첫 줄: 인덱스 번호 (skip), 두 번째 줄: 타임스탬프
+        try:
+            ts_line = lines[1]
+            start_str, end_str = ts_line.split("-->")
+            start_sec = _ts_to_sec(start_str.strip())
+            end_sec = _ts_to_sec(end_str.strip())
+        except (ValueError, IndexError):
+            continue
+
+        # 나머지 줄: 자막 텍스트 (HTML 태그 제거 후 합침)
+        raw_text = " ".join(lines[2:])
+        clean_text = re.sub(r"<[^>]+>", "", raw_text).strip()
+        # 대사 앞 (이름) → "이름: 대사" 변환 (Gemini 발화자 인식용)
+        speaker_match = re.match(r"^\(([^)]+)\)\s*", clean_text)
+        if speaker_match:
+            speaker = speaker_match.group(1)
+            dialogue = clean_text[speaker_match.end():]
+            clean_text = f"{speaker}: {dialogue}".strip()
+        else:
+            # 앞에 없는 괄호는 효과음으로 간주하여 제거
+            clean_text = re.sub(r"\([^)]*\)", "", clean_text).strip()
+        # 대괄호(음악/효과음 표기)는 항상 제거
+        clean_text = re.sub(r"\[[^\]]*\]", "", clean_text).strip()
+        if not clean_text:
+            continue
+
+        segments.append(SpeechSegment(start_sec=start_sec, end_sec=end_sec, text=clean_text))
+
+    return segments
 
 
 @dataclass(frozen=True)
@@ -47,7 +105,7 @@ def build_ass(
         end = _format_time(current_timeline_sec + clip_dur)
         text = clip.subtitle.replace("\n", " ")
         
-        line = f"Dialogue: 0,{start},{end},Default,,,,, {text}\n"
+        line = f"Dialogue: 0,{start},{end},Default,,,,,, {text}\n"
         clip_events_list.append(line)
         
         current_timeline_sec += clip_dur # 다음 클립을 위해 시간 누적
@@ -102,8 +160,8 @@ def build_ass_from_segments(
         # 2. 터미널 출력 (이제 정상적으로 찍힐 겁니다)
         print(f"[{idx+1}] {start_str} ~ {end_str} | {text}")
         
-        # 3. 라인 생성 (쉼표 5개 구조)
-        line = f"Dialogue: 0,{start_str},{end_str},Default,,,,, {text}\n"
+        # 3. 라인 생성 (쉼표 6개 구조: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text)
+        line = f"Dialogue: 0,{start_str},{end_str},Default,,,,,, {text}\n"
         clip_events_list.append(line)
 
     events = "".join(clip_events_list)
@@ -225,21 +283,26 @@ def merge_subtitle_segments(
 
 
 def _ass_header(style: SubtitleStyle) -> str:
-    margin_v = style.margin_v if style.margin_v > 0 else 480
-    
+    from app.config import FONT_NAME_MAP
 
-    alignment = 5 
+    margin_v = style.margin_v if style.margin_v >= 0 else 480
+
+    alignment = 2  # 2 = 하단 중앙
+
+    # 한글 폰트명 → 실제 파일명으로 매핑
+    # ASS Fontname은 파일명(확장자 제외)과 일치해야 fontsdir에서 찾을 수 있음
+    font_name = FONT_NAME_MAP.get(style.font_name, style.font_name)
 
     return (
         "[Script Info]\n"
         "ScriptType: v4.00+\n"
         "PlayResX: 1080\n"
         "PlayResY: 1920\n"
-        "ScaledBorderAndShadow: yes\n"  # 테두리와 그림자가 해상도에 맞게 스케일링되도록 추가
+        "ScaledBorderAndShadow: yes\n"
         "\n"
         "[V4+ Styles]\n"
         "Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Default,{style.font_name},{style.font_size},{style.primary_color},{style.outline_color},0,0,1,{style.outline},{style.shadow},{alignment},80,80,{margin_v},0\n"
+        f"Style: Default,{font_name},{style.font_size},{style.primary_color},{style.outline_color},0,0,1,{style.outline},{style.shadow},{alignment},80,80,{margin_v},0\n"
         "\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
@@ -250,7 +313,7 @@ def _ass_line(index: int, clip: StoryClip, style: SubtitleStyle) -> str:
     start = _format_time(clip.start_sec)
     end = _format_time(clip.end_sec)
     text = clip.subtitle.replace("\n", " ")
-    return f"Dialogue: 0,{start},{end},Default,,,,, {text}\n"
+    return f"Dialogue: 0,{start},{end},Default,,,,,, {text}\n"
 
 
 def _ass_line_original(segment: SpeechSegment, style: SubtitleStyle) -> str:
@@ -259,14 +322,14 @@ def _ass_line_original(segment: SpeechSegment, style: SubtitleStyle) -> str:
     end = _format_time(segment.end_sec)
     text = segment.text.replace("\n", " ")
     # 원본 자막은 레이어 1에 배치하고 약간 다른 스타일 적용 가능
-    return f"Dialogue: 1,{start},{end},Default,,,,, {text}\n"
+    return f"Dialogue: 1,{start},{end},Default,,,,,, {text}\n"
 
 
 def _ass_line_segment(segment: SpeechSegment) -> str:
     start = _format_time(segment.start_sec)
     end = _format_time(segment.end_sec)
     text = segment.text.replace("\n", " ")
-    return f"Dialogue: 0,{start},{end},Default,,,,, {text}\n"
+    return f"Dialogue: 0,{start},{end},Default,,,,,, {text}\n"
 
 
 def _format_time(seconds: float) -> str:

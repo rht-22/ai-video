@@ -8,13 +8,13 @@ import os
 @dataclass(frozen=True)
 class DesignConfig:
     # 영상 프레임 (9:16, 1:1 등)
-    aspect_ratio: str = "16:9" 
+    aspect_ratio: str = "3:4" 
     video_width: int = 800
     video_height: int = 1100
     video_y_pos: int = 480
     
     # 제목 설정
-    title_font: str = "NanumGothicBold"
+    title_font: str = "Jalnan"
     title_size: int = 90
     title_color: str = "white"
     title_colors: list[str] = field(default_factory=lambda: ["white", "white"])
@@ -24,7 +24,7 @@ class DesignConfig:
     subtitle_font: str = "여기어때 잘난체 2 TTF"
     subtitle_size: int = 65
     subtitle_color: str = "&H0000FFFF" 
-    subtitle_y_margin: int = 0
+    subtitle_y_margin: int = 500
     
     # 작품명 및 이미지 설정
     work_title_y: int = 1500

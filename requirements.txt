@@ -1,8 +1,7 @@
 google-genai>=0.8.0
-gTTS>=2.5.1
+edge-tts>=6.1.9
 opencv-python>=4.9.0.80
-openai-whisper>=20231117
-python-dotenv>=1.0.0
+faster-whisper>=1.0.0
 
 # Web Framework & Server
 fastapi==0.135.1
@@ -26,5 +25,3 @@ python-multipart==0.0.22
 # Utilities
 typing-extensions==4.15.0
 watchfiles==1.1.1
-
-python-dotenv>=1.0.0
