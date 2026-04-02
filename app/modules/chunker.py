@@ -96,7 +96,7 @@ def split_video_chunk(
         "-i", str(video_path),  # 입력 파일
         "-t", str(duration_sec),  # 길이
         "-c", "copy",  # 재인코딩 없이 복사 (빠름)
-        "-avoid_negative_ts", "make_zero",  # 타임스탬프 문제 방지
+        # -avoid_negative_ts make_zero 제거: 원본 PTS를 보존해야 ffprobe로 실제 시작 시간을 정확히 읽을 수 있음
         str(output_path),
     ]
     
