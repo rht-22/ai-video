@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -76,8 +79,13 @@ def _detect_faces(
     
     # 0.5초(sample_interval_sec) 간격으로 프레임을 건너뛰며 분석
     frame_step = max(1, int(fps * sample_interval_sec))
-    detector = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-    
+
+    # 한글 경로 문제 우회: ASCII 임시 경로로 복사 후 로드
+    _tmp_dir = tempfile.mkdtemp()
+    cascade_tmp = os.path.join(_tmp_dir, "haarcascade_frontalface_default.xml")
+    shutil.copy2(cv2.data.haarcascades + "haarcascade_frontalface_default.xml", cascade_tmp)
+    detector = cv2.CascadeClassifier(cascade_tmp)
+
     keyframes = []
     last_x, last_y = width / 2, height / 2
     crop_w, crop_h = _portrait_crop_size(width, height)
@@ -136,15 +144,6 @@ def _center_crop(width: int, height: int, sample_interval_sec: float) -> list[Cr
     ]
 
 
-# def _portrait_crop_size(width: int, height: int) -> tuple[int, int]:
-#     target_ratio = 9 / 16
-#     if width / height > target_ratio:
-#         crop_h = height
-#         crop_w = int(height * target_ratio)
-#     else:
-#         crop_w = width
-#         crop_h = int(width / target_ratio)
-#     return crop_w, crop_h
 def _portrait_crop_size(width: int, height: int) -> tuple[int, int]:
     target_ratio = 9 / 16
     
@@ -281,76 +280,3 @@ def _portrait_crop_size(width: int, height: int) -> tuple[int, int]:
 #     capture.release()
 #     return keyframes
 
-def _detect_faces(
-    clip_path: Path,
-    width: int,
-    height: int,
-    sample_interval_sec: float,
-    start_sec: float = 0.0, 
-    end_sec: float = None
-) -> list[CropKeyframe]:
-    import cv2
-
-    capture = cv2.VideoCapture(str(clip_path))
-    fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
-    total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-
-    # 1. 분석 구간 계산
-    start_frame = int(start_sec * fps)
-    if end_sec is None:
-        end_frame = total_frames
-    else:
-        end_frame = min(int(end_sec * fps), total_frames)
-
-    capture.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-    frame_interval = max(1, int(fps * sample_interval_sec))
-    
-    keyframes = []
-    frame_idx = start_frame
-
-  
-    crop_w = width
-    crop_h = height
-
-    while frame_idx < end_frame:
-        success, frame = capture.read()
-        if not success:
-            break
-        
-        if (frame_idx - start_frame) % frame_interval == 0:
-            keyframes.append(
-                CropKeyframe(
-                    time_sec=frame_idx / fps,
-                    x_center=float(width / 2),
-                    y_center=float(height / 2),
-                    crop_w=int(crop_w),
-                    crop_h=int(crop_h),
-                )
-            )
-        frame_idx += 1
-        
-    capture.release()
-    return keyframes
-
-def _center_crop(width: int, height: int, sample_interval_sec: float) -> list[CropKeyframe]:
-    crop_w, crop_h = _portrait_crop_size(width, height)
-    return [
-        CropKeyframe(
-            time_sec=0.0,
-            x_center=width / 2,
-            y_center=height / 2,
-            crop_w=crop_w,
-            crop_h=crop_h,
-        )
-    ]
-
-
-def _portrait_crop_size(width: int, height: int) -> tuple[int, int]:
-    target_ratio = 9 / 16
-    if width / height > target_ratio:
-        crop_h = height
-        crop_w = int(height * target_ratio)
-    else:
-        crop_w = width
-        crop_h = int(width / target_ratio)
-    return crop_w, crop_h

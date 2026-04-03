@@ -53,9 +53,8 @@ GEMINI_PROMPT_TEMPLATE = """
 - 아래 JSON 스키마 구조를 100% 동일하게 유지하여 출력
 - 분석 결과 해당 항목이 없을 경우 빈 배열 대신 null로 출력
 - candidate_moments 최소 10개
-- story_role은 hook/build/payoff 중 하나
 - 타이틀 시퀀스, 엔딩 크레딧은 제외하기
-- 앞 장면이 나중 내용에 의해 재해석되는 경우 그 의미를 반영하라
+- description은 실제 장면 묘사를 유지하고, 앞 장면이 나중 내용에 의해 재해석되는 경우 재해석된 의미는 reason 필드에만 반영할 것
 - 확실하지 않은 내용은 넣지 마라
 - 완결되지 않은 부분(엔딩)은 이후 전개에 대한 궁금증을 유발하는 장면일 수 있으므로 확정된 전개로 장담하지 말 것
 
@@ -88,7 +87,6 @@ GEMINI_PROMPT_TEMPLATE = """
       "importance": 0.0,
       "hook_score": 0.0,
       "topic_alignment_score": 0.0,
-      "story_role": "hook|build|payoff",
       "description": "장면 설명(묘사 위주)",
       "reason": "선정 이유",
       "transcript": "해당 구간에서 가장 핵심이 되는 '단 한 명'의 주요 대사",
@@ -597,12 +595,9 @@ def _validate_gemini_schema(data: dict[str, Any]) -> None:
             "importance",
             "hook_score",
             "topic_alignment_score",
-            "story_role",
             "description",
             "reason",
             "transcript"
         ]:
             if key not in moment:
                 raise ValueError(f"Missing key {key} in candidate moment")
-        if moment["story_role"] not in {"hook", "build", "payoff"}:
-            raise ValueError("story_role must be hook/build/payoff")

@@ -23,6 +23,7 @@ from app.modules.subtitle import (
     SubtitleStyle,
     build_ass,
     build_ass_from_segments,
+    build_tts_ass,
     merge_subtitle_segments,
     parse_srt,
     remap_transcript_to_edited_timeline,
@@ -32,6 +33,22 @@ from app.modules.validator import validate_output
 from app.modules.ffmpeg_utils import find_ffmpeg_command
 from types import SimpleNamespace
 from app.modules.silence_cutter import cut_silence_from_clips, flatten_to_clips, print_silence_cut_summary
+
+
+def _get_audio_duration(path: Path) -> float:
+    """ffprobe로 오디오 파일의 재생 시간을 읽습니다."""
+    ffprobe_cmd = find_ffmpeg_command("ffprobe")
+    cmd = [
+        ffprobe_cmd, "-v", "quiet",
+        "-show_entries", "format=duration",
+        "-of", "csv=p=0",
+        str(path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        return float(result.stdout.strip())
+    except (ValueError, AttributeError):
+        return 0.0
 
 @dataclass(frozen=True)
 class PipelineInput:
@@ -44,6 +61,7 @@ class PipelineInput:
     language: str = "ko"
     previous_episodes_context: str | None = None  # 이전 맥락 부여 테스트
     srt_path: Path | None = None  # 외부 SRT 파일 경로 (없으면 Whisper 사용)
+    show_subtitles: bool = True  # False이면 최종 영상에 자막 미표시
 
 
 @dataclass(frozen=True)
@@ -318,7 +336,13 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     # ffprobe로 확인한 실제 시작 시간을 오프셋으로 사용
                     # (-c copy는 키프레임 단위로 잘리므로 chunk.start_sec보다 일찍 시작될 수 있음)
                     # Gemini는 파일 내 상대적 위치를 보고하므로, 실제 파일 시작 PTS를 더해야 원본 시간이 됨
-                    actual_cut_offset = chunk.actual_start_sec if chunk.actual_start_sec is not None else chunk.start_sec
+                    if chunk.start_sec == 0:
+                        # 첫 청크는 항상 0부터 시작 (패킷 PTS 오차 방지)
+                        actual_cut_offset = 0.0
+                    elif chunk.actual_start_sec is not None and chunk.actual_start_sec > 0:
+                        actual_cut_offset = chunk.actual_start_sec
+                    else:
+                        actual_cut_offset = chunk.start_sec
                     moment["start_sec"] += actual_cut_offset
                     moment["end_sec"] += actual_cut_offset
                     moment["chunk_index"] = chunk.index
@@ -512,13 +536,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         # 1. 전사 데이터 추출 및 자막 데이터 생성
         print("\n[8/13] 자막 데이터 처리 중... (Whisper 전사 및 타임라인 매핑)")
 
-         # 2. 편집 타임라인에 맞게 자막 매핑
-        remapped = remap_transcript_to_edited_timeline(
-            clips,
-            transcript_text,
-            tts_only_when_no_orig=True
-        )
-        
         # 2. 편집 타임라인에 맞게 자막 매핑
         remapped = remap_transcript_to_edited_timeline(
             clips,
@@ -663,17 +680,46 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             
 
         if final_segments:
-        
+
             sub_style = SubtitleStyle(
-                font_name=payload.design.subtitle_font,      
-                font_size=payload.design.subtitle_size,      
-                primary_color=payload.design.subtitle_color, 
-                margin_v=payload.design.subtitle_y_margin 
+                font_name=payload.design.subtitle_font,
+                font_size=payload.design.subtitle_size,
+                primary_color=payload.design.subtitle_color,
+                margin_v=payload.design.subtitle_y_margin
             )
-            
-            # 이제 sub_style이 확실히 존재하므로 안전하게 호출 가능
+
+            # TTS 자막 세그먼트 생성 (use_original_audio 여부와 무관하게 tts_line이 있는 클립)
+            tts_line_segs: list[SimpleNamespace] = []
+            _tts_files = tts_audio_files if "tts_audio_files" in locals() else {}
+            _t = 0.0
+            for _idx, _clip in enumerate(clips):
+                _dur = max(0.0, _clip.end_sec - _clip.start_sec)
+                if _dur > 0 and _clip.tts_line:
+                    _tts_path = _tts_files.get(_idx)
+                    if _tts_path and Path(_tts_path).exists():
+                        _tts_dur = min(_get_audio_duration(Path(_tts_path)), _dur)
+                    else:
+                        _tts_dur = _dur
+                    tts_line_segs.append(SimpleNamespace(start_sec=_t, end_sec=_t + _tts_dur, text=_clip.tts_line))
+                _t += _dur
+
+            tts_line_style = SubtitleStyle(
+                font_name=payload.design.subtitle_font,
+                font_size=payload.design.tts_line_font_size,
+                primary_color=payload.design.tts_line_color,
+                margin_v=payload.design.tts_line_y_margin,
+            ) if tts_line_segs else None
+
             build_ass_from_segments(final_segments, subtitle_path, sub_style)
             print(f"  [OK] 디자인이 업데이트된 자막 파일 생성 완료: {subtitle_path}")
+
+            # TTS 전용 ASS 파일 생성 (--no-subtitles여도 항상 표시)
+            tts_subtitle_path = output_dir / "tts_subtitles.ass"
+            if tts_line_segs and tts_line_style:
+                build_tts_ass(tts_line_segs, tts_subtitle_path, tts_line_style)
+                print(f"  [OK] TTS 자막 파일 생성 완료: {tts_subtitle_path}")
+            else:
+                tts_subtitle_path = None
         else:
             print("  - [주의] 자막 데이터가 없어 .ass 생성을 건너뜁니다.")
 
@@ -694,7 +740,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         render_inputs = RenderInputs(
             video_path=payload.video_path,
             clips=clips,
-            subtitle_path=subtitle_path if subtitle_path.exists() else None,
+            subtitle_path=subtitle_path if (payload.show_subtitles and subtitle_path.exists()) else None,
             crop_timeline_map=crop_map,
             title_text=title_text,
             work_title=payload.work_title,
@@ -704,6 +750,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             canvas_height=config.canvas_height,
             top_title_height=config.top_title_height,
             bottom_label_height=config.bottom_label_height,
+            tts_subtitle_path=tts_subtitle_path if "tts_subtitle_path" in locals() else None,
             tts_audio_files=tts_files_map if tts_files_map else None,
             original_audio_gain_db=config.original_gain_db,
             tts_audio_gain_db=config.tts_gain_db,

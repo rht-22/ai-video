@@ -43,8 +43,14 @@ def build_chunks(video_path: Path, duration_sec: float, chunk_seconds: int, over
 
 
 def get_actual_start_time(video_path: Path) -> float:
-    """ffprobe로 영상의 실제 시작 타임스탬프를 읽습니다."""
+    """ffprobe로 영상의 실제 시작 타임스탬프를 읽습니다.
+
+    format=start_time이 0을 반환하면 첫 번째 패킷의 PTS로 재시도합니다.
+    (MP4 -c copy 청크에서 컨테이너 start_time이 0으로 기록되는 경우 대비)
+    """
     ffprobe_cmd = find_ffmpeg_command("ffprobe")
+
+    # 1차: 컨테이너 start_time
     cmd = [
         ffprobe_cmd,
         "-v", "quiet",
@@ -54,7 +60,25 @@ def get_actual_start_time(video_path: Path) -> float:
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     try:
-        return float(result.stdout.strip())
+        val = float(result.stdout.strip())
+        if val > 0:
+            return val
+    except (ValueError, AttributeError):
+        pass
+
+    # 2차: 첫 번째 비디오 패킷의 PTS
+    cmd2 = [
+        ffprobe_cmd,
+        "-v", "quiet",
+        "-read_intervals", "%+#1",
+        "-show_entries", "packet=pts_time",
+        "-select_streams", "v:0",
+        "-of", "csv=p=0",
+        str(video_path),
+    ]
+    result2 = subprocess.run(cmd2, capture_output=True, text=True)
+    try:
+        return float(result2.stdout.strip())
     except (ValueError, AttributeError):
         return 0.0
 

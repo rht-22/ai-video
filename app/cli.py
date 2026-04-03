@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from app.config import DesignConfig
 from app.pipeline import PipelineInput, run_pipeline
 
 
@@ -49,6 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--previous-context", help="이전 에피소드 요약 텍스트 (직접 입력)")  # 이전 맥락 부여 테스트
     create.add_argument("--previous-context-file", help="이전 에피소드 요약이 담긴 텍스트 파일 경로")  # 이전 맥락 부여 테스트
     create.add_argument("--srt-file", help="외부 SRT 자막 파일 경로 (제공 시 Whisper 음성인식 생략)")
+    create.add_argument("--no-subtitles", action="store_true", help="최종 영상에 자막 표시 안 함")
     return parser
 
 
@@ -92,8 +94,9 @@ def main() -> None:
                 work_title=args.title,
                 topic=args.topic,
                 outdir=_resolve_outdir(Path(args.outdir)),
-                previous_episodes_context=previous_episodes_context,  # 이전 맥락 부여 테스트
+                previous_episodes_context=previous_episodes_context,
                 srt_path=srt_path,
+                show_subtitles=not getattr(args, "no_subtitles", False),
             ),
             from_step=args.from_step,
             job_id=args.job_id,

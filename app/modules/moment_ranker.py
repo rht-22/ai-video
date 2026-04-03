@@ -11,7 +11,6 @@ class RankedMoment:
     importance: float
     hook_score: float
     topic_alignment_score: float
-    story_role: str
     description: str
     reason: str
     transcript: str
@@ -33,7 +32,6 @@ def rank_moments(moments: list[dict[str, Any]]) -> list[RankedMoment]:
                 importance=float(moment["importance"]),
                 hook_score=float(moment["hook_score"]),
                 topic_alignment_score=float(moment["topic_alignment_score"]),
-                story_role=moment["story_role"],
                 description=moment["description"],
                 reason=moment["reason"],
                 transcript=moment["transcript"],

@@ -501,7 +501,7 @@ _VIDEO_ENCODER_CACHE: str | None = None
 class RenderInputs:
     video_path: Path
     clips: list[StoryClip]
-    subtitle_path: Path | None  # None이면 자막 없이 렌더링
+    subtitle_path: Path | None  # None이면 일반 자막 없이 렌더링
     crop_timeline_map: dict[str, Path]
     title_text: str
     work_title: str
@@ -511,6 +511,7 @@ class RenderInputs:
     top_title_height: int
     bottom_label_height: int
     design: DesignConfig = field(default_factory=DesignConfig)
+    tts_subtitle_path: Path | None = None  # TTS 자막 전용 ASS (show_subtitles와 무관하게 표시)
     tts_audio_files: dict[int, Path] | None = None  # clip_idx -> tts mp3 path
     original_audio_gain_db: int = -10
     tts_audio_gain_db: int = -4
@@ -933,24 +934,31 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sort
 
   
     # [7] 자막(ASS) 적용
+    font_dir_fixed = _to_short_path(str(font_folder.resolve())).replace("\\", "/").replace(":", "\\:")
+
     if inputs.subtitle_path:
         default_font = DesignConfig.subtitle_font
         requested_font = d.subtitle_font
-        
+
         ass_path = inputs.subtitle_path.resolve()
         ass_content = ass_path.read_text(encoding="utf-8")
-        
         ass_content = ass_content.replace(default_font, requested_font)
         ass_path.write_text(ass_content, encoding="utf-8")
 
         sub_path_fixed = _to_short_path(str(ass_path)).replace("\\", "/").replace(":", "\\:")
-        font_dir_fixed = _to_short_path(str(font_folder.resolve())).replace("\\", "/").replace(":", "\\:")
-        
-        # filters.append(f"{work_label}ass='{sub_path_fixed}':original_size={W}x{H}:fontsdir='{font_dir_fixed}'[vout]")
-        filters.append(f"{work_label}ass='{sub_path_fixed}':fontsdir='{font_dir_fixed}'[vout]")
+        filters.append(f"{work_label}ass='{sub_path_fixed}':fontsdir='{font_dir_fixed}'[vsub]")
+        last_v_label = "[vsub]"
+    else:
+        filters.append(f"{work_label}null[vsub]")
+        last_v_label = "[vsub]"
+
+    if inputs.tts_subtitle_path and inputs.tts_subtitle_path.exists():
+        tts_ass_path = inputs.tts_subtitle_path.resolve()
+        tts_sub_fixed = _to_short_path(str(tts_ass_path)).replace("\\", "/").replace(":", "\\:")
+        filters.append(f"{last_v_label}ass='{tts_sub_fixed}':fontsdir='{font_dir_fixed}'[vout]")
         last_v_label = "[vout]"
     else:
-        filters.append(f"{work_label}null[vout]")
+        filters.append(f"{last_v_label}null[vout]")
         last_v_label = "[vout]"
 
     filters.append(_build_audio_filter(inputs, num_clip_inputs, tts_keys_sorted))

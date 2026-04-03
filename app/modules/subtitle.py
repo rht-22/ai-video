@@ -133,9 +133,11 @@ def build_ass_from_segments(
     segments: list[SpeechSegment],
     output_path: Path,
     style: SubtitleStyle,
+    tts_segments: list[SpeechSegment] | None = None,
+    tts_style: SubtitleStyle | None = None,
 ) -> None:
     """ASS 자막 파일을 생성합니다(전사/세그먼트 기반)."""
-    header = _ass_header(style)
+    header = _ass_header(style, tts_style)
     
     clip_events_list = []
     
@@ -165,7 +167,19 @@ def build_ass_from_segments(
         clip_events_list.append(line)
 
     events = "".join(clip_events_list)
-    
+
+    # TTS 자막 이벤트 (TtsLine 스타일)
+    if tts_segments and tts_style:
+        for seg in tts_segments:
+            start_str = _format_time(seg.start_sec)
+            end_str = _format_time(seg.end_sec)
+            text = seg.text.replace("\n", " ").strip()
+            if len(text) > 15:
+                words = text.split()
+                mid = len(words) // 2
+                text = " ".join(words[:mid]) + r"\N" + " ".join(words[mid:])
+            events += f"Dialogue: 0,{start_str},{end_str},TtsLine,,,,,, {text}\n"
+
     # 4. 파일 저장
     output_path.parent.mkdir(parents=True, exist_ok=True)
     content = header + events
@@ -173,6 +187,27 @@ def build_ass_from_segments(
     
     print(f"DEBUG: 자막 저장 완료 -> {output_path}")
     print("="*50 + "\n")
+
+
+def build_tts_ass(
+    tts_segments: list[SpeechSegment],
+    output_path: Path,
+    style: SubtitleStyle,
+) -> None:
+    """TTS 자막만 담은 ASS 파일을 생성합니다."""
+    header = _ass_header(style)
+    events = ""
+    for seg in tts_segments:
+        start_str = _format_time(seg.start_sec)
+        end_str = _format_time(seg.end_sec)
+        text = seg.text.replace("\n", " ").strip()
+        if len(text) > 15:
+            words = text.split()
+            mid = len(words) // 2
+            text = " ".join(words[:mid]) + r"\N" + " ".join(words[mid:])
+        events += f"Dialogue: 0,{start_str},{end_str},Default,,,,,, {text}\n"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes((header + events).encode("utf-8-sig"))
 
 
 def remap_transcript_to_edited_timeline(
@@ -282,16 +317,24 @@ def merge_subtitle_segments(
     return merged
 
 
-def _ass_header(style: SubtitleStyle) -> str:
+def _ass_header(style: SubtitleStyle, tts_style: SubtitleStyle | None = None) -> str:
     from app.config import FONT_NAME_MAP
 
     margin_v = style.margin_v if style.margin_v >= 0 else 480
-
     alignment = 2  # 2 = 하단 중앙
-
-    # 한글 폰트명 → 실제 파일명으로 매핑
-    # ASS Fontname은 파일명(확장자 제외)과 일치해야 fontsdir에서 찾을 수 있음
     font_name = FONT_NAME_MAP.get(style.font_name, style.font_name)
+
+    styles_block = (
+        "Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Default,{font_name},{style.font_size},{style.primary_color},{style.outline_color},0,0,1,{style.outline},{style.shadow},{alignment},80,80,{margin_v},0\n"
+    )
+
+    if tts_style:
+        tts_font = FONT_NAME_MAP.get(tts_style.font_name, tts_style.font_name)
+        tts_margin_v = tts_style.margin_v if tts_style.margin_v >= 0 else 300
+        styles_block += (
+            f"Style: TtsLine,{tts_font},{tts_style.font_size},{tts_style.primary_color},{tts_style.outline_color},0,0,1,{tts_style.outline},{tts_style.shadow},{alignment},80,80,{tts_margin_v},0\n"
+        )
 
     return (
         "[Script Info]\n"
@@ -301,8 +344,7 @@ def _ass_header(style: SubtitleStyle) -> str:
         "ScaledBorderAndShadow: yes\n"
         "\n"
         "[V4+ Styles]\n"
-        "Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Default,{font_name},{style.font_size},{style.primary_color},{style.outline_color},0,0,1,{style.outline},{style.shadow},{alignment},80,80,{margin_v},0\n"
+        + styles_block +
         "\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
