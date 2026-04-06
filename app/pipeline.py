@@ -1,12 +1,35 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 import subprocess
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
+
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F600-\U0001F64F"  # emoticons
+    "\U0001F300-\U0001F5FF"  # symbols & pictographs
+    "\U0001F680-\U0001F6FF"  # transport & map
+    "\U0001F1E0-\U0001F1FF"  # flags
+    "\U00002702-\U000027B0"
+    "\U0000FE00-\U0000FE0F"  # variation selectors
+    "\U0001F900-\U0001F9FF"  # supplemental symbols
+    "\U0001FA00-\U0001FA6F"  # chess symbols
+    "\U0001FA70-\U0001FAFF"  # symbols extended-A
+    "\U00002600-\U000026FF"  # misc symbols
+    "\U0000200D"             # zero width joiner
+    "\U00002B50"             # star
+    "]+",
+    flags=re.UNICODE,
+)
+
+
+def _strip_emoji(text: str) -> str:
+    return _EMOJI_RE.sub("", text).strip()
 
 
 from app.config import AppConfig, Paths, DesignConfig, get_font_path
@@ -38,9 +61,9 @@ def _clips_from_storyline(storyline_data: dict, fallback_title: str = "") -> tup
     """스토리라인 dict에서 (clips, title_text)를 추출합니다."""
     clips: list[StoryClip] = []
 
-    # 제목 구성
-    title_line1 = storyline_data.get("title_line1", "")
-    title_line2 = storyline_data.get("title_line2", "")
+    # 제목 구성 (이모지 제거)
+    title_line1 = _strip_emoji(storyline_data.get("title_line1", ""))
+    title_line2 = _strip_emoji(storyline_data.get("title_line2", ""))
     if title_line1 and title_line2:
         title_text = f"{title_line1}\n{title_line2}"
     else:
@@ -487,8 +510,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
             # 최상위 제목 (첫 번째 스토리라인만 story_plan의 title 사용 가능)
             if sl_idx == 0:
-                top_line1 = story_plan.get("title_line1", "")
-                top_line2 = story_plan.get("title_line2", "")
+                top_line1 = _strip_emoji(story_plan.get("title_line1", ""))
+                top_line2 = _strip_emoji(story_plan.get("title_line2", ""))
                 if top_line1 and top_line2:
                     sl_title = f"{top_line1}\n{top_line2}"
 

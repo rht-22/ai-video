@@ -323,16 +323,6 @@ def build_ass_from_segments(
         raw_text = seg.text.replace("\n", " ").strip()
         text = raw_text
 
-        # TTS 구간과 겹치면 메인 자막 스킵 (TTS 자막 우선)
-        if tts_time_ranges:
-            is_tts_active = any(
-                ts <= seg.start_sec < te or ts < seg.end_sec <= te
-                for ts, te in tts_time_ranges
-            )
-            if is_tts_active:
-                print(f"[{idx+1}] {start_str} ~ {end_str} | (TTS 우선 — 스킵) {text}")
-                continue
-
         # 2. 터미널 출력
         print(f"[{idx+1}] {start_str} ~ {end_str} | {text}")
 

@@ -115,7 +115,7 @@ GEMINI_PROMPT_TEMPLATE = """
 - 영상 전체를 빠짐없이 스캔하라. 앞부분에만 집중하지 말고 중반~후반도 균등하게 분석할 것.
 - 확실하지 않은 내용은 넣지 마라
 - 완결되지 않은 부분(엔딩)은 이후 전개에 대한 궁금증을 유발하는 장면일 수 있으므로 확정된 전개로 장담하지 말 것
-- 각 moment에 바이럴 제목 후보 2개 포함 (30자 이내, 이모지 포함)
+- 각 moment에 바이럴 제목 후보 2개 포함 (30자 이내, 이모지/이모티콘 절대 금지)
 - 각 moment의 story_role을 반드시 지정: "hook" | "build" | "payoff"
 - hook으로 적합한 moment에는 hook_description 필드 추가 (0-3초 후킹 전략)
 
@@ -159,7 +159,7 @@ GEMINI_PROMPT_TEMPLATE = """
       "reason": "선정 이유",
       "hook_description": "이 장면을 hook으로 사용할 경우 0-3초 전략 (hook role일 때만, 아니면 null)",
       "transcript": "start_sec~end_sec 구간에서 가장 핵심이 되는 '단 한 명'의 주요 대사",
-      "viral_titles": ["제목 후보 1 🔥", "제목 후보 2 😱"],
+      "viral_titles": ["제목 후보 1", "제목 후보 2"],
       "suggested_tts_line": "이 장면에 어울리는 나레이션 TTS 한 줄",
       "pacing_note": "빠른 컷|느린 텐션|점진적 고조",
       "points": {{
