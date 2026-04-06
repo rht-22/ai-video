@@ -45,6 +45,7 @@ GEMINI_PROMPT_TEMPLATE = """
 {previous_episodes_context_block}
 - ⚠️ 모든 start_sec / end_sec는 반드시 첨부된 영상 파일의 시작(0초)을 기준으로 한 상대값으로 반환할 것
 
+- 자막(있으면): {transcript_text}
 - 씬 경계(있으면): {scene_boundaries}
 - 전체 줄거리(있으면): {full_summary}
 - 스토리라인(있으면): {storyline} {previous_context}
@@ -89,7 +90,7 @@ GEMINI_PROMPT_TEMPLATE = """
       "topic_alignment_score": 0.0,
       "description": "장면 설명(묘사 위주)",
       "reason": "선정 이유",
-      "transcript": "해당 구간에서 가장 핵심이 되는 '단 한 명'의 주요 대사",
+      "transcript": "start_sec~end_sec 구간에서 가장 핵심이 되는 '단 한 명'의 주요 대사",
       "points": {{
         "humor": null,
         "love": null,
@@ -241,12 +242,26 @@ class GeminiClient:
             if context_parts:
                 previous_context = "\n\n이전 청크들의 분석 결과 (전체 흐름 이해용):" + "\n".join(context_parts)
         
+        chunk_start = payload["chunk_start_sec"]
+        chunk_end = payload["chunk_end_sec"]
+        raw_segments = payload.get("transcript_text") or []
+        if raw_segments:
+            filtered = [
+                s for s in raw_segments
+                if hasattr(s, "start_sec") and s.start_sec >= chunk_start and s.end_sec <= chunk_end
+            ]
+            transcript_text_str = "\n".join(
+                f"[{s.start_sec:.1f}~{s.end_sec:.1f}] {s.text}" for s in filtered
+            ) or "없음"
+        else:
+            transcript_text_str = "없음"
+
         prompt = GEMINI_PROMPT_TEMPLATE.format(
             work_title=payload["work_title"],
             topic=payload["topic"],
-            chunk_start_sec=payload["chunk_start_sec"],
-            chunk_end_sec=payload["chunk_end_sec"],
-            transcript_text=payload.get("transcript_text") or "없음",
+            chunk_start_sec=chunk_start,
+            chunk_end_sec=chunk_end,
+            transcript_text=transcript_text_str,
             scene_boundaries=payload.get("scene_boundaries") or "없음",
             full_summary=payload.get("full_summary") or "없음",
             storyline=payload.get("storyline") or "없음",
@@ -502,13 +517,17 @@ class GeminiClient:
     1. Highlight Type: 
     - 모든 chunk의 candidate_moments들 중, 맥락 설명 없이 가장 자극적이고 강렬한 장면(Peak Tension) 하나를 중심으로 구성할 것.
     - viral_type: "points"를 참고하여, 해당되는 것 모두 기재.
+
     2. Storytelling Type: 
-    - 모든 chunk의 candidate_moments 중에서 여러개를 연결해 영상 속 사건 하나를 요약.
+    - 모든 chunk의 candidate_moments 중에서 여러 장면들을 선정해 원본 스토리에 맞게 기승전결이 있도록 유기적으로 연결할 것.
+    - 캐릭터의 행적을 조명하거나 영상의 주요 서사를 요약.
     - 각 storyline 내에서는 가장 눈길을 끄는 장면을 hook으로 사용하고, hook이 전개상 앞부분이면 "여정몰입형", 전개상 뒷부분이면 "결과선공개형"으로 분류.
 
     3. Common: 
-    각 장면의 'start_sec', 'end_sec'를 명시하고, 영상의 '후킹'을 위한 TTS 라인을 반드시 포함할 것.
-    제목은 30자 이내로.
+    - 각 장면의 'start_sec', 'end_sec'를 명시하고, 영상의 '후킹'을 위한 TTS 라인을 반드시 포함할 것.
+    - "chunk_index", "candidate_index": 기존 candidate_moments의 인덱스 기재.
+    - 제목은 30자 이내로.
+
 
     다음 JSON 스키마로만 응답:
     {{
