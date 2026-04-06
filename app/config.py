@@ -8,52 +8,54 @@ import os
 @dataclass(frozen=True)
 class DesignConfig:
     # 영상 프레임 (9:16, 1:1 등)
-    aspect_ratio: str = "1:1" 
+    aspect_ratio: str = "16:9"
     video_width: int = 800
     video_height: int = 1100
     video_y_pos: int = 480
-    
-    # 제목 설정
+
+    # 제목 설정 (2줄 구조: line1=맥락, line2=후킹)
     title_font: str = "Jalnan"
-    title_size: int = 90
+    title_size: int = 70
     title_color: str = "white"
-    title_colors: list[str] = field(default_factory=lambda: ["white", "white"])
-    title_y: int = 150
-    
+    title_colors: list[str] = field(default_factory=lambda: ["white", "#FFFF00"])
+    title_sizes: list[int] = field(default_factory=lambda: [70, 90])
+    title_y: int = 120
+
     # 자막 설정 (ASS 스타일 기준)
     subtitle_font: str = "여기어때 잘난체 2 TTF"
     subtitle_size: int = 65
     subtitle_color: str = "&H0000FFFF"
-    subtitle_y_margin: int = 500
+    subtitle_y_margin: int = 380
 
     # TTS 자막 설정 (원본 자막과 별도 위치)
     tts_line_font_size: int = 70
     tts_line_color: str = "&H00EBCE87"
-    tts_line_y_margin: int = 620
-    
-    # 작품명 및 이미지 설정
-    work_title_y: int = 1400
-    work_font_size: int = 35 
-    work_color: str = "white"
+    tts_line_y_margin: int = 580
 
-    work_type: str = "text"             
-    work_value: str | None = None        
-    work_image_width: int = 200 
+    # 작품명 및 이미지 설정
+    work_title_y: int = 1560
+    work_font_size: int = 40
+    work_color: str = "#FF69B4"
+    work_letter_spacing: bool = True
+
+    work_type: str = "text"
+    work_value: str | None = None
+    work_image_width: int = 200
 
     overlay_image_path: str | None = None # 필요 시 이미지 경로
 
 @dataclass(frozen=True)
 class AppConfig:
-    chunk_seconds: int = 1800
-    chunk_overlap: int = 0
+    chunk_seconds: int = 600
+    chunk_overlap: int = 30
     target_duration_sec: int = 60
     target_duration_tolerance_sec: int = 10 
     min_duration_sec: int = 50  
     max_duration_sec: int = 60  
     canvas_width: int = 1080
     canvas_height: int = 1920
-    top_title_height: int = 550
-    bottom_label_height: int = 450
+    top_title_height: int = 250
+    bottom_label_height: int = 200
     subtitle_margin_top: int = 320
     subtitle_margin_bottom: int = 400 
     subtitle_max_chars_per_line: int = 15
@@ -66,6 +68,12 @@ class AppConfig:
     bgm_gain_db: int = -20
     render_preset: str = "balanced"
     enable_hwaccel: bool = True
+    # 바이럴 최적화 설정
+    viral_scroll_stop_threshold: float = 0.7
+    viral_score_min_threshold: float = 0.4
+    max_storyline_candidates: int = 6
+    gemini_story_max_retries: int = 3
+    max_shorts_count: int = 3
 
 
 @dataclass(frozen=True)

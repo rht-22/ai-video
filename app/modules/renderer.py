@@ -564,7 +564,7 @@ def render_short(inputs: RenderInputs) -> list[str]:
     work_file = inputs.work_title_textfile or (output_dir / "work_title.txt")
 
     title_file.write_bytes((wrapped_title + "\n").encode("utf-8-sig"))
-    work_file.write_bytes((f"작품명: {inputs.work_title}" + "\n").encode("utf-8-sig"))
+    work_file.write_bytes((inputs.work_title + "\n").encode("utf-8-sig"))
 
     inputs = replace(inputs, title_textfile=title_file, work_title_textfile=work_file)
     tts_keys_sorted: list[int] = sorted(inputs.tts_audio_files.keys()) if inputs.tts_audio_files else []
@@ -782,23 +782,23 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sort
 
     title_lines = split_text_smart(inputs.title_text, 14)
 
+    # 줄별 폰트 크기 (title_sizes가 있으면 사용, 없으면 title_size로 통일)
+    title_sizes = getattr(d, 'title_sizes', [d.title_size])
+
     # [2] 비디오 레이아웃 설정
     scaled_w = W
-    # scaled_h = d.video_height
-    
+
     line_spacing = 30
-    title_total_height = (len(title_lines) * d.title_size) + ((len(title_lines) - 1) * line_spacing)
-    title_bottom_y = d.title_y + title_total_height
-    overlay_y = title_bottom_y + 20 # 제목 아래 50px 여백
+    title_total_height = sum(
+        (title_sizes[i] if i < len(title_sizes) else title_sizes[-1])
+        for i in range(len(title_lines))
+    ) + max(0, len(title_lines) - 1) * line_spacing
 
     try:
         r_w, r_h = map(int, ratio.split(':'))
         scaled_h = int(W * r_h / r_w)
     except:
         scaled_h = W
-
-    # scaled_w -= scaled_w % 2
-    # scaled_h -= scaled_h % 2
 
     overlay_y = (H - scaled_h) // 2
 
@@ -829,7 +829,7 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sort
             f"scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=increase,"
             f"setsar=1,"
             f"crop={W}:{scaled_h},"
-            f"pad={W}:{H}:0:{overlay_y}:black[v{i}]"
+            f"pad={W}:{H}:0:{overlay_y}:color=#0D0011[v{i}]"
         )
         filters.append(v_filter)
         filters.append(f"[{i}:a]anull[a{i}]")
@@ -905,16 +905,18 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sort
         clean_path = short_path.replace("\\", "/").replace(":", "\\:")
         font_arg = clean_path
 
+    cumulative_y = d.title_y
     for idx, raw_line in enumerate(title_lines):
         base_color = custom_colors[idx] if idx < len(custom_colors) else custom_colors[-1]
-        y_pos = d.title_y + (idx * (d.title_size + line_spacing))
+        font_size = title_sizes[idx] if idx < len(title_sizes) else title_sizes[-1]
+        y_pos = cumulative_y
+        cumulative_y += font_size + line_spacing
         escaped_full = _escape_text_for_drawtext(raw_line)
         next_label = f"[title_{idx}]"
-        
-        # [핵심] fontfile='{font_arg}' 로 감싸서 한글 경로 인식률 극대화
+
         filters.append(
             f"{last_v_label}drawtext=fontfile='{font_arg}':text='{escaped_full}':"
-            f"fontcolor={base_color}:fontsize={d.title_size}:"
+            f"fontcolor={base_color}:fontsize={font_size}:"
             f"x=(w-text_w)/2:y={y_pos}{next_label}"
         )
         last_v_label = next_label
@@ -929,7 +931,11 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sort
         logo_w = getattr(d, 'work_image_width', 300)
         filters.append(f"movie='{logo_path_str}',scale={logo_w}:-1[logo];{last_v_label}[logo]overlay=(W-w)/2:{d.work_title_y}{work_label}")
     else:
-        escaped_val = _escape_text_for_drawtext(work_value if work_value else inputs.work_title)
+        raw_work = work_value if work_value else inputs.work_title
+        # 레터스페이싱 적용: 글자 사이에 공백 삽입
+        if getattr(d, 'work_letter_spacing', False):
+            raw_work = " ".join(raw_work)
+        escaped_val = _escape_text_for_drawtext(raw_work)
         filters.append(f"{last_v_label}drawtext=fontfile='{font_arg}':text='{escaped_val}':fontcolor={d.work_color}:fontsize={d.work_font_size}:x=(w-text_w)/2:y={d.work_title_y}{work_label}")
 
   

@@ -25,6 +25,48 @@ def extract_vad_segments(audio_path: Path) -> list[SpeechSegment]:
     return []
 
 
+def extract_audio_segment(
+    video_path: Path,
+    output_path: Path,
+    start_sec: float,
+    end_sec: float,
+    padding_sec: float = 2.0,
+) -> tuple[Path, float]:
+    """영상에서 특정 구간의 오디오만 추출합니다.
+
+    Whisper 정확도를 위해 앞뒤 padding_sec만큼 여유를 두고 추출합니다.
+
+    Args:
+        video_path: 입력 영상 파일 경로
+        output_path: 출력 오디오 파일 경로
+        start_sec: 추출 시작 시간(초)
+        end_sec: 추출 종료 시간(초)
+        padding_sec: Whisper 컨텍스트 확보용 앞뒤 패딩(초)
+
+    Returns:
+        (추출된 오디오 경로, 실제 추출 시작 시간) 튜플.
+        실제 시작 시간은 패딩이 적용된 값이며 전사 결과 오프셋 보정에 사용.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    actual_start = max(0.0, start_sec - padding_sec)
+    duration = (end_sec + padding_sec) - actual_start
+
+    ffmpeg_cmd = find_ffmpeg_command("ffmpeg")
+    cmd = [
+        ffmpeg_cmd, "-y",
+        "-ss", str(actual_start),
+        "-i", str(video_path),
+        "-t", str(duration),
+        "-vn",
+        "-acodec", "pcm_s16le",
+        "-ar", "16000",
+        "-ac", "1",
+        str(output_path),
+    ]
+    subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return output_path, actual_start
+
+
 def extract_audio_from_video(video_path: Path, output_path: Path | None = None) -> Path:
     """영상에서 오디오를 추출합니다.
 
