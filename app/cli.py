@@ -31,27 +31,74 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument(
         "--from-step",
         choices=[
-            "init",
-            "probe",
-            "full_audio",
-            "storyline",
-            "chunk",
-            "gemini",
-            "story",
-            "resources",
-            "temp_render",
-            "extract_audio",
-            "regenerate_subtitles",
-            "final_render",
-            "validate",
+            "init", "probe", "proxy", "chunk", "gemini",
+            "story", "transcribe", "resources", "render", "validate",
         ],
-                       help="Start from specific step (requires --job-id)")
+        help="Start from specific step (requires --job-id)",
+    )
     create.add_argument("--job-id", help="Job ID to resume from (for --from-step)")
     create.add_argument("--previous-context", help="이전 에피소드 요약 텍스트 (직접 입력)")  # 이전 맥락 부여 테스트
     create.add_argument("--previous-context-file", help="이전 에피소드 요약이 담긴 텍스트 파일 경로")  # 이전 맥락 부여 테스트
-    create.add_argument("--srt-file", help="외부 SRT 자막 파일 경로 (제공 시 Whisper 음성인식 생략)")
+    create.add_argument("--work-context", help="작품 설명/시놉시스 텍스트 (직접 입력)")
+    create.add_argument("--work-context-file", help="작품 설명/시놉시스가 담긴 텍스트 파일 경로")
+    create.add_argument("--subtitle-file", help="외부 자막 파일 경로 — SRT, ASS, VTT, SMI 지원 (제공 시 Whisper 음성인식 생략)")
+    create.add_argument("--srt-file", dest="subtitle_file_legacy", help=argparse.SUPPRESS)  # 하위호환
     create.add_argument("--no-subtitles", action="store_true", help="최종 영상에 자막 표시 안 함")
+    create.add_argument("--max-shorts", type=int, default=3, help="생성할 최대 쇼츠 수 (1-3, 기본: 3)")
+
+    # ── 디자인 파라미터 (DesignConfig 오버라이드) ──
+    design = create.add_argument_group("design", "영상 디자인/레이아웃 설정 (YouTube Shorts safe zone 기준)")
+    design.add_argument("--design-title-y", type=int, default=None, help="제목 Y 위치 (기본: 120)")
+    design.add_argument("--design-work-title-y", type=int, default=None, help="작품명 Y 위치 (기본: 1560)")
+    design.add_argument("--design-aspect-ratio", type=str, default=None, help="비디오 영역 비율 (예: 16:9, 4:3, 1:1)")
+    design.add_argument("--design-title-font", type=str, default=None, help="제목 폰트명")
+    design.add_argument("--design-title-size", type=int, default=None, help="제목 폰트 크기")
+    design.add_argument("--design-title-color", type=str, default=None, help="제목 색상")
+    design.add_argument("--design-subtitle-size", type=int, default=None, help="자막 폰트 크기")
+    design.add_argument("--design-subtitle-y-margin", type=int, default=None, help="메인 자막 MarginV (기본: 380)")
+    design.add_argument("--design-tts-y-margin", type=int, default=None, help="TTS 자막 MarginV (기본: 580)")
+    design.add_argument("--design-work-font-size", type=int, default=None, help="작품명 폰트 크기")
+    design.add_argument("--design-work-color", type=str, default=None, help="작품명 색상")
+
     return parser
+
+
+_CLI_TO_DESIGN_FIELD = {
+    "design_title_y": "title_y",
+    "design_work_title_y": "work_title_y",
+    "design_aspect_ratio": "aspect_ratio",
+    "design_title_font": "title_font",
+    "design_title_size": "title_size",
+    "design_title_color": "title_color",
+    "design_subtitle_size": "subtitle_size",
+    "design_subtitle_y_margin": "subtitle_y_margin",
+    "design_tts_y_margin": "tts_line_y_margin",
+    "design_work_font_size": "work_font_size",
+    "design_work_color": "work_color",
+}
+
+
+def _build_design_config(args: argparse.Namespace) -> DesignConfig:
+    """CLI의 --design-* 인자에서 DesignConfig를 생성합니다."""
+    overrides: dict = {}
+    for cli_name, field_name in _CLI_TO_DESIGN_FIELD.items():
+        value = getattr(args, cli_name, None)
+        if value is not None:
+            overrides[field_name] = value
+
+    # aspect_ratio 형식 검증
+    if "aspect_ratio" in overrides:
+        ratio_str = overrides["aspect_ratio"]
+        try:
+            rw, rh = map(int, ratio_str.split(":"))
+            if rw <= 0 or rh <= 0:
+                raise ValueError
+        except (ValueError, AttributeError):
+            raise ValueError(
+                f"잘못된 비율 형식: '{ratio_str}'. W:H 형식을 사용하세요 (예: 16:9, 4:3, 1:1)"
+            )
+
+    return DesignConfig(**overrides)
 
 
 def main() -> None:
@@ -68,6 +115,13 @@ def main() -> None:
             previous_episodes_context = Path(args.previous_context_file).read_text(encoding="utf-8").strip()
         elif getattr(args, "previous_context", None):
             previous_episodes_context = args.previous_context
+
+        # 작품 컨텍스트: --work-context 또는 --work-context-file 처리
+        work_context: str | None = None
+        if getattr(args, "work_context_file", None):
+            work_context = Path(args.work_context_file).read_text(encoding="utf-8").strip()
+        elif getattr(args, "work_context", None):
+            work_context = args.work_context
 
         # # 명령어 실행 직후(영상을 올리고 나서) 사용자에게 톤(장르)을 인터랙티브하게 물어봅니다.
         # print("\n🎬 어떤 스타일(톤)의 쇼츠를 만드시겠습니까?")
@@ -86,7 +140,11 @@ def main() -> None:
         #     else:
         #         print("❌ 잘못된 입력입니다. 1 또는 2를 입력해 주세요.")
         
-        srt_path = Path(args.srt_file) if getattr(args, "srt_file", None) else None
+        # 자막 파일: --subtitle-file 우선, --srt-file(레거시) 폴백
+        sub_file = getattr(args, "subtitle_file", None) or getattr(args, "subtitle_file_legacy", None)
+        srt_path = Path(sub_file) if sub_file else None
+
+        max_shorts = min(max(getattr(args, "max_shorts", 3), 1), 3)
 
         output = run_pipeline(
             PipelineInput(
@@ -94,14 +152,18 @@ def main() -> None:
                 work_title=args.title,
                 topic=args.topic,
                 outdir=_resolve_outdir(Path(args.outdir)),
+                design=_build_design_config(args),
                 previous_episodes_context=previous_episodes_context,
+                work_context=work_context,
                 srt_path=srt_path,
                 show_subtitles=not getattr(args, "no_subtitles", False),
+                max_shorts=max_shorts,
             ),
             from_step=args.from_step,
             job_id=args.job_id,
         )
-        print(f"shorts: {output.output_video}")
+        for idx, vp in enumerate(output.output_videos, 1):
+            print(f"shorts_{idx}: {vp}")
         print(f"edit_plan: {output.edit_plan_path}")
         print(f"run_log: {output.run_log_path}")
 

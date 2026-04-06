@@ -9,6 +9,22 @@ from app.modules.story_builder import StoryClip
 from app.config import DesignConfig
 
 
+def _split_text_to_lines(text: str, max_chars: int = 15) -> list[str]:
+    """긴 텍스트를 max_chars 단위로 어절 경계에서 분할합니다."""
+    words = text.split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        if current and len(current) + 1 + len(word) > max_chars:
+            lines.append(current)
+            current = word
+        else:
+            current = f"{current} {word}".strip() if current else word
+    if current:
+        lines.append(current)
+    return lines if lines else [text]
+
+
 def parse_srt(srt_path: Path) -> list[SpeechSegment]:
     """SRT 파일을 SpeechSegment 리스트로 변환합니다.
 
@@ -64,6 +80,160 @@ def parse_srt(srt_path: Path) -> list[SpeechSegment]:
         segments.append(SpeechSegment(start_sec=start_sec, end_sec=end_sec, text=clean_text))
 
     return segments
+
+
+def parse_ass(ass_path: Path) -> list[SpeechSegment]:
+    """ASS/SSA 자막 파일을 SpeechSegment 리스트로 변환합니다."""
+    def _ass_ts_to_sec(ts: str) -> float:
+        # H:MM:SS.cc (centiseconds)
+        h, m, rest = ts.strip().split(":")
+        s, cs = rest.split(".")
+        return int(h) * 3600 + int(m) * 60 + int(s) + int(cs) / 100
+
+    text = ass_path.read_text(encoding="utf-8-sig")
+    segments: list[SpeechSegment] = []
+    in_events = False
+
+    for line in text.splitlines():
+        if line.strip().lower() == "[events]":
+            in_events = True
+            continue
+        if line.strip().startswith("[") and in_events:
+            break
+        if not in_events or not line.startswith("Dialogue:"):
+            continue
+
+        # Dialogue: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
+        parts = line.split(",", 9)
+        if len(parts) < 10:
+            continue
+        try:
+            start_sec = _ass_ts_to_sec(parts[1])
+            end_sec = _ass_ts_to_sec(parts[2])
+        except (ValueError, IndexError):
+            continue
+
+        raw_text = parts[9]
+        # ASS 태그 제거: {\tag}
+        clean = re.sub(r"\{[^}]*\}", "", raw_text)
+        # \N, \n → 공백
+        clean = clean.replace("\\N", " ").replace("\\n", " ").strip()
+        if not clean:
+            continue
+        segments.append(SpeechSegment(start_sec=start_sec, end_sec=end_sec, text=clean))
+
+    return segments
+
+
+def parse_vtt(vtt_path: Path) -> list[SpeechSegment]:
+    """WebVTT 자막 파일을 SpeechSegment 리스트로 변환합니다."""
+    def _vtt_ts_to_sec(ts: str) -> float:
+        ts = ts.strip()
+        parts = ts.split(":")
+        if len(parts) == 3:
+            h, m, rest = parts
+        else:
+            h = "0"
+            m, rest = parts
+        s, ms = rest.split(".")
+        return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
+
+    text = vtt_path.read_text(encoding="utf-8-sig")
+    blocks = re.split(r"\n{2,}", text.strip())
+    segments: list[SpeechSegment] = []
+
+    for block in blocks:
+        lines = block.strip().splitlines()
+        # 타임스탬프 라인 찾기
+        ts_idx = -1
+        for i, l in enumerate(lines):
+            if "-->" in l:
+                ts_idx = i
+                break
+        if ts_idx < 0:
+            continue
+
+        try:
+            start_str, end_str = lines[ts_idx].split("-->")
+            # position/alignment 메타 제거
+            end_str = end_str.split()[0] if end_str.strip() else end_str
+            start_sec = _vtt_ts_to_sec(start_str)
+            end_sec = _vtt_ts_to_sec(end_str)
+        except (ValueError, IndexError):
+            continue
+
+        raw_text = " ".join(lines[ts_idx + 1:])
+        # <v Speaker> 태그에서 화자 추출
+        speaker_match = re.match(r"<v\s+([^>]+)>", raw_text)
+        if speaker_match:
+            speaker = speaker_match.group(1)
+            dialogue = re.sub(r"</?v[^>]*>", "", raw_text).strip()
+            clean = f"{speaker}: {dialogue}"
+        else:
+            clean = re.sub(r"<[^>]+>", "", raw_text).strip()
+        if not clean:
+            continue
+        segments.append(SpeechSegment(start_sec=start_sec, end_sec=end_sec, text=clean))
+
+    return segments
+
+
+def parse_smi(smi_path: Path) -> list[SpeechSegment]:
+    """SAMI(SMI) 자막 파일을 SpeechSegment 리스트로 변환합니다."""
+    text = smi_path.read_text(encoding="utf-8-sig")
+
+    # <SYNC Start=밀리초> 블록 추출
+    sync_pattern = re.compile(
+        r"<SYNC\s+Start=(\d+)>(.*?)(?=<SYNC|</BODY>|$)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    matches = list(sync_pattern.finditer(text))
+    segments: list[SpeechSegment] = []
+
+    for i, m in enumerate(matches):
+        start_ms = int(m.group(1))
+        content = m.group(2).strip()
+        # 다음 SYNC의 시작 시간을 end로 사용
+        end_ms = int(matches[i + 1].group(1)) if i + 1 < len(matches) else start_ms + 3000
+
+        # HTML 태그 제거
+        clean = re.sub(r"<[^>]+>", "", content)
+        clean = clean.replace("&nbsp;", " ").strip()
+        if not clean or clean == "\xa0":
+            continue
+
+        # <P Class=Speaker> 에서 화자 추출
+        class_match = re.search(r'<P\s+Class=(["\']?)(\w+)\1', content, re.IGNORECASE)
+        if class_match:
+            speaker = class_match.group(2)
+            if speaker.lower() not in ("krcc", "encc", "default"):
+                clean = f"{speaker}: {clean}"
+
+        segments.append(SpeechSegment(
+            start_sec=start_ms / 1000,
+            end_sec=end_ms / 1000,
+            text=clean,
+        ))
+
+    return segments
+
+
+def parse_subtitle(path: Path) -> list[SpeechSegment]:
+    """파일 확장자를 기반으로 적절한 자막 파서를 선택합니다.
+
+    지원 형식: SRT, ASS/SSA, VTT, SMI
+    """
+    ext = path.suffix.lower()
+    if ext == ".srt":
+        return parse_srt(path)
+    elif ext in (".ass", ".ssa"):
+        return parse_ass(path)
+    elif ext == ".vtt":
+        return parse_vtt(path)
+    elif ext in (".smi", ".sami"):
+        return parse_smi(path)
+    else:
+        raise ValueError(f"지원하지 않는 자막 형식: {ext} (지원: .srt, .ass, .ssa, .vtt, .smi)")
 
 
 @dataclass(frozen=True)
@@ -135,6 +305,7 @@ def build_ass_from_segments(
     style: SubtitleStyle,
     tts_segments: list[SpeechSegment] | None = None,
     tts_style: SubtitleStyle | None = None,
+    tts_time_ranges: list[tuple[float, float]] | None = None,
 ) -> None:
     """ASS 자막 파일을 생성합니다(전사/세그먼트 기반)."""
     header = _ass_header(style, tts_style)
@@ -148,37 +319,47 @@ def build_ass_from_segments(
         start_str = _format_time(seg.start_sec)
         end_str = _format_time(seg.end_sec)
         
-        # 1. 텍스트 정리 및 줄바꿈 처리
+        # 1. 텍스트 정리 (줄바꿈 없이 1줄로 표시)
         raw_text = seg.text.replace("\n", " ").strip()
-        
-        # 15자 기준 자동 줄바꿈
-        if len(raw_text) > 15:
-            words = raw_text.split()
-            mid = len(words) // 2
-            text = " ".join(words[:mid]) + r"\N" + " ".join(words[mid:])
-        else:
-            text = raw_text
-            
-        # 2. 터미널 출력 (이제 정상적으로 찍힐 겁니다)
+        text = raw_text
+
+        # TTS 구간과 겹치면 메인 자막 스킵 (TTS 자막 우선)
+        if tts_time_ranges:
+            is_tts_active = any(
+                ts <= seg.start_sec < te or ts < seg.end_sec <= te
+                for ts, te in tts_time_ranges
+            )
+            if is_tts_active:
+                print(f"[{idx+1}] {start_str} ~ {end_str} | (TTS 우선 — 스킵) {text}")
+                continue
+
+        # 2. 터미널 출력
         print(f"[{idx+1}] {start_str} ~ {end_str} | {text}")
-        
-        # 3. 라인 생성 (쉼표 6개 구조: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text)
-        line = f"Dialogue: 0,{start_str},{end_str},Default,,,,,, {text}\n"
-        clip_events_list.append(line)
+
+        # 3. 텍스트 분할 → 순차 이벤트 (1줄씩 표시)
+        lines = _split_text_to_lines(text, max_chars=15)
+        total_dur = seg.end_sec - seg.start_sec
+        line_dur = total_dur / len(lines) if lines else total_dur
+        for i, line in enumerate(lines):
+            s = seg.start_sec + i * line_dur
+            e = s + line_dur
+            clip_events_list.append(
+                f"Dialogue: 0,{_format_time(s)},{_format_time(e)},Default,,,,,, {line}\n"
+            )
 
     events = "".join(clip_events_list)
 
-    # TTS 자막 이벤트 (TtsLine 스타일)
+    # TTS 자막 이벤트 (TtsLine 스타일) — 분할 적용
     if tts_segments and tts_style:
         for seg in tts_segments:
-            start_str = _format_time(seg.start_sec)
-            end_str = _format_time(seg.end_sec)
             text = seg.text.replace("\n", " ").strip()
-            if len(text) > 15:
-                words = text.split()
-                mid = len(words) // 2
-                text = " ".join(words[:mid]) + r"\N" + " ".join(words[mid:])
-            events += f"Dialogue: 0,{start_str},{end_str},TtsLine,,,,,, {text}\n"
+            lines = _split_text_to_lines(text, max_chars=15)
+            total_dur = seg.end_sec - seg.start_sec
+            line_dur = total_dur / len(lines) if lines else total_dur
+            for i, line in enumerate(lines):
+                s = seg.start_sec + i * line_dur
+                e = s + line_dur
+                events += f"Dialogue: 0,{_format_time(s)},{_format_time(e)},TtsLine,,,,,, {line}\n"
 
     # 4. 파일 저장
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -198,14 +379,14 @@ def build_tts_ass(
     header = _ass_header(style)
     events = ""
     for seg in tts_segments:
-        start_str = _format_time(seg.start_sec)
-        end_str = _format_time(seg.end_sec)
         text = seg.text.replace("\n", " ").strip()
-        if len(text) > 15:
-            words = text.split()
-            mid = len(words) // 2
-            text = " ".join(words[:mid]) + r"\N" + " ".join(words[mid:])
-        events += f"Dialogue: 0,{start_str},{end_str},Default,,,,,, {text}\n"
+        lines = _split_text_to_lines(text, max_chars=15)
+        total_dur = seg.end_sec - seg.start_sec
+        line_dur = total_dur / len(lines) if lines else total_dur
+        for i, line in enumerate(lines):
+            s = seg.start_sec + i * line_dur
+            e = s + line_dur
+            events += f"Dialogue: 0,{_format_time(s)},{_format_time(e)},Default,,,,,, {line}\n"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes((header + events).encode("utf-8-sig"))
 
