@@ -1,28 +1,34 @@
 from __future__ import annotations
 
+import asyncio
 import subprocess
 from pathlib import Path
 
 from app.modules.ffmpeg_utils import find_ffmpeg_command
 
+VOICE = "ko-KR-SunHiNeural"
+
 
 def synthesize_tts(text: str, output_path: Path, lang: str = "ko") -> Path:
-    if _has_gtts():
-        return _synthesize_gtts(text, output_path, lang)
+    if _has_edge_tts():
+        return _synthesize_edge_tts(text, output_path)
     return _synthesize_silence(output_path, duration_sec=1.0)
 
 
-def _has_gtts() -> bool:
+def _has_edge_tts() -> bool:
     import importlib.util
 
-    return importlib.util.find_spec("gtts") is not None
+    return importlib.util.find_spec("edge_tts") is not None
 
 
-def _synthesize_gtts(text: str, output_path: Path, lang: str) -> Path:
-    from gtts import gTTS
+def _synthesize_edge_tts(text: str, output_path: Path) -> Path:
+    import edge_tts
 
-    tts = gTTS(text=text, lang=lang)
-    tts.save(str(output_path))
+    async def _run() -> None:
+        communicate = edge_tts.Communicate(text, VOICE)
+        await communicate.save(str(output_path))
+
+    asyncio.run(_run())
     return output_path
 
 

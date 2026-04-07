@@ -15,6 +15,7 @@ class Chunk:
     end_sec: float
     path: Path
     split_path: Path | None = None  # 분할된 파일 경로 (optional)
+    actual_start_sec: float | None = None  # ffprobe로 확인한 실제 시작 시간
 
 
 def build_chunks(video_path: Path, duration_sec: float, chunk_seconds: int, overlap_sec: int) -> list[Chunk]:
@@ -41,12 +42,53 @@ def build_chunks(video_path: Path, duration_sec: float, chunk_seconds: int, over
     return chunks
 
 
+def get_actual_start_time(video_path: Path) -> float:
+    """ffprobe로 영상의 실제 시작 타임스탬프를 읽습니다.
+
+    format=start_time이 0을 반환하면 첫 번째 패킷의 PTS로 재시도합니다.
+    (MP4 -c copy 청크에서 컨테이너 start_time이 0으로 기록되는 경우 대비)
+    """
+    ffprobe_cmd = find_ffmpeg_command("ffprobe")
+
+    # 1차: 컨테이너 start_time
+    cmd = [
+        ffprobe_cmd,
+        "-v", "quiet",
+        "-show_entries", "format=start_time",
+        "-of", "csv=p=0",
+        str(video_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        val = float(result.stdout.strip())
+        if val > 0:
+            return val
+    except (ValueError, AttributeError):
+        pass
+
+    # 2차: 첫 번째 비디오 패킷의 PTS
+    cmd2 = [
+        ffprobe_cmd,
+        "-v", "quiet",
+        "-read_intervals", "%+#1",
+        "-show_entries", "packet=pts_time",
+        "-select_streams", "v:0",
+        "-of", "csv=p=0",
+        str(video_path),
+    ]
+    result2 = subprocess.run(cmd2, capture_output=True, text=True)
+    try:
+        return float(result2.stdout.strip())
+    except (ValueError, AttributeError):
+        return 0.0
+
+
 def split_video_chunk(
     video_path: Path,
     start_sec: float,
     end_sec: float,
     output_path: Path | None = None,
-) -> Path:
+) -> tuple[Path, float]:
     """ffmpeg를 사용해 영상의 특정 구간을 분할합니다.
     
     Args:
@@ -78,11 +120,14 @@ def split_video_chunk(
         "-i", str(video_path),  # 입력 파일
         "-t", str(duration_sec),  # 길이
         "-c", "copy",  # 재인코딩 없이 복사 (빠름)
-        "-avoid_negative_ts", "make_zero",  # 타임스탬프 문제 방지
+        # -avoid_negative_ts make_zero 제거: 원본 PTS를 보존해야 ffprobe로 실제 시작 시간을 정확히 읽을 수 있음
         str(output_path),
     ]
     
     # ffmpeg 실행
     subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
-    return output_path
+
+    # 실제로 잘린 시작 시간 확인 (키프레임 정렬로 인해 start_sec와 다를 수 있음)
+    actual_start = get_actual_start_time(output_path)
+
+    return output_path, actual_start

@@ -33,26 +33,6 @@ async def generate_shorts(
         raise HTTPException(status_code=404, detail="Video not found")
 
    
-    # design = DesignConfig(
-    #     aspect_ratio=req.video_config.get("aspect_ratio", "9:16"),
-    #     video_width=req.video_config.get("width",  800),
-    #     video_height=req.video_config.get("height", 720),
-    #     video_y_pos=req.video_config.get("y_pos", 480),
-        
-    #     title_font=req.title_config.get("font", "Malgun Gothic"),
-    #     title_size=req.title_config.get("size", 70),
-    #     title_color=req.title_config.get("color", "yellow"),
-    #     title_y=req.title_config.get("y", 200),
-        
-    #     subtitle_font=req.subtitle_config.get("font", "Malgun Gothic"),
-    #     subtitle_size=req.subtitle_config.get("size", 65),
-    #     subtitle_color=req.subtitle_config.get("color", "&H0000FFFF"),
-    #     subtitle_y_margin=req.subtitle_config.get("margin_v", 400),
-        
-    #     work_font_size=req.work_config.get("size", 45),
-    #     work_color=req.work_config.get("color", "white"),
-    #     work_title_y=req.work_config.get("y", 1260)
-    # )
     design = DesignConfig(
         aspect_ratio=req.video_config.get("aspect_ratio", "9:16"),
         video_width=req.video_config.get("width", 800),
@@ -66,10 +46,10 @@ async def generate_shorts(
         title_color=req.title_config.get("colors", ["white"])[0],
         title_y=req.title_config.get("y", 200),
         
-        subtitle_font=req.subtitle_config.get("font", "Malgun Gothic"),
+        subtitle_font=req.subtitle_config.get("font", "Jalnan"),
         subtitle_size=req.subtitle_config.get("size", 65),
         subtitle_color=req.subtitle_config.get("color", "&H0000FFFF"),
-        subtitle_y_margin=req.subtitle_config.get("margin_v", 400),
+        subtitle_y_margin=req.subtitle_config.get("margin_v", 0),
         
         # [중요] 작품명 이미지/텍스트 설정 추출
         work_type=req.work_config.get("type", "text"),         
@@ -80,8 +60,6 @@ async def generate_shorts(
         work_color=req.work_config.get("color", "white"),
         work_title_y=req.work_config.get("y", 1260)
     )
-
-    print(f"DEBUG: API에서 받은 margin_v: {design.subtitle_y_margin}")
 
     # 2. 파이프라인 실행용 페이로드 구성
     # Path 객체 변환 및 저장 경로(OUTPUT_ROOT) 확인 필요
