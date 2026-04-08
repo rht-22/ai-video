@@ -50,6 +50,7 @@ GEMINI_PROMPT_TEMPLATE = """
 단순히 자극적이거나 감정적인 장면이 아니라, **이 영상에서 시청자가 꼭 봐야 할 핵심 장면**을 찾아라.
 - 이 에피소드의 스토리를 이해하는 데 필수적인 장면
 - 캐릭터의 성격/매력이 가장 잘 드러나는 장면
+- 사건/상황 자체가 핵심인 장면 (특정 인물보다 "무슨 일이 벌어졌는가"가 중요한 장면 (예시: 모두가 공감하는(relatability가 높은) 상황 등 points가 높은 장면의 맥락))
 - 시청자가 "이 드라마/예능 재밌다"고 느끼게 만드는 결정적 장면
 - 반전, 갈등의 정점, 감정의 클라이맥스, 핵심 대사가 있는 장면
 - 맥락 없이도 "뭔데 이거?" 하고 궁금해지는 장면
@@ -109,12 +110,13 @@ GEMINI_PROMPT_TEMPLATE = """
 - 분석 결과 해당 항목이 없을 경우 빈 배열 대신 null로 출력
 - candidate_moments 최소 {min_candidates}개 (이 청크에서 주목할 만한 모든 장면을 빠짐없이 포함)
 - 타이틀 시퀀스, 엔딩 크레딧은 제외하기
-- description은 실제 장면 묘사를 유지하고, 앞 장면이 나중 내용에 의해 재해석되는 경우 재해석된 의미는 reason 필드에만 반영할 것
+- description은 실제 장면 묘사를 유지하고, 앞 장면이 나중 내용에 의해 재해석되는 경우 재해석된 의미는 reason 필드에만 반영할 것. 과대해석 및 과장 금지.
 - ⚠️ **영상에 실제로 존재하는 장면만** 후보에 포함하라. 추론이나 상상으로 장면을 만들어내지 마라.
 - 각 candidate_moment의 start_sec~end_sec 구간은 반드시 첨부 영상에서 실제 확인 가능해야 한다.
 - 영상 전체를 빠짐없이 스캔하라. 앞부분에만 집중하지 말고 중반~후반도 균등하게 분석할 것.
-- 확실하지 않은 내용은 넣지 마라
-- 완결되지 않은 부분(엔딩)은 이후 전개에 대한 궁금증을 유발하는 장면일 수 있으므로 확정된 전개로 장담하지 말 것
+- 확실하지 않은 내용은 넣지 마라.
+- 완결되지 않은 부분(엔딩)은 이후 전개에 대한 궁금증을 유발하는 장면일 수 있으므로 확정된 전개로 장담하지 말 것.
+- "start_sec"~"end_sec" 내의 상황만 봐도 이해가 가능해야 한다.
 - 각 moment에 바이럴 제목 후보 2개 포함 (30자 이내, 이모지/이모티콘 절대 금지)
 - 각 moment의 story_role을 반드시 지정: "hook" | "build" | "payoff"
 - hook으로 적합한 moment에는 hook_description 필드 추가 (0-3초 후킹 전략)
@@ -190,6 +192,7 @@ STORY_COMPOSITION_PROMPT = """
 ⚠️ **3개 스토리라인 독립성 원칙:**
 - 3개 스토리라인은 **서로 다른 장면을 사용**해야 한다 (동일 씬 중복 사용 금지)
 - 각 스토리라인마다 **독립적인 서사 아크, 제목(title_line1+title_line2), TTS 나레이션**을 갖추어야 한다
+- 반드시 확실히 관련되어 있는 장면을 기준으로 연결하라
 - score는 바이럴 가능성을 0.0~1.0으로 **정직하게** 평가하라 (모두 비슷한 점수 금지)
 
 # 핵심 원칙: 멀티클립 편집
@@ -205,7 +208,7 @@ STORY_COMPOSITION_PROMPT = """
 ## Hook (0-5초): 스크롤 멈춤
 - 충격적 반전, 감정 폭발, 의외의 상황으로 시작
 - scroll_stop_power 0.7 이상인 moment 우선 선택
-- TTS로 궁금증 유발: "그런데 이때 예상치 못한 일이 벌어지는데..."
+- TTS로 궁금증 유발
 
 ## Build (5-45초): 몰입 유지 (최소 2개 씬)
 - 감정 강도가 점진적으로 상승
@@ -220,20 +223,20 @@ STORY_COMPOSITION_PROMPT = """
 
 레퍼런스 분석 결과 고조회수 쇼츠 제목은 반드시 2줄 구조:
 - **title_line1**: 상황/맥락 설명 (15자 이내, 흰색으로 표시됨)
-- **title_line2**: 캐릭터 중심 후킹 문구 (15자 이내, 노란색 강조로 표시됨)
+- **title_line2**: 캐릭터/주제 중심 후킹 문구 (15자 이내, 노란색 강조로 표시됨)
 
 예시:
-- "되찾은 구역과 신뢰" / "기분 째지는 태진이"
-- "멍청한 아줌마 연기" / "천재가 들통나는 순간"
-- "위기를 기회로 삼아" / "회장 눈에 든 희로"
+- "모두 기피하는 깡치사건" / "클리어하는 이한영"
+- "차기 회장을 지명한" / "준수의 놀라운 선택"
+- "교우 불화의 원인이" / "부모님 재력인 현실"
 
-⚠️ 이모지 금지. 캐릭터명(인물명) 반드시 포함.
+⚠️ 이모지 금지.
 
 # TTS 나레이션 규칙
 
 각 클립(hook, build 각 항목, payoff)마다 반드시 tts_line을 작성:
 - 해설 톤으로 상황을 요약하고 다음 씬으로 전환 유도
-- 예: "그런데 이때", "바로 그 순간", "하지만 반전이 있었으니"
+- 다음 씬 전환 유도 예: "그런데 이때", "바로 그 순간", "하지만 반전이 있었으니"
 - 각 TTS는 1-2문장, 자연스럽게 이전 씬에서 다음 씬으로 연결
 - payoff의 마지막에는 궁금증을 유발하는 엔딩 훅 가능
 
@@ -381,7 +384,7 @@ class GeminiClient:
         chunk_end = payload["chunk_end_sec"]
 
         # 자막 텍스트 (origin/test: transcript_text)
-        raw_segments = payload.get("transcript_text") or []
+        raw_segments = payload.get("transcript_segments") or []
         if raw_segments:
             filtered = [
                 s for s in raw_segments
@@ -390,6 +393,7 @@ class GeminiClient:
             transcript_text_str = "\n".join(
                 f"[{s.start_sec:.1f}~{s.end_sec:.1f}] {s.text}" for s in filtered
             ) or "없음"
+            transcript_text_str = transcript_text_str.replace("{", "{{").replace("}", "}}")
         else:
             transcript_text_str = "없음"
 
@@ -409,9 +413,9 @@ class GeminiClient:
                 "작품의 장르, 톤, 핵심 갈등을 이해하고, 그에 맞는 명장면을 선별하라.\n"
             )
 
-        # 청크 길이에 비례한 최소 후보 수 (1분당 1개, 최소 5개)
+        # 청크 길이에 비례한 최소 후보 수 (2분당 1개, 올림, 최소 1개)
         chunk_duration = chunk_end - chunk_start
-        min_candidates = max(5, int(chunk_duration / 60))
+        min_candidates = max(1, -(-int(chunk_duration) // 120))
 
         prompt = GEMINI_PROMPT_TEMPLATE.format(
             work_title=payload["work_title"],
