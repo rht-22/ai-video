@@ -24,10 +24,18 @@ def build_crop_timeline(
     height: int,
     sample_interval_sec: float,
     start_sec: float = 0.0,
-    end_sec: float = None
+    end_sec: float = None,
+    enable_speaker_tracking: bool = True,
+    target_character: str | None = None,
+    face_identifier: object | None = None,
 ) -> list[CropKeyframe]:
     if _has_cv2():
-        keyframes = _detect_faces(clip_path, width, height, sample_interval_sec, start_sec, end_sec)
+        keyframes = _detect_faces(
+            clip_path, width, height, sample_interval_sec, start_sec, end_sec,
+            enable_speaker_tracking=enable_speaker_tracking,
+            target_character=target_character,
+            face_identifier=face_identifier,
+        )
     else:
         keyframes = _center_crop(width, height, sample_interval_sec)
 
@@ -46,13 +54,49 @@ def _has_cv2() -> bool:
 
     return importlib.util.find_spec("cv2") is not None
 
+def _pick_speaker(faces, gray, prev_gray, frame_w: int, frame_h: int, prev_x: float, prev_y: float):
+    """area + center + mouth-motion + sticky 가중 점수로 화자 후보 얼굴 선택."""
+    import math
+    import cv2
+
+    cx_frame, cy_frame = frame_w / 2, frame_h / 2
+    max_dist = math.hypot(cx_frame, cy_frame) or 1.0
+    frame_area = float(frame_w * frame_h) or 1.0
+    diag = math.hypot(frame_w, frame_h) or 1.0
+
+    best_score = -1.0
+    best_face = None
+    for (x, y, fw, fh) in faces:
+        cx, cy = x + fw / 2, y + fh / 2
+        area_norm = (fw * fh) / frame_area
+        center_norm = 1.0 - (math.hypot(cx - cx_frame, cy - cy_frame) / max_dist)
+
+        my0 = int(y + fh * 0.6); my1 = min(int(y + fh), frame_h)
+        mx0 = max(int(x), 0);    mx1 = min(int(x + fw), frame_w)
+        if prev_gray is not None and my1 > my0 and mx1 > mx0:
+            diff = cv2.absdiff(gray[my0:my1, mx0:mx1], prev_gray[my0:my1, mx0:mx1])
+            motion_norm = min(float(diff.mean()) / 30.0, 1.0)
+        else:
+            motion_norm = 0.0
+
+        sticky_norm = 1.0 - min(math.hypot(cx - prev_x, cy - prev_y) / diag, 1.0)
+        score = 0.30 * area_norm + 0.30 * center_norm + 0.30 * motion_norm + 0.10 * sticky_norm
+        if score > best_score:
+            best_score = score
+            best_face = (x, y, fw, fh)
+    return best_face
+
+
 def _detect_faces(
     clip_path: Path,
     width: int,
     height: int,
     sample_interval_sec: float,
     start_sec: float = 0.0,
-    end_sec: float = None
+    end_sec: float = None,
+    enable_speaker_tracking: bool = True,
+    target_character: str | None = None,
+    face_identifier: object | None = None,
 ) -> list[CropKeyframe]:
     import cv2
     import numpy as np
@@ -101,6 +145,7 @@ def _detect_faces(
 
     # EMA 스무딩 계수 (0에 가까울수록 부드럽고, 1에 가까울수록 즉각 반응)
     ema_alpha = 0.25
+    prev_gray = None  # Phase 11: mouth-motion 계산용 직전 프레임
 
     # 3. 루프를 돌며 타임라인 데이터 생성
     for current_frame in range(start_frame, end_frame, frame_step):
@@ -128,15 +173,36 @@ def _detect_faces(
                     fw = gray.shape[1]
                     faces = np.array([[fw - (x + w), y, w, h] for x, y, w, h in faces_flip])
 
-        if len(faces) > 0:
-            # 가장 큰 얼굴 기준
-            x, y, w, h = max(faces, key=lambda item: item[2] * item[3])
+        # Phase 12: face_identifier로 타겟 인물 우선 추적
+        face_id_hit = False
+        if face_identifier and target_character:
+            try:
+                result = face_identifier.find_target_in_frame(frame, target_character)
+                if result is not None:
+                    target_x, target_y = result
+                    face_id_hit = True
+            except Exception:
+                pass  # deepface 오류 시 기존 로직 폴백
+
+        if not face_id_hit and len(faces) > 0:
+            if enable_speaker_tracking:
+                best = _pick_speaker(
+                    faces, gray, prev_gray,
+                    frame_w=gray.shape[1], frame_h=gray.shape[0],
+                    prev_x=smooth_x, prev_y=smooth_y,
+                )
+            else:
+                best = max(faces, key=lambda item: item[2] * item[3])
+            x, y, w, h = best
             target_x = float(x + w / 2)
             target_y = float(y + h / 2)
+
+        if face_id_hit or len(faces) > 0:
             # EMA 스무딩 적용 (급격한 점프 방지)
             smooth_x = ema_alpha * target_x + (1 - ema_alpha) * smooth_x
             smooth_y = ema_alpha * target_y + (1 - ema_alpha) * smooth_y
         # 얼굴 못 찾으면 smooth_x/y 유지 (자연스럽게 정체)
+        prev_gray = gray
 
         keyframes.append(
             CropKeyframe(

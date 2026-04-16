@@ -25,3 +25,7 @@ python-multipart==0.0.22
 # Utilities
 typing-extensions==4.15.0
 watchfiles==1.1.1
+requests>=2.31.0
+
+# Face Recognition (Phase 12)
+deepface>=0.0.93

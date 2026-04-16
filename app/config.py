@@ -44,14 +44,20 @@ class DesignConfig:
 
     overlay_image_path: str | None = None # 필요 시 이미지 경로
 
+    # Phase 11: 화자 우선 얼굴 트래킹 (False면 "가장 큰 얼굴" 폴백)
+    enable_speaker_tracking: bool = True
+
+    # Phase 12: 인물 인식 기반 얼굴 추적 (deepface + TMDb 배우 사진)
+    enable_face_recognition: bool = True
+
 @dataclass(frozen=True)
 class AppConfig:
     chunk_seconds: int = 600
     chunk_overlap: int = 30
     target_duration_sec: int = 60
-    target_duration_tolerance_sec: int = 10 
-    min_duration_sec: int = 50  
-    max_duration_sec: int = 60  
+    target_duration_tolerance_sec: int = 40
+    min_duration_sec: int = 40
+    max_duration_sec: int = 100
     canvas_width: int = 1080
     canvas_height: int = 1920
     top_title_height: int = 250
@@ -63,8 +69,8 @@ class AppConfig:
     crop_sample_interval_sec: float = 1.0
     crop_smoothing_window: int = 5
     scene_snap_threshold_sec: float = 0.8
-    tts_gain_db: int = -2
-    original_gain_db: int = -12
+    tts_gain_db: int = -3
+    original_gain_db: int = -3
     bgm_gain_db: int = -20
     render_preset: str = "balanced"
     enable_hwaccel: bool = True

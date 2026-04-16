@@ -18,15 +18,32 @@ class Chunk:
     actual_start_sec: float | None = None  # ffprobe로 확인한 실제 시작 시간
 
 
-def build_chunks(video_path: Path, duration_sec: float, chunk_seconds: int, overlap_sec: int) -> list[Chunk]:
-    if duration_sec <= chunk_seconds:
-        return [Chunk(index=0, start_sec=0.0, end_sec=duration_sec, path=video_path)]
+def build_chunks(
+    video_path: Path,
+    duration_sec: float,
+    chunk_seconds: int,
+    overlap_sec: int,
+    content_start_sec: float = 0.0,
+    content_end_sec: float | None = None,
+) -> list[Chunk]:
+    """영상을 청크로 분할합니다.
+
+    Args:
+        content_start_sec: 콘텐츠 시작 시간 (인트로 이후). 기본 0.0.
+        content_end_sec: 콘텐츠 종료 시간 (크레딧 이전). None이면 duration_sec.
+    """
+    if content_end_sec is None:
+        content_end_sec = duration_sec
+    effective_duration = content_end_sec - content_start_sec
+
+    if effective_duration <= chunk_seconds:
+        return [Chunk(index=0, start_sec=content_start_sec, end_sec=content_end_sec, path=video_path)]
 
     chunks = []
     index = 0
-    start = 0.0
-    while start < duration_sec:
-        end = min(start + chunk_seconds, duration_sec)
+    start = content_start_sec
+    while start < content_end_sec:
+        end = min(start + chunk_seconds, content_end_sec)
         chunks.append(
             Chunk(
                 index=index,
@@ -35,7 +52,7 @@ def build_chunks(video_path: Path, duration_sec: float, chunk_seconds: int, over
                 path=video_path,
             )
         )
-        if end >= duration_sec:
+        if end >= content_end_sec:
             break
         index += 1
         start = end - overlap_sec
