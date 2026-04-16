@@ -23,7 +23,14 @@ def _get_api_key() -> str | None:
 
 
 def _safe_filename(name: str) -> str:
-    return re.sub(r"[^\w가-힣]+", "_", name).strip("_") or "unknown"
+    """배우명을 파일시스템 + deepface 호환 ASCII 파일명으로 변환."""
+    # 한글을 제거하고 영문/숫자만 남김 (deepface가 비-ASCII 경로를 거부)
+    ascii_only = re.sub(r"[^a-zA-Z0-9]+", "_", name).strip("_")
+    if ascii_only:
+        return ascii_only
+    # 영문이 전혀 없으면 해시로 대체
+    import hashlib
+    return hashlib.md5(name.encode()).hexdigest()[:12]
 
 
 def search_actor_image(actor_name: str, api_key: str) -> str | None:
