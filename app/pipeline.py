@@ -36,12 +36,13 @@ from app.config import AppConfig, Paths, DesignConfig, get_font_path
 from app.modules.chunker import build_chunks, split_video_chunk
 from app.modules.gemini_client import load_gemini_client
 from app.modules.media_probe import probe_media
-from app.modules.moment_ranker import rank_moments
+from app.modules.moment_ranker import rank_moments, rank_moments_enhanced
+from app.prompts import PromptRegistry, GenreType, resolve_auto_format, resolve_auto_focus
 from app.modules.reframe import build_crop_timeline
 from app.modules.renderer import RenderInputs, render_short
 from app.modules.scene_detect import detect_scenes
 from app.modules.speech import extract_audio_segment, extract_transcript, SpeechSegment
-from app.modules.story_builder import StoryClip, validate_story_clips
+from app.modules.story_builder import StoryClip, validate_story_clips, validate_clip_coherence
 from app.modules.subtitle import (
     SubtitleStyle,
     build_ass_from_segments,
@@ -51,6 +52,7 @@ from app.modules.subtitle import (
     remap_transcript_to_edited_timeline,
 )
 from app.modules.tts import synthesize_tts
+from app.modules.work_researcher import research_work, CharacterInfo
 from app.modules.validator import validate_output
 from app.modules.ffmpeg_utils import find_ffmpeg_command
 from types import SimpleNamespace
@@ -93,6 +95,8 @@ def _clips_from_storyline(storyline_data: dict, fallback_title: str = "") -> tup
                 use_original_audio=h.get("use_original_audio", True),
                 chunk_index=h.get("chunk_index", -1),
                 candidate_index=h.get("candidate_index", -1),
+                character_focus=tuple(h.get("character_focus") or []),
+                bridges_from_previous=h.get("bridges_from_previous") or "",
             ))
 
         if "build" in actual_storyline:
@@ -106,6 +110,8 @@ def _clips_from_storyline(storyline_data: dict, fallback_title: str = "") -> tup
                     use_original_audio=b.get("use_original_audio", True),
                     chunk_index=b.get("chunk_index", -1),
                     candidate_index=b.get("candidate_index", -1),
+                    character_focus=tuple(b.get("character_focus") or []),
+                    bridges_from_previous=b.get("bridges_from_previous") or "",
                 ))
 
         if "payoff" in actual_storyline:
@@ -119,6 +125,8 @@ def _clips_from_storyline(storyline_data: dict, fallback_title: str = "") -> tup
                 use_original_audio=p.get("use_original_audio", True),
                 chunk_index=p.get("chunk_index", -1),
                 candidate_index=p.get("candidate_index", -1),
+                character_focus=tuple(p.get("character_focus") or []),
+                bridges_from_previous=p.get("bridges_from_previous") or "",
             ))
 
     # tts_line이 없는 클립은 원본 오디오 사용으로 강제
@@ -149,13 +157,19 @@ class PipelineInput:
     topic: str
     outdir: Path
     design: DesignConfig = field(default_factory=DesignConfig)
-    tone: str = "drama_variety"
+    genre: str = "auto"
+    content_format: str = "auto"
+    editing_focus: str = "auto"
     language: str = "ko"
     previous_episodes_context: str | None = None
     work_context: str | None = None
     srt_path: Path | None = None
     show_subtitles: bool = True
     max_shorts: int = 3
+    skip_research: bool = False
+    episode: int | None = None
+    skip_intro_sec: float = 0.0
+    skip_credits_sec: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -202,7 +216,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     "video_path": str(payload.video_path),
                     "work_title": payload.work_title,
                     "topic": payload.topic,
-                    "tone": payload.tone,
+                    "genre": payload.genre,
+                    "content_format": payload.content_format,
+                    "editing_focus": payload.editing_focus,
                     "language": payload.language,
                 },
                 "steps": [],
@@ -218,7 +234,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 "video_path": str(payload.video_path),
                 "work_title": payload.work_title,
                 "topic": payload.topic,
-                "tone": payload.tone,
+                "genre": payload.genre,
+                "content_format": payload.content_format,
+                "editing_focus": payload.editing_focus,
                 "language": payload.language,
             },
             "steps": [],
@@ -226,6 +244,89 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print(f"  - Job ID: {job_id}")
         print(f"  - 출력 디렉토리: {output_dir}")
     print("[OK] 초기화 완료")
+
+    # ═══════════════════════════════════════
+    # [1.5/10] 작품 자동 리서치
+    # ═══════════════════════════════════════
+    checkpoint_research = output_dir / "checkpoint_research.json"
+    cast_images: list[CharacterInfo] = []
+
+    if not payload.skip_research and not payload.work_context:
+        if checkpoint_research.exists():
+            print("\n[1.5/10] 작품 리서치 로드 중... (체크포인트)")
+            _rdata = json.loads(checkpoint_research.read_text(encoding="utf-8"))
+            payload = replace(payload,
+                work_context=_rdata.get("work_context", ""),
+                previous_episodes_context=_rdata.get("episodes_context") or payload.previous_episodes_context,
+            )
+            # 캐스트 이미지 복원
+            for ci in _rdata.get("cast_images", []):
+                img_p = Path(ci["image_path"]) if ci.get("image_path") else None
+                cast_images.append(CharacterInfo(
+                    character_name=ci.get("character_name", ""),
+                    actor_name=ci.get("actor_name", ""),
+                    role_description=ci.get("role_description", ""),
+                    image_path=img_p if img_p and img_p.exists() else None,
+                    image_url=ci.get("image_url"),
+                ))
+            print(f"  리서치 로드 완료 ({len(cast_images)}명 캐릭터)")
+        else:
+            print("\n[1.5/10] 작품 자동 리서치 중...")
+            research_start = time.time()
+            gemini = load_gemini_client()
+            research = research_work(payload.work_title, payload.episode, gemini)
+            research_elapsed = time.time() - research_start
+
+            if research.work_context:
+                payload = replace(payload,
+                    work_context=research.work_context,
+                    previous_episodes_context=research.episodes_context or payload.previous_episodes_context,
+                )
+                print(f"  시놉시스: {research.work_context[:80]}...")
+                print(f"  등장인물: {len(research.characters)}명")
+
+                # TMDb 배우 이미지 다운로드
+                import os
+                tmdb_key = os.environ.get("TMDB_API_KEY")
+                if tmdb_key:
+                    from app.modules.tmdb_client import download_cast_images as _dl_cast
+                    research_dir = output_dir / "_research"
+                    cast_images = _dl_cast(
+                        research.raw_data.get("characters", []),
+                        research_dir,
+                        tmdb_key,
+                    )
+                else:
+                    cast_images = list(research.characters)
+                    print("  [TMDb] TMDB_API_KEY 미설정 — 배우 이미지 없이 진행")
+
+                # 체크포인트 저장
+                checkpoint_research.write_text(json.dumps({
+                    "work_context": research.work_context,
+                    "episodes_context": research.episodes_context,
+                    "raw_data": research.raw_data,
+                    "sources": research.sources,
+                    "cast_images": [
+                        {
+                            "character_name": ci.character_name,
+                            "actor_name": ci.actor_name,
+                            "role_description": ci.role_description,
+                            "image_path": str(ci.image_path) if ci.image_path else None,
+                            "image_url": ci.image_url,
+                        }
+                        for ci in cast_images
+                    ],
+                }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+                run_log["steps"].append({"step": "research", "elapsed": research_elapsed,
+                                         "characters": len(cast_images)})
+                print(f"[OK] 작품 리서치 완료 (소요 시간: {research_elapsed:.1f}초)")
+            else:
+                print("  [WARN] 리서치 결과 없음 — 작품 정보 없이 진행")
+    elif payload.work_context:
+        print("\n[1.5/10] 작품 리서치 건너뜀 (수동 work_context 제공)")
+    else:
+        print("\n[1.5/10] 작품 리서치 건너뜀 (--no-research)")
 
     # 단계별 실행 플래그
     step_order = [
@@ -298,6 +399,43 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print("\n[3/10] 프록시 영상 이미 존재 — 건너뜀")
 
     # ═══════════════════════════════════════
+    # [3.5/10] 인트로/크레딧 제외 구간 감지
+    # ═══════════════════════════════════════
+    from app.modules.intro_credits_detector import (
+        detect_exclusion_zones, filter_excluded_moments, print_exclusion_summary, ExclusionZones,
+    )
+
+    checkpoint_exclusion = output_dir / "checkpoint_exclusion.json"
+    if checkpoint_exclusion.exists():
+        _ez_data = json.loads(checkpoint_exclusion.read_text(encoding="utf-8"))
+        exclusion_zones = ExclusionZones.from_dict(_ez_data)
+        print(f"\n[3.5/10] 제외 구간 로드 완료")
+        print_exclusion_summary(exclusion_zones, media_info.duration_sec)
+    else:
+        # SRT가 있으면 자동 감지에 활용
+        _srt_segs_for_detect = None
+        if payload.srt_path and payload.srt_path.exists():
+            try:
+                _srt_segs_for_detect = parse_subtitle(payload.srt_path)
+            except Exception:
+                pass
+
+        exclusion_zones = detect_exclusion_zones(
+            media_info.duration_sec,
+            skip_intro_sec=payload.skip_intro_sec,
+            skip_credits_sec=payload.skip_credits_sec,
+            auto_detect=True,
+            srt_segments=_srt_segs_for_detect,
+        )
+        if exclusion_zones.detection_method != "none":
+            print(f"\n[3.5/10] 인트로/크레딧 제외 구간 감지")
+            print_exclusion_summary(exclusion_zones, media_info.duration_sec)
+            checkpoint_exclusion.write_text(
+                json.dumps(exclusion_zones.to_dict(), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+    # ═══════════════════════════════════════
     # [4/10] 청크 분할
     # ═══════════════════════════════════════
     print("\n[4/10] 영상 청크 분할 중...")
@@ -306,8 +444,12 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         media_info.duration_sec,
         config.chunk_seconds,
         config.chunk_overlap,
+        content_start_sec=exclusion_zones.intro_end_sec,
+        content_end_sec=exclusion_zones.credits_start_sec,
     )
     print(f"  - 총 {len(chunks)}개 청크 생성")
+    if exclusion_zones.detection_method != "none":
+        print(f"  - 유효 구간: {exclusion_zones.intro_end_sec:.1f}s ~ {exclusion_zones.credits_start_sec:.1f}s")
 
     split_chunks = []
     for i, chunk in enumerate(chunks, 1):
@@ -325,13 +467,91 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     print("[OK] 청크 분할 완료")
 
     # ═══════════════════════════════════════
+    # [5-pre/10] 영상 의도 사전 분석 (narrative_skeleton)
+    # ═══════════════════════════════════════
+    skeleton_path = output_dir / "narrative_skeleton.json"
+    narrative_skeleton: dict[str, Any] = {}
+    if start_idx <= 4 and skeleton_path.exists() and from_step != "gemini":
+        print("\n[5-pre/10] narrative_skeleton 로드 중...")
+        try:
+            narrative_skeleton = json.loads(skeleton_path.read_text(encoding="utf-8"))
+            print(f"  - skeleton intent: {narrative_skeleton.get('intent', '')[:60]}")
+        except Exception as e:
+            print(f"  [WARN] skeleton 로드 실패: {e}")
+            narrative_skeleton = {}
+    elif start_idx <= 4:
+        print("\n[5-pre/10] 전체 영상 의도 사전 분석 중 (Flash)...")
+        try:
+            _intent_gemini = load_gemini_client()
+            narrative_skeleton = _intent_gemini.analyze_video_intent(
+                proxy_path=proxy_video_path,
+                work_title=payload.work_title,
+                topic=payload.topic,
+                work_context=payload.work_context,
+                genre=payload.genre,
+                content_format=payload.content_format,
+            )
+            if narrative_skeleton:
+                skeleton_path.write_text(
+                    json.dumps(narrative_skeleton, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                print(f"  [OK] skeleton 저장: intent={narrative_skeleton.get('intent', '')[:60]}")
+                print(f"       mandatory_scenes: {len(narrative_skeleton.get('mandatory_scenes', []))}개")
+            else:
+                print("  [WARN] skeleton이 비어 있음 — 청크 분석 시 생략")
+        except Exception as e:
+            print(f"  [WARN] 영상 의도 분석 실패: {e} — skeleton 없이 진행")
+            narrative_skeleton = {}
+    else:
+        if skeleton_path.exists():
+            try:
+                narrative_skeleton = json.loads(skeleton_path.read_text(encoding="utf-8"))
+            except Exception:
+                narrative_skeleton = {}
+
+    # ── Gemini skeleton으로 인트로/크레딧 제외 구간 업데이트 ──
+    if narrative_skeleton and (narrative_skeleton.get("has_intro") or narrative_skeleton.get("has_credits")):
+        _srt_for_ez = None
+        if payload.srt_path and payload.srt_path.exists():
+            try:
+                _srt_for_ez = parse_subtitle(payload.srt_path)
+            except Exception:
+                pass
+        exclusion_zones = detect_exclusion_zones(
+            media_info.duration_sec,
+            skip_intro_sec=payload.skip_intro_sec,
+            skip_credits_sec=payload.skip_credits_sec,
+            auto_detect=True,
+            srt_segments=_srt_for_ez,
+            gemini_result=narrative_skeleton,
+        )
+        if exclusion_zones.detection_method != "none":
+            print("  [인트로/크레딧] Gemini 영상 분석 결과 반영")
+            print_exclusion_summary(exclusion_zones, media_info.duration_sec)
+            checkpoint_exclusion.write_text(
+                json.dumps(exclusion_zones.to_dict(), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+    # ═══════════════════════════════════════
     # [5/10] Gemini 분석 (바이럴 최적화)
     # ═══════════════════════════════════════
     checkpoint_gemini = output_dir / "checkpoint_gemini.json"
+    _genre_votes: dict[str, int] = {}
+    _format_votes: dict[str, int] = {}
+    _final_genre: str = payload.genre
+    _final_format: str = payload.content_format
+    _final_focus: str = payload.editing_focus
     if start_idx <= 4 and checkpoint_gemini.exists() and from_step != "gemini":
         print("\n[5/10] Gemini 분석 결과 로드 중...")
         gemini_data = json.loads(checkpoint_gemini.read_text(encoding="utf-8"))
         all_candidates = gemini_data["all_candidates"]
+        _genre_votes = gemini_data.get("genre_votes", {}) or {}
+        _format_votes = gemini_data.get("format_votes", {}) or {}
+        _final_genre = gemini_data.get("resolved_genre", payload.genre)
+        _final_format = gemini_data.get("resolved_content_format", payload.content_format)
+        _final_focus = gemini_data.get("resolved_editing_focus", payload.editing_focus)
         # 하위 호환: 바이럴 필드 없는 기존 체크포인트 지원
         for m in all_candidates:
             m.setdefault("scroll_stop_power", 0.5)
@@ -362,6 +582,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             srt_segments_for_gemini = parse_subtitle(payload.srt_path)
             print(f"  - SRT 자막 {len(srt_segments_for_gemini)}개 세그먼트 → Gemini 인물 식별용 전달")
 
+        _resolved_genre = payload.genre
+        _resolved_format = payload.content_format
+        _resolved_focus = payload.editing_focus
+
         for idx, chunk in enumerate(chunks, 1):
             print(f"  청크 {idx}/{len(chunks)} 분석 중... ({chunk.start_sec:.1f}초 ~ {chunk.end_sec:.1f}초)")
             chunk_start = time.time()
@@ -376,6 +600,14 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 if s.start_sec < chunk.end_sec and s.end_sec > chunk.start_sec
             ] if srt_segments_for_gemini else []
 
+            # 2번째 청크부터 누적 투표 결과 반영 (auto 모드에서 점진적 확정)
+            if idx > 1 and _genre_votes and payload.genre == "auto":
+                _resolved_genre = max(_genre_votes, key=_genre_votes.get)
+            if idx > 1 and _format_votes and payload.content_format == "auto":
+                _resolved_format = max(_format_votes, key=_format_votes.get)
+            if _resolved_focus == "auto" and _resolved_genre != "auto":
+                _resolved_focus = resolve_auto_focus(_resolved_genre)
+
             prompt_payload = {
                 "work_title": payload.work_title,
                 "topic": payload.topic,
@@ -387,6 +619,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 "video_path": str(split_path) if split_path else None,
                 "previous_analyses": previous_analyses.copy(),
                 "transcript_segments": chunk_transcript_segs,
+                "genre": _resolved_genre,
+                "content_format": _resolved_format,
+                "editing_focus": _resolved_focus,
+                "narrative_skeleton": narrative_skeleton,
             }
 
             try:
@@ -395,6 +631,14 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 run_log["steps"].append({"step": "gemini", "chunk": chunk.index, "response": response})
                 moment_count = len(response.get("candidate_moments", []))
                 print(f"    → {moment_count}개 후보 모멘트 발견 (소요 시간: {chunk_elapsed:.1f}초)")
+
+                # 자동 감지 투표 집계
+                _det_g = response.get("detected_genre")
+                _det_f = response.get("detected_content_format")
+                if _det_g and _det_g != "auto":
+                    _genre_votes[_det_g] = _genre_votes.get(_det_g, 0) + 1
+                if _det_f and _det_f != "auto":
+                    _format_votes[_det_f] = _format_votes.get(_det_f, 0) + 1
 
                 previous_analyses.append({
                     "summary": response.get("summary", ""),
@@ -421,8 +665,38 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                         print(f"    [WARN] 분할 파일 삭제 실패: {split_path.name} ({e})")
 
         gemini_elapsed = time.time() - gemini_start
+
+        # 최종 genre/format/focus 확정
+        if payload.genre == "auto" and _genre_votes:
+            _final_genre = max(_genre_votes, key=_genre_votes.get)
+            print(f"  [AUTO] 장르 확정: {_final_genre} (투표: {_genre_votes})")
+        else:
+            _final_genre = payload.genre
+
+        if payload.content_format == "auto":
+            if _format_votes:
+                _final_format = max(_format_votes, key=_format_votes.get)
+            else:
+                _final_format = resolve_auto_format(_final_genre) if _final_genre != "auto" else "auto"
+        else:
+            _final_format = payload.content_format
+
+        if payload.editing_focus == "auto":
+            _final_focus = resolve_auto_focus(_final_genre) if _final_genre != "auto" else "auto"
+        else:
+            _final_focus = payload.editing_focus
+
+        print(f"  [결정] genre={_final_genre}, format={_final_format}, focus={_final_focus}")
+
         checkpoint_gemini.write_text(
-            json.dumps({"all_candidates": all_candidates}, ensure_ascii=False, indent=2),
+            json.dumps({
+                "all_candidates": all_candidates,
+                "genre_votes": _genre_votes,
+                "format_votes": _format_votes,
+                "resolved_genre": _final_genre,
+                "resolved_content_format": _final_format,
+                "resolved_editing_focus": _final_focus,
+            }, ensure_ascii=False, indent=2),
             encoding="utf-8"
         )
         print(f"[OK] Gemini 분석 완료 (총 {len(all_candidates)}개 후보, 소요 시간: {gemini_elapsed:.1f}초)")
@@ -431,6 +705,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             raise FileNotFoundError(f"체크포인트 파일을 찾을 수 없습니다: {checkpoint_gemini}")
         gemini_data = json.loads(checkpoint_gemini.read_text(encoding="utf-8"))
         all_candidates = gemini_data["all_candidates"]
+        _final_genre = gemini_data.get("resolved_genre", payload.genre)
+        _final_format = gemini_data.get("resolved_content_format", payload.content_format)
+        _final_focus = gemini_data.get("resolved_editing_focus", payload.editing_focus)
         for m in all_candidates:
             m.setdefault("scroll_stop_power", 0.5)
             m.setdefault("emotional_intensity", 0.5)
@@ -442,6 +719,13 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             m.setdefault("suggested_tts_line", "")
             m.setdefault("pacing_note", "")
             m.setdefault("points", {})
+
+    # ── 인트로/크레딧 포스트필터 (안전망) ──
+    if exclusion_zones.detection_method != "none":
+        before_count = len(all_candidates)
+        all_candidates = filter_excluded_moments(all_candidates, exclusion_zones)
+        if before_count != len(all_candidates):
+            print(f"  인트로/크레딧 필터 적용: {before_count} → {len(all_candidates)}개 후보")
 
     # ═══════════════════════════════════════
     # [6/10] 스토리 구성 (바이럴 최적화 — 멀티쇼츠)
@@ -475,10 +759,23 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         gemini = load_gemini_client()
         story_start = time.time()
 
-        ranked_candidates = rank_moments(all_candidates)
+        # 포커스/장르 가중치를 적용한 enhanced 랭킹
+        try:
+            _focus_mods = PromptRegistry.get_focus_weight_modifiers(_final_focus)
+            _genre_weights = PromptRegistry.get_scoring_weights(
+                GenreType(_final_genre) if _final_genre and _final_genre != "auto" else GenreType.AUTO
+            )
+        except Exception:
+            _focus_mods, _genre_weights = None, None
+        ranked_candidates = rank_moments_enhanced(
+            all_candidates,
+            shorts_type="storytelling",
+            focus_weight_modifiers=_focus_mods,
+            genre_scoring_weights=_genre_weights,
+        )
         ranked_dicts = [m.__dict__ for m in ranked_candidates]
 
-        # Gemini 바이럴 스토리 구성
+        # Gemini 바이럴 스토리 구성 (Flash + skeleton + 장르/포맷/포커스 블록)
         story_plan = gemini.compose_story_with_context(
             ranked_dicts,
             payload.work_title,
@@ -486,6 +783,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             min_duration_sec=config.min_duration_sec,
             max_duration_sec=config.max_duration_sec,
             work_context=payload.work_context,
+            genre=_final_genre,
+            content_format=_final_format,
+            editing_focus=_final_focus,
+            narrative_skeleton=narrative_skeleton,
         )
 
         # 멀티쇼츠: ranked_storylines에서 최대 max_shorts개 추출
@@ -518,6 +819,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             is_valid, msg = validate_story_clips(sl_clips, config.min_duration_sec, config.max_duration_sec)
             if not is_valid:
                 print(f"  [WARN] 스토리라인 {sl_idx + 1} 검증 실패: {msg}")
+            coh_warnings = validate_clip_coherence(sl_clips)
+            for w in coh_warnings:
+                print(f"  [COHERENCE] 스토리라인 {sl_idx + 1}: {w}")
 
             all_storyline_variants.append((sl_clips, sl_title, score))
             print(f"  - 스토리라인 {sl_idx + 1}: {len(sl_clips)}개 클립, 점수 {score:.2f}, 제목: {sl_title}")
@@ -619,6 +923,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             print(f"  - SRT 필터링 완료: {len(transcript_text)}개 세그먼트")
         else:
             print("  Whisper 전사 중... (선택된 클립만)")
+            # 리서치 결과에서 인물명 추출 (Whisper 프롬프트용)
+            _char_names = list(dict.fromkeys(
+                [ci.character_name for ci in cast_images if ci.character_name]
+                + [ci.actor_name for ci in cast_images if ci.actor_name]
+            ))
             for idx, clip in enumerate(clips):
                 clip_audio_path = output_dir / f"clip_audio_{idx}.wav"
                 try:
@@ -629,7 +938,12 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                         end_sec=clip.end_sec,
                         padding_sec=2.0,
                     )
-                    segments = extract_transcript(clip_audio_path)
+                    segments = extract_transcript(
+                        clip_audio_path,
+                        work_title=payload.work_title,
+                        character_names=_char_names,
+                        work_context=payload.work_context,
+                    )
                     for seg in segments:
                         # 패딩 오프셋 보정: actual_start는 (clip.start_sec - padding) 일 수 있음
                         adjusted_start = seg.start_sec + actual_start
@@ -739,11 +1053,30 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print("\n[8/10] 리소스 생성 중...")
         resource_start = time.time()
 
+        # Phase 12: 인물 인식 레퍼런스 빌드 (배우 사진이 있을 때만)
+        face_identifier = None
+        if cast_images and payload.design.enable_face_recognition:
+            try:
+                from app.modules.face_id import FaceIdentifier
+                fi = FaceIdentifier()
+                fi.build_references(cast_images)
+                if fi.references:
+                    face_identifier = fi
+                    print(f"  [FaceID] 인물 인식 레퍼런스: {len(fi.references)}명")
+                else:
+                    print("  [FaceID] 유효한 레퍼런스 없음 — 화자 추적 폴백")
+            except ImportError:
+                print("  [FaceID] deepface 미설치 — 화자 추적 폴백")
+            except Exception as e:
+                print(f"  [FaceID] 초기화 실패: {e} — 화자 추적 폴백")
+
         # 얼굴 크롭 타임라인
         crop_map = {}
         print(f"  크롭 타임라인 생성 중... ({len(clips)}개 클립)")
         for idx, clip in enumerate(clips):
             crop_path = output_dir / f"crop_{clip.role}_{idx}.json"
+            # Phase 12: character_focus 첫 번째 인물을 타겟으로
+            target_char = clip.character_focus[0] if clip.character_focus and face_identifier else None
             build_crop_timeline(
                 payload.video_path.resolve(),
                 crop_path,
@@ -752,6 +1085,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 config.crop_sample_interval_sec,
                 start_sec=clip.start_sec,
                 end_sec=clip.end_sec,
+                enable_speaker_tracking=payload.design.enable_speaker_tracking,
+                target_character=target_char,
+                face_identifier=face_identifier,
             )
             crop_map[f"{clip.role}_{idx}"] = crop_path
             if (idx + 1) % 5 == 0 or (idx + 1) == len(clips):
@@ -763,7 +1099,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         for idx, clip in enumerate(clips):
             if clip.tts_line:
                 tts_path = output_dir / f"tts_{idx}.mp3"
-                synthesize_tts(clip.tts_line, tts_path, lang=payload.language)
+                synthesize_tts(clip.tts_line, tts_path, lang=payload.language, editing_focus=_final_focus)
                 tts_audio_files[idx] = tts_path
                 if (idx + 1) % 3 == 0 or (idx + 1) == len(clips):
                     print(f"    진행 중... ({idx + 1}/{len(clips)})")
@@ -801,6 +1137,13 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     if start_idx <= 7:
         print("  편집 계획 생성 중...")
         edit_plan = _build_edit_plan(payload, title_text, clips, crop_map, config)
+        edit_plan["resolved"] = {
+            "genre": _final_genre,
+            "content_format": _final_format,
+            "editing_focus": _final_focus,
+        }
+        if narrative_skeleton:
+            edit_plan["narrative_skeleton"] = narrative_skeleton
         edit_plan_path.write_text(json.dumps(edit_plan, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"  - 편집 계획 저장: {edit_plan_path}")
 
@@ -939,6 +1282,14 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     if len(all_storyline_variants) > 1 and start_idx <= 8:
         print(f"\n추가 쇼츠 렌더링 ({len(all_storyline_variants) - 1}개)...")
 
+        # variant 쇼츠도 쇼츠 #1과 동일하게 라인 단위 SRT 기반 자막을 사용하도록 미리 파싱
+        srt_segments_for_variants: list[SpeechSegment] = []
+        if payload.srt_path and payload.srt_path.exists():
+            try:
+                srt_segments_for_variants = parse_subtitle(payload.srt_path)
+            except Exception as _exc:
+                print(f"  [경고] variant용 SRT 재파싱 실패: {_exc}")
+
         for var_idx in range(1, len(all_storyline_variants)):
             var_clips, var_title, var_score = all_storyline_variants[var_idx]
             var_num = var_idx + 1
@@ -954,16 +1305,20 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             try:
                 var_start = time.time()
 
-                # 전사 (Gemini 폴백 사용 — 추가 쇼츠는 빠른 렌더링 우선)
+                # 전사: SRT가 있으면 라인 단위 SRT를 그대로 사용 (remap이 clip 범위로 잘라냄).
+                # SRT가 없을 때만 Gemini candidate transcript로 폴백.
                 var_transcript: list = []
-                if all_candidates:
+                if srt_segments_for_variants:
+                    var_transcript = list(srt_segments_for_variants)
+                elif all_candidates:
                     for clip in var_clips:
                         for m in all_candidates:
                             m_start = float(m.get("start_sec", 0))
                             m_end = float(m.get("end_sec", 0))
                             if m_end > clip.start_sec and m_start < clip.end_sec and m.get("transcript"):
+                                # 실제 candidate 구간 시간을 보존 (clip 전체 덮어쓰기 금지)
                                 var_transcript.append(SpeechSegment(
-                                    start_sec=clip.start_sec, end_sec=clip.end_sec, text=m["transcript"],
+                                    start_sec=m_start, end_sec=m_end, text=m["transcript"],
                                 ))
                                 break
 
@@ -987,7 +1342,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     if tclip.tts_line:
                         tts_out = output_dir / f"tts_{var_num}_{tidx}.mp3"
                         if not tts_out.exists():
-                            synthesize_tts(tclip.tts_line, str(tts_out))
+                            synthesize_tts(tclip.tts_line, tts_out, lang=payload.language, editing_focus=_final_focus)
                         var_tts_files[tidx] = tts_out
 
                 # TTS 자막
@@ -1029,10 +1384,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     build_tts_ass(var_tts_segs, var_tts_sub_path, var_tts_line_style)
                     var_tts_sub_final = var_tts_sub_path
 
-                # 얼굴 크롭 타��라인
+                # 얼굴 크롭 타임라인
                 var_crop_map = {}
                 for cidx, cclip in enumerate(var_clips):
                     crop_file = output_dir / f"crop_{var_num}_{cclip.role}_{cidx}.json"
+                    var_target_char = cclip.character_focus[0] if cclip.character_focus and face_identifier else None
                     build_crop_timeline(
                         payload.video_path.resolve(),
                         crop_file,
@@ -1041,6 +1397,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                         config.crop_sample_interval_sec,
                         start_sec=cclip.start_sec,
                         end_sec=cclip.end_sec,
+                        enable_speaker_tracking=payload.design.enable_speaker_tracking,
+                        target_character=var_target_char,
+                        face_identifier=face_identifier,
                     )
                     var_crop_map[f"{cclip.role}_{cidx}"] = crop_file
 
@@ -1181,7 +1540,9 @@ def _build_edit_plan(
             "video_path": str(payload.video_path),
             "work_title": payload.work_title,
             "topic": payload.topic,
-            "tone": payload.tone,
+            "genre": payload.genre,
+            "content_format": payload.content_format,
+            "editing_focus": payload.editing_focus,
             "language": payload.language,
         },
         "layout": {

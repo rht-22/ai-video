@@ -15,9 +15,20 @@ class SpeechSegment:
     text: str
 
 
-def extract_transcript(audio_path: Path) -> list[SpeechSegment]:
+def extract_transcript(
+    audio_path: Path,
+    *,
+    work_title: str | None = None,
+    character_names: list[str] | None = None,
+    work_context: str | None = None,
+) -> list[SpeechSegment]:
     if _has_faster_whisper():
-        return _extract_with_faster_whisper(audio_path)
+        return _extract_with_faster_whisper(
+            audio_path,
+            work_title=work_title,
+            character_names=character_names,
+            work_context=work_context,
+        )
     return []
 
 
@@ -105,36 +116,91 @@ def _has_faster_whisper() -> bool:
     return importlib.util.find_spec("faster_whisper") is not None
 
 
-def _extract_with_faster_whisper(audio_path: Path) -> list[SpeechSegment]:
-    """faster-whisper로 음성을 텍스트로 변환합니다.
+# ── Whisper 모델 캐싱 (클립마다 재로드 방지) ──
+_cached_model = None
+_cached_model_key: str | None = None
 
-    기존 openai-whisper 대비:
-    - CPU에서 약 4배 빠름
-    - 동일 모델 크기 대비 메모리 사용량 절반
-    - int8 양자화로 CPU 최적화
+
+def _detect_device_and_compute() -> tuple[str, str]:
+    """GPU 가용성을 확인하고 최적 device/compute_type을 반환."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda", "float16"
+    except ImportError:
+        pass
+    return "cpu", "int8"
+
+
+def _get_whisper_model(model_name: str, device: str, compute_type: str):
+    """Whisper 모델을 캐싱하여 반환 (동일 설정이면 재사용)."""
+    global _cached_model, _cached_model_key
+    key = f"{model_name}:{device}:{compute_type}"
+    if _cached_model_key != key:
+        from faster_whisper import WhisperModel
+        print(f"  [Whisper] 모델 로드 중... ({model_name}, {device}, {compute_type})")
+        _cached_model = WhisperModel(model_name, device=device, compute_type=compute_type)
+        _cached_model_key = key
+    return _cached_model
+
+
+def _build_whisper_prompt(
+    work_title: str | None = None,
+    character_names: list[str] | None = None,
+    work_context: str | None = None,
+) -> str:
+    """리서치 결과를 반영한 Whisper initial_prompt를 생성."""
+    parts = ["한국어 드라마, 예능 프로그램입니다."]
+    if work_title:
+        parts.append(f"작품명: {work_title}.")
+    if character_names:
+        # Whisper initial_prompt ~224 토큰 제한 → 인물명 15명으로 제한
+        names_str = ", ".join(character_names[:15])
+        parts.append(f"등장인물: {names_str}.")
+    if work_context:
+        # 시놉시스는 100자만 (너무 길면 역효과)
+        parts.append(f"내용: {work_context[:100].rstrip()}")
+    parts.append("한국어와 외국어가 혼용될 수 있습니다.")
+    return " ".join(parts)
+
+
+def _extract_with_faster_whisper(
+    audio_path: Path,
+    *,
+    work_title: str | None = None,
+    character_names: list[str] | None = None,
+    work_context: str | None = None,
+) -> list[SpeechSegment]:
+    """faster-whisper large-v3-turbo로 음성을 텍스트로 변환합니다.
+
+    - large-v3-turbo: base 대비 한국어 정확도 대폭 향상
+    - 리서치 결과(인물명, 작품명)를 initial_prompt에 주입하여 고유명사 인식 강화
+    - 모델 캐싱으로 다중 클립 전사 시 재로드 방지
+    - GPU 자동 감지 (CUDA 가용 시 float16 사용)
     """
-    from faster_whisper import WhisperModel
+    device, compute_type = _detect_device_and_compute()
+    model = _get_whisper_model("large-v3-turbo", device, compute_type)
 
-    print("  [Whisper] 모델 로드 중...")
-    model = WhisperModel(
-        "base",
-        device="cpu",
-        compute_type="int8",  # CPU에서 속도/정확도 균형을 위한 int8 양자화
+    initial_prompt = _build_whisper_prompt(
+        work_title=work_title,
+        character_names=character_names,
+        work_context=work_context,
     )
+    print(f"  [Whisper] 프롬프트: {initial_prompt[:80]}...")
 
     print("  [Whisper] 전사 시작...")
     segments_generator, info = model.transcribe(
-    str(audio_path),
-    # language 제거 → 자동 감지
-    initial_prompt="한국어 드라마, 예능 프로그램입니다. 한국어와 외국어가 혼용될 수 있습니다.",
-    no_speech_threshold=0.6,
-    temperature=0.0,
-    condition_on_previous_text=False,
-    vad_filter=True,
-    vad_parameters=dict(
-        min_silence_duration_ms=500,
-    ),
-)
+        str(audio_path),
+        language="ko",
+        initial_prompt=initial_prompt,
+        no_speech_threshold=0.6,
+        temperature=0.0,
+        condition_on_previous_text=False,
+        vad_filter=True,
+        vad_parameters=dict(
+            min_silence_duration_ms=500,
+        ),
+    )
 
     print(f"  [Whisper] 감지된 언어: {info.language} (확률: {info.language_probability:.2f})")
 

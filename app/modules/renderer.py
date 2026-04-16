@@ -497,6 +497,32 @@ from app.config import DesignConfig,AppConfig
 _VIDEO_ENCODER_CACHE: str | None = None
 
 
+def _build_crop_expr(keyframes: list[dict], axis: str) -> str:
+    """키프레임 → ffmpeg crop x/y용 piecewise linear 시간 표현식.
+
+    axis: 'x_center' 또는 'y_center'.
+    클립 입력은 -ss로 0초부터 시작한다고 가정 → time을 첫 KF 기준으로 정규화.
+    표현식 길이 가드: 80개 초과 시 다운샘플.
+    """
+    if not keyframes:
+        return "0"
+    if len(keyframes) > 80:
+        step = (len(keyframes) // 80) + 1
+        keyframes = keyframes[::step] + [keyframes[-1]]
+    t0 = keyframes[0]['time_sec']
+    pts = [(kf['time_sec'] - t0, float(kf[axis])) for kf in keyframes]
+    if len(pts) == 1:
+        return f"{pts[0][1]:.2f}"
+    expr = f"{pts[-1][1]:.2f}"
+    for i in range(len(pts) - 2, -1, -1):
+        t_a, v_a = pts[i]
+        t_b, v_b = pts[i + 1]
+        dt = max(t_b - t_a, 1e-3)
+        lerp = f"({v_a:.2f}+({v_b - v_a:.2f})*(t-{t_a:.3f})/{dt:.3f})"
+        expr = f"if(lt(t,{t_b:.3f}),{lerp},{expr})"
+    return expr
+
+
 @dataclass(frozen=True)
 class RenderInputs:
     video_path: Path
@@ -818,10 +844,11 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sort
             try:
                 crop_json = json.loads(crop_data_path.read_text(encoding="utf-8"))
                 if crop_json and len(crop_json) > 0:
-                    avg_cx = sum(kf['x_center'] for kf in crop_json) / len(crop_json)
                     cw, ch = crop_json[0]['crop_w'], crop_json[0]['crop_h']
-                    cy = crop_json[0]['y_center']
-                    crop_filter = f"crop={cw}:{ch}:{avg_cx}-{cw}/2:{cy}-{ch}/2,"
+                    x_expr = _build_crop_expr(crop_json, 'x_center')
+                    y_expr = _build_crop_expr(crop_json, 'y_center')
+                    # ffmpeg crop x/y는 좌상단 좌표 → center에서 cw/2, ch/2 빼기
+                    crop_filter = f"crop={cw}:{ch}:x='({x_expr})-{cw}/2':y='({y_expr})-{ch}/2',"
             except: pass
 
         v_filter = (

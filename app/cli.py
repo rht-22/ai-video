@@ -5,6 +5,7 @@ from pathlib import Path
 
 from app.config import DesignConfig
 from app.pipeline import PipelineInput, run_pipeline
+from app.prompts import GenreType
 
 
 def _resolve_outdir(outdir: Path) -> Path:
@@ -24,10 +25,18 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     create = subparsers.add_parser("create_shorts", help="Create a 60-second vertical short")
-    create.add_argument("--video", required=True, help="Path to input video")
-    create.add_argument("--title", required=True, help="Work title")
-    create.add_argument("--topic", required=True, help="One topic to focus on")
-    create.add_argument("--outdir", required=True, help="Output directory")
+    # ── 필수: 작품명. 입력 소스는 로컬 파일(--video + --subtitle) 또는 --youtube-url 중 하나 ──
+    create.add_argument("--video", help="입력 영상 파일 경로 (--youtube-url 사용 시 생략)")
+    create.add_argument("--subtitle", dest="subtitle_file",
+                        help="자막 파일 경로 SRT/ASS/VTT/SMI (--youtube-url 사용 시 생략)")
+    create.add_argument("--youtube-url", dest="youtube_url",
+                        help="YouTube 영상 URL — 영상+자막 자동 다운로드")
+    create.add_argument("--title", required=True, help="작품명 또는 채널명")
+    # ── 선택 입력 (기본값 제공) ──
+    create.add_argument("--topic", default="",
+                        help="(선택) 집중할 주제 한 줄 — 미지정 시 전체 맥락으로 자동 구성")
+    create.add_argument("--outdir", default="outputs",
+                        help="(선택) 출력 디렉토리 — 기본: outputs/")
     create.add_argument(
         "--from-step",
         choices=[
@@ -41,10 +50,35 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--previous-context-file", help="이전 에피소드 요약이 담긴 텍스트 파일 경로")  # 이전 맥락 부여 테스트
     create.add_argument("--work-context", help="작품 설명/시놉시스 텍스트 (직접 입력)")
     create.add_argument("--work-context-file", help="작품 설명/시놉시스가 담긴 텍스트 파일 경로")
-    create.add_argument("--subtitle-file", help="외부 자막 파일 경로 — SRT, ASS, VTT, SMI 지원 (제공 시 Whisper 음성인식 생략)")
     create.add_argument("--srt-file", dest="subtitle_file_legacy", help=argparse.SUPPRESS)  # 하위호환
     create.add_argument("--no-subtitles", action="store_true", help="최종 영상에 자막 표시 안 함")
     create.add_argument("--max-shorts", type=int, default=3, help="생성할 최대 쇼츠 수 (1-3, 기본: 3)")
+    create.add_argument("--no-research", action="store_true",
+                        help="작품 자동 리서치를 건너뜁니다")
+    create.add_argument("--episode", type=int, default=None,
+                        help="에피소드 번호 (리서치 시 스포일러 방지)")
+    create.add_argument("--skip-intro", type=float, default=0.0,
+                        help="오프닝/인트로 건너뛰기 (초, 예: 90)")
+    create.add_argument("--skip-credits", type=float, default=0.0,
+                        help="엔딩 크레딧 건너뛰기 (초, 예: 120)")
+    create.add_argument(
+        "--genre",
+        default="auto",
+        choices=[g.value for g in GenreType],
+        help="콘텐츠 장르 (기본: auto). 예: drama_romance, drama_thriller, variety_talk, movie_general",
+    )
+    create.add_argument(
+        "--content-format",
+        default="auto",
+        choices=["auto", "episodic", "standalone", "season_based", "variety_episode"],
+        help="콘텐츠 형식 (기본: auto). 연속극/독립/시즌제/예능 에피소드",
+    )
+    create.add_argument(
+        "--editing-focus",
+        default="auto",
+        choices=["auto", "event", "character", "emotion", "narrative", "reaction"],
+        help="편집 포커스 (기본: auto). 사건/인물/감정/서사/리액션 중심",
+    )
 
     # ── 디자인 파라미터 (DesignConfig 오버라이드) ──
     design = create.add_argument_group("design", "영상 디자인/레이아웃 설정 (YouTube Shorts safe zone 기준)")
@@ -140,15 +174,34 @@ def main() -> None:
         #     else:
         #         print("❌ 잘못된 입력입니다. 1 또는 2를 입력해 주세요.")
         
-        # 자막 파일: --subtitle-file 우선, --srt-file(레거시) 폴백
-        sub_file = getattr(args, "subtitle_file", None) or getattr(args, "subtitle_file_legacy", None)
-        srt_path = Path(sub_file) if sub_file else None
+        # 입력 소스 해소: YouTube URL이면 자동 다운로드, 아니면 로컬 파일 사용
+        if getattr(args, "youtube_url", None):
+            import re
+            from app.modules.youtube_downloader import download_youtube_assets
+
+            def _slugify(s: str) -> str:
+                return re.sub(r"[^\w가-힣]+", "_", s).strip("_") or "untitled"
+
+            dl_dir = _resolve_outdir(Path(args.outdir)) / _slugify(args.title) / "_source"
+            print(f"[YouTube] 다운로드 중: {args.youtube_url}")
+            assets = download_youtube_assets(args.youtube_url, dl_dir, lang="ko")
+            print(f"  영상: {assets.video_path}")
+            print(f"  자막: {assets.subtitle_path or '(없음 — Gemini 전사로 폴백)'}")
+            video_path = assets.video_path
+            srt_path = assets.subtitle_path
+        else:
+            if not args.video:
+                parser.error("--video 또는 --youtube-url 중 하나는 필수입니다")
+            video_path = Path(args.video)
+            # 자막 파일: --subtitle 우선, --srt-file(레거시) 폴백
+            sub_file = getattr(args, "subtitle_file", None) or getattr(args, "subtitle_file_legacy", None)
+            srt_path = Path(sub_file) if sub_file else None
 
         max_shorts = min(max(getattr(args, "max_shorts", 3), 1), 3)
 
         output = run_pipeline(
             PipelineInput(
-                video_path=Path(args.video),
+                video_path=video_path,
                 work_title=args.title,
                 topic=args.topic,
                 outdir=_resolve_outdir(Path(args.outdir)),
@@ -158,6 +211,13 @@ def main() -> None:
                 srt_path=srt_path,
                 show_subtitles=not getattr(args, "no_subtitles", False),
                 max_shorts=max_shorts,
+                genre=getattr(args, "genre", "auto"),
+                content_format=getattr(args, "content_format", "auto"),
+                editing_focus=getattr(args, "editing_focus", "auto"),
+                skip_research=getattr(args, "no_research", False),
+                episode=getattr(args, "episode", None),
+                skip_intro_sec=getattr(args, "skip_intro", 0.0),
+                skip_credits_sec=getattr(args, "skip_credits", 0.0),
             ),
             from_step=args.from_step,
             job_id=args.job_id,

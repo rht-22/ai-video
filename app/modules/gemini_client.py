@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import shutil
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +12,26 @@ from typing import Any
 
 from dotenv import load_dotenv
 import re
+
+from app.prompts import PromptRegistry, GenreType
+
+
+def _safe_upload_path(file_path: Path) -> tuple[Path, bool]:
+    """한글 등 비-ASCII 경로를 Gemini File API 호환 경로로 변환.
+
+    Returns:
+        (사용할 경로, 임시파일 여부). 임시파일이면 사용 후 삭제 필요.
+    """
+    path_str = str(file_path)
+    try:
+        path_str.encode("ascii")
+        return file_path, False
+    except UnicodeEncodeError:
+        # 비-ASCII 경로 → 임시 디렉토리에 심볼릭 링크 생성
+        suffix = file_path.suffix
+        tmp = Path(tempfile.mktemp(suffix=suffix, prefix="gemini_upload_"))
+        shutil.copy2(file_path, tmp)
+        return tmp, True
 
 
 def _extract_json_from_markdown(text: str) -> str:
@@ -38,6 +60,7 @@ GEMINI_PROMPT_TEMPLATE = """
 - 주제: {topic}
 - 청크 범위: {chunk_start_sec} ~ {chunk_end_sec} 초
 {work_context_block}
+{narrative_skeleton_block}
 {previous_episodes_context_block}
 - ⚠️ 모든 start_sec / end_sec는 반드시 첨부된 영상 파일의 시작(0초)을 기준으로 한 상대값으로 반환할 것
 
@@ -121,6 +144,20 @@ GEMINI_PROMPT_TEMPLATE = """
 - 각 moment의 story_role을 반드시 지정: "hook" | "build" | "payoff"
 - hook으로 적합한 moment에는 hook_description 필드 추가 (0-3초 후킹 전략)
 
+{genre_specific_block}
+{format_specific_block}
+{focus_specific_block}
+{auto_detect_instruction}
+
+[Audience Appeal 필드 — 각 candidate_moment에 반드시 포함]
+- hook_reason: 이 장면이 시청자의 스크롤을 멈추게 하는 구체적 이유 (1문장)
+- emotional_peak: 이 장면의 감정 정점 키워드 (놀람|슬픔|분노|설렘|통쾌|답답|호기심 등)
+- payoff_feeling: 시청자가 클립 끝에서 얻는 감정적 보상 (1문장)
+- is_mandatory_narrative_beat: 이 장면이 전체 영상의 필수 서사 비트인지 (true|false)
+- belongs_to_skeleton_beat: 전체 skeleton 비트(발단|위기|절정|반전|결말) 중 어디에 속하는지 (없으면 null)
+- character_focus: 이 장면의 주요 인물 이름 배열
+- coherence_with_neighbors: 이 장면이 전체 영상 skeleton 상 앞뒤 비트와 어떻게 연결되는가 (1문장)
+
 {{
   "chunk_index": 0,
   "chunk_start_sec": 0,
@@ -140,6 +177,8 @@ GEMINI_PROMPT_TEMPLATE = """
   "emotion_curve": [{{"start_sec": 0.0, "end_sec": 10.0, "emotion": "감정", "intensity": 0.8}}],
   "tension_score": {{"average": 0.6, "peak": 0.95, "peak_start_sec": 0.0, "peak_end_sec": 10.0}},
   "overall_vibe": "영상 전체 분위기 요약",
+  "detected_genre": "auto일 때만 감지된 장르(drama_romance|drama_thriller|drama_makjang|drama_legal|drama_sageuk|variety_talk|variety_observation|variety_survival|variety_mukbang|movie_general), 아니면 null",
+  "detected_content_format": "auto일 때만 감지된 포맷(episodic|standalone|season_based|variety_episode), 아니면 null",
   "candidate_moments": [
     {{
       "chunk_index": 0,
@@ -164,6 +203,13 @@ GEMINI_PROMPT_TEMPLATE = """
       "viral_titles": ["제목 후보 1", "제목 후보 2"],
       "suggested_tts_line": "이 장면에 어울리는 나레이션 TTS 한 줄",
       "pacing_note": "빠른 컷|느린 텐션|점진적 고조",
+      "hook_reason": "스크롤을 멈추게 하는 이유",
+      "emotional_peak": "감정 정점 키워드",
+      "payoff_feeling": "클립 끝에서 얻는 감정적 보상",
+      "is_mandatory_narrative_beat": false,
+      "belongs_to_skeleton_beat": null,
+      "character_focus": ["인물명"],
+      "coherence_with_neighbors": "앞뒤 비트와 연결되는 방식",
       "points": {{
         "humor": null,
         "love": null,
@@ -248,7 +294,22 @@ STORY_COMPOSITION_PROMPT = """
 # Input Data
 - 작품명: {work_title}
 - 주제: {topic}
+{story_topic_line}
 {work_context_block}
+{narrative_skeleton_json_block}
+{story_genre_block}
+{story_format_specific_block}
+{story_focus_specific_block}
+
+[스토리라인 구성 룰 — 어색함 방지 / 연결성 강제]
+1. 선택된 클립 세트는 skeleton의 "mandatory_scenes" 중 최소 1개를 포함해야 한다
+2. 인물 연속성: 인접 클립은 character_focus 교집합이 있거나, bridges_from_previous 문장에서 연결을 명확히 설명해야 한다
+3. 시간 근접성: 원본 타임라인 상 큰 점프가 필요한 경우, 반드시 TTS bridges_from_previous로 맥락을 제공하라
+4. 감정 흐름: 감정 아크(emotional_arc) 순서를 역행하지 마라 (고조→도입 금지)
+5. 각 storyline에 "coherence_score" (0.0~1.0) 필드 — 위 4가지 룰 달성도
+6. 각 클립 객체에 "bridges_from_previous" 필드 — 앞 클립에서 어떻게 이어지는지 한 문장 (hook은 null 가능)
+7. 각 클립 객체에 "character_focus" 배열 — 해당 장면의 주요 인물 이름
+
 - 후보 장면 및 분석 데이터:
 {candidates_str}
 
@@ -290,6 +351,7 @@ STORY_COMPOSITION_PROMPT = """
       "topic": "주제명",
       "topic_reason": "서사 구성 이유",
       "score": 0.0,
+      "coherence_score": 0.0,
       "estimated_duration_sec": 0.0,
       "viral_titles": ["제목1", "제목2", "제목3"],
       "title_line1": "상황/맥락 설명 (15자 이내)",
@@ -301,7 +363,9 @@ STORY_COMPOSITION_PROMPT = """
           "start_sec": 0.0, "end_sec": 0.0,
           "description": "장면 설명",
           "tts_line": "궁금증 유발 나레이션 1-2문장",
-          "use_original_audio": true
+          "use_original_audio": true,
+          "character_focus": ["인물명"],
+          "bridges_from_previous": null
         }},
         "build": [
           {{
@@ -309,7 +373,9 @@ STORY_COMPOSITION_PROMPT = """
             "start_sec": 0.0, "end_sec": 0.0,
             "description": "장면 설명",
             "tts_line": "맥락 연결 나레이션 1-2문장",
-            "use_original_audio": true
+            "use_original_audio": true,
+            "character_focus": ["인물명"],
+            "bridges_from_previous": "앞 씬에서 어떻게 이어지는지"
           }}
         ],
         "payoff": {{
@@ -317,7 +383,9 @@ STORY_COMPOSITION_PROMPT = """
           "start_sec": 0.0, "end_sec": 0.0,
           "description": "장면 설명",
           "tts_line": "클라이맥스 나레이션",
-          "use_original_audio": true
+          "use_original_audio": true,
+          "character_focus": ["인물명"],
+          "bridges_from_previous": "앞 씬에서 어떻게 이어지는지"
         }}
       }}
     }}
@@ -336,7 +404,8 @@ STORY_COMPOSITION_PROMPT = """
 @dataclass(frozen=True)
 class GeminiConfig:
     api_key: str
-    model_name: str = "gemini-1.5-pro"
+    model_name: str = "gemini-3.1-pro-preview"
+    flash_model_name: str = "gemini-3-flash-preview"
     max_retries: int = 3
 
 
@@ -417,6 +486,48 @@ class GeminiClient:
         chunk_duration = chunk_end - chunk_start
         min_candidates = max(1, -(-int(chunk_duration) // 120))
 
+        # ── 장르/포맷/포커스 블록 주입 ──
+        _genre_val = payload.get("genre", "auto") or "auto"
+        _fmt_val = payload.get("content_format", "auto") or "auto"
+        _focus_val = payload.get("editing_focus", "auto") or "auto"
+        try:
+            _genre_enum = GenreType(_genre_val)
+        except ValueError:
+            _genre_enum = GenreType.AUTO
+        genre_block = PromptRegistry.get_analysis_genre_block(_genre_enum)
+        format_block = PromptRegistry.get_format_analysis_block(_fmt_val)
+        focus_block = PromptRegistry.get_focus_analysis_block(_focus_val)
+
+        auto_detect_instruction = ""
+        if _genre_val == "auto":
+            auto_detect_instruction += (
+                "\n[자동 장르 감지] 이 영상의 장르를 분석해 "
+                "\"detected_genre\" 필드에 반드시 작성하라. "
+                "선택 가능: drama_romance | drama_thriller | drama_makjang | "
+                "drama_legal | drama_sageuk | variety_talk | variety_observation | "
+                "variety_survival | variety_mukbang | movie_general\n"
+            )
+        if _fmt_val == "auto":
+            auto_detect_instruction += (
+                "\n[자동 형식 감지] 이 영상의 콘텐츠 형식을 분석해 "
+                "\"detected_content_format\" 필드에 반드시 작성하라. "
+                "선택 가능: episodic | standalone | season_based | variety_episode\n"
+            )
+
+        # ── 전체 영상 skeleton 블록 주입 ──
+        narrative_skeleton_block = ""
+        sk = payload.get("narrative_skeleton")
+        if sk and isinstance(sk, dict):
+            sk_json = json.dumps(sk, ensure_ascii=False, indent=2)
+            sk_json_escaped = sk_json.replace("{", "{{").replace("}", "}}")
+            narrative_skeleton_block = (
+                "\n[전체 영상 맥락 — 반드시 이 그림 안에서 현재 청크를 해석하라]\n"
+                f"{sk_json_escaped}\n"
+                "⚠️ 위 narrative_skeleton은 전체 영상을 사전 스캔한 결과다. "
+                "현재 청크의 각 장면이 이 스켈레톤의 어느 비트에 해당하는지 판단해 "
+                "belongs_to_skeleton_beat / is_mandatory_narrative_beat 필드에 반드시 반영하라.\n"
+            )
+
         prompt = GEMINI_PROMPT_TEMPLATE.format(
             work_title=payload["work_title"],
             topic=payload["topic"],
@@ -428,6 +539,11 @@ class GeminiClient:
             previous_context=previous_context,
             previous_episodes_context_block=previous_episodes_context_block,
             work_context_block=work_context_block,
+            narrative_skeleton_block=narrative_skeleton_block,
+            genre_specific_block=genre_block,
+            format_specific_block=format_block,
+            focus_specific_block=focus_block,
+            auto_detect_instruction=auto_detect_instruction,
             min_candidates=min_candidates,
         )
 
@@ -438,9 +554,10 @@ class GeminiClient:
         if video_path:
             video_path_obj = Path(video_path) if isinstance(video_path, str) else video_path
             if video_path_obj.exists():
+                safe_path, is_tmp = _safe_upload_path(video_path_obj)
                 for upload_attempt in range(self.config.max_retries):
                     try:
-                        uploaded_file = self.client.files.upload(file=str(video_path_obj))
+                        uploaded_file = self.client.files.upload(file=str(safe_path))
                         while uploaded_file.state.name == "PROCESSING":
                             time.sleep(2)
                             uploaded_file = self.client.files.get(name=uploaded_file.name)
@@ -462,6 +579,8 @@ class GeminiClient:
                         wait = 2 ** upload_attempt
                         print(f" [WARN] 업로드 오류 (시도 {upload_attempt + 1}/{self.config.max_retries}), {wait}초 후 재시도: {upload_err}")
                         time.sleep(wait)
+                if is_tmp and safe_path.exists():
+                    safe_path.unlink()
 
         try:
             for attempt in range(self.config.max_retries):
@@ -516,6 +635,124 @@ class GeminiClient:
                     print(f" [WARN] Gemini File API 서버 파일 삭제 실패: {del_err}")
 
     # ─────────────────────────────────────────
+    # 영상 의도 사전 분석 (Flash 모델, 전체 프록시 1회 스캔)
+    # ─────────────────────────────────────────
+    def analyze_video_intent(
+        self,
+        proxy_path: Path,
+        work_title: str,
+        topic: str,
+        work_context: str | None = None,
+        genre: str = "auto",
+        content_format: str = "auto",
+    ) -> dict[str, Any]:
+        """전체 프록시 영상을 1회 스캔해 narrative_skeleton을 생성합니다.
+
+        Flash 모델로 빠르게 영상의 의도/중심 갈등/감정 아크/핵심 인물/서사 비트를 파악하고,
+        이후 청크 분석 및 스토리 구성 단계에 주입되어 청크가 '전체 그림 안에서 이 장면은 뭐야?'
+        를 알 수 있게 합니다.
+        """
+        work_context_line = f"\n[작품 정보]\n{work_context}\n" if work_context else ""
+        prompt = (
+            "너는 영상 분석 전문가다. 아래 첨부된 전체 영상을 빠르게 스캔해 "
+            "narrative_skeleton JSON을 생성하라. 반드시 JSON만 출력, 코드블록 금지.\n\n"
+            f"[입력]\n- 작품명: {work_title}\n- 주제: {topic}\n"
+            f"- 선언된 장르: {genre}\n- 선언된 포맷: {content_format}\n"
+            f"{work_context_line}\n"
+            "[필수 출력 스키마 — 반드시 아래 키 전부 포함]\n"
+            "{\n"
+            '  "intent": "이 영상이 시청자에게 전달하려는 핵심 의도 (1-2문장)",\n'
+            '  "central_conflict": "중심 갈등/질문 (1문장)",\n'
+            '  "emotional_arc": [\n'
+            '    {"phase": "오프닝", "emotion": "호기심", "time_range": "0-120"}\n'
+            "  ],\n"
+            '  "key_characters": [\n'
+            '    {"name": "인물A", "role": "주인공", "arc": "불신 → 신뢰"}\n'
+            "  ],\n"
+            '  "narrative_beats": [\n'
+            '    {"beat": "발단", "approx_time": 30, "why_critical": "..."},\n'
+            '    {"beat": "위기", "approx_time": 600, "why_critical": "..."},\n'
+            '    {"beat": "절정", "approx_time": 900, "why_critical": "..."},\n'
+            '    {"beat": "반전", "approx_time": 1200, "why_critical": "..."}\n'
+            "  ],\n"
+            '  "mandatory_scenes": ["반드시 쇼츠에 들어가야 하는 핵심 장면 요약 목록"],\n'
+            '  "tone_keywords": ["묵직함", "반전 서스펜스"],\n'
+            '  "has_intro": false,\n'
+            '  "intro_end_sec": 0,\n'
+            '  "intro_description": "오프닝 타이틀/크레딧/로고 시퀀스가 있으면 true, 끝나는 시간(초). 없으면 false, 0",\n'
+            '  "has_credits": false,\n'
+            '  "credits_start_sec": 0,\n'
+            '  "credits_description": "엔딩 크레딧/스태프롤/예고편이 시작되면 true, 시작 시간(초). 없으면 false, 0"\n'
+            "}\n\n"
+            "⚠️ 영상에 실제로 존재하는 정보만 담아라. 추측 금지.\n"
+            "⚠️ 인트로/크레딧 감지: 실제 타이틀 시퀀스, 스태프롤, 출연진 자막 등이 보이는 경우에만 true로 표기.\n"
+        )
+
+        uploaded_file = None
+        content_parts: list = [prompt]
+        proxy_path_obj = Path(proxy_path)
+        if proxy_path_obj.exists():
+            safe_path, is_tmp = _safe_upload_path(proxy_path_obj)
+            for upload_attempt in range(self.config.max_retries):
+                try:
+                    uploaded_file = self.client.files.upload(file=str(safe_path))
+                    while uploaded_file.state.name == "PROCESSING":
+                        time.sleep(2)
+                        uploaded_file = self.client.files.get(name=uploaded_file.name)
+                    if uploaded_file.state.name == "FAILED":
+                        raise RuntimeError("Gemini File API 업로드 실패")
+                    content_parts.append(self.types.Part(
+                        file_data=self.types.FileData(
+                            file_uri=uploaded_file.uri,
+                            mime_type="video/mp4",
+                        ),
+                    ))
+                    break
+                except Exception as upload_err:
+                    if upload_attempt == self.config.max_retries - 1:
+                        raise RuntimeError(
+                            f"프록시 업로드 {self.config.max_retries}회 모두 실패: {upload_err}"
+                        )
+                    time.sleep(2 ** upload_attempt)
+            if is_tmp and safe_path.exists():
+                safe_path.unlink()
+
+        try:
+            for attempt in range(self.config.max_retries):
+                try:
+                    response = self.client.models.generate_content(
+                        model=self.config.flash_model_name,
+                        contents=content_parts,
+                        config=self.types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                        ),
+                    )
+                    if not response or not response.text:
+                        if attempt == self.config.max_retries - 1:
+                            raise RuntimeError("Gemini Flash가 빈 응답을 반환했습니다.")
+                        continue
+                    text = response.text.strip()
+                    if not text:
+                        continue
+                    json_text = _extract_json_from_markdown(text)
+                    data = json.loads(json_text)
+                    if isinstance(data, list):
+                        data = data[0] if data else {}
+                    return data
+                except Exception as e:
+                    if attempt == self.config.max_retries - 1:
+                        print(f"    [WARN] analyze_video_intent 실패: {e} — 빈 skeleton 반환")
+                        return {}
+                    time.sleep(2 ** attempt)
+            return {}
+        finally:
+            if uploaded_file:
+                try:
+                    self.client.files.delete(name=uploaded_file.name)
+                except Exception:
+                    pass
+
+    # ─────────────────────────────────────────
     # 스토리 구성 v2 (바이럴 최적화)
     # ─────────────────────────────────────────
     def compose_story_with_context(
@@ -526,6 +763,10 @@ class GeminiClient:
         min_duration_sec: float = 50.0,
         max_duration_sec: float = 60.0,
         work_context: str | None = None,
+        genre: str = "auto",
+        content_format: str = "auto",
+        editing_focus: str = "auto",
+        narrative_skeleton: dict | None = None,
     ) -> dict[str, Any]:
         """후보 장면들로 바이럴 최적화 스토리라인을 구성합니다.
 
@@ -545,6 +786,27 @@ class GeminiClient:
                 "⚠️ 이 정보를 바탕으로 작품의 핵심 서사와 매력을 잘 살리는 스토리라인을 구성하라.\n"
             )
 
+        # ── 장르/포맷/포커스 스토리 블록 ──
+        try:
+            _genre_enum = GenreType(genre) if genre else GenreType.AUTO
+        except ValueError:
+            _genre_enum = GenreType.AUTO
+        story_genre_block = PromptRegistry.get_story_genre_block(_genre_enum)
+        story_format_block = PromptRegistry.get_format_story_block(content_format or "auto")
+        story_focus_block = PromptRegistry.get_focus_story_block(editing_focus or "auto")
+        story_topic_line = f"[핵심 주제] {topic}" if topic else ""
+
+        # ── narrative_skeleton 블록 ──
+        narrative_skeleton_json_block = ""
+        if narrative_skeleton and isinstance(narrative_skeleton, dict):
+            sk_json = json.dumps(narrative_skeleton, ensure_ascii=False, indent=2)
+            sk_escaped = sk_json.replace("{", "{{").replace("}", "}}")
+            narrative_skeleton_json_block = (
+                "\n[전체 영상 skeleton]\n" + sk_escaped +
+                "\n⚠️ 스토리라인은 반드시 이 skeleton을 기반으로 구성하라. "
+                "mandatory_scenes 중 최소 1개를 포함하고, emotional_arc 순서를 따르라.\n"
+            )
+
         prompt = STORY_COMPOSITION_PROMPT.format(
             work_title=work_title,
             topic=topic,
@@ -552,12 +814,17 @@ class GeminiClient:
             max_duration_sec=max_duration_sec,
             candidates_str=candidates_str,
             work_context_block=work_context_block,
+            story_topic_line=story_topic_line,
+            story_genre_block=story_genre_block,
+            story_format_specific_block=story_format_block,
+            story_focus_specific_block=story_focus_block,
+            narrative_skeleton_json_block=narrative_skeleton_json_block,
         )
 
         for attempt in range(self.config.max_retries):
             try:
                 response = self.client.models.generate_content(
-                    model=self.config.model_name,
+                    model=self.config.flash_model_name,
                     contents=[prompt],
                     config=self.types.GenerateContentConfig(
                         response_mime_type="application/json",
@@ -591,10 +858,16 @@ class GeminiClient:
                     result["selected_storyline_index"] = best_idx
                     selected_idx = best_idx
 
+                # 복합 점수 = viral*0.6 + coherence*0.4
+                for _sl in storylines:
+                    _v = float(_sl.get("score", 0) or 0)
+                    _c = float(_sl.get("coherence_score", 0) or 0)
+                    _sl["composite_score"] = _v * 0.6 + _c * 0.4
+
                 result["selected_storyline"] = storylines[selected_idx]
-                # 전체 storylines를 score 순으로 정렬하여 반환 (멀티쇼츠용)
+                # 전체 storylines를 복합 점수 순으로 정렬 (멀티쇼츠용)
                 result["ranked_storylines"] = sorted(
-                    storylines, key=lambda s: s.get("score", 0), reverse=True
+                    storylines, key=lambda s: s.get("composite_score", s.get("score", 0)), reverse=True
                 )
                 return result
 
@@ -779,9 +1052,15 @@ def load_gemini_client() -> GeminiClient:
             "GEMINI_API_KEY environment variable is required. "
             "Please set it in .env file or as an environment variable."
         )
-    model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-pro-preview-06-05")
+    model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-3.1-pro-preview")
+    flash_model_name = os.getenv("GEMINI_FLASH_MODEL_NAME", "gemini-3-flash-preview")
     max_retries = int(os.getenv("GEMINI_MAX_RETRIES", "3"))
-    return GeminiClient(GeminiConfig(api_key=api_key, model_name=model_name, max_retries=max_retries))
+    return GeminiClient(GeminiConfig(
+        api_key=api_key,
+        model_name=model_name,
+        flash_model_name=flash_model_name,
+        max_retries=max_retries,
+    ))
 
 
 def _validate_gemini_schema(data: dict[str, Any]) -> None:
