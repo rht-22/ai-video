@@ -24,7 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     create = subparsers.add_parser("create_shorts", help="Create a 60-second vertical short")
-    create.add_argument("--video", required=True, help="Path to input video")
+    create.add_argument("--video", required=True, help="로컬 영상 파일 경로 또는 YouTube URL")
     create.add_argument("--title", required=True, help="Work title")
     create.add_argument("--topic", required=True, help="One topic to focus on")
     create.add_argument("--outdir", required=True, help="Output directory")
@@ -44,6 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--subtitle-file", help="외부 자막 파일 경로 — SRT, ASS, VTT, SMI 지원 (제공 시 Whisper 음성인식 생략)")
     create.add_argument("--srt-file", dest="subtitle_file_legacy", help=argparse.SUPPRESS)  # 하위호환
     create.add_argument("--no-subtitles", action="store_true", help="최종 영상에 자막 표시 안 함")
+    create.add_argument("--no-face-tracking", action="store_true", help="얼굴 추적 비활성화 — 중앙 고정 크롭 사용")
     create.add_argument("--max-shorts", type=int, default=3, help="생성할 최대 쇼츠 수 (1-3, 기본: 3)")
 
     # ── 디자인 파라미터 (DesignConfig 오버라이드) ──
@@ -148,7 +149,7 @@ def main() -> None:
 
         output = run_pipeline(
             PipelineInput(
-                video_path=Path(args.video),
+                video_path=args.video,  # URL이면 pipeline에서 자동 다운로드
                 work_title=args.title,
                 topic=args.topic,
                 outdir=_resolve_outdir(Path(args.outdir)),
@@ -157,6 +158,7 @@ def main() -> None:
                 work_context=work_context,
                 srt_path=srt_path,
                 show_subtitles=not getattr(args, "no_subtitles", False),
+                face_tracking=not getattr(args, "no_face_tracking", False),
                 max_shorts=max_shorts,
             ),
             from_step=args.from_step,

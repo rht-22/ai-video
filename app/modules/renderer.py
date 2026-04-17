@@ -492,7 +492,7 @@ from typing import Any, Iterable
 
 from app.modules.ffmpeg_utils import find_ffmpeg_command
 from app.modules.story_builder import StoryClip
-from app.config import DesignConfig,AppConfig
+from app.config import DesignConfig,AppConfig,FONT_NAME_MAP
 
 _VIDEO_ENCODER_CACHE: str | None = None
 
@@ -846,6 +846,19 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sort
     current_file_path = Path(__file__).resolve()
     project_root = current_file_path.parent.parent  # /app 폴더 위치
     font_folder = project_root / "assets" / "fonts"
+
+    # 한글 경로 등 비ASCII 경로는 FFmpeg이 fontsdir로 인식하지 못함.
+    # 폰트 파일을 임시 ASCII 경로로 복사해서 사용한다.
+    import shutil, tempfile
+    _font_folder_str = str(font_folder.resolve())
+    if not _font_folder_str.isascii():
+        _tmp_font_dir = Path(tempfile.gettempdir()) / "ai_video_fonts"
+        _tmp_font_dir.mkdir(exist_ok=True)
+        for _f in font_folder.glob("*.ttf"):
+            _dst = _tmp_font_dir / _f.name
+            if not _dst.exists():
+                shutil.copy2(_f, _dst)
+        font_folder = _tmp_font_dir
     
     # [5] 제목(Title) 필터
     # font_arg = str(d.title_font).replace("\\", "/").replace(":", "\\:")
@@ -893,14 +906,23 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sort
     #         f"x=(w-text_w)/2:y={y_pos}{next_label}"
     #     )
     #     last_v_label = next_label
-    # [5] 제목(Title) 필터 
+    # [5] 제목(Title) 필터
     actual_font = str(d.title_font)
 
     font_arg = actual_font
     last_v_label = "[vcat]"
     custom_colors = getattr(d, 'title_colors', ["white"])
     if "/" in actual_font or "\\" in actual_font:
-        # 유니코드 경로(한글 등)를 FFmpeg이 인식할 수 있도록 8.3 단축 경로로 변환
+        # 비ASCII 경로(한글 등)는 임시 ASCII 경로로 복사 후 사용
+        _font_src = Path(actual_font.replace("/", "\\"))
+        if not actual_font.isascii() and _font_src.exists():
+            import shutil, tempfile
+            _tmp_font_dir = Path(tempfile.gettempdir()) / "ai_video_fonts"
+            _tmp_font_dir.mkdir(exist_ok=True)
+            _tmp_font = _tmp_font_dir / _font_src.name
+            if not _tmp_font.exists():
+                shutil.copy2(_font_src, _tmp_font)
+            actual_font = str(_tmp_font)
         short_path = _to_short_path(actual_font.replace("/", "\\"))
         clean_path = short_path.replace("\\", "/").replace(":", "\\:")
         font_arg = clean_path
@@ -943,8 +965,8 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sort
     font_dir_fixed = _to_short_path(str(font_folder.resolve())).replace("\\", "/").replace(":", "\\:")
 
     if inputs.subtitle_path:
-        default_font = DesignConfig.subtitle_font
-        requested_font = d.subtitle_font
+        default_font = FONT_NAME_MAP.get(DesignConfig.subtitle_font, DesignConfig.subtitle_font)
+        requested_font = FONT_NAME_MAP.get(d.subtitle_font, d.subtitle_font)
 
         ass_path = inputs.subtitle_path.resolve()
         ass_content = ass_path.read_text(encoding="utf-8")
@@ -1016,14 +1038,14 @@ def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sor
             mute_end = start_time + actual_dur
             mute_ranges.append((start_time, mute_end))
  
-    # 원본 오디오: TTS 구간만 음소거, 나머지는 정상 볼륨
+    # 원본 오디오: TTS 구간은 볼륨을 낮추고(덕킹), 나머지는 정상 볼륨
     if mute_ranges:
-        # volume 필터의 enable 표현식: TTS 재생 구간에서 volume=0
-        mute_expr = "+".join(
+        # TTS 재생 구간에서 volume=0.15 (약 -16dB 덕킹), 나머지는 1.0
+        duck_expr = "+".join(
             f"between(t,{s:.3f},{e:.3f})" for s, e in mute_ranges
         )
         original_vol = (
-            f"[acat]volume=enable='{mute_expr}':volume=0,"
+            f"[acat]volume='if(gt({duck_expr},0),0.5,1.0)',"
             f"volume={inputs.original_audio_gain_db}dB[orig_vol]"
         )
     else:

@@ -8,7 +8,7 @@ import os
 @dataclass(frozen=True)
 class DesignConfig:
     # 영상 프레임 (9:16, 1:1 등)
-    aspect_ratio: str = "16:9"
+    aspect_ratio: str = "4:3"
     video_width: int = 800
     video_height: int = 1100
     video_y_pos: int = 480
@@ -48,10 +48,10 @@ class DesignConfig:
 class AppConfig:
     chunk_seconds: int = 600
     chunk_overlap: int = 30
-    target_duration_sec: int = 60
-    target_duration_tolerance_sec: int = 10 
-    min_duration_sec: int = 50  
-    max_duration_sec: int = 60  
+    target_duration_sec: int = 70
+    target_duration_tolerance_sec: int = 30
+    min_duration_sec: int = 40
+    max_duration_sec: int = 100
     canvas_width: int = 1080
     canvas_height: int = 1920
     top_title_height: int = 250

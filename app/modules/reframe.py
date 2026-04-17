@@ -24,9 +24,10 @@ def build_crop_timeline(
     height: int,
     sample_interval_sec: float,
     start_sec: float = 0.0,
-    end_sec: float = None
+    end_sec: float = None,
+    face_tracking: bool = True,
 ) -> list[CropKeyframe]:
-    if _has_cv2():
+    if face_tracking and _has_cv2():
         keyframes = _detect_faces(clip_path, width, height, sample_interval_sec, start_sec, end_sec)
     else:
         keyframes = _center_crop(width, height, sample_interval_sec)
@@ -173,10 +174,10 @@ def _center_crop(width: int, height: int, sample_interval_sec: float) -> list[Cr
 
 
 def _portrait_crop_size(width: int, height: int) -> tuple[int, int]:
-    target_ratio = 9 / 16
+    target_ratio = 4 / 3
 
     # 1.6 = 넓은 구도 (인물 주변 환경까지 포함)
-    zoom_out_factor = 1.6
+    zoom_out_factor = 1.0
 
     if width / height > target_ratio:
         # 가로형 영상
