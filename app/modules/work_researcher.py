@@ -28,6 +28,7 @@ class ResearchResult:
 
 def _build_research_prompt(work_title: str, episode: int | None) -> str:
     episode_constraint = ""
+    episode_str = f"{episode}회" if episode is not None else "전체 회차"
     if episode is not None:
         episode_constraint = (
             f"\n⚠️ 중요: 반드시 1회~{episode}회까지의 정보만 수집하세요.\n"
@@ -67,8 +68,8 @@ def _build_research_prompt(work_title: str, episode: int | None) -> str:
 }}
 
 검색 지침:
-- 나무위키, 위키백과, 공식 홈페이지, 뉴스 기사 등에서 정보를 수집하세요.
-- 등장인물은 주요 인물 위주로 정리하세요 (최대 10명).
+- 네이버 엔터, 나무위키, 위키백과, 공식 홈페이지, 뉴스 기사 등에서 정보를 수집하세요.
+- 등장인물은 해당 {episode_str}에 등장하는 인물을 우선으로 하되, 최대한 모든 인물을 정리하세요. (최대 15명, 주연/조연/게스트 모두 포함).
 - episode_summaries는 각 회차별로 핵심 줄거리와 주요 사건을 정리하세요.
 - 영상에 없는 내용을 창작하지 마세요. 검색 결과에 기반한 사실만 포함하세요.
 - 반드시 JSON만 출력하세요. 마크다운 코드블록이나 설명 텍스트를 추가하지 마세요.
@@ -174,6 +175,100 @@ def _build_characters_list(raw_data: dict[str, Any]) -> list[CharacterInfo]:
     return characters
 
 
+def _build_episode_cast_prompt(work_title: str, episode: int) -> str:
+    """특정 회차 출연진 전용 보완 검색 프롬프트."""
+    return f"""아래 드라마/예능의 {episode}회차에 출연한 배우와 등장인물을 검색하세요.
+
+작품명: {work_title}
+회차: {episode}회
+
+검색 키워드 예시: "{work_title} {episode}회 출연진", "{work_title} {episode}화 등장인물", \
+"{work_title} {episode}회 게스트", "{work_title} ep{episode} cast"
+
+다음 JSON 형식으로만 반환하세요:
+{{
+  "characters": [
+    {{
+      "name": "극중 인물명",
+      "actor": "배우/출연자 실명",
+      "role": "역할, 직책, 다른 인물과의 관계 간단 설명"
+    }}
+  ]
+}}
+
+- 주연, 조연, 게스트, 특별 출연 모두 포함하세요. 우선순위 주연>조연>게스트>특별 출연
+- 검색 결과에 없는 인물은 창작하지 마세요.
+- 반드시 JSON만 출력하세요.
+"""
+
+
+def _search_with_grounding(gemini_client: Any, prompt: str, use_grounding: bool = True) -> Any:
+    """Google Search grounding으로 Gemini 호출. 미지원 시 일반 호출로 폴백."""
+    temperature = getattr(gemini_client.config, "research_temperature", 0.7)
+    if not use_grounding:
+        return gemini_client.client.models.generate_content(
+            model=gemini_client.config.model_name,
+            contents=[prompt],
+            config=gemini_client.types.GenerateContentConfig(
+                temperature=temperature,
+            ),
+        )
+    try:
+        return gemini_client.client.models.generate_content(
+            model=gemini_client.config.model_name,
+            contents=[prompt],
+            config=gemini_client.types.GenerateContentConfig(
+                tools=[gemini_client.types.Tool(
+                    google_search=gemini_client.types.GoogleSearch()
+                )],
+                temperature=temperature,
+            ),
+        )
+    except (TypeError, AttributeError):
+        print("  [WARN] Google Search grounding 미지원 — 일반 Gemini 호출로 폴백")
+        return gemini_client.client.models.generate_content(
+            model=gemini_client.config.model_name,
+            contents=[prompt],
+            config=gemini_client.types.GenerateContentConfig(
+                temperature=temperature,
+            ),
+        )
+
+
+def _supplement_episode_cast(
+    work_title: str,
+    episode: int,
+    existing_chars: list[dict[str, Any]],
+    gemini_client: Any,
+) -> list[dict[str, Any]]:
+    """에피소드 전용 캐스팅 보완 검색. 기존 목록에 새 인물만 추가."""
+    from app.modules.gemini_client import _extract_json_from_markdown
+
+    print(f"  [리서치] {episode}회 출연진 보완 검색 중...")
+    try:
+        prompt = _build_episode_cast_prompt(work_title, episode)
+        response = _search_with_grounding(gemini_client, prompt)
+        json_text = _extract_json_from_markdown(response.text)
+        data = json.loads(json_text)
+        new_chars = data.get("characters", [])
+    except Exception as e:
+        print(f"  [WARN] 에피소드 캐스팅 보완 검색 실패: {e}")
+        return existing_chars
+
+    # 기존 인물명 셋 (중복 방지)
+    existing_names = {ch.get("name", "").strip() for ch in existing_chars if ch.get("name")}
+    added = 0
+    for ch in new_chars:
+        name = ch.get("name", "").strip()
+        if name and name not in existing_names:
+            existing_chars.append(ch)
+            existing_names.add(name)
+            added += 1
+
+    print(f"  [리서치] 보완 검색으로 {added}명 추가 (총 {len(existing_chars)}명)")
+    return existing_chars
+
+
 def research_work(
     work_title: str,
     episode: int | None,
@@ -187,29 +282,18 @@ def research_work(
 
     for attempt in range(max_retries):
         try:
-            # Google Search grounding으로 호출
-            try:
-                response = gemini_client.client.models.generate_content(
-                    model=gemini_client.config.model_name,
-                    contents=[prompt],
-                    config=gemini_client.types.GenerateContentConfig(
-                        tools=[gemini_client.types.Tool(
-                            google_search=gemini_client.types.GoogleSearch()
-                        )],
-                    ),
-                )
-            except (TypeError, AttributeError):
-                # GoogleSearch grounding 미지원 시 일반 호출로 폴백
-                print("  [WARN] Google Search grounding 미지원 — 일반 Gemini 호출로 폴백")
-                response = gemini_client.client.models.generate_content(
-                    model=gemini_client.config.model_name,
-                    contents=[prompt],
-                )
+            response = _search_with_grounding(gemini_client, prompt)
 
             json_text = _extract_json_from_markdown(response.text)
             raw_data = json.loads(json_text)
 
             sources = _extract_sources(response)
+
+            # 캐릭터가 3명 미만이면 에피소드 전용 보완 검색
+            if episode is not None and len(raw_data.get("characters", [])) < 3:
+                raw_data["characters"] = _supplement_episode_cast(
+                    work_title, episode, raw_data.get("characters", []), gemini_client
+                )
 
             work_context = _format_work_context(raw_data)
             episodes_context = _format_episodes_context(raw_data, episode)

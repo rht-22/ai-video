@@ -5,7 +5,6 @@ from pathlib import Path
 
 from app.config import DesignConfig
 from app.pipeline import PipelineInput, run_pipeline
-from app.prompts import GenreType
 
 
 def _resolve_outdir(outdir: Path) -> Path:
@@ -61,25 +60,6 @@ def build_parser() -> argparse.ArgumentParser:
                         help="오프닝/인트로 건너뛰기 (초, 예: 90)")
     create.add_argument("--skip-credits", type=float, default=0.0,
                         help="엔딩 크레딧 건너뛰기 (초, 예: 120)")
-    create.add_argument(
-        "--genre",
-        default="auto",
-        choices=[g.value for g in GenreType],
-        help="콘텐츠 장르 (기본: auto). 예: drama_romance, drama_thriller, variety_talk, movie_general",
-    )
-    create.add_argument(
-        "--content-format",
-        default="auto",
-        choices=["auto", "episodic", "standalone", "season_based", "variety_episode"],
-        help="콘텐츠 형식 (기본: auto). 연속극/독립/시즌제/예능 에피소드",
-    )
-    create.add_argument(
-        "--editing-focus",
-        default="auto",
-        choices=["auto", "event", "character", "emotion", "narrative", "reaction"],
-        help="편집 포커스 (기본: auto). 사건/인물/감정/서사/리액션 중심",
-    )
-
     # ── 디자인 파라미터 (DesignConfig 오버라이드) ──
     design = create.add_argument_group("design", "영상 디자인/레이아웃 설정 (YouTube Shorts safe zone 기준)")
     design.add_argument("--design-title-y", type=int, default=None, help="제목 Y 위치 (기본: 120)")
@@ -211,9 +191,6 @@ def main() -> None:
                 srt_path=srt_path,
                 show_subtitles=not getattr(args, "no_subtitles", False),
                 max_shorts=max_shorts,
-                genre=getattr(args, "genre", "auto"),
-                content_format=getattr(args, "content_format", "auto"),
-                editing_focus=getattr(args, "editing_focus", "auto"),
                 skip_research=getattr(args, "no_research", False),
                 episode=getattr(args, "episode", None),
                 skip_intro_sec=getattr(args, "skip_intro", 0.0),

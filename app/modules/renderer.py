@@ -1028,9 +1028,9 @@ def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sor
         clip_times.append((current, clip))
         current += clip.end_sec - clip.start_sec
  
-    # TTS가 재생되는 구간 계산 → 원본 오디오 음소거 구간
-    # atempo=1.5 적용 후 실제 재생 길이 = 원본 길이 / 1.5
-    mute_ranges: list[tuple[float, float]] = []
+    # TTS가 재생되는 구간 계산 → 원본 오디오 덕킹 구간
+    # atempo=1.2 적용 후 실제 재생 길이 = 원본 길이 / 1.2
+    duck_ranges: list[tuple[float, float]] = []
     tts_pos = {clip_idx: pos for pos, clip_idx in enumerate(tts_keys_sorted)}
     for clip_idx, (start_time, _) in enumerate(clip_times):
         if clip_idx not in inputs.tts_audio_files:
@@ -1038,19 +1038,18 @@ def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sor
         tts_path = inputs.tts_audio_files[clip_idx]
         raw_dur = _get_audio_duration(tts_path)
         if raw_dur > 0:
-            # atempo=1.5이므로 실제 재생 길이는 짧아짐
             actual_dur = raw_dur / 1.2
-            mute_end = start_time + actual_dur
-            mute_ranges.append((start_time, mute_end))
+            duck_end = start_time + actual_dur
+            duck_ranges.append((start_time, duck_end))
  
-    # 원본 오디오: TTS 구간만 음소거, 나머지는 정상 볼륨
-    if mute_ranges:
-        # volume 필터의 enable 표현식: TTS 재생 구간에서 volume=0
-        mute_expr = "+".join(
-            f"between(t,{s:.3f},{e:.3f})" for s, e in mute_ranges
+    # 원본 오디오: TTS 구간은 볼륨 0.5로 덕킹, 나머지는 정상 볼륨
+    if duck_ranges:
+        # volume 필터의 enable 표현식: TTS 재생 구간에서 volume=0.5 (덕킹)
+        duck_expr = "+".join(
+            f"between(t,{s:.3f},{e:.3f})" for s, e in duck_ranges
         )
         original_vol = (
-            f"[acat]volume=enable='{mute_expr}':volume=0,"
+            f"[acat]volume=enable='{duck_expr}':volume=0.5,"
             f"volume={inputs.original_audio_gain_db}dB[orig_vol]"
         )
     else:

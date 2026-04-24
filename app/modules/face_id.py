@@ -65,8 +65,13 @@ class FaceIdentifier:
                 continue
 
             try:
+                import cv2
+                img_array = cv2.imdecode(
+                    np.frombuffer(Path(img_path).read_bytes(), dtype=np.uint8),
+                    cv2.IMREAD_COLOR,
+                )
                 result = DeepFace.represent(
-                    img_path=str(img_path),
+                    img_path=img_array,
                     model_name=self.model_name,
                     detector_backend=self.detector_backend,
                     enforce_detection=False,

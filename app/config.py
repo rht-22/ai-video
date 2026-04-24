@@ -8,7 +8,7 @@ import os
 @dataclass(frozen=True)
 class DesignConfig:
     # 영상 프레임 (9:16, 1:1 등)
-    aspect_ratio: str = "16:9"
+    aspect_ratio: str = "1:1"
     video_width: int = 800
     video_height: int = 1100
     video_y_pos: int = 480
@@ -95,16 +95,33 @@ class Paths:
         return self.app_root.parent / "outputs"
 
 
+def _ensure_ascii_font_path(file_path: Path) -> str:
+    """폰트 경로에 비-ASCII 문자가 있으면 시스템 임시 디렉토리로 복사 후 반환."""
+    import shutil
+    import tempfile
+    path_str = str(file_path.resolve())
+    try:
+        path_str.encode("ascii")
+        return path_str.replace("\\", "/")
+    except UnicodeEncodeError:
+        tmp_dir = Path(tempfile.gettempdir()) / "ai_video_fonts"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = tmp_dir / file_path.name
+        if not tmp_path.exists():
+            shutil.copy2(file_path, tmp_path)
+        return str(tmp_path).replace("\\", "/")
+
+
 def get_font_path(name: str, app_root: Path) -> str:
     font_dir = app_root / "assets" / "fonts"
     font_dir.mkdir(parents=True, exist_ok=True)
 
     safe_name = FONT_NAME_MAP.get(name, name.replace(" ", "_"))
-    
+
     file_path = font_dir / f"{safe_name}.ttf"
 
     if file_path.exists():
-        return str(file_path.absolute()).replace("\\", "/")
+        return _ensure_ascii_font_path(file_path)
 
     url = REMOTE_FONTS.get(name)
     if url:
@@ -113,7 +130,7 @@ def get_font_path(name: str, app_root: Path) -> str:
             response = requests.get(url, timeout=10)
             response.raise_for_status()
             file_path.write_bytes(response.content)
-            return str(file_path.absolute()).replace("\\", "/")
+            return _ensure_ascii_font_path(file_path)
         except Exception as e:
             print(f"다운로드 실패: {e}")
             return "Malgun Gothic"

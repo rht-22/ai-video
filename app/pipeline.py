@@ -36,8 +36,7 @@ from app.config import AppConfig, Paths, DesignConfig, get_font_path
 from app.modules.chunker import build_chunks, split_video_chunk
 from app.modules.gemini_client import load_gemini_client
 from app.modules.media_probe import probe_media
-from app.modules.moment_ranker import rank_moments, rank_moments_enhanced
-from app.prompts import PromptRegistry, GenreType, resolve_auto_format, resolve_auto_focus
+from app.modules.moment_ranker import assign_sequence_ids, rank_moments, rank_moments_enhanced
 from app.modules.reframe import build_crop_timeline
 from app.modules.renderer import RenderInputs, render_short
 from app.modules.scene_detect import detect_scenes
@@ -80,6 +79,8 @@ def _clips_from_storyline(storyline_data: dict, fallback_title: str = "") -> tup
             subtitle=tts_line_val if tts_line_val else storyline_data.get("topic", ""),
             tts_line=tts_line_val,
             use_original_audio=storyline_data.get("use_original_audio", True),
+            chunk_index=storyline_data.get("chunk_index", -1),
+            candidate_index=storyline_data.get("candidate_index", -1),
         ))
     else:
         actual_storyline = storyline_data.get("storyline", {})
@@ -157,9 +158,6 @@ class PipelineInput:
     topic: str
     outdir: Path
     design: DesignConfig = field(default_factory=DesignConfig)
-    genre: str = "auto"
-    content_format: str = "auto"
-    editing_focus: str = "auto"
     language: str = "ko"
     previous_episodes_context: str | None = None
     work_context: str | None = None
@@ -216,9 +214,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     "video_path": str(payload.video_path),
                     "work_title": payload.work_title,
                     "topic": payload.topic,
-                    "genre": payload.genre,
-                    "content_format": payload.content_format,
-                    "editing_focus": payload.editing_focus,
                     "language": payload.language,
                 },
                 "steps": [],
@@ -234,9 +229,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 "video_path": str(payload.video_path),
                 "work_title": payload.work_title,
                 "topic": payload.topic,
-                "genre": payload.genre,
-                "content_format": payload.content_format,
-                "editing_focus": payload.editing_focus,
                 "language": payload.language,
             },
             "steps": [],
@@ -331,7 +323,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 단계별 실행 플래그
     step_order = [
         "init", "probe", "proxy", "chunk", "gemini",
-        "story", "transcribe", "resources", "render", "validate",
+        "graph", "story", "transcribe", "resources", "render", "validate",
     ]
     if from_step:
         start_idx = step_order.index(from_step)
@@ -488,8 +480,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 work_title=payload.work_title,
                 topic=payload.topic,
                 work_context=payload.work_context,
-                genre=payload.genre,
-                content_format=payload.content_format,
+                previous_episodes_context=payload.previous_episodes_context,
             )
             if narrative_skeleton:
                 skeleton_path.write_text(
@@ -538,30 +529,12 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # [5/10] Gemini 분석 (바이럴 최적화)
     # ═══════════════════════════════════════
     checkpoint_gemini = output_dir / "checkpoint_gemini.json"
-    _genre_votes: dict[str, int] = {}
-    _format_votes: dict[str, int] = {}
-    _final_genre: str = payload.genre
-    _final_format: str = payload.content_format
-    _final_focus: str = payload.editing_focus
     if start_idx <= 4 and checkpoint_gemini.exists() and from_step != "gemini":
-        print("\n[5/10] Gemini 분석 결과 로드 중...")
+        print("\n[5/10] Gemini 분析 결과 로드 중...")
         gemini_data = json.loads(checkpoint_gemini.read_text(encoding="utf-8"))
         all_candidates = gemini_data["all_candidates"]
-        _genre_votes = gemini_data.get("genre_votes", {}) or {}
-        _format_votes = gemini_data.get("format_votes", {}) or {}
-        _final_genre = gemini_data.get("resolved_genre", payload.genre)
-        _final_format = gemini_data.get("resolved_content_format", payload.content_format)
-        _final_focus = gemini_data.get("resolved_editing_focus", payload.editing_focus)
-        # 하위 호환: 바이럴 필드 없는 기존 체크포인트 지원
         for m in all_candidates:
-            m.setdefault("scroll_stop_power", 0.5)
-            m.setdefault("emotional_intensity", 0.5)
-            m.setdefault("rewatch_value", 0.5)
-            m.setdefault("shareability", 0.5)
-            m.setdefault("standalone_value", 0.5)
             m.setdefault("story_role", "build")
-            m.setdefault("viral_titles", [])
-            m.setdefault("suggested_tts_line", "")
             m.setdefault("pacing_note", "")
             m.setdefault("points", {})
         print(f"  - 총 {len(all_candidates)}개 후보 모멘트")
@@ -582,10 +555,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             srt_segments_for_gemini = parse_subtitle(payload.srt_path)
             print(f"  - SRT 자막 {len(srt_segments_for_gemini)}개 세그먼트 → Gemini 인물 식별용 전달")
 
-        _resolved_genre = payload.genre
-        _resolved_format = payload.content_format
-        _resolved_focus = payload.editing_focus
-
         for idx, chunk in enumerate(chunks, 1):
             print(f"  청크 {idx}/{len(chunks)} 분석 중... ({chunk.start_sec:.1f}초 ~ {chunk.end_sec:.1f}초)")
             chunk_start = time.time()
@@ -600,13 +569,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 if s.start_sec < chunk.end_sec and s.end_sec > chunk.start_sec
             ] if srt_segments_for_gemini else []
 
-            # 2번째 청크부터 누적 투표 결과 반영 (auto 모드에서 점진적 확정)
-            if idx > 1 and _genre_votes and payload.genre == "auto":
-                _resolved_genre = max(_genre_votes, key=_genre_votes.get)
-            if idx > 1 and _format_votes and payload.content_format == "auto":
-                _resolved_format = max(_format_votes, key=_format_votes.get)
-            if _resolved_focus == "auto" and _resolved_genre != "auto":
-                _resolved_focus = resolve_auto_focus(_resolved_genre)
 
             prompt_payload = {
                 "work_title": payload.work_title,
@@ -619,9 +581,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 "video_path": str(split_path) if split_path else None,
                 "previous_analyses": previous_analyses.copy(),
                 "transcript_segments": chunk_transcript_segs,
-                "genre": _resolved_genre,
-                "content_format": _resolved_format,
-                "editing_focus": _resolved_focus,
                 "narrative_skeleton": narrative_skeleton,
             }
 
@@ -632,13 +591,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 moment_count = len(response.get("candidate_moments", []))
                 print(f"    → {moment_count}개 후보 모멘트 발견 (소요 시간: {chunk_elapsed:.1f}초)")
 
-                # 자동 감지 투표 집계
-                _det_g = response.get("detected_genre")
-                _det_f = response.get("detected_content_format")
-                if _det_g and _det_g != "auto":
-                    _genre_votes[_det_g] = _genre_votes.get(_det_g, 0) + 1
-                if _det_f and _det_f != "auto":
-                    _format_votes[_det_f] = _format_votes.get(_det_f, 0) + 1
 
                 previous_analyses.append({
                     "summary": response.get("summary", ""),
@@ -666,36 +618,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
         gemini_elapsed = time.time() - gemini_start
 
-        # 최종 genre/format/focus 확정
-        if payload.genre == "auto" and _genre_votes:
-            _final_genre = max(_genre_votes, key=_genre_votes.get)
-            print(f"  [AUTO] 장르 확정: {_final_genre} (투표: {_genre_votes})")
-        else:
-            _final_genre = payload.genre
-
-        if payload.content_format == "auto":
-            if _format_votes:
-                _final_format = max(_format_votes, key=_format_votes.get)
-            else:
-                _final_format = resolve_auto_format(_final_genre) if _final_genre != "auto" else "auto"
-        else:
-            _final_format = payload.content_format
-
-        if payload.editing_focus == "auto":
-            _final_focus = resolve_auto_focus(_final_genre) if _final_genre != "auto" else "auto"
-        else:
-            _final_focus = payload.editing_focus
-
-        print(f"  [결정] genre={_final_genre}, format={_final_format}, focus={_final_focus}")
 
         checkpoint_gemini.write_text(
             json.dumps({
                 "all_candidates": all_candidates,
-                "genre_votes": _genre_votes,
-                "format_votes": _format_votes,
-                "resolved_genre": _final_genre,
-                "resolved_content_format": _final_format,
-                "resolved_editing_focus": _final_focus,
             }, ensure_ascii=False, indent=2),
             encoding="utf-8"
         )
@@ -705,18 +631,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             raise FileNotFoundError(f"체크포인트 파일을 찾을 수 없습니다: {checkpoint_gemini}")
         gemini_data = json.loads(checkpoint_gemini.read_text(encoding="utf-8"))
         all_candidates = gemini_data["all_candidates"]
-        _final_genre = gemini_data.get("resolved_genre", payload.genre)
-        _final_format = gemini_data.get("resolved_content_format", payload.content_format)
-        _final_focus = gemini_data.get("resolved_editing_focus", payload.editing_focus)
         for m in all_candidates:
-            m.setdefault("scroll_stop_power", 0.5)
-            m.setdefault("emotional_intensity", 0.5)
-            m.setdefault("rewatch_value", 0.5)
-            m.setdefault("shareability", 0.5)
-            m.setdefault("standalone_value", 0.5)
             m.setdefault("story_role", "build")
-            m.setdefault("viral_titles", [])
-            m.setdefault("suggested_tts_line", "")
             m.setdefault("pacing_note", "")
             m.setdefault("points", {})
 
@@ -728,6 +644,28 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             print(f"  인트로/크레딧 필터 적용: {before_count} → {len(all_candidates)}개 후보")
 
     # ═══════════════════════════════════════
+    # [5.5/10] 관계 그래프 추출
+    # ═══════════════════════════════════════
+    checkpoint_graph = output_dir / "checkpoint_graph.json"
+    relationship_edges: list[dict[str, Any]] = []
+
+    if start_idx <= 5 and checkpoint_graph.exists() and from_step not in ("gemini", "graph"):
+        print("\n[5.5/10] 관계 그래프 로드 중...")
+        graph_data = json.loads(checkpoint_graph.read_text(encoding="utf-8"))
+        relationship_edges = graph_data.get("edges", [])
+        print(f"  - {len(relationship_edges)}개 관계 엣지 로드")
+        print("[OK] 관계 그래프 로드 완료 (체크포인트에서)")
+    elif start_idx <= 5:
+        print("\n[5.5/10] 관계 그래프 추출 중...")
+        gemini = load_gemini_client()
+        relationship_edges = gemini.extract_relationships(all_candidates)
+        checkpoint_graph.write_text(
+            json.dumps({"edges": relationship_edges}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"[OK] 관계 그래프 추출 완료 ({len(relationship_edges)}개 엣지)")
+
+    # ═══════════════════════════════════════
     # [6/10] 스토리 구성 (바이럴 최적화 — 멀티쇼츠)
     # ═══════════════════════════════════════
     # all_storyline_variants: list of (clips, title_text, score)
@@ -736,7 +674,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     story_plan = None
 
     checkpoint_story = output_dir / "checkpoint_story.json"
-    if start_idx <= 5 and checkpoint_story.exists() and from_step != "story":
+    if start_idx <= 6 and checkpoint_story.exists() and from_step != "story":
         print("\n[6/10] 스토리 구성 결과 로드 중...")
         story_data = json.loads(checkpoint_story.read_text(encoding="utf-8"))
 
@@ -754,26 +692,27 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             print(f"  - {len(clips)}개 클립, 제목: {title_text}")
         print("[OK] 스토리 구성 결과 로드 완료 (체크포인트에서)")
 
-    elif start_idx <= 5:
+    elif start_idx <= 6:
         print("\n[6/10] 스토리 구성 중...")
         gemini = load_gemini_client()
         story_start = time.time()
 
-        # 포커스/장르 가중치를 적용한 enhanced 랭킹
-        try:
-            _focus_mods = PromptRegistry.get_focus_weight_modifiers(_final_focus)
-            _genre_weights = PromptRegistry.get_scoring_weights(
-                GenreType(_final_genre) if _final_genre and _final_genre != "auto" else GenreType.AUTO
-            )
-        except Exception:
-            _focus_mods, _genre_weights = None, None
+        # sequence_id 부여: continues_from + 관계 그래프 continuous 엣지 기반
+        all_candidates = assign_sequence_ids(all_candidates, edges=relationship_edges or None)
+
         ranked_candidates = rank_moments_enhanced(
             all_candidates,
             shorts_type="storytelling",
-            focus_weight_modifiers=_focus_mods,
-            genre_scoring_weights=_genre_weights,
         )
-        ranked_dicts = [m.__dict__ for m in ranked_candidates]
+
+        # RankedMoment 변환 시 chunk_index/candidate_index/sequence_id 등 원본 필드 소실 방지
+        orig_by_time = {
+            (m["start_sec"], m["end_sec"]): m for m in all_candidates
+        }
+        ranked_dicts = []
+        for m_obj in ranked_candidates:
+            orig = orig_by_time.get((m_obj.start_sec, m_obj.end_sec), {})
+            ranked_dicts.append({**orig, "final_score": m_obj.final_score})
 
         # Gemini 바이럴 스토리 구성 (Flash + skeleton + 장르/포맷/포커스 블록)
         story_plan = gemini.compose_story_with_context(
@@ -783,11 +722,21 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             min_duration_sec=config.min_duration_sec,
             max_duration_sec=config.max_duration_sec,
             work_context=payload.work_context,
-            genre=_final_genre,
-            content_format=_final_format,
-            editing_focus=_final_focus,
+            previous_episodes_context=payload.previous_episodes_context,
             narrative_skeleton=narrative_skeleton,
+            relationship_edges=relationship_edges or None,
         )
+
+        # narrative_plan 출력 (storyline별)
+        for _sl in story_plan.get("storylines", []):
+            _np = _sl.get("narrative_plan")
+            if _np and isinstance(_np, dict):
+                _idx = _sl.get("storyline_index", "?")
+                _stype = _sl.get("shorts_type", "")
+                print(f"\n  ── narrative_plan [storyline {_idx} / {_stype}] ──")
+                for key, val in _np.items():
+                    print(f"  [{key}] {val}")
+                print("  " + "─" * 44)
 
         # 멀티쇼츠: ranked_storylines에서 최대 max_shorts개 추출
         ranked_storylines = story_plan.get("ranked_storylines", [])
@@ -895,7 +844,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     full_audio_path = output_dir / "full_audio.json"
     segments_cache_path = output_dir / "subtitle_segments.json"
 
-    if start_idx <= 6 and full_audio_path.exists() and from_step != "transcribe":
+    if start_idx <= 7 and full_audio_path.exists() and from_step != "transcribe":
         print("\n[7/10] 전사 데이터 로드 중...")
         loaded_data = json.loads(full_audio_path.read_text(encoding="utf-8"))
         transcript_text = [SimpleNamespace(**seg) for seg in loaded_data]
@@ -908,7 +857,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         clips = flatten_to_clips(cut_results)
         print(f"[OK] 전사 로드 + 무음 제거 완료 ({len(clips)}개 클립)")
 
-    elif start_idx <= 6:
+    elif start_idx <= 7:
         print("\n[7/10] 선택된 클립 구간 전사 중...")
         transcribe_start = time.time()
 
@@ -1006,7 +955,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
     # 자막 데이터 생성 (전사 → 편집 타임라인 매핑)
     final_segments = []
-    if start_idx <= 7 and not (segments_cache_path.exists() and from_step not in ("transcribe", "resources")):
+    if start_idx <= 8 and not (segments_cache_path.exists() and from_step not in ("transcribe", "resources")):
         print("  자막 타임라인 매핑 중...")
         remapped = remap_transcript_to_edited_timeline(
             clips, transcript_text, tts_only_when_no_orig=True,
@@ -1040,7 +989,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     checkpoint_resources = output_dir / "checkpoint_resources.json"
     edit_plan_path = output_dir / "edit_plan.json"
 
-    if start_idx <= 7 and checkpoint_resources.exists() and from_step != "resources":
+    if start_idx <= 8 and checkpoint_resources.exists() and from_step != "resources":
         print("\n[8/10] 리소스 로드 중...")
         resources_data = json.loads(checkpoint_resources.read_text(encoding="utf-8"))
         crop_map = {k: Path(v) for k, v in resources_data["crop_map"].items()}
@@ -1049,7 +998,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         } if "tts_audio_files" in resources_data else {}
         print(f"  - 크롭 타임라인: {len(crop_map)}개, TTS 오디오: {len(tts_audio_files)}개")
         print("[OK] 리소스 로드 완료 (체크포인트에서)")
-    elif start_idx <= 7:
+    elif start_idx <= 8:
         print("\n[8/10] 리소스 생성 중...")
         resource_start = time.time()
 
@@ -1099,7 +1048,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         for idx, clip in enumerate(clips):
             if clip.tts_line:
                 tts_path = output_dir / f"tts_{idx}.mp3"
-                synthesize_tts(clip.tts_line, tts_path, lang=payload.language, editing_focus=_final_focus)
+                synthesize_tts(clip.tts_line, tts_path, lang=payload.language)
                 tts_audio_files[idx] = tts_path
                 if (idx + 1) % 3 == 0 or (idx + 1) == len(clips):
                     print(f"    진행 중... ({idx + 1}/{len(clips)})")
@@ -1134,14 +1083,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             raise FileNotFoundError("체크포인트 파일이나 edit_plan.json을 찾을 수 없습니다.")
 
     # 편집 계획 생성
-    if start_idx <= 7:
+    if start_idx <= 8:
         print("  편집 계획 생성 중...")
         edit_plan = _build_edit_plan(payload, title_text, clips, crop_map, config)
-        edit_plan["resolved"] = {
-            "genre": _final_genre,
-            "content_format": _final_format,
-            "editing_focus": _final_focus,
-        }
         if narrative_skeleton:
             edit_plan["narrative_skeleton"] = narrative_skeleton
         edit_plan_path.write_text(json.dumps(edit_plan, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1153,7 +1097,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     output_video = output_dir / "shorts.mp4"
     subtitle_path = output_dir / "subtitles.ass"
 
-    if start_idx <= 8 or from_step == "render" or not output_video.exists():
+    if start_idx <= 9 or from_step == "render" or not output_video.exists():
         # 자막 디자인 적용
         print("\n[9/10] 자막 디자인 적용 및 최종 렌더링 중...")
 
@@ -1252,7 +1196,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # ═══════════════════════════════════════
     # [10/10] 출력 검증
     # ═══════════════════════════════════════
-    if start_idx <= 9:
+    if start_idx <= 10:
         print("\n[10/10] 출력 검증 중...")
         if not output_video.exists():
             raise FileNotFoundError(f"검증할 영상 파일을 찾을 수 없습니다: {output_video}")
@@ -1279,7 +1223,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # ═══════════════════════════════════════
     all_output_videos: list[Path] = [output_video]
 
-    if len(all_storyline_variants) > 1 and start_idx <= 8:
+    if len(all_storyline_variants) > 1 and start_idx <= 9:
         print(f"\n추가 쇼츠 렌더링 ({len(all_storyline_variants) - 1}개)...")
 
         # variant 쇼츠도 쇼츠 #1과 동일하게 라인 단위 SRT 기반 자막을 사용하도록 미리 파싱
@@ -1342,7 +1286,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     if tclip.tts_line:
                         tts_out = output_dir / f"tts_{var_num}_{tidx}.mp3"
                         if not tts_out.exists():
-                            synthesize_tts(tclip.tts_line, tts_out, lang=payload.language, editing_focus=_final_focus)
+                            synthesize_tts(tclip.tts_line, tts_out, lang=payload.language)
                         var_tts_files[tidx] = tts_out
 
                 # TTS 자막
@@ -1540,9 +1484,6 @@ def _build_edit_plan(
             "video_path": str(payload.video_path),
             "work_title": payload.work_title,
             "topic": payload.topic,
-            "genre": payload.genre,
-            "content_format": payload.content_format,
-            "editing_focus": payload.editing_focus,
             "language": payload.language,
         },
         "layout": {
