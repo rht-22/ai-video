@@ -14,7 +14,6 @@ class StoryClip:
     subtitle: str
     tts_line: str
     use_original_audio: bool
-    pacing_note: str = ""
     chunk_index: int = -1
     candidate_index: int = -1
     character_focus: tuple[str, ...] = ()
@@ -99,7 +98,6 @@ def build_story(
             subtitle=m.suggested_tts_line or m.description,
             tts_line=m.suggested_tts_line,
             use_original_audio=True,
-            pacing_note=m.pacing_note,
         )
         for m in selected
     ]
@@ -146,7 +144,6 @@ def _fit_duration(
                 subtitle=last.subtitle,
                 tts_line=last.tts_line,
                 use_original_audio=last.use_original_audio,
-                pacing_note=last.pacing_note,
                 chunk_index=last.chunk_index,
                 candidate_index=last.candidate_index,
             )
@@ -180,7 +177,6 @@ def _fit_duration(
                     subtitle=clip.subtitle,
                     tts_line=clip.tts_line,
                     use_original_audio=clip.use_original_audio,
-                    pacing_note=clip.pacing_note,
                     chunk_index=clip.chunk_index,
                     candidate_index=clip.candidate_index,
                 )
@@ -198,7 +194,6 @@ def _fit_duration(
                 subtitle=last.subtitle,
                 tts_line=last.tts_line,
                 use_original_audio=last.use_original_audio,
-                pacing_note=last.pacing_note,
                 chunk_index=last.chunk_index,
                 candidate_index=last.candidate_index,
             )

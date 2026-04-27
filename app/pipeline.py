@@ -36,7 +36,7 @@ from app.config import AppConfig, Paths, DesignConfig, get_font_path
 from app.modules.chunker import build_chunks, split_video_chunk
 from app.modules.gemini_client import load_gemini_client
 from app.modules.media_probe import probe_media
-from app.modules.moment_ranker import assign_sequence_ids, rank_moments, rank_moments_enhanced
+from app.modules.moment_ranker import assign_sequence_ids
 from app.modules.reframe import build_crop_timeline
 from app.modules.renderer import RenderInputs, render_short
 from app.modules.scene_detect import detect_scenes
@@ -535,8 +535,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         all_candidates = gemini_data["all_candidates"]
         for m in all_candidates:
             m.setdefault("story_role", "build")
-            m.setdefault("pacing_note", "")
-            m.setdefault("points", {})
         print(f"  - 총 {len(all_candidates)}개 후보 모멘트")
         print("[OK] Gemini 분석 결과 로드 완료 (체크포인트에서)")
     elif start_idx <= 4:
@@ -633,8 +631,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         all_candidates = gemini_data["all_candidates"]
         for m in all_candidates:
             m.setdefault("story_role", "build")
-            m.setdefault("pacing_note", "")
-            m.setdefault("points", {})
 
     # ── 인트로/크레딧 포스트필터 (안전망) ──
     if exclusion_zones.detection_method != "none":
@@ -700,19 +696,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         # sequence_id 부여: continues_from + 관계 그래프 continuous 엣지 기반
         all_candidates = assign_sequence_ids(all_candidates, edges=relationship_edges or None)
 
-        ranked_candidates = rank_moments_enhanced(
-            all_candidates,
-            shorts_type="storytelling",
-        )
-
-        # RankedMoment 변환 시 chunk_index/candidate_index/sequence_id 등 원본 필드 소실 방지
-        orig_by_time = {
-            (m["start_sec"], m["end_sec"]): m for m in all_candidates
-        }
-        ranked_dicts = []
-        for m_obj in ranked_candidates:
-            orig = orig_by_time.get((m_obj.start_sec, m_obj.end_sec), {})
-            ranked_dicts.append({**orig, "final_score": m_obj.final_score})
+        # ranking 임시 비활성화: compose_story에 전체 후보를 시간순 그대로 전달
+        # ranked_candidates = rank_moments_enhanced(all_candidates, shorts_type="storytelling")
+        ranked_dicts = [{**m, "final_score": 0.0} for m in all_candidates]
 
         # Gemini 바이럴 스토리 구성 (Flash + skeleton + 장르/포맷/포커스 블록)
         story_plan = gemini.compose_story_with_context(

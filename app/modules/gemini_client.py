@@ -69,7 +69,7 @@ GEMINI_PROMPT_TEMPLATE = """
 [핵심 장면 선별 원칙]
 현재 단계에서 선별된 장면은 다음 단계에서 쇼츠 제작을 위한 스토리 구성 단계에 일부로 사용된다.
 - 캐릭터의 성격/매력이 가장 잘 드러나는 장면
-- 사건/상황 자체가 주목을 끌만한 장면 (특정 인물보다 "무슨 일이 벌어졌는가"가 인상적인 장면 (예시: 모두가 공감하는(relatability가 높은) 상황 등 points가 높은 장면의 맥락))
+- 사건/상황 자체가 주목을 끌만한 장면 (특정 인물보다 "무슨 일이 벌어졌는가"가 인상적인 장면)
 - 시청자가 "이 드라마/예능 재밌다"고 느끼게 만드는 결정적 장면
 - 맥락 없이도 "뭔데 이거?" 하고 궁금해지는 장면
 
@@ -77,14 +77,6 @@ GEMINI_PROMPT_TEMPLATE = """
 - 단순 이동/대기/배경 장면 (서사적으로 무의미)
 - 감정은 강하지만 맥락이 없으면 이해 불가능한 장면
 - 엔딩 크레딧, 타이틀 시퀀스, 예고편
-
-[points 평가 기준 — 해당 항목만 0.0~1.0 점수, 해당 없으면 null]
-- humor: 웃긴 정도 (리액션, 상황 코미디, 말실수 등)
-- love: 설렘/달달함 (스킨십, 고백, 케미 등)
-- relatability: 공감도 (시청자가 "나도 저래" 할 만한 장면)
-- saida: 시원함 (속이 뻥 뚫리는 통쾌한 장면)
-- goguma: 답답함 (시청자가 답답해하며 댓글 달 만한 장면)
-- conflict_twist: 갈등/반전 (예상 못한 전개, 충격적 반전)
 
 [인물 식별 원칙 — 복장/헤어스타일 변화에 강건하게]
 - 인물 동일성 판단 시 **절대 복장이나 헤어스타일에 의존하지 마라** (씬마다 바뀔 수 있음)
@@ -118,17 +110,14 @@ GEMINI_PROMPT_TEMPLATE = """
 - 완결되지 않은 부분(엔딩)은 이후 전개에 대한 궁금증을 유발하는 장면일 수 있으므로 확정된 전개로 장담하지 말 것.
 - "start_sec"~"end_sec" 내의 상황만 봐도 이해가 가능해야 한다.
 - 각 moment의 story_role을 반드시 지정: "hook" | "build" | "payoff"
-- hook으로 적합한 moment에는 hook_description 필드 추가 (0-3초 후킹 전략)
-- "requires_context": 이 클립을 이해하기 위해서 다른 장면이 필요한 경우 True.
 - `continues_from`: 이 장면이 다른 candidate_moment와 직접 이어지는 경우 `{{"chunk_index": N, "candidate_index": M}}` 형태로 명시, 독립 장면이면 null
 - `highlight_eligible`: 이 클립 하나만으로 완결된 쇼츠가 될 수 있으면 true.
-  판단 기준: requires_context가 false이고, 클립 자체에 감정적 완결성이 있는 경우
+  판단 기준: 클립 자체에 감정적 완결성이 있고, 선행 맥락 없이도 단독으로 이해 가능한 경우
   (웃긴 상황의 시작~반응 등, 특정 상황의 시작과 끝이 클립 하나에 담기는 경우).
 - `highlight_reason`: highlight_eligible이 true인 경우에만 작성. 이 클립이 단독으로 완결성을 갖는 이유를 1문장으로 기술. (false면 null)
 
 [Audience Appeal 필드 — 각 candidate_moment에 반드시 포함]
 - character_focus: 이 장면의 주요 인물 이름 배열
-- coherence_with_neighbors: 이 장면이 전체 영상 맥락 상 앞뒤와 어떻게 연결되는가 (1문장)
 - scene_location: 이 장면의 배경 장소를 구체적으로 기술 (예: "병원 복도", "카페 야외석", "잠수교 위")
   ※ sequence_id(시간 연속성)와 독립적인 공간 정보다. 같은 장소라도 시간이 달라지면 sequence_id는 달라진다.
   스토리 구성 단계에서 장소 전환의 자연스러움과 공간 대비를 판단하는 데 사용된다.
@@ -153,9 +142,6 @@ GEMINI_PROMPT_TEMPLATE = """
       ]
     }}
   ],
-  "emotion_curve": [{{"start_sec": 0.0, "end_sec": 10.0, "emotion": "감정", "intensity": 0.8}}],
-  "tension_score": {{"average": 0.6, "peak": 0.95, "peak_start_sec": 0.0, "peak_end_sec": 10.0}},
-  "overall_vibe": "영상 전체 분위기 요약",
   "candidate_moments": [
     {{
       "chunk_index": 0,
@@ -170,22 +156,12 @@ GEMINI_PROMPT_TEMPLATE = """
       "description": "장면 설명(묘사 위주)",
       "reason": "선정 이유",
       "transcript": "start_sec~end_sec 구간에서 가장 핵심이 되는 '단 한 명'의 주요 발화. 내레이션/독백/VO인 경우 '[내레이션]' 접두어를 붙일 것",
-      "requires_context": false,
       "continues_from": {{"chunk_index": 0, "candidate_index": 0}},
       "highlight_eligible": false,
       "highlight_reason": null,
-      "pacing_note": "빠른 컷|느린 텐션|점진적 고조",
       "character_focus": ["인물명"],
       "scene_location": "장면 배경 장소",
-      "timeline_position": "현재|과거|불명",
-      "points": {{
-        "humor": null,
-        "love": null,
-        "relatability": null,
-        "saida": null,
-        "goguma": null,
-        "conflict_twist": null
-      }}
+      "timeline_position": "현재|과거|불명"
     }}
   ]
 }}
@@ -222,7 +198,7 @@ STORY_COMPOSITION_PROMPT = """
 - 조회수 100만+ 쇼츠는 예외 없이 3~7개의 서로 다른 씬을 편집하여 하나의 서사를 만듬
 - 각 씬 사이에 TTS 나레이션이 맥락을 연결함
 - **반드시 확실히 이어지는 장면끼리 연결하라. 앞뒤 맥락을 모른 채로 이해할 수 없는 클립을 맥락 없이 사용 금지**
-- **`requires_context: true`인 클립은 단독 사용 금지.** 해당 클립을 이해하는 데 필요한 선행 또는 후행 장면을 후보 목록에서 찾아 함께 포함시켜라. 후보 목록에 적절한 맥락 장면이 없으면 해당 클립은 스토리라인에서 제외하라.
+- **`highlight_eligible: false`인 클립은 단독 사용 금지.** 해당 클립을 이해하는 데 필요한 선행 또는 후행 장면을 후보 목록에서 찾아 함께 포함시켜라. `continues_from`을 참고해 연결 가능한 장면이 없으면 해당 클립은 스토리라인에서 제외하라.
 - score는 바이럴 가능성을 0.0~1.0으로 **정직하게** 평가하라 (모두 비슷한 점수 금지)
 - sequence_type: "여정몰입형" 또는 "결과선공개형" 중 선택 (storytelling만 해당)
    - **결과선공개형**: 에피소드 내 핵심 결과(반전·충격·감정 폭발)가 명확하고, 그 결과만으로도 시청자의 시선을 확 잡아끌 수 있을 때 선택한다. hook에서 결과 장면을 먼저 보여줘 "이게 왜?", "어쩌다 이렇게 됐지?"라는 궁금증을 유발하고, build~payoff에서 그 과정을 시간 순으로 풀어준다.
@@ -329,7 +305,7 @@ hook, build 각 항목, payoff 모두 tts_line을 반드시 작성하라:
 # Constraints & Rules
 1. 각 클립의 start_sec, end_sec 명시
 2. 작품의 전체 맥락을 모르는 사람도 한 번 보고 재미를 느낄 수 있는 장면을 선정
-3. score는 importance, hook_score, points 등을 종합해 정직하게 평가하라
+3. score는 importance, hook_score 등을 종합해 정직하게 평가하라
 4. 'continues_from'을 참고하여 맥락이 끊기지 않게 하라
 
 다음 JSON 스키마로만 응답.
@@ -843,7 +819,7 @@ class GeminiClient:
         slim_fields = (
             "chunk_index", "candidate_index", "start_sec", "end_sec",
             "story_role", "description", "characters_in_scene",
-            "requires_context", "continues_from", "transcript",
+            "continues_from", "transcript",
         )
         candidates_str = ""
         for m in all_candidates:
@@ -1245,9 +1221,6 @@ def _validate_gemini_schema(data: dict[str, Any]) -> None:
         ]:
             if key not in moment:
                 raise ValueError(f"Missing key {key} in candidate moment")
-
-        moment.setdefault("pacing_note", "")
-        moment.setdefault("points", {})
 
         # story_role 기본값
         if moment.get("story_role") not in ("hook", "build", "payoff"):
