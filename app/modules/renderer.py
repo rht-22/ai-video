@@ -538,7 +538,7 @@ class RenderInputs:
     bottom_label_height: int
     design: DesignConfig = field(default_factory=DesignConfig)
     tts_subtitle_path: Path | None = None  # TTS 자막 전용 ASS (show_subtitles와 무관하게 표시)
-    tts_audio_files: dict[int, Path] | None = None  # clip_idx -> tts mp3 path
+    tts_cue_files: list[dict] | None = None  # 각 항목: {"cue_index": int, "path": str, "cue": {start_sec, end_sec, text, voice, speed}}
     original_audio_gain_db: int = -10
     tts_audio_gain_db: int = -4
     render_preset: str = "balanced"  # balanced|fastest|quality (현재는 balanced만 사용)
@@ -593,8 +593,8 @@ def render_short(inputs: RenderInputs) -> list[str]:
     work_file.write_bytes((inputs.work_title + "\n").encode("utf-8-sig"))
 
     inputs = replace(inputs, title_textfile=title_file, work_title_textfile=work_file)
-    tts_keys_sorted: list[int] = sorted(inputs.tts_audio_files.keys()) if inputs.tts_audio_files else []
-    filter_script = _build_filtergraph(inputs, num_clip_inputs=len(inputs.clips), tts_keys_sorted=tts_keys_sorted)
+    num_cue_inputs = len(inputs.tts_cue_files or [])
+    filter_script = _build_filtergraph(inputs, num_clip_inputs=len(inputs.clips), num_cue_inputs=num_cue_inputs)
     filter_path = inputs.output_path.with_suffix(".filter.txt")
     filter_path.write_text(filter_script, encoding="utf-8")
 
@@ -616,10 +616,12 @@ def render_short(inputs: RenderInputs) -> list[str]:
                 "-to", f"{clip.end_sec}",
                 "-i", str(_relpath_or_abs(inputs.video_path, output_dir)),
             ])
-        if inputs.tts_audio_files:
-            for clip_idx in tts_keys_sorted:
-                tts_path = inputs.tts_audio_files[clip_idx]
-                args.extend(["-i", str(_relpath_or_abs(tts_path, output_dir))])
+        if inputs.tts_cue_files:
+            for cf in inputs.tts_cue_files:
+                cue_path = Path(cf["path"]) if isinstance(cf.get("path"), str) else cf.get("path")
+                if cue_path is None:
+                    continue
+                args.extend(["-i", str(_relpath_or_abs(cue_path, output_dir))])
         return args
 
     # GPU 인코더는 환경(드라이버) 따라 실패할 수 있으므로,
@@ -777,10 +779,10 @@ def _probe_video_dims(video_path: Path) -> tuple[int, int]:
 
 
 
-def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sorted: list[int]) -> str:
+def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_inputs: int) -> str:
     W = inputs.canvas_width
     H = inputs.canvas_height
-    d = inputs.design 
+    d = inputs.design
 
     ratio = getattr(d, 'aspect_ratio', '16:9')
 
@@ -994,7 +996,7 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sort
         filters.append(f"{last_v_label}null[vout]")
         last_v_label = "[vout]"
 
-    filters.append(_build_audio_filter(inputs, num_clip_inputs, tts_keys_sorted))
+    filters.append(_build_audio_filter(inputs, num_clip_inputs, num_cue_inputs))
     return ";".join(filters)
 
 def _get_audio_duration(path: Path) -> float:
@@ -1015,36 +1017,27 @@ def _get_audio_duration(path: Path) -> float:
         pass
     return 0.0
 
-def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sorted: list[int]) -> str:
- 
-    if not inputs.tts_audio_files:
-        # TTS 없으면 원본 오디오 그대로
+def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, num_cue_inputs: int) -> str:
+    """편집 타임라인 절대 시간 기준 cue 리스트로 오디오 필터를 만든다.
+
+    voice/speed는 이미 mp3 합성 시점에 적용됐으므로 atempo는 추가하지 않는다.
+    cue 시간(start_sec~end_sec)이 원본 오디오 덕킹 구간이며 adelay 위치이다.
+    """
+    if not inputs.tts_cue_files:
         return f"[acat]volume={inputs.original_audio_gain_db}dB[aout]"
- 
-    # 각 클립의 편집 타임라인 기준 시작 시간 계산
-    clip_times: list[tuple[float, StoryClip]] = []
-    current = 0.0
-    for clip in inputs.clips:
-        clip_times.append((current, clip))
-        current += clip.end_sec - clip.start_sec
- 
-    # TTS가 재생되는 구간 계산 → 원본 오디오 덕킹 구간
-    # atempo=1.2 적용 후 실제 재생 길이 = 원본 길이 / 1.2
+
+    cue_files = list(inputs.tts_cue_files or [])
+
+    # 덕킹 구간: cue.start_sec ~ cue.end_sec 그대로
     duck_ranges: list[tuple[float, float]] = []
-    tts_pos = {clip_idx: pos for pos, clip_idx in enumerate(tts_keys_sorted)}
-    for clip_idx, (start_time, _) in enumerate(clip_times):
-        if clip_idx not in inputs.tts_audio_files:
-            continue
-        tts_path = inputs.tts_audio_files[clip_idx]
-        raw_dur = _get_audio_duration(tts_path)
-        if raw_dur > 0:
-            actual_dur = raw_dur / 1.2
-            duck_end = start_time + actual_dur
-            duck_ranges.append((start_time, duck_end))
- 
-    # 원본 오디오: TTS 구간은 볼륨 0.5로 덕킹, 나머지는 정상 볼륨
+    for cf in cue_files:
+        cue = cf.get("cue") or {}
+        s = float(cue.get("start_sec", 0.0))
+        e = float(cue.get("end_sec", 0.0))
+        if e > s:
+            duck_ranges.append((s, e))
+
     if duck_ranges:
-        # volume 필터의 enable 표현식: TTS 재생 구간에서 volume=0.5 (덕킹)
         duck_expr = "+".join(
             f"between(t,{s:.3f},{e:.3f})" for s, e in duck_ranges
         )
@@ -1054,37 +1047,31 @@ def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, tts_keys_sor
         )
     else:
         original_vol = f"[acat]volume={inputs.original_audio_gain_db}dB[orig_vol]"
- 
+
     tts_filters: list[str] = []
     mix_inputs: list[str] = ["[orig_vol]"]
- 
-    # 입력 인덱스: 0..(num_clip_inputs-1)=클립, num_clip_inputs..=tts
-    for clip_idx, (start_time, _) in enumerate(clip_times):
-        if clip_idx not in inputs.tts_audio_files:
-            continue
-        tts_input_idx = num_clip_inputs + tts_pos[clip_idx]
- 
-        # TTS 속도 1.5배
-        tts_speed = f"[{tts_input_idx}:a]atempo=1.2[tts{clip_idx}_speed]"
-        tts_filters.append(tts_speed)
- 
-        tts_vol = f"[tts{clip_idx}_speed]volume={inputs.tts_audio_gain_db}dB[tts{clip_idx}_vol]"
+
+    # 입력 인덱스: 0..(num_clip_inputs-1)=클립, num_clip_inputs..=cue (cue_files 순서)
+    for ci, cf in enumerate(cue_files):
+        cue = cf.get("cue") or {}
+        cue_input_idx = num_clip_inputs + ci
+        tts_vol = f"[{cue_input_idx}:a]volume={inputs.tts_audio_gain_db}dB[cue{ci}_vol]"
         tts_filters.append(tts_vol)
- 
-        if start_time > 0:
-            delay_ms = int(start_time * 1000)
+
+        start_sec = float(cue.get("start_sec", 0.0))
+        if start_sec > 0:
+            delay_ms = int(start_sec * 1000)
             tts_delayed = (
-                f"[tts{clip_idx}_vol]adelay={delay_ms}|{delay_ms}[tts{clip_idx}_delayed]"
+                f"[cue{ci}_vol]adelay={delay_ms}|{delay_ms}[cue{ci}_delayed]"
             )
             tts_filters.append(tts_delayed)
-            mix_inputs.append(f"[tts{clip_idx}_delayed]")
+            mix_inputs.append(f"[cue{ci}_delayed]")
         else:
-            mix_inputs.append(f"[tts{clip_idx}_vol]")
- 
+            mix_inputs.append(f"[cue{ci}_vol]")
+
     if len(mix_inputs) <= 1:
         return original_vol.replace("[orig_vol]", "[aout]")
- 
-    # amix로 원본 + TTS 믹싱
+
     mix_inputs_str = "".join(mix_inputs)
     mix_filter = (
         f"{';'.join(tts_filters)};{mix_inputs_str}"

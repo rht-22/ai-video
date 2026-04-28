@@ -132,7 +132,6 @@ def flatten_to_clips(cut_results: list[SilenceCutResult]) -> list[StoryClip]:
                 start_sec=interval.start_sec,
                 end_sec=interval.end_sec,
                 subtitle=clip.subtitle,
-                tts_line=clip.tts_line,
                 use_original_audio=clip.use_original_audio,
             ))
         else:
@@ -142,9 +141,8 @@ def flatten_to_clips(cut_results: list[SilenceCutResult]) -> list[StoryClip]:
                     role=clip.role,
                     start_sec=interval.start_sec,
                     end_sec=interval.end_sec,
-                    # 첫 번째 구간만 subtitle/tts 유지, 나머지는 비움
+                    # 첫 번째 구간만 subtitle 유지, 나머지는 비움
                     subtitle=clip.subtitle if idx == 0 else "",
-                    tts_line=clip.tts_line if idx == 0 else "",
                     use_original_audio=clip.use_original_audio,
                 ))
 

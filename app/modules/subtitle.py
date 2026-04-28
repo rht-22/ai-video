@@ -422,7 +422,7 @@ def remap_transcript_to_edited_timeline(
                 )
         else:
             if tts_only_when_no_orig:
-                text = (clip.tts_line or "").strip() or (clip.subtitle or "").strip()
+                text = (clip.subtitle or "").strip()
                 if text:
                     out.append(SpeechSegment(start_sec=t, end_sec=t + clip_dur, text=text))
 

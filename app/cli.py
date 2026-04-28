@@ -39,8 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument(
         "--from-step",
         choices=[
-            "init", "probe", "proxy", "chunk", "gemini",
-            "story", "transcribe", "resources", "render", "validate",
+            "init", "research", "probe", "proxy", "exclusion", "chunk",
+            "skeleton", "character_index", "gemini", "graph", "story",
+            "tts_plan", "transcribe", "resources", "render", "validate",
         ],
         help="Start from specific step (requires --job-id)",
     )
@@ -51,6 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--work-context-file", help="작품 설명/시놉시스가 담긴 텍스트 파일 경로")
     create.add_argument("--srt-file", dest="subtitle_file_legacy", help=argparse.SUPPRESS)  # 하위호환
     create.add_argument("--no-subtitles", action="store_true", help="최종 영상에 자막 표시 안 함")
+    create.add_argument("--no-tts-subtitles", action="store_true", help="TTS 내레이션 자막을 영상에 표시 안 함 (TTS 음성은 그대로 재생)")
     create.add_argument("--max-shorts", type=int, default=3, help="생성할 최대 쇼츠 수 (1-3, 기본: 3)")
     create.add_argument("--no-research", action="store_true",
                         help="작품 자동 리서치를 건너뜁니다")
@@ -190,6 +192,7 @@ def main() -> None:
                 work_context=work_context,
                 srt_path=srt_path,
                 show_subtitles=not getattr(args, "no_subtitles", False),
+                show_tts_subtitles=not getattr(args, "no_tts_subtitles", False),
                 max_shorts=max_shorts,
                 skip_research=getattr(args, "no_research", False),
                 episode=getattr(args, "episode", None),

@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any
-
 
 def assign_sequence_ids(
     candidates: list[dict],
@@ -93,90 +90,3 @@ def assign_sequence_ids(
         m_copy["sequence_id"] = seq_id_map[find(i)]
         result.append(m_copy)
     return result
-
-
-@dataclass(frozen=True)
-class RankedMoment:
-    start_sec: float
-    end_sec: float
-    importance: float
-    hook_score: float
-    topic_alignment_score: float
-    story_role: str  # "hook" | "build" | "payoff"
-    description: str
-    reason: str
-    transcript: str
-    pacing_note: str
-    points: dict
-    final_score: float
-    viral_titles: list[str] = field(default_factory=list)
-    suggested_tts_line: str = ""
-
-
-def rank_moments(moments: list[dict[str, Any]]) -> list[RankedMoment]:
-    """하위 호환 래퍼 — 기본 auto 모드로 랭킹."""
-    return rank_moments_enhanced(moments, shorts_type="auto")
-
-
-def rank_moments_enhanced(
-    moments: list[dict[str, Any]],
-    shorts_type: str = "auto",  # "highlight" | "storytelling" | "auto"
-) -> list[RankedMoment]:
-    """Rank moments by composite importance."""
-    ranked = []
-    for moment in moments:
-        # 1. points 보너스 계산
-        points = moment.get("points") or {}
-        points_values = [
-            float(v) for v in points.values()
-            if v is not None and isinstance(v, (int, float))
-        ]
-        points_max = max(points_values) if points_values else 0.0
-        points_avg = (
-            sum(points_values) / len(points_values) if points_values else 0.0
-        )
-
-        importance = float(moment.get("importance", 0.0))
-        hook_score = float(moment.get("hook_score", 0.0))
-        topic_alignment = float(moment.get("topic_alignment_score", 0.0))
-
-        if shorts_type == "highlight":
-            final_score = (
-                importance * 0.45
-                + hook_score * 0.15
-                + points_max * 0.40
-            )
-        elif shorts_type == "storytelling":
-            final_score = (
-                importance * 0.40
-                + hook_score * 0.15
-                + topic_alignment * 0.20
-                + points_avg * 0.25
-            )
-        else:  # auto
-            final_score = (
-                importance * 0.40
-                + hook_score * 0.15
-                + topic_alignment * 0.15
-                + points_max * 0.30
-            )
-
-        ranked.append(
-            RankedMoment(
-                start_sec=float(moment["start_sec"]),
-                end_sec=float(moment["end_sec"]),
-                importance=importance,
-                hook_score=hook_score,
-                topic_alignment_score=topic_alignment,
-                story_role=moment.get("story_role", "build"),
-                description=moment["description"],
-                reason=moment["reason"],
-                transcript=moment["transcript"],
-                viral_titles=moment.get("viral_titles", []),
-                suggested_tts_line=moment.get("suggested_tts_line", ""),
-                pacing_note=moment.get("pacing_note", ""),
-                points=moment.get("points") or {},
-                final_score=final_score,
-            )
-        )
-    return sorted(ranked, key=lambda item: item.final_score, reverse=True)
