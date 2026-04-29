@@ -48,7 +48,8 @@ def _extract_json_from_markdown(text: str) -> str:
 # 청크 분석 프롬프트 (바이럴 최적화 버전)
 # ─────────────────────────────────────────────
 GEMINI_PROMPT_TEMPLATE = """
-너는 유튜브 쇼츠 영상 분석 및 편집 전문가다.
+너는 드라마/예능 톤의 쇼츠 편집 어시스턴트다.
+현재 단계에서 분석된 내용은 다음 단계에서 쇼츠 제작을 위한 스토리 구성 단계에서 재료로 사용된다.
 반드시 JSON만 출력한다. 코드블록 금지.
 영상에 없는 내용은 절대 창작하지 말 것.
 
@@ -66,55 +67,30 @@ GEMINI_PROMPT_TEMPLATE = """
 - 자막/대사 참고 (화자명 포함): {transcript_hint}
 {previous_context}
 
-[핵심 장면 선별 원칙]
-현재 단계에서 선별된 장면은 다음 단계에서 쇼츠 제작을 위한 스토리 구성 단계에 일부로 사용된다.
-- 캐릭터의 성격/매력이 가장 잘 드러나는 장면
-- 사건/상황 자체가 주목을 끌만한 장면 (특정 인물보다 "무슨 일이 벌어졌는가"가 인상적인 장면)
-- 시청자가 "이 드라마/예능 재밌다"고 느끼게 만드는 결정적 장면
-- 맥락 없이도 "뭔데 이거?" 하고 궁금해지는 장면
-
-다음은 피하라:
-- 단순 이동/대기/배경 장면 (서사적으로 무의미)
-- 감정은 강하지만 맥락이 없으면 이해 불가능한 장면
-- 엔딩 크레딧, 타이틀 시퀀스, 예고편
-
-[인물 식별 원칙 — 복장/헤어스타일 변화에 강건하게]
-- 인물 동일성 판단 시 **절대 복장이나 헤어스타일에 의존하지 마라** (씬마다 바뀔 수 있음)
-- 대신 다음 우선순위로 식별하라:
-  1. 자막의 화자명 (가장 신뢰도 높음)
-  2. 얼굴 특징 (얼굴형, 연령대, 성별, 쌍꺼풀 유무 등)
-  3. 체형/키/목소리 톤
-  4. 극 중 역할과 다른 인물과의 관계
-- 이름을 알 수 없는 인물은 **얼굴/체형 기반**으로 레이블링 (예: "30대 각진 턱 남성", "둥근 얼굴 여성")
-  ❌ "갈색 재킷 남자" (복장 기반 — 금지)
-- 동일 인물이 다른 씬에 다른 옷으로 등장해도 같은 이름/레이블을 유지
-- **자막 화자태그 > 화면에 보이는 인물**: 반응 컷(cutaway)에서는 화면에 보이는 인물과 실제 화자가 다를 수 있다.
-- **화자 태그 없는 대사는 단정짓지 마라**: 자막에 `화자명:` 태그가 없는 대사의 화자를 서사적 추론으로 채우지 마라. 직전 태그의 화자를 이어받거나, 불명확하면 화자를 특정하지 말 것.
+요구 사항:
+- 아래 JSON 스키마 구조를 100% 동일하게 유지하여 출력
+- candidate_moments 최소 {min_candidates}개
+- 드라마/예능 톤, 짧은 리액션 문구는 가능하지만 과도 금지
+- 최신 쇼츠 트렌드 반영: 자연스러운 톤, 짧은 문장, 강조/리액션 요소
+- 분석 결과 해당 항목이 없을 경우 빈 배열 대신 null로 출력
+- 타이틀 시퀀스, 엔딩 크레딧은 제외하기
+- ⚠️ **영상에 실제로 존재하는 장면만** 후보에 포함하라. 추론이나 상상으로 장면을 만들어내지 마라.
+- 각 candidate_moment의 'start_sec'~'end_sec' 구간은 반드시 첨부 영상에서 실제 확인 가능해야 한다.
+- 영상 전체를 빠짐없이 스캔하라. 앞부분에만 집중하지 말고 중반~후반도 균등하게 분석할 것.
+- 확실하지 않은 내용은 넣지 마라.
+- 완결되지 않은 부분(엔딩)은 이후 전개에 대한 궁금증을 유발하는 장면일 수 있으므로 확정된 전개로 장담하지 말 것.
+- "start_sec"~"end_sec" 내의 상황만 봐도 이해가 가능해야 한다.
+- `continues_from`: 이 장면이 다른 candidate_moment와 직접 이어지는 경우 `{{"chunk_index": N, "candidate_index": M}}` 형태로 명시, 독립 장면이면 null
+- `highlight_eligible`: 이 클립 하나만으로 완결된 쇼츠가 될 수 있으면 true.
+  판단 기준: 클립 자체에 감정적 완결성이 있고, 선행 맥락 없이도 단독으로 이해 가능한 경우
+  (웃긴 상황의 시작~반응 등, 특정 상황의 시작과 끝이 클립 하나에 담기는 경우).
+- `highlight_reason`: highlight_eligible이 true인 경우에만 작성. 이 클립이 단독으로 완결성을 갖는 이유를 1문장으로 기술. (false면 null)
 
 [description 규칙]
 - description은 compose story 단계를 위한 정보이므로 영상과 자막을 기반으로 시간 순서에 맞게 정확하고 객관적으로 최소 5 문장 이상.
 - description은 실제 장면 묘사를 유지하고, 앞 장면이 나중 내용에 의해 재해석되는 경우 재해석된 의미는 reason 필드에만 반영할 것. 과대해석 및 과장 금지.
 - description에서 행동의 범주를 바꾸지 마라. 장면에서 명확히 관찰된 행동(발화·동작·표정)만 그 종류 그대로 기술하고, 확인되지 않은 의도·감정·결과를 덧씌우지 마라.
 - ⚠️ description에서 내레이션·독백·보이스오버(VO)는 반드시 "~의 내레이션", "~가 속으로 독백한다", "VO로 ~가 말한다" 등으로 명시하여 실제 대화와 혼동되지 않도록 할 것.
-
-
-[공통 규칙]
-- 아래 JSON 스키마 구조를 100% 동일하게 유지하여 출력
-- 분석 결과 해당 항목이 없을 경우 빈 배열 대신 null로 출력
-- candidate_moments 최소 {min_candidates}개 (이 청크에서 주목할 만한 모든 장면을 빠짐없이 포함)
-- 타이틀 시퀀스, 엔딩 크레딧은 제외하기
-- ⚠️ **영상에 실제로 존재하는 장면만** 후보에 포함하라. 추론이나 상상으로 장면을 만들어내지 마라.
-- 각 candidate_moment의 start_sec~end_sec 구간은 반드시 첨부 영상에서 실제 확인 가능해야 한다.
-- 영상 전체를 빠짐없이 스캔하라. 앞부분에만 집중하지 말고 중반~후반도 균등하게 분석할 것.
-- 확실하지 않은 내용은 넣지 마라.
-- 완결되지 않은 부분(엔딩)은 이후 전개에 대한 궁금증을 유발하는 장면일 수 있으므로 확정된 전개로 장담하지 말 것.
-- "start_sec"~"end_sec" 내의 상황만 봐도 이해가 가능해야 한다.
-- 각 moment의 story_role을 반드시 지정: "hook" | "build" | "payoff"
-- `continues_from`: 이 장면이 다른 candidate_moment와 직접 이어지는 경우 `{{"chunk_index": N, "candidate_index": M}}` 형태로 명시, 독립 장면이면 null
-- `highlight_eligible`: 이 클립 하나만으로 완결된 쇼츠가 될 수 있으면 true.
-  판단 기준: 클립 자체에 감정적 완결성이 있고, 선행 맥락 없이도 단독으로 이해 가능한 경우
-  (웃긴 상황의 시작~반응 등, 특정 상황의 시작과 끝이 클립 하나에 담기는 경우).
-- `highlight_reason`: highlight_eligible이 true인 경우에만 작성. 이 클립이 단독으로 완결성을 갖는 이유를 1문장으로 기술. (false면 null)
 
 [Audience Appeal 필드 — 각 candidate_moment에 반드시 포함]
 - character_focus: 이 장면의 주요 인물 이름 배열
@@ -126,22 +102,15 @@ GEMINI_PROMPT_TEMPLATE = """
 - ⚠️ 대사가 있는 장면에서 인물의 행동/의도를 묘사할 때는 대사 내용을 최우선으로 반영하라.
   캐릭터 설정(질병, 성격 등 배경 지식)이 대사와 충돌하면 대사를 믿어라.
 
+
+다음 스키마로만 응답:
+
 {{
   "chunk_index": 0,
   "chunk_start_sec": 0,
   "chunk_end_sec": 300,
   "summary": "해당 청크 전체의 핵심 내용 요약",
   "main_plot": "이 구간의 핵심 내용 요약 80자 이내",
-  "characters_relations": "출연자 간 관계 및 역학",
-  "characters_tracking": [
-    {{
-      "character": "인물명 (자막 화자명 우선, 없으면 얼굴 기반 레이블)",
-      "identity_anchor": "이 인물을 다른 씬에서도 알아볼 수 있는 불변 특징 (얼굴형, 연령대, 성별, 체형, 목소리)",
-      "appearances": [
-        {{"start_sec": 0.0, "end_sec": 32.0, "action": "행동 요약", "current_look": "이 씬에서의 복장/헤어 (참고용)"}}
-      ]
-    }}
-  ],
   "candidate_moments": [
     {{
       "chunk_index": 0,
@@ -151,10 +120,8 @@ GEMINI_PROMPT_TEMPLATE = """
       "importance": 0.0,
       "hook_score": 0.0,
       "topic_alignment_score": 0.0,
-      "story_role": "hook|build|payoff",
       "characters_in_scene": ["인물명1", "인물명2"],
       "description": "장면 설명(묘사 위주)",
-      "reason": "선정 이유",
       "transcript": "start_sec~end_sec 구간에서 가장 핵심이 되는 '단 한 명'의 주요 발화. 내레이션/독백/VO인 경우 '[내레이션]' 접두어를 붙일 것",
       "continues_from": {{"chunk_index": 0, "candidate_index": 0}},
       "highlight_eligible": false,
@@ -172,111 +139,40 @@ GEMINI_PROMPT_TEMPLATE = """
 # ─────────────────────────────────────────────
 STORY_COMPOSITION_PROMPT = """
 # Role
-너는 드라마/영화/예능 기반 유튜브 쇼츠 100만 조회수 전문 편집자다.
-시청자가 해당 쇼츠를 보고 재미를 느껴 작품을 궁금해하게 만든다.
+너는 쇼츠 영상 편집 전문가다. 전체 영상 분석 결과를 바탕으로 여러 개의 쇼츠 스토리라인을 생성해라.
 
 # Task
-제공된 영상 분석 데이터를 기반으로 스토리라인 3개를 구성하라.
-해당 작품을 처음 보는 사람도 맥락을 모른채 이해하고 관심을 가질 수 있게 구성하라.
-각 스토리라인은 **storytelling(멀티클립 서사형)** 또는 **highlight(단일클립 완결형)** 중 적합한 타입을 선택하라.
-3개 모두 독립적으로 완성도 높은 쇼츠가 될 수 있어야 한다.
-그중 가장 바이럴 성공 가능성이 높은 하나를 최종 선정하되, 나머지 2개도 사용될 수 있다.
+제공된 영상 분석 데이터를 기반으로 시청자의 몰입을 극대화할 수 있는 2가지 타입의 스토리라인(하이라이트형, 서사형)을 3개씩 구성하고,
+그중 가장 성공 가능성이 높은 하나를 최종 선정하여 출력하라.
+원본 영상에 대해 아무 정보가 없는 사람도 만들어진 쇼츠에 대해 흥미를 느낄 수 있어야 한다.
 
-# 타입 선택 기준
+# Input Data
+- 제목: {work_title}
+- 주제: {topic}
+- 후보 장면 및 분석 데이터:
+{candidates_str}
 
-후보 클립 목록에서 highlight_eligible: true인 클립 수와 전체 클립 수를 직접 세어 비율을 계산하라.
+# Constraints & Rules
+1. Highlight Type:
+- candidate_moments들 중, `highlight_eligible`이 true인 것만 선별. 
+- 맥락 설명 없이 시청 지속을 유도할 수 있는 하나를 중심으로 구성할 것.
 
-- 비율 **90% 이상**: 전부 highlight로 구성해도 된다.
-- 비율 **20% 이하**: storytelling을 반드시 하나 이상 구성하라.
-- 그 외 (20%~90%): storytelling과 highlight를 적절히 혼합하라.
-- highlight 타입은 반드시 highlight_eligible: true인 클립에만 사용하라.
+2. Storytelling Type:
+- 모든 chunk의 candidate_moments 중에서 여러 장면들을 선정해 완결성이 있도록 여러 장면을 유기적으로 연결할 것.
+- 캐릭터의 행적을 조명하거나 영상의 특정 사건을 요약.
+- 각 storyline 내에서는 가장 눈길을 끄는 장면을 hook으로 사용하고, hook이 전개상 앞부분이면 "여정몰입형", 전개상 뒷부분이면 "결과선공개형"으로 분류.
 
-## storytelling 타입 — 멀티클립 서사형
+3. 연속성 (Storytelling 전용):
+각 후보 장면에는 `sequence_id`(정수)와 `continues_from` 필드가 있다.
+- `sequence_id`가 같은 장면끼리 = 원본에서 직접 이어지는 연속 장면 → 인접 배치 시 자연스럽게 연결됨.
+- `sequence_id`가 다른 장면끼리 = 다른 시간·상황의 장면 → 인접 배치 시 `tts_line`으로 맥락 전환을 반드시 설명할 것.
+- `continues_from`이 있는 장면은 앞 장면의 맥락을 이어받으므로, 선행 장면 없이 단독 배치 시 이해가 어려울 수 있음.
+- build·payoff는 반드시 원본 시간 순(start_sec 오름차순)으로 배치할 것.
 
-**단일 연속 클립 사용 금지.** 반드시 3개 이상의 서로 다른 씬을 조합하여 서사 아크를 구성하라.
-실제 고조회수 쇼츠 레퍼런스를 분석한 결과:
-- 조회수 100만+ 쇼츠는 예외 없이 3~7개의 서로 다른 씬을 편집하여 하나의 서사를 만듬
-- 각 씬 사이에 TTS 나레이션이 맥락을 연결함
-- **반드시 확실히 이어지는 장면끼리 연결하라. 앞뒤 맥락을 모른 채로 이해할 수 없는 클립을 맥락 없이 사용 금지**
-- **`highlight_eligible: false`인 클립은 단독 사용 금지.** 해당 클립을 이해하는 데 필요한 선행 또는 후행 장면을 후보 목록에서 찾아 함께 포함시켜라. `continues_from`을 참고해 연결 가능한 장면이 없으면 해당 클립은 스토리라인에서 제외하라.
-- score는 바이럴 가능성을 0.0~1.0으로 **정직하게** 평가하라 (모두 비슷한 점수 금지)
-- sequence_type: "여정몰입형" 또는 "결과선공개형" 중 선택 (storytelling만 해당)
-   - **결과선공개형**: 에피소드 내 핵심 결과(반전·충격·감정 폭발)가 명확하고, 그 결과만으로도 시청자의 시선을 확 잡아끌 수 있을 때 선택한다. hook에서 결과 장면을 먼저 보여줘 "이게 왜?", "어쩌다 이렇게 됐지?"라는 궁금증을 유발하고, build~payoff에서 그 과정을 시간 순으로 풀어준다.
-   - **여정몰입형**: 에피소드의 전반적인 분위기·긴장감이 처음부터 끝까지 일관되게 유지돼, 굳이 결과를 앞당길 필요가 없을 때 선택한다. 사건이 자연스럽게 고조되는 흐름 자체가 훅이 되므로 hook~payoff를 원본 시간 순서대로 배치한다.
-
-### sequence_id — 연속 장면 그룹 식별자
-
-각 클립에는 `sequence_id` 정수 필드가 있다. 이 값은 원본 영상의 `continues_from` 체인을 분석해 자동 부여된 것으로, **같은 숫자 = 직접 이어지는 연속 장면, 다른 숫자 = 다른 시간·상황의 장면**이다.
-
-- **같은 sequence_id끼리**: 원본에서 바로 이어지므로 편집 시 자연스럽게 연결된다.
-- **다른 sequence_id끼리**: 시간·장소·상황이 달라진 씬이다. 인접 클립으로 사용하면 시청자에게 혼란을 줄 수 있다.
-- **겉으로 비슷해 보여도** (같은 인물, 비슷한 장소) sequence_id가 다르면 다른 상황임을 반드시 인지하라.
-- build 클립들과 payoff는 sequence_id가 달라져도 되지만, 그 경우 bridges_from_previous에서 시청자가 납득할 수 있는 맥락 전환을 반드시 설명해야 한다.
-
-### 연결성 강제 룰
-
-1. 인물 연속성: 인접 클립은 character_focus 교집합이 있거나, bridges_from_previous 문장에서 연결을 명확히 설명해야 한다
-2. 시간 근접성: 원본 타임라인 상 큰 점프가 필요한 경우, 반드시 TTS bridges_from_previous로 맥락을 제공하라
-3. 공간 전환: 인접 클립의 scene_location이 다를 경우, 장소 이동이 시청자에게 자연스럽게 느껴지도록 bridges_from_previous에서 맥락을 제공하라. 단, scene_location이 같고 sequence_id만 다른 경우(같은 장소·다른 시간)는 TTS로 시간 경과를 명시하라.
-4. 감정 흐름: 감정 아크(emotional_arc) 순서를 역행하지 마라 (고조→도입 금지)
-4. 각 storyline에 "coherence_score" (0.0~1.0) 필드 — 위 룰 달성도
-5. 각 클립 객체에 "bridges_from_previous" 필드 — 앞 클립에서 어떻게 이어지는지 한 문장 (hook은 null 가능)
-6. 각 클립 객체에 "character_focus" 배열 — 해당 장면의 주요 인물 이름
-
-### 바이럴 쇼츠 구조
-
-#### Hook (0-5초): 스크롤 멈춤
-- 충격적 반전, 감정 폭발, 의외의 상황으로 시작
-- importance 0.7 이상이고 story_role이 "hook"인 moment 우선 선택
-- TTS로 궁금증 유발
-
-#### Build (5-45초): 몰입 유지 (최소 2개 씬)
-- 감정 강도가 점진적으로 상승
-- 씬 전환마다 TTS 나레이션이 맥락을 이어줌
-- 핵심 대사가 포함된 씬 우선 선택
-
-#### Payoff (45-60초): 감정 폭발 + 엔딩
-- 클라이맥스 또는 예상치 못한 반전
-- 여운이 남거나 다음 편 궁금증 유도
-
-### TTS 나레이션 (클립별 필수)
-
-hook, build 각 항목, payoff 모두 tts_line을 반드시 작성하라:
-- 해설 톤으로 상황을 요약하고 다음 씬으로 전환 유도
-- 간결하고 트렌디한 톤으로 1-2문장, 이전 씬에서 다음 씬으로 자연스럽게 연결
-- 해당 클립의 시작 장면과 함께 재생될 때 자연스럽도록 작성
-
-### 원본 타임라인 순서 원칙 (절대 규칙)
-
-- hook은 예외적으로 원본상 어느 위치의 장면이든 사용 가능 (결과선공개형 허용)
-- **build 클립들과 payoff는 반드시 원본 영상의 시간 순서(start_sec 오름차순)대로 배치해야 한다**
-  - build[0].start_sec < build[1].start_sec < ... < payoff.start_sec 를 반드시 만족
-- 점수가 높다고 해서 뒤에 나온 장면을 앞으로 당기거나 순서를 임의로 섞는 것은 절대 금지
-- 원본 영상의 전개 흐름을 무시한 뒤죽박죽 구성은 시청자에게 혼란을 줌
-
-## highlight 타입 — 단일클립 완결형
-
-단일 클립만으로 시청자가 "뭐지?" → 감정반응 → 완결까지 느낄 수 있는 경우 선택하라.
-멀티클립으로 이으면 오히려 흐름이 끊기거나 불필요해지는 경우가 여기에 해당한다.
-**반드시 highlight_eligible: true인 클립만 사용할 수 있다.**
-
-### TTS 나레이션 (선택)
-
-- tts_line은 선택 사항 — 원본 오디오만으로 충분하면 빈 문자열("")로 둬도 된다.
-- 나레이션이 필요한 경우 클립 **시작 부분**과 함께 재생될 때 자연스럽도록 1-2문장으로 작성
-
-# 공통 규칙
-
-## 3개 스토리라인 독립성
-
-- 3개 스토리라인은 **서로 다른 장면을 사용**해야 한다 (동일 씬 중복 사용 금지)
-- 각 스토리라인마다 **독립적인 서사 아크, 제목(title_line1+title_line2), TTS 나레이션**을 갖추어야 한다
-
-## 제목 구조 (2줄 필수)
-
-레퍼런스 분석 결과 고조회수 쇼츠 제목은 반드시 2줄 구조:
-- **title_line1**: 상황/맥락 설명 (15자 이내, 흰색으로 표시됨)
-- **title_line2**: 캐릭터/주제 중심 후킹 문구 (15자 이내, 노란색 강조로 표시됨)
+4. 제목 구조 (2줄 필수):
+각 storyline마다 반드시 2줄 제목을 작성할 것.
+- title_line1: 상황/맥락 설명 (15자 이내, 흰색으로 표시됨)
+- title_line2: 캐릭터/주제 중심 후킹 문구 (15자 이내, 노란색 강조로 표시됨)
 
 예시:
 - "모두 기피하는 깡치사건" / "클리어하는 이한영"
@@ -285,114 +181,48 @@ hook, build 각 항목, payoff 모두 tts_line을 반드시 작성하라:
 
 ⚠️ 이모지 금지.
 
-## Duration Constraint
+5. Common:
+각 장면의 `start_sec`, `end_sec`를 명시하고, 영상의 '후킹'을 위한 TTS 라인을 반드시 포함할 것.
 
-- 총 클립 길이 합계: {min_duration_sec}초 ~ {max_duration_sec}초 범위
-- 각 클립의 start_sec, end_sec는 반드시 원본 영상 타임라인 기준
-- 각 장면의 (end_sec - start_sec)를 합산하여 범위 내인지 반드시 확인할 것
-
-# Input Data
-- 작품명: {work_title}
-- 주제: {topic}
-{story_topic_line}
-{work_context_block}
-{episodes_context_block}
-{narrative_skeleton_json_block}
-
-- 후보 장면 및 분석 데이터:
-{candidates_str}
-
-# Constraints & Rules
-1. 각 클립의 start_sec, end_sec 명시
-2. 작품의 전체 맥락을 모르는 사람도 한 번 보고 재미를 느낄 수 있는 장면을 선정
-3. score는 importance, hook_score 등을 종합해 정직하게 평가하라
-4. 'continues_from'을 참고하여 맥락이 끊기지 않게 하라
-
-다음 JSON 스키마로만 응답.
-
-⚠️ **각 storyline의 `narrative_plan`을 해당 storyline의 클립 선택 전에 반드시 먼저 작성하라.**
-점수나 수치가 아니라 "어떤 장면/이야기를 쇼츠로 만들 것인가"를 먼저 결정한 뒤 클립을 찾아라.
-
+다음 JSON 스키마로만 응답:
 {{
-  "storylines": [
+"storylines": [
     {{
-      "storyline_index": 0,
-      "shorts_type": "storytelling",
-      "narrative_plan": {{
-        "type_rationale": "왜 storytelling 타입을 선택했는가",
-        "concept": "이 쇼츠에 담길 내용 (3문장)"
-      }},
-      "sequence_type": "여정몰입형|결과선공개형",
-      "topic": "주제명",
-      "topic_reason": "서사 구성 이유",
-      "score": 0.0,
-      "coherence_score": 0.0,
-      "estimated_duration_sec": 0.0,
-      "viral_titles": ["제목1", "제목2", "제목3"],
-      "title_line1": "상황/맥락 설명 (15자 이내)",
-      "title_line2": "캐릭터/사건 중심 후킹 (15자 이내)",
-      "storyline": {{
-        "hook": {{
-          "chunk_index": 0, "candidate_index": 0,
-          "start_sec": 0.0, "end_sec": 0.0,
-          "description": "장면 설명",
-          "tts_line": "궁금증 유발 나레이션 1-2문장",
-          "use_original_audio": true,
-          "character_focus": ["인물명"],
-          "bridges_from_previous": null
-        }},
-        "build": [
-          {{
-            "chunk_index": 0, "candidate_index": 0,
-            "start_sec": 0.0, "end_sec": 0.0,
-            "description": "장면 설명",
-            "tts_line": "맥락 연결 나레이션 1-2문장",
-            "use_original_audio": true,
-            "character_focus": ["인물명"],
-            "bridges_from_previous": "앞 씬에서 어떻게 이어지는지"
-          }}
-        ],
-        "payoff": {{
-          "chunk_index": 0, "candidate_index": 0,
-          "start_sec": 0.0, "end_sec": 0.0,
-          "description": "장면 설명",
-          "tts_line": "클라이맥스 나레이션",
-          "use_original_audio": true,
-          "character_focus": ["인물명"],
-          "bridges_from_previous": "앞 씬에서 어떻게 이어지는지"
-        }}
-      }}
+    "storyline_index": 0,
+    "chunk_index": 0,
+    "candidate_index": 0,
+    "shorts_type": "highlight",
+    "topic": "주제명",
+    "topic_reason": "선정 이유",
+    "score": 0.0,
+    "title_line1": "상황/맥락 (15자 이내)",
+    "title_line2": "캐릭터/후킹 (15자 이내)",
+    "start_sec": 0.0,
+    "end_sec": 0.0
     }},
     {{
-      "storyline_index": 1,
-      "shorts_type": "highlight",
-      "narrative_plan": {{
-        "type_rationale": "왜 highlight 타입을 선택했는가 (이 클립이 단독으로 완결성을 갖는 이유)",
-        "concept": "이 쇼츠에 담길 내용 (3문장)"
-      }},
-      "chunk_index": 0,
-      "candidate_index": 0,
-      "start_sec": 0.0,
-      "end_sec": 0.0,
-      "topic": "주제명",
-      "topic_reason": "단독 선정 이유",
-      "score": 0.0,
-      "coherence_score": 0.0,
-      "estimated_duration_sec": 0.0,
-      "viral_titles": ["제목1", "제목2", "제목3"],
-      "title_line1": "상황/맥락 설명 (15자 이내)",
-      "title_line2": "캐릭터/사건 중심 후킹 (15자 이내)",
-      "tts_line": "나레이션 (선택 — 원본 오디오로 충분하면 빈 문자열)",
-      "use_original_audio": true
+    "storyline_index": 1,
+    "shorts_type": "storytelling",
+    "sequence_type": "여정몰입형|결과선공개형",
+    "topic": "주제명",
+    "topic_reason": "서사 구성 이유",
+    "score": 0.0,
+    "title_line1": "상황/맥락 (15자 이내)",
+    "title_line2": "캐릭터/후킹 (15자 이내)",
+    "storyline": {{
+        "hook": {{ "chunk_index": 0, "candidate_index": 0, "start_sec": 0.0, "end_sec": 0.0, "description": "장면 설명", "tts_line": "", "use_original_audio": true }},
+        "build": [ {{ "chunk_index": 0, "candidate_index": 0, "start_sec": 0.0, "end_sec": 0.0, "description": "장면 설명", "tts_line": "", "use_original_audio": true }} ],
+        "payoff": {{ "chunk_index": 0, "candidate_index": 0, "start_sec": 0.0, "end_sec": 0.0, "description": "장면 설명", "tts_line": "", "use_original_audio": true }}
     }}
-  ],
-  "selected_storyline_index": 0,
-  "shorts_type":"storytelling"|"highlight",
-  "selection_reason": "이 스토리라인을 선택한 이유",
-  "title_line1": "최종 제목 1줄 (맥락)",
-  "title_line2": "최종 제목 2줄 (후킹)",
-  "title_txt": "title_line1 + title_line2 합친 전체 제목",
-  "selected_storyline": {{ "선정된 인덱스의 객체를 그대로 복사해서 출력": "" }}
+    }}
+],
+"selected_storyline_index": 0,
+"shorts_type": "storytelling|highlight",
+"selection_reason": "이 스토리라인을 선택한 이유",
+"title_line1": "최종 제목 1줄 (맥락, 15자 이내)",
+"title_line2": "최종 제목 2줄 (후킹, 15자 이내)",
+"title_txt": "title_line1 + title_line2 합친 전체 제목",
+"selected_storyline": {{ "이곳에 선정된 인덱스의 객체를 그대로 복사해서 출력": "" }}
 }}
 """
 
@@ -818,7 +648,7 @@ class GeminiClient:
         """후보 장면들 사이의 관계 엣지를 Pro 모델로 추출한다 (텍스트 전용, 영상 업로드 없음)."""
         slim_fields = (
             "chunk_index", "candidate_index", "start_sec", "end_sec",
-            "story_role", "description", "characters_in_scene",
+            "description", "characters_in_scene",
             "continues_from", "transcript",
         )
         candidates_str = ""
@@ -988,13 +818,13 @@ class GeminiClient:
                     result["selected_storyline_index"] = best_idx
                     selected_idx = best_idx
 
-                # 복합 점수 = viral*0.6 + coherence*0.4
                 for _sl in storylines:
-                    _v = float(_sl.get("score", 0) or 0)
-                    _c = float(_sl.get("coherence_score", 0) or 0)
-                    _sl["composite_score"] = _v * 0.6 + _c * 0.4
+                    _sl["composite_score"] = float(_sl.get("score", 0) or 0)
 
                 result["selected_storyline"] = storylines[selected_idx]
+                # 선정된 storyline의 shorts_type을 top-level에 자동 반영
+                result.setdefault("shorts_type", storylines[selected_idx].get("shorts_type", "storytelling"))
+                result.setdefault("selection_reason", "")
                 # 전체 storylines를 복합 점수 순으로 정렬 (멀티쇼츠용)
                 result["ranked_storylines"] = sorted(
                     storylines, key=lambda s: s.get("composite_score", s.get("score", 0)), reverse=True
@@ -1214,14 +1044,9 @@ def _validate_gemini_schema(data: dict[str, Any]) -> None:
         raise ValueError("candidate_moments must be a list")
 
     for moment in data["candidate_moments"]:
-        # 기존 필수 필드
         for key in [
             "start_sec", "end_sec", "importance", "hook_score",
-            "topic_alignment_score", "description", "reason", "transcript",
+            "topic_alignment_score", "description", "transcript",
         ]:
             if key not in moment:
                 raise ValueError(f"Missing key {key} in candidate moment")
-
-        # story_role 기본값
-        if moment.get("story_role") not in ("hook", "build", "payoff"):
-            moment["story_role"] = "build"

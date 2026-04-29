@@ -40,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--from-step",
         choices=[
             "init", "probe", "proxy", "chunk", "gemini",
-            "story", "transcribe", "resources", "render", "validate",
+            "graph", "story", "transcribe", "resources", "render", "validate",
         ],
         help="Start from specific step (requires --job-id)",
     )

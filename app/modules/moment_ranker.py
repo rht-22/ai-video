@@ -102,11 +102,11 @@ class RankedMoment:
     importance: float
     hook_score: float
     topic_alignment_score: float
-    story_role: str  # "hook" | "build" | "payoff"
-    description: str
-    reason: str
-    transcript: str
-    final_score: float
+    story_role: str = "build"
+    description: str = ""
+    reason: str = ""
+    transcript: str = ""
+    final_score: float = 0.0
     viral_titles: list[str] = field(default_factory=list)
     suggested_tts_line: str = ""
 
@@ -150,9 +150,9 @@ def rank_moments_enhanced(
                 hook_score=hook_score,
                 topic_alignment_score=topic_alignment,
                 story_role=moment.get("story_role", "build"),
-                description=moment["description"],
-                reason=moment["reason"],
-                transcript=moment["transcript"],
+                description=moment.get("description", ""),
+                reason=moment.get("reason", ""),
+                transcript=moment.get("transcript", ""),
                 viral_titles=moment.get("viral_titles", []),
                 suggested_tts_line=moment.get("suggested_tts_line", ""),
                 final_score=final_score,

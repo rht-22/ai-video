@@ -71,14 +71,13 @@ def _clips_from_storyline(storyline_data: dict, fallback_title: str = "") -> tup
         title_text = storyline_data.get("topic", fallback_title)
 
     if storyline_data.get("shorts_type") == "highlight":
-        tts_line_val = storyline_data.get("tts_line", "")
         clips.append(StoryClip(
             role="payoff",
             start_sec=storyline_data["start_sec"],
             end_sec=storyline_data["end_sec"],
-            subtitle=tts_line_val if tts_line_val else storyline_data.get("topic", ""),
-            tts_line=tts_line_val,
-            use_original_audio=storyline_data.get("use_original_audio", True),
+            subtitle=storyline_data.get("topic", ""),
+            tts_line="",
+            use_original_audio=True,
             chunk_index=storyline_data.get("chunk_index", -1),
             candidate_index=storyline_data.get("candidate_index", -1),
         ))
@@ -96,8 +95,6 @@ def _clips_from_storyline(storyline_data: dict, fallback_title: str = "") -> tup
                 use_original_audio=h.get("use_original_audio", True),
                 chunk_index=h.get("chunk_index", -1),
                 candidate_index=h.get("candidate_index", -1),
-                character_focus=tuple(h.get("character_focus") or []),
-                bridges_from_previous=h.get("bridges_from_previous") or "",
             ))
 
         if "build" in actual_storyline:
@@ -111,8 +108,6 @@ def _clips_from_storyline(storyline_data: dict, fallback_title: str = "") -> tup
                     use_original_audio=b.get("use_original_audio", True),
                     chunk_index=b.get("chunk_index", -1),
                     candidate_index=b.get("candidate_index", -1),
-                    character_focus=tuple(b.get("character_focus") or []),
-                    bridges_from_previous=b.get("bridges_from_previous") or "",
                 ))
 
         if "payoff" in actual_storyline:
@@ -126,8 +121,6 @@ def _clips_from_storyline(storyline_data: dict, fallback_title: str = "") -> tup
                 use_original_audio=p.get("use_original_audio", True),
                 chunk_index=p.get("chunk_index", -1),
                 candidate_index=p.get("candidate_index", -1),
-                character_focus=tuple(p.get("character_focus") or []),
-                bridges_from_previous=p.get("bridges_from_previous") or "",
             ))
 
     # tts_line이 없는 클립은 원본 오디오 사용으로 강제
@@ -533,8 +526,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print("\n[5/10] Gemini 분析 결과 로드 중...")
         gemini_data = json.loads(checkpoint_gemini.read_text(encoding="utf-8"))
         all_candidates = gemini_data["all_candidates"]
-        for m in all_candidates:
-            m.setdefault("story_role", "build")
         print(f"  - 총 {len(all_candidates)}개 후보 모멘트")
         print("[OK] Gemini 분석 결과 로드 완료 (체크포인트에서)")
     elif start_idx <= 4:
@@ -629,8 +620,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             raise FileNotFoundError(f"체크포인트 파일을 찾을 수 없습니다: {checkpoint_gemini}")
         gemini_data = json.loads(checkpoint_gemini.read_text(encoding="utf-8"))
         all_candidates = gemini_data["all_candidates"]
-        for m in all_candidates:
-            m.setdefault("story_role", "build")
+        print(f"\n[5/10] Gemini 분석 결과 로드 완료 (체크포인트에서) — 총 {len(all_candidates)}개 후보")
 
     # ── 인트로/크레딧 포스트필터 (안전망) ──
     if exclusion_zones.detection_method != "none":
