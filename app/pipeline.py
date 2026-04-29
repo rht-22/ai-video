@@ -41,7 +41,12 @@ from app.modules.reframe import build_crop_timeline
 from app.modules.renderer import RenderInputs, render_short
 from app.modules.scene_detect import detect_scenes
 from app.modules.speech import extract_audio_segment, extract_transcript, SpeechSegment
-from app.modules.story_builder import StoryClip, validate_story_clips, validate_clip_coherence
+from app.modules.story_builder import (
+    StoryClip,
+    validate_story_clips,
+    validate_clip_coherence,
+    select_diverse_storylines,
+)
 from app.modules.subtitle import (
     SubtitleStyle,
     build_ass_from_segments,
@@ -886,9 +891,19 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             if sel:
                 ranked_storylines = [sel]
 
-        for sl_idx, sl_data in enumerate(ranked_storylines[:max_shorts]):
+        # 다양성 우선 재선정: 같은 chunk/phase가 max_shorts개 모두 차지하지 않게
+        # 점수 1위는 무조건 유지하고, 이후는 chunk_index/emotional_phase가 다른 후보를 우선
+        diverse_pool = select_diverse_storylines(
+            ranked_storylines,
+            max_count=max(max_shorts * 2, len(ranked_storylines)),  # 폴백 여유분 확보
+            skeleton=narrative_skeleton if narrative_skeleton else None,
+        )
+
+        for sl_idx, sl_data in enumerate(diverse_pool):
+            if len(all_storyline_variants) >= max_shorts:
+                break
             score = sl_data.get("score", 0.0)
-            if score < config.viral_score_min_threshold and sl_idx > 0:
+            if score < config.viral_score_min_threshold and len(all_storyline_variants) > 0:
                 print(f"  - 스토리라인 {sl_idx + 1} 스킵 (점수 {score:.2f} < 임계값 {config.viral_score_min_threshold})")
                 continue
 
@@ -899,15 +914,22 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 continue
 
             # 최상위 제목 (첫 번째 스토리라인만 story_plan의 title 사용 가능)
-            if sl_idx == 0:
+            if len(all_storyline_variants) == 0:
                 top_line1 = _strip_emoji(story_plan.get("title_line1", ""))
                 top_line2 = _strip_emoji(story_plan.get("title_line2", ""))
                 if top_line1 and top_line2:
                     sl_title = f"{top_line1}\n{top_line2}"
 
-            is_valid, msg = validate_story_clips(sl_clips, config.min_duration_sec, config.max_duration_sec)
+            # 클립 수 검증: highlight형은 1개도 OK, storytelling형은 최소 3개
+            is_highlight = (sl_data.get("shorts_type") == "highlight")
+            min_clip_count = 1 if is_highlight else 3
+            is_valid, msg = validate_story_clips(
+                sl_clips, config.min_duration_sec, config.max_duration_sec,
+                min_clip_count=min_clip_count,
+            )
             if not is_valid:
-                print(f"  [WARN] 스토리라인 {sl_idx + 1} 검증 실패: {msg}")
+                print(f"  [SKIP] 스토리라인 {sl_idx + 1} 검증 실패: {msg}")
+                continue  # storytelling 1~2클립이면 스킵 → 다음 후보로
             coh_warnings = validate_clip_coherence(sl_clips)
             for w in coh_warnings:
                 print(f"  [COHERENCE] 스토리라인 {sl_idx + 1}: {w}")
@@ -1029,7 +1051,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     full_audio_path = output_dir / "full_audio.json"
     segments_cache_path = output_dir / "subtitle_segments.json"
 
-    if start_idx <= 12 and full_audio_path.exists() and from_step != "transcribe":
+    # full_audio는 선택된 클립 범위에만 전사된 데이터. story/graph 단계부터 재실행 시
+    # 클립 범위가 달라지면 매핑 미스(0 segments)가 발생하므로 full_audio도 재생성한다.
+    _full_audio_invalidate = from_step in ("graph", "story", "tts_plan", "transcribe", "resources")
+
+    if start_idx <= 12 and full_audio_path.exists() and not _full_audio_invalidate:
         print("\n[13/16] 전사 데이터 로드 중...")
         loaded_data = json.loads(full_audio_path.read_text(encoding="utf-8"))
         transcript_text = [SimpleNamespace(**seg) for seg in loaded_data]
@@ -1139,8 +1165,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print(f"\n[13/16] 전사 단계 건너뜀 ({len(transcript_text)}개 세그먼트 로드)")
 
     # 자막 데이터 생성 (전사 → 편집 타임라인 매핑)
+    # transcribe 이전(graph/story/tts_plan) 단계부터 재실행이면 클립 구성/길이가 달라졌으므로
+    # 자막 캐시도 무효화해서 새 클립 기준으로 remap + merge(환각 필터 포함) 재수행.
     final_segments = []
-    if start_idx <= 13 and not (segments_cache_path.exists() and from_step not in ("transcribe", "resources")):
+    _transcribe_invalidate = from_step in ("graph", "story", "tts_plan", "transcribe", "resources")
+    if start_idx <= 13 and (not segments_cache_path.exists() or _transcribe_invalidate):
         print("  자막 타임라인 매핑 중...")
         remapped = remap_transcript_to_edited_timeline(
             clips, transcript_text, tts_only_when_no_orig=True,
@@ -1174,7 +1203,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     checkpoint_resources = output_dir / "checkpoint_resources.json"
     edit_plan_path = output_dir / "edit_plan.json"
 
-    if start_idx <= 13 and checkpoint_resources.exists() and from_step != "resources":
+    # story/graph 단계부터 재실행 시 클립 구성이 달라질 수 있으므로 resources 캐시 무효화.
+    # 이전 라운드의 crop_map 키(role_idx)와 새 라운드의 clip 키가 어긋나면 KeyError 발생.
+    _resources_invalidate = from_step in ("graph", "story", "tts_plan", "transcribe", "resources")
+    if start_idx <= 13 and checkpoint_resources.exists() and not _resources_invalidate:
         print("\n[14/16] 리소스 로드 중...")
         resources_data = json.loads(checkpoint_resources.read_text(encoding="utf-8"))
         crop_map = {k: Path(v) for k, v in resources_data["crop_map"].items()}
@@ -1276,8 +1308,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     if start_idx <= 13:
         print("  편집 계획 생성 중...")
         edit_plan = _build_edit_plan(payload, title_text, clips, crop_map, config)
-        if narrative_skeleton:
-            edit_plan["narrative_skeleton"] = narrative_skeleton
+        # NOTE: narrative_skeleton은 같은 디렉토리의 narrative_skeleton.json에 별도 저장됨.
+        # edit_plan에 임베드하면 ~4KB 중복 + 렌더 단계가 사용하지 않는 죽은 데이터.
         edit_plan_path.write_text(json.dumps(edit_plan, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"  - 편집 계획 저장: {edit_plan_path}")
 
@@ -1589,7 +1621,33 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         else:
             return obj
 
-    run_log_serializable = _make_json_serializable(run_log)
+    # run_log 다이어트: gemini step의 거대한 response(characters_tracking 포함 ~수십KB/청크)는
+    # 같은 디렉토리의 checkpoint_gemini.json에 이미 보존되므로 run_log에는 요약만 남긴다.
+    # render step의 ffmpeg argv도 검증·디버깅용 → 길이만 기록. 효과: 232KB → 5KB 수준.
+    def _slim_run_log(rl: dict) -> dict:
+        slim = {k: v for k, v in rl.items() if k != "steps"}
+        slim_steps: list[dict] = []
+        for step in rl.get("steps", []):
+            s = dict(step)
+            if s.get("step") == "gemini" and isinstance(s.get("response"), dict):
+                resp = s["response"]
+                s["response"] = {
+                    "chunk_index": resp.get("chunk_index"),
+                    "summary_chars": len(resp.get("summary", "")) if isinstance(resp.get("summary"), str) else 0,
+                    "candidate_count": len(resp.get("candidate_moments", []) or []),
+                    "segment_count": len(resp.get("segments", []) or []),
+                    "characters_tracking_count": len(resp.get("characters_tracking", []) or []),
+                }
+            elif s.get("step") == "render" and isinstance(s.get("command"), list):
+                s["command"] = {
+                    "argv_count": len(s["command"]),
+                    "first": s["command"][:6],  # 디버깅용 첫 인자 일부만
+                }
+            slim_steps.append(s)
+        slim["steps"] = slim_steps
+        return slim
+
+    run_log_serializable = _make_json_serializable(_slim_run_log(run_log))
     run_log_path = output_dir / "run_log.json"
     run_log_path.write_text(json.dumps(run_log_serializable, ensure_ascii=False, indent=2), encoding="utf-8")
 

@@ -451,6 +451,14 @@ needed가 false면 candidate의 원래 start_sec/end_sec 그대로 사용.
    - 같은 장면이 두 번 등장하므로 hook_preview는 임팩트 핵심만 짧게
    - hook 본체는 시퀀스 후처리에서 build 다음 자리(시간순)로 자동 배치된다
    - 케이스 1·2(hook이 시간순 앞 또는 끝-결과)에서는 hook_preview = null
+10. (storylines 다양성) storylines 배열을 2개 이상 만들 경우, **서로 다른 사건/장면/코너**에서 추출하라.
+    - 같은 인물·같은 장소·같은 사건의 다른 각도 변형은 다양성 위반 (예: "의사 캐릭터 A의 이중성" + "의사 캐릭터 A의 기싸움" + "의사 캐릭터 A 환자 응대" 셋 다 같은 코너 → 1개만 채택)
+    - 가능하면 각 storyline의 hook/build/payoff가 서로 다른 chunk_index에서 시작되도록 배분
+    - narrative_skeleton.emotional_arc[]가 주어졌다면 서로 다른 phase의 장면을 우선 선택
+    - 같은 코너만 반복되면 시청자 입장에서 "다 비슷한 영상" 인상을 주므로 점수 0.05~0.10 감점
+11. (storytelling 클립 수) 모든 storytelling storyline은 hook + build(1개 이상) + payoff = **최소 3개 클립** 필수.
+    - 1~2개 클립으로는 스토리 흐름이 만들어지지 않음 → 후처리에서 reject 됨
+    - build를 충분히 찾기 어려우면 해당 storyline의 score를 낮추고, 다른 storyline 우선 추천
 
 다음 JSON 스키마로만 응답.
 

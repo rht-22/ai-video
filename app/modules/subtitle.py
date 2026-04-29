@@ -431,6 +431,47 @@ def remap_transcript_to_edited_timeline(
     return out
 
 
+def _is_hallucinated_text(text: str, *, repeat_threshold: int = 3, length_outlier_factor: float = 5.0,
+                          avg_length: float | None = None) -> bool:
+    """전사 환각 패턴 감지.
+
+    기준 a) 동일 어구가 3회 이상 연속 반복 (n-gram 2~10자 범위로 스캔)
+    기준 b) avg_length가 주어지고 길이가 평균의 length_outlier_factor배 이상
+
+    환각 사례: "코리아 시즌 2등 코리아 시즌 2등 ..." — Gemini/Whisper가 BGM·박수
+    구간에서 반복 패턴을 만들어내는 케이스.
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+
+    # 기준 b) 길이 outlier
+    if avg_length is not None and avg_length > 0:
+        if len(stripped) > avg_length * length_outlier_factor and len(stripped) > 80:
+            return True
+
+    # 기준 a) 동일 n-gram 반복: 2~10자 범위에서 같은 부분문자열이 repeat_threshold번 이상 즉시 인접 반복
+    # 예: "코리아 시즌 2등 " (8자)이 반복되면 검출
+    cleaned = re.sub(r"\s+", " ", stripped)
+    n_max = min(20, len(cleaned) // 2)
+    for n in range(2, n_max + 1):
+        # 슬라이딩 윈도우로 즉시 반복 검사
+        for i in range(len(cleaned) - n * repeat_threshold + 1):
+            chunk = cleaned[i:i + n]
+            if not chunk.strip():
+                continue
+            ok = True
+            for k in range(1, repeat_threshold):
+                if cleaned[i + k * n:i + (k + 1) * n] != chunk:
+                    ok = False
+                    break
+            if ok:
+                return True
+    return False
+
+
 def merge_subtitle_segments(
     segments: list[SpeechSegment],
     *,
@@ -439,11 +480,69 @@ def merge_subtitle_segments(
     max_duration_sec: float = 6.0,
     min_duration_sec: float = 0.6,
 ) -> list[SpeechSegment]:
-    """자막 이벤트 수를 줄여(렌더 부담 감소) 가독성을 개선합니다."""
+    """자막 이벤트 수를 줄여(렌더 부담 감소) 가독성을 개선합니다.
+
+    추가 정제:
+    - 환각 텍스트(같은 어구 3회+ 반복 / 평균 5배+ 길이) 자동 제거
+    - 동일 (start, end, text) 중복 제거
+    - 시간 겹침 + 동일 텍스트 케이스에서 더 긴 구간 유지
+    """
     if not segments:
         return []
 
-    segs = sorted(segments, key=lambda s: (s.start_sec, s.end_sec))
+    # 0) 환각 + 중복 사전 정제
+    # 평균 길이 산출 (환각 의심 outlier 판단용 기준선)
+    valid_lengths = [len(s.text.strip()) for s in segments if s.text and s.text.strip()]
+    avg_len = sum(valid_lengths) / len(valid_lengths) if valid_lengths else 0.0
+
+    cleaned_segments: list[SpeechSegment] = []
+    seen_keys: set[tuple[float, float, str]] = set()
+    dropped_hallucinations = 0
+    dropped_duplicates = 0
+    for seg in segments:
+        seg_text = (seg.text or "").replace("\n", " ").strip()
+        if not seg_text:
+            continue
+        if _is_hallucinated_text(seg_text, avg_length=avg_len):
+            dropped_hallucinations += 1
+            continue
+        # 동일 (start, end, text) 키 중복 — 청크 경계에서 자주 발생
+        key = (round(seg.start_sec, 2), round(seg.end_sec, 2), seg_text)
+        if key in seen_keys:
+            dropped_duplicates += 1
+            continue
+        seen_keys.add(key)
+        cleaned_segments.append(SpeechSegment(start_sec=seg.start_sec, end_sec=seg.end_sec, text=seg_text))
+
+    # 시간 겹침 + 동일 텍스트 → 더 긴(end-start 큰) 구간 유지
+    cleaned_segments.sort(key=lambda s: (s.start_sec, s.end_sec))
+    deoverlapped: list[SpeechSegment] = []
+    for seg in cleaned_segments:
+        absorbed = False
+        for i, prev in enumerate(deoverlapped):
+            if prev.text == seg.text and seg.start_sec < prev.end_sec and prev.start_sec < seg.end_sec:
+                # 겹침 → 더 긴 쪽으로 통합
+                merged_seg = SpeechSegment(
+                    start_sec=min(prev.start_sec, seg.start_sec),
+                    end_sec=max(prev.end_sec, seg.end_sec),
+                    text=seg.text,
+                )
+                deoverlapped[i] = merged_seg
+                absorbed = True
+                dropped_duplicates += 1
+                break
+        if not absorbed:
+            deoverlapped.append(seg)
+
+    if dropped_hallucinations or dropped_duplicates:
+        print(
+            f"  [SubtitleClean] 환각 {dropped_hallucinations}건 / 중복 {dropped_duplicates}건 제거"
+        )
+
+    if not deoverlapped:
+        return []
+
+    segs = sorted(deoverlapped, key=lambda s: (s.start_sec, s.end_sec))
     merged: list[SpeechSegment] = []
 
     cur = SpeechSegment(
