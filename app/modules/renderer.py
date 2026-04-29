@@ -584,7 +584,34 @@ def render_short(inputs: RenderInputs) -> list[str]:
             lines.append(current_line)
         return "\n".join(lines)
     
-    wrapped_title = _wrap_text(inputs.title_text, 14, inputs.design.title_size)
+    # 좌우 padding을 둔 텍스트박스 폭 기준으로 자동 줄바꿈 + 줄 수 기반 폰트 축소
+    title_padding_px = 60  # 캔버스 좌우 각각 60px (총 120px 여백)
+    title_max_width_px = max(200, inputs.canvas_width - 2 * title_padding_px)
+
+    def _max_chars_for(font_size: int) -> int:
+        # 한글 글자 폭은 폰트 크기와 거의 동일 (font_size px당 ~1글자)
+        return max(8, int(title_max_width_px / max(1, font_size)))
+
+    base_size = inputs.design.title_size
+    wrapped_title = _wrap_text(inputs.title_text, _max_chars_for(base_size), base_size)
+    title_lines = wrapped_title.count("\n") + 1
+
+    if title_lines >= 4:
+        scaled_title_size = max(24, int(base_size * 0.70))
+    elif title_lines == 3:
+        scaled_title_size = max(28, int(base_size * 0.85))
+    else:
+        scaled_title_size = base_size
+
+    if scaled_title_size != base_size:
+        # 줄어든 폰트로 재계산 (더 잘 들어갈 가능성 — 4줄→3줄 등)
+        wrapped_title = _wrap_text(
+            inputs.title_text, _max_chars_for(scaled_title_size), scaled_title_size
+        )
+        inputs = replace(
+            inputs,
+            design=replace(inputs.design, title_size=scaled_title_size),
+        )
 
     title_file = inputs.title_textfile or (output_dir / "title.txt")
     work_file = inputs.work_title_textfile or (output_dir / "work_title.txt")

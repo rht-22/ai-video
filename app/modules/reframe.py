@@ -147,7 +147,9 @@ def _detect_faces(
     crop_w, crop_h = _portrait_crop_size(width, height)
 
     # EMA 스무딩 계수 (0에 가까울수록 부드럽고, 1에 가까울수록 즉각 반응)
-    ema_alpha = 0.25
+    ema_alpha = 0.12  # 0.25→0.12: 작은 변동을 더 부드럽게 흡수해 출렁임 감소
+    # dead zone: 변화량이 화면 폭/높이의 5% 이내면 무시 (정적 장면 미세 흔들림 제거)
+    dead_zone_ratio = 0.05
     prev_gray = None  # Phase 11: mouth-motion 계산용 직전 프레임
 
     # 3. 루프를 돌며 타임라인 데이터 생성
@@ -215,9 +217,13 @@ def _detect_faces(
             target_y = float(y + h / 2)
 
         if face_id_hit or len(faces) > 0:
-            # EMA 스무딩 적용 (급격한 점프 방지)
-            smooth_x = ema_alpha * target_x + (1 - ema_alpha) * smooth_x
-            smooth_y = ema_alpha * target_y + (1 - ema_alpha) * smooth_y
+            # EMA + dead zone: 작은 변동(±5% 이내)은 무시, 큰 변동만 부드럽게 추적
+            dz_x = gray.shape[1] * dead_zone_ratio
+            dz_y = gray.shape[0] * dead_zone_ratio
+            if abs(target_x - smooth_x) > dz_x:
+                smooth_x = ema_alpha * target_x + (1 - ema_alpha) * smooth_x
+            if abs(target_y - smooth_y) > dz_y:
+                smooth_y = ema_alpha * target_y + (1 - ema_alpha) * smooth_y
         # 얼굴 못 찾으면 smooth_x/y 유지 (자연스럽게 정체)
         prev_gray = gray
 

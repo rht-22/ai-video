@@ -98,6 +98,26 @@ GEMINI_PROMPT_TEMPLATE = """
 
 ---
 
+[타임스탬프 정확도 — 절대 규칙 / 어기면 그 후보는 폐기됨]
+
+🚫 가장 중요한 규칙. 어기면 다운스트림에서 자막·TTS·렌더가 모두 어긋난다.
+
+1. **첨부 영상의 시작 = 0.0초**. 모든 start_sec / end_sec는 이 영상의 0초 기준 상대값이다. 원본 풀 영상의 절대 시간이 아니다.
+2. **첨부 영상 길이를 초과하는 시간은 절대 출력하지 마라.** 영상 길이가 600초이면 어떤 출력 시간도 600.0을 넘으면 안 된다.
+3. **transcript에 적은 대사는 그 timestamp 시점에 실제로 들리는 대사여야 한다.** 영상 안 다른 시점의 대사를 베껴서 다른 시간에 붙이지 마라. transcript 시점과 화면 위치를 다시 한 번 일치시킨 뒤 출력하라.
+4. **자막에서 본 시간을 그대로 베끼지 마라.** 자막 텍스트가 [12:30~12:35]에 적혀 있어도, 첨부된 영상에서 그 대사가 실제로 어느 시점에 들리는지 영상 본문을 다시 확인하고 그 시점을 적어야 한다. (영상이 원본의 일부 잘라낸 chunk이므로 자막 절대 시간과 영상 0초 기준 상대 시간은 다르다.)
+5. **각 candidate_moments의 start_sec / end_sec는 반드시 영상에서 직접 확인 가능한 구간이어야 한다.** 보지 않은 시점을 추측해서 만들지 마라.
+6. **context_extension.extended_start_sec / extended_end_sec 도 chunk-relative 시간**이며 동일하게 [0.0, 첨부 영상 길이] 범위 안에 있어야 한다.
+   `extended_start_sec ≤ start_sec ≤ end_sec ≤ extended_end_sec`를 만족시키지 못하면 needed=false로 강등하라.
+7. 응답 직전 자가 점검:
+   - 모든 start_sec / end_sec / extended_start_sec / extended_end_sec 가 [0.0, 첨부 영상 길이] 범위 안인가?
+   - 각 candidate의 transcript가 그 timestamp 위치에서 실제로 들리는가?
+   - segments[i].end_sec == segments[i+1].start_sec 가 정확히 같은가?
+   - context_extension.needed=true면 extended가 start/end를 정확히 감싸는가?
+   하나라도 No 면 출력 직전에 보정하라.
+
+---
+
 [세그먼트(segments) 분할 — 청크 전체 커버]
 
 청크 전체 시간(`chunk_start_sec` ~ `chunk_end_sec`)을 **빈틈 없이, 겹침 없이** 시간순 세그먼트로 분할하라.
@@ -139,6 +159,9 @@ candidate_moments는 다음 두 가지 유형의 쇼츠 제작에 모두 활용�
 - 다른 장면들과 함께 묶여 hook→build→payoff 흐름을 만들 수 있는 장면
 
 ⚠️ hook/build/payoff 역할 결정은 다음 단계(스토리 구성)에서 수행하므로 여기서는 미리 라벨을 붙이지 말 것.
+
+⚠️ **모든 candidate**(highlight·서사형 무관)는 context_extension 필드로 앞뒤 맥락 필요 여부를 판단·출력하라.
+다음 단계(스토리 구성)에서 highlight는 단독 클립 자연 확장에, storytelling은 hook/build/payoff 클립 사이의 시간 점프를 줄이는 데 활용된다.
 
 ---
 
@@ -193,9 +216,22 @@ segments 중 **쇼츠 제작에 가치 있는 장면만** 선별해 candidate_mo
 - transcript: '단 한 명'의 주요 발화. 내레이션/독백/VO인 경우 '[내레이션]' 접두
 - scene_location / timeline_position: segment에서 복사
 - continues_from: 다른 candidate_moment와 직접 이어지면 {{"chunk_index": N, "candidate_index": M}}, 독립이면 null
+  - 같은 청크 내 후보를 참조 → chunk_index = 위 [입력 정보]의 '현재 청크 번호'와 동일하게
+  - 이전 청크 후보를 참조 → chunk_index = 위 [이전 청크들의 분석 결과] 블록에 명시된 chunk_index 값을 그대로 사용
+  - ⚠️ 응답 예시의 (0, 3) 같은 좌표를 그대로 베껴 쓰지 마라. 실제 참조 대상의 좌표를 정확히 입력하라.
 - requires_context: 이 클립을 이해하려면 다른 장면이 필요하면 true
 - highlight_eligible: requires_context가 false이고 클립 자체에 감정적 완결성이 있으면 true
 - highlight_reason: highlight_eligible이 true인 경우에만 1문장 (false면 null)
+- context_extension: **모든 candidate**에 대해 다음을 판단·출력 (highlight 여부와 무관)
+    - needed: 이 candidate를 단독 클립으로 보여줬을 때 시청자가 "뭐지?" 없이 흐름을 따라가려면 앞뒤 맥락이 필요한가?
+    - extended_start_sec: needed=true면 인접 segment까지 확장한 시작점 (보통 핵심 직전 5~15초). false면 start_sec와 동일
+    - extended_end_sec: needed=true면 인접 segment까지 확장한 종료점 (보통 핵심 직후 3~10초). false면 end_sec와 동일
+    - before_summary / after_summary: 확장 부분에 무엇이 있는지 한 문장씩
+    - reason: 왜 그 앞뒤가 필수인지 한 줄
+    - 강제 조건: extended_start_sec ≤ start_sec ≤ end_sec ≤ extended_end_sec (양쪽 확장만 허용)
+    - 확장 구간 안에 컷·장소 변경이 너무 많으면(>2회) needed:false 로 강등하라
+    - 확장은 정말 필요한 경우에만 (불필요 시 needed:false 가 기본)
+    - storytelling의 hook/build/payoff에서도 활용되어 클립 사이 시간 점프를 줄이는 데 사용된다.
 
 다음 스키마로만 응답 (※ 아래 예시의 숫자는 placeholder다. 실제 값은 [입력 정보]의 "현재 청크 번호"·"청크 범위"를 그대로 사용하라):
 {{
@@ -238,9 +274,19 @@ segments 중 **쇼츠 제작에 가치 있는 장면만** 선별해 candidate_mo
       "scene_location": "장면 배경 장소",
       "timeline_position": "현재|과거|불명",
       "continues_from": null,
+      // 또는 이전 후보를 참조하는 경우:
+      // {{"chunk_index": <참조 청크 번호 — 같은 청크면 현재 청크 번호, 이전 청크면 [이전 청크들의 분석 결과]에 명시된 chunk_index>, "candidate_index": <참조 후보의 candidate_index>}}
       "requires_context": false,
       "highlight_eligible": false,
-      "highlight_reason": null
+      "highlight_reason": null,
+      "context_extension": {{
+        "needed": false,
+        "extended_start_sec": 12.4,
+        "extended_end_sec": 25.8,
+        "before_summary": null,
+        "after_summary": null,
+        "reason": null
+      }}
     }}
   ],
   "title_candidates": ["제목1", "제목2", "제목3"]
@@ -301,11 +347,49 @@ STORY_COMPOSITION_PROMPT = """
 - 점수가 높다고 해서 뒤에 나온 장면을 앞으로 당기거나 순서를 임의로 섞는 것은 절대 금지
 - 원본 영상의 전개 흐름을 무시한 뒤죽박죽 구성은 시청자에게 혼란을 줌
 
+### hook 시간 위치 검증 (절대 규칙) — hook 이중 사용 결정
+
+hook을 결정한 뒤 build / payoff와 시간을 비교해 다음 케이스를 적용하라:
+
+[케이스 1] hook.start_sec < build[0].start_sec  (시간순)
+[케이스 2] hook.start_sec > payoff.end_sec      (끝-결과 선공개)
+[케이스 3] build[0].start_sec ≤ hook.start_sec ≤ payoff.end_sec  (hook이 build/payoff 사이)
+
+→ 케이스 1, 2: hook_preview = null. 시퀀스: hook → build → payoff
+→ 케이스 3: ⚠️ hook_preview 필수 (3~7초 발췌). 후처리 시퀀스: hook_preview → build → hook(시간순 자리) → payoff
+   (build → hook → payoff 가 시간순으로 자연 연결되어 인과 끊김 사라짐)
+
+### 클립 경계 자연 연결 (storytelling)
+
+각 클립(hook / build[*] / payoff)을 결정할 때 해당 candidate의 `context_extension`을 검토하라.
+candidate.context_extension.needed=true면 그 클립의 start_sec/end_sec을 extended 시간으로 설정해
+인접 segments를 자연스럽게 흡수할 수 있다. 결과: 클립 사이 시간 점프가 줄어 흐름이 부드러워짐.
+
+다만 다음을 지켜라:
+- build[i].extended_end_sec 이 build[i+1].start_sec 을 넘으면 안 됨 (시간 역전 금지) → 충돌 시 충돌 없는 범위로 잘라 쓰거나 needed=false로 폴백
+- 모든 클립 시간 합이 max_duration_sec를 초과하지 않도록 확장 우선순위:
+  payoff > hook > 가장 클라이맥스인 build > 나머지 build
+- segments 컨텍스트(`[전체 장면 흐름 (segments)]` 블록)을 함께 참고해 인접 segment 묘사가 현재 클립과 자연스럽게 이어지는지 확인
+
+extended 시간을 적용한 클립에는 `"context_extended": true` 플래그를 표기 (디버그용).
+
 ## highlight 타입 — 단일클립 완결형
 
 단일 클립만으로 시청자가 "뭐지?" → 감정반응 → 완결까지 느낄 수 있는 경우 선택하라.
 멀티클립으로 이으면 오히려 흐름이 끊기거나 불필요해지는 경우가 여기에 해당한다.
 **반드시 highlight_eligible: true인 클립만 사용할 수 있다.**
+
+### context_extension 활용 (highlight 시간 자동 확장)
+
+선택한 highlight candidate의 `context_extension.needed`가 true면 다음을 따른다:
+- highlight 클립의 `start_sec`을 candidate.context_extension.extended_start_sec로 설정 (앞쪽 setup 포함)
+- highlight 클립의 `end_sec`을 candidate.context_extension.extended_end_sec로 설정 (뒤쪽 aftermath 포함)
+- 결과: 핵심 장면이 setup → 핵심 → 결과 흐름으로 컷 없이 한 번에 흘러감 → 시청자 이해도 ↑
+- storyline 출력에 `"context_extended": true` 플래그를 함께 표기 (디버그용)
+
+needed가 false면 candidate의 원래 start_sec/end_sec 그대로 사용.
+
+⚠️ extended 구간 길이가 max_duration_sec(약 75초)를 초과하면 candidate의 원래 start_sec/end_sec로 폴백하라.
 
 # 공통 규칙
 
@@ -340,10 +424,38 @@ STORY_COMPOSITION_PROMPT = """
 {work_context_block}
 {episodes_context_block}
 {narrative_skeleton_json_block}
+{segments_summary_block}
 
 - 후보 장면 및 분석 데이터:
 {candidates_str}
 
+# Constraints & Rules
+1. 각 클립의 start_sec, end_sec 명시
+2. 작품의 전체 맥락을 모르는 사람도 한 번 보고 재미를 느낄 수 있는 장면을 선정
+3. score는 description, reason, requires_context, highlight_eligible 등 후보의 의미적 평가를 종합해 0.0~1.0으로 정직하게 평가하라
+4. 'continues_from'을 참고하여 맥락이 끊기지 않게 하라
+5. 위 # Input Data의 "이전 에피소드 요약"이 비어있지 않으면, 이전 회차에서 묘사된 인물 관계·미해결 갈등을 후킹 포인트로 활용하여 연속극 시청자에게 자연스럽게 이어지도록 hook/payoff를 구성하라
+6. 위 # Input Data의 "작품 서사 스켈레톤(narrative_skeleton)"이 비어있지 않으면, 작품 전체 서사 구조 안에서 이번 회차가 차지하는 위치(도입/전개/위기/절정/결말)를 고려하여 스토리라인의 톤(긴장 강도, 감정 결)이 단계와 부합하도록 구성하라
+7. 위 # Input Data의 "[전체 장면 흐름 (segments)]"이 비어있지 않으면, 다음 용도로만 활용하라:
+   - candidate_moments가 영상 어느 흐름에 위치하는지 맥락 파악
+   - 두 candidate 사이 갭이 큰 경우 그 사이 segments 묘사를 참고해 자연스러운 흐름 작성
+   - hook 직전·payoff 직후 장면을 segments에서 확인해 클립 시작/종료 시점 정밀 조정
+   ⚠️ segments에 있는 평범한 구간을 새 candidate로 만들지 마라. 후보는 반드시 candidate_moments에서만 선택.
+8. (storytelling) 각 클립(hook / build[*] / payoff)도 해당 candidate.context_extension을 검토하라.
+   - needed=true면 그 클립의 start_sec/end_sec을 extended 값으로 설정 가능
+   - 인접 클립과 시간 충돌 시 충돌 없는 범위로 잘라 쓰거나 needed=false 폴백
+   - 클립 시간 합 ≤ max_duration_sec 보장 (확장 우선순위: payoff > hook > 클라이맥스 build > 나머지 build)
+   - 적용한 클립에 "context_extended": true 표기
+9. (storytelling) hook이 build와 payoff 시간대 사이에 있으면(케이스 3) 반드시 hook_preview를 출력하라.
+   - hook_preview.start_sec/end_sec은 hook 시간 안 짧은 발췌 (3~7초 권장)
+   - 같은 장면이 두 번 등장하므로 hook_preview는 임팩트 핵심만 짧게
+   - hook 본체는 시퀀스 후처리에서 build 다음 자리(시간순)로 자동 배치된다
+   - 케이스 1·2(hook이 시간순 앞 또는 끝-결과)에서는 hook_preview = null
+
+다음 JSON 스키마로만 응답.
+
+⚠️ **각 storyline의 `narrative_plan`을 해당 storyline의 클립 선택 전에 반드시 먼저 작성하라.**
+점수나 수치가 아니라 "어떤 장면/이야기를 쇼츠로 만들 것인가"를 먼저 결정한 뒤 클립을 찾아라.
 {{
   "storylines": [
     {{
@@ -364,14 +476,18 @@ STORY_COMPOSITION_PROMPT = """
           "start_sec": 0.0, "end_sec": 0.0,
           "description": "장면 설명",
           "use_original_audio": true,
-          "character_focus": ["인물명"]
+          "character_focus": ["인물명"],
+          "context_extended": false
+        }},
+        "hook_preview": null,
         "build": [
           {{
             "chunk_index": 0, "candidate_index": 0,
             "start_sec": 0.0, "end_sec": 0.0,
             "description": "장면 설명",
             "use_original_audio": true,
-            "character_focus": ["인물명"]
+            "character_focus": ["인물명"],
+            "context_extended": false
           }}
         ],
         "payoff": {{
@@ -379,7 +495,8 @@ STORY_COMPOSITION_PROMPT = """
           "start_sec": 0.0, "end_sec": 0.0,
           "description": "장면 설명",
           "use_original_audio": true,
-          "character_focus": ["인물명"]
+          "character_focus": ["인물명"],
+          "context_extended": false
         }}
       }}
     }},
@@ -390,6 +507,7 @@ STORY_COMPOSITION_PROMPT = """
       "candidate_index": 0,
       "start_sec": 0.0,
       "end_sec": 0.0,
+      "context_extended": false,
       "topic": "주제명",
       "topic_reason": "단독 선정 이유",
       "score": 0.0,
@@ -1035,6 +1153,7 @@ class GeminiClient:
         narrative_skeleton: dict | None = None,
         previous_episodes_context: str | None = None,
         relationship_edges: list[dict] | None = None,
+        chunk_meta: list[dict] | None = None,
     ) -> dict[str, Any]:
         """후보 장면들로 바이럴 최적화 스토리라인을 구성합니다.
 
@@ -1076,6 +1195,31 @@ class GeminiClient:
                 "skeleton에 없는 장면이어도 매력적이면 우선 선택하라.\n"
             )
 
+        # ── segments 요약 블록 (청크별 시간순 — 영상 전체 흐름 빈틈없이 보여주기) ──
+        segments_summary_block = ""
+        if chunk_meta:
+            parts: list[str] = []
+            for cm in chunk_meta:
+                ci = cm.get("chunk_index", 0)
+                summary = (cm.get("summary") or "").strip().replace("\n", " ")
+                segs = cm.get("segments") or []
+                lines: list[str] = [f"\n[chunk {ci}] 요약: {summary[:120]}"]
+                for s in segs:
+                    ss = float(s.get("start_sec", 0))
+                    ee = float(s.get("end_sec", 0))
+                    desc = (s.get("description") or "").strip().replace("\n", " ")
+                    if len(desc) > 100:
+                        desc = desc[:100] + "…"
+                    lines.append(f"  - {ss:>6.1f}~{ee:>6.1f}s  {desc}")
+                parts.append("\n".join(lines))
+            if parts:
+                joined = "\n".join(parts).replace("{", "{{").replace("}", "}}")
+                segments_summary_block = (
+                    "\n\n[전체 장면 흐름 (segments) — 청크별 시간순]\n"
+                    "(이 요약은 영상 전체 흐름을 빈틈없이 보여준다. candidate_moments는 그 중 가치 있는 일부만 추린 것.)\n"
+                    + joined
+                )
+
         prompt = STORY_COMPOSITION_PROMPT.format(
             work_title=work_title,
             topic=topic,
@@ -1084,6 +1228,7 @@ class GeminiClient:
             candidates_str=candidates_str,
             work_context_block=work_context_block,
             episodes_context_block=episodes_context_block,
+            segments_summary_block=segments_summary_block,
             story_topic_line=story_topic_line,
             narrative_skeleton_json_block=narrative_skeleton_json_block,
         )

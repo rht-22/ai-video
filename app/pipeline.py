@@ -71,6 +71,9 @@ def _clips_from_storyline(storyline_data: dict, fallback_title: str = "") -> tup
         title_text = storyline_data.get("topic", fallback_title)
 
     if storyline_data.get("shorts_type") == "highlight":
+        _hl_dur = storyline_data["end_sec"] - storyline_data["start_sec"]
+        _hl_extended = bool(storyline_data.get("context_extended", False))
+        print(f"  - highlight 클립 길이 {_hl_dur:.1f}s" + (" (context 확장됨)" if _hl_extended else ""))
         clips.append(StoryClip(
             role="payoff",
             start_sec=storyline_data["start_sec"],
@@ -83,41 +86,96 @@ def _clips_from_storyline(storyline_data: dict, fallback_title: str = "") -> tup
     else:
         actual_storyline = storyline_data.get("storyline", {})
 
-        if "hook" in actual_storyline:
-            h = actual_storyline["hook"]
-            clips.append(StoryClip(
-                role="hook",
-                start_sec=h["start_sec"], end_sec=h["end_sec"],
-                subtitle=h.get("description", ""),
-                use_original_audio=h.get("use_original_audio", True),
-                chunk_index=h.get("chunk_index", -1),
-                candidate_index=h.get("candidate_index", -1),
-                character_focus=tuple(h.get("character_focus") or []),
-            ))
+        def _make_clip(role: str, src: dict) -> StoryClip:
+            # NOTE: bridges_from_previous는 origin이 StoryClip에서 제거함 (story_builder.py)
+            # → 인자에서 제외. src에 그 키가 와도 무시.
+            return StoryClip(
+                role=role,
+                start_sec=float(src["start_sec"]),
+                end_sec=float(src["end_sec"]),
+                subtitle=src.get("description", ""),
+                use_original_audio=src.get("use_original_audio", True),
+                chunk_index=src.get("chunk_index", -1),
+                candidate_index=src.get("candidate_index", -1),
+                character_focus=tuple(src.get("character_focus") or []),
+            )
 
-        if "build" in actual_storyline:
-            for b in actual_storyline["build"]:
-                clips.append(StoryClip(
-                    role="build",
-                    start_sec=b["start_sec"], end_sec=b["end_sec"],
-                    subtitle=b.get("description", ""),
-                    use_original_audio=b.get("use_original_audio", True),
-                    chunk_index=b.get("chunk_index", -1),
-                    candidate_index=b.get("candidate_index", -1),
-                    character_focus=tuple(b.get("character_focus") or []),
-                ))
+        hook = actual_storyline.get("hook")
+        hook_preview = actual_storyline.get("hook_preview")
+        build_list = actual_storyline.get("build", []) or []
+        payoff = actual_storyline.get("payoff")
 
-        if "payoff" in actual_storyline:
-            p = actual_storyline["payoff"]
-            clips.append(StoryClip(
-                role="payoff",
-                start_sec=p["start_sec"], end_sec=p["end_sec"],
-                subtitle=p.get("description", ""),
-                use_original_audio=p.get("use_original_audio", True),
-                chunk_index=p.get("chunk_index", -1),
-                candidate_index=p.get("candidate_index", -1),
-                character_focus=tuple(p.get("character_focus") or []),
-            ))
+        # hook_preview 유효성 검증: hook 시간 안 + 길이 ≥ 1초
+        valid_preview = False
+        if isinstance(hook_preview, dict) and isinstance(hook, dict):
+            try:
+                hp_s = float(hook_preview["start_sec"])
+                hp_e = float(hook_preview["end_sec"])
+                h_s = float(hook["start_sec"])
+                h_e = float(hook["end_sec"])
+                valid_preview = (h_s <= hp_s < hp_e <= h_e) and (hp_e - hp_s >= 1.0)
+            except (KeyError, TypeError, ValueError):
+                valid_preview = False
+
+        if valid_preview:
+            # 케이스 3: hook_preview → build → [hook 본체] → payoff
+            # hook 본체와 payoff 시간이 겹치면 자막이 중복(이중/삼중) 표시되므로
+            # hook 본체를 생략하고 payoff에 흡수한다 (payoff.start_sec을 hook 시작점까지 확장).
+            clips.append(_make_clip("hook", hook_preview))
+            for b in build_list:
+                clips.append(_make_clip("build", b))
+
+            hp_dur = float(hook_preview["end_sec"]) - float(hook_preview["start_sec"])
+            h_s_abs = float(hook["start_sec"]) if hook else 0.0
+            h_e_abs = float(hook["end_sec"]) if hook else 0.0
+            p_s_abs = float(payoff["start_sec"]) if payoff else float("inf")
+            p_e_abs = float(payoff["end_sec"]) if payoff else float("inf")
+            overlap = (
+                hook is not None and payoff is not None
+                and p_s_abs < h_e_abs and h_s_abs < p_e_abs
+            )
+
+            if overlap and payoff is not None:
+                # hook 본체와 payoff 시간 겹침 → hook 본체 생략, payoff에 흡수
+                merged_payoff = dict(payoff)
+                merged_payoff["start_sec"] = min(p_s_abs, h_s_abs)
+                merged_payoff["end_sec"] = max(p_e_abs, h_e_abs)
+                clips.append(_make_clip("payoff", merged_payoff))
+                merged_dur = merged_payoff["end_sec"] - merged_payoff["start_sec"]
+                print(
+                    f"  - hook_preview({hp_dur:.1f}s) + build×{len(build_list)} "
+                    f"+ payoff(hook 본체 흡수, {merged_dur:.1f}s) — 자막 중복 방지"
+                )
+            else:
+                # 겹침 없음: 기존 시퀀스 (hook 본체 → payoff 별도)
+                if hook is not None:
+                    clips.append(_make_clip("build", hook))
+                if payoff is not None:
+                    clips.append(_make_clip("payoff", payoff))
+                print(
+                    f"  - hook_preview({hp_dur:.1f}s) + build×{len(build_list)} "
+                    f"+ hook(본체) + payoff (이중 사용)"
+                )
+        else:
+            # 케이스 1·2 또는 hook_preview 무효: 기존 흐름
+            if hook is not None:
+                clips.append(_make_clip("hook", hook))
+            for b in build_list:
+                clips.append(_make_clip("build", b))
+            if payoff is not None:
+                clips.append(_make_clip("payoff", payoff))
+            # 케이스 3 의심 — LLM 가이드 위반 경고
+            if hook is not None and payoff is not None and build_list:
+                try:
+                    b0 = float(build_list[0]["start_sec"])
+                    pe = float(payoff["end_sec"])
+                    h_s = float(hook["start_sec"])
+                    if b0 <= h_s <= pe and not isinstance(hook_preview, dict):
+                        print(
+                            f"  [WARN] hook이 build/payoff 사이(케이스 3)인데 hook_preview 누락 — build→payoff 점프 발생 가능"
+                        )
+                except (KeyError, TypeError, ValueError):
+                    pass
 
     return clips, title_text
 
@@ -575,7 +633,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print("\n[9/16] Gemini 분析 결과 로드 중...")
         gemini_data = json.loads(checkpoint_gemini.read_text(encoding="utf-8"))
         all_candidates = gemini_data["all_candidates"]
-        print(f"  - 총 {len(all_candidates)}개 후보 모멘트")
+        chunk_meta_list = gemini_data.get("chunk_meta", [])
+        print(f"  - 총 {len(all_candidates)}개 후보 모멘트, chunk_meta {len(chunk_meta_list)}건")
         print("[OK] Gemini 분석 결과 로드 완료 (체크포인트에서)")
     elif start_idx <= 8:
         print("\n[9/16] Gemini 분석 준비 중...")
@@ -584,6 +643,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
         print("\n[9/16] Gemini 분석 진행 중...")
         all_candidates: list[dict[str, Any]] = []
+        chunk_meta_list: list[dict[str, Any]] = []
         gemini_start = time.time()
         previous_analyses: list[dict[str, Any]] = []
 
@@ -659,16 +719,60 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     "segments": response.get("segments", []),
                 })
 
+                # chunk-level 메타 (segments 포함) 누적 — checkpoint_gemini.json에 보존되고
+                # story 단계의 segments 요약 컨텍스트로도 활용된다.
+                # segments의 start_sec/end_sec은 chunk-relative이므로 chunk.start_sec를 더해 절대 시간으로 변환.
+                _chunk_segments_abs: list[dict[str, Any]] = []
+                for s in (response.get("segments") or []):
+                    _ss = float(s.get("start_sec", 0)) + chunk.start_sec
+                    _ee = float(s.get("end_sec", 0)) + chunk.start_sec
+                    _chunk_segments_abs.append({
+                        "segment_index": s.get("segment_index"),
+                        "start_sec": _ss,
+                        "end_sec": _ee,
+                        "description": s.get("description", ""),
+                    })
+                chunk_meta_list.append({
+                    "chunk_index": chunk.index,
+                    "summary": response.get("summary", ""),
+                    "segments": _chunk_segments_abs,
+                    "characters_tracking": response.get("characters_tracking", []),
+                    "title_candidates": response.get("title_candidates", []),
+                })
+
+                # split_video_chunk가 PTS를 0초로 정규화하므로 (output seek + -avoid_negative_ts make_zero),
+                # Gemini는 항상 0초 기준 상대 시간으로 응답한다고 신뢰할 수 있다.
+                # 따라서 chunk.start_sec을 더해 원본 영상 절대 시간으로 변환한다.
+                # (이전엔 actual_start_sec 양수 분기로 0.05초 같은 PTS 잔여값을 잘못 사용해
+                #  chunk.start_sec이 무시되는 버그가 있었음)
+                actual_cut_offset = chunk.start_sec
                 for moment in response["candidate_moments"]:
-                    if chunk.start_sec == 0:
-                        actual_cut_offset = 0.0
-                    elif chunk.actual_start_sec is not None and chunk.actual_start_sec > 0:
-                        actual_cut_offset = chunk.actual_start_sec
-                    else:
-                        actual_cut_offset = chunk.start_sec
                     moment["start_sec"] += actual_cut_offset
                     moment["end_sec"] += actual_cut_offset
                     moment["chunk_index"] = chunk.index
+
+                    # context_extension 시간도 절대값으로 변환 (highlight 자동 확장용)
+                    ce = moment.get("context_extension")
+                    if isinstance(ce, dict):
+                        if "extended_start_sec" in ce and ce["extended_start_sec"] is not None:
+                            try:
+                                ce["extended_start_sec"] = float(ce["extended_start_sec"]) + actual_cut_offset
+                            except (TypeError, ValueError):
+                                ce["needed"] = False
+                        if "extended_end_sec" in ce and ce["extended_end_sec"] is not None:
+                            try:
+                                ce["extended_end_sec"] = float(ce["extended_end_sec"]) + actual_cut_offset
+                            except (TypeError, ValueError):
+                                ce["needed"] = False
+                        # 안전 검증: extended가 start/end를 감싸지 않으면 needed=false 강등
+                        if ce.get("needed"):
+                            es = ce.get("extended_start_sec")
+                            ee = ce.get("extended_end_sec")
+                            if es is None or ee is None:
+                                ce["needed"] = False
+                            elif not (es <= moment["start_sec"] and moment["end_sec"] <= ee):
+                                ce["needed"] = False
+
                     all_candidates.append(moment)
             finally:
                 if split_path and split_path.exists():
@@ -684,6 +788,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         checkpoint_gemini.write_text(
             json.dumps({
                 "all_candidates": all_candidates,
+                "chunk_meta": chunk_meta_list,
             }, ensure_ascii=False, indent=2),
             encoding="utf-8"
         )
@@ -693,6 +798,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             raise FileNotFoundError(f"체크포인트 파일을 찾을 수 없습니다: {checkpoint_gemini}")
         gemini_data = json.loads(checkpoint_gemini.read_text(encoding="utf-8"))
         all_candidates = gemini_data["all_candidates"]
+        chunk_meta_list = gemini_data.get("chunk_meta", [])
 
     # ── 인트로/크레딧 포스트필터 (안전망) ──
     if exclusion_zones.detection_method != "none":
@@ -769,6 +875,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             previous_episodes_context=payload.previous_episodes_context,
             narrative_skeleton=narrative_skeleton,
             relationship_edges=relationship_edges or None,
+            chunk_meta=chunk_meta_list or None,
         )
 
         # 멀티쇼츠: ranked_storylines에서 최대 max_shorts개 추출

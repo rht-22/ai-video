@@ -127,24 +127,34 @@ def split_video_chunk(
     
     # 분할 길이 계산
     duration_sec = end_sec - start_sec
-    
-    # ffmpeg 명령 구성
+
+    # ffmpeg 명령 구성 — output seek (-ss AFTER -i) + 재인코딩으로 정확히 자른다.
+    # input seek + -c copy 방식은 키프레임에 정렬되어 시작/종료가 수~수백 초 어긋나
+    # Gemini timestamp 후처리 오프셋이 틀어지는 문제가 있었다. (split mp4 길이가 의도한
+    # duration_sec를 초과해 다음 chunk 영역까지 포함되는 케이스 발생)
     ffmpeg_cmd = find_ffmpeg_command("ffmpeg")
     cmd = [
         ffmpeg_cmd,
         "-y",  # 기존 파일 덮어쓰기
-        "-ss", str(start_sec),  # 시작 시간
-        "-i", str(video_path),  # 입력 파일
-        "-t", str(duration_sec),  # 길이
-        "-c", "copy",  # 재인코딩 없이 복사 (빠름)
-        # -avoid_negative_ts make_zero 제거: 원본 PTS를 보존해야 ffprobe로 실제 시작 시간을 정확히 읽을 수 있음
+        "-i", str(video_path),       # 입력 파일 (input 먼저)
+        "-ss", str(start_sec),        # 시작 시간 (output seek — 정확)
+        "-t", str(duration_sec),      # 길이 (정확히 적용됨)
+        "-c:v", "libx264",
+        "-preset", "ultrafast",       # 빠른 재인코딩 (proxy는 480p라 비용 작음)
+        "-crf", "26",
+        "-c:a", "aac",
+        "-ar", "22050", "-ac", "1",
+        "-avoid_negative_ts", "make_zero",  # PTS를 0초부터 시작하도록 정규화
+        "-fflags", "+genpts",
+        "-threads", "4",
         str(output_path),
     ]
-    
+
     # ffmpeg 실행
     subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # 실제로 잘린 시작 시간 확인 (키프레임 정렬로 인해 start_sec와 다를 수 있음)
+    # 정확 cut + PTS 정규화 후에는 actual_start가 0초여야 정상.
+    # ffprobe로 검증만 하고 반환 (anomaly 감지용).
     actual_start = get_actual_start_time(output_path)
 
     return output_path, actual_start
