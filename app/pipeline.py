@@ -93,7 +93,6 @@ def _clips_from_storyline(storyline_data: dict, fallback_title: str = "") -> tup
                 chunk_index=h.get("chunk_index", -1),
                 candidate_index=h.get("candidate_index", -1),
                 character_focus=tuple(h.get("character_focus") or []),
-                bridges_from_previous=h.get("bridges_from_previous") or "",
             ))
 
         if "build" in actual_storyline:
@@ -106,7 +105,6 @@ def _clips_from_storyline(storyline_data: dict, fallback_title: str = "") -> tup
                     chunk_index=b.get("chunk_index", -1),
                     candidate_index=b.get("candidate_index", -1),
                     character_focus=tuple(b.get("character_focus") or []),
-                    bridges_from_previous=b.get("bridges_from_previous") or "",
                 ))
 
         if "payoff" in actual_storyline:
@@ -119,7 +117,6 @@ def _clips_from_storyline(storyline_data: dict, fallback_title: str = "") -> tup
                 chunk_index=p.get("chunk_index", -1),
                 candidate_index=p.get("candidate_index", -1),
                 character_focus=tuple(p.get("character_focus") or []),
-                bridges_from_previous=p.get("bridges_from_previous") or "",
             ))
 
     return clips, title_text
@@ -636,6 +633,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 "topic": payload.topic,
                 "previous_episodes_context": payload.previous_episodes_context,
                 "work_context": payload.work_context,
+                "chunk_index": chunk.index,
                 "chunk_start_sec": chunk.start_sec,
                 "chunk_end_sec": chunk.end_sec,
                 "scene_boundaries": scene_boundaries,
@@ -655,6 +653,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
 
                 previous_analyses.append({
+                    "chunk_index": chunk.index,
                     "summary": response.get("summary", ""),
                     "candidate_moments": response.get("candidate_moments", []),
                     "segments": response.get("segments", []),
@@ -771,17 +770,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             narrative_skeleton=narrative_skeleton,
             relationship_edges=relationship_edges or None,
         )
-
-        # narrative_plan 출력 (storyline별)
-        for _sl in story_plan.get("storylines", []):
-            _np = _sl.get("narrative_plan")
-            if _np and isinstance(_np, dict):
-                _idx = _sl.get("storyline_index", "?")
-                _stype = _sl.get("shorts_type", "")
-                print(f"\n  ── narrative_plan [storyline {_idx} / {_stype}] ──")
-                for key, val in _np.items():
-                    print(f"  [{key}] {val}")
-                print("  " + "─" * 44)
 
         # 멀티쇼츠: ranked_storylines에서 최대 max_shorts개 추출
         ranked_storylines = story_plan.get("ranked_storylines", [])

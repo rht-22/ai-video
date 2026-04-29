@@ -14,7 +14,6 @@ class StoryClip:
     chunk_index: int = -1
     candidate_index: int = -1
     character_focus: tuple[str, ...] = ()
-    bridges_from_previous: str = ""
 
 
 @dataclass(frozen=True)
@@ -57,10 +56,7 @@ def validate_clip_coherence(
     clips: list[StoryClip],
     time_jump_warning_sec: float = 300.0,
 ) -> list[str]:
-    """인접 클립 간 인물/시간 연속성을 검사해 경고 문자열 목록을 반환합니다.
-
-    실패시키지 않고 단지 경고만 반환 (fix는 TTS 브릿지로).
-    """
+    """인접 클립 간 인물/시간 연속성을 검사해 경고 문자열 목록을 반환합니다."""
     warnings: list[str] = []
     for i in range(1, len(clips)):
         prev, curr = clips[i - 1], clips[i]
@@ -68,15 +64,15 @@ def validate_clip_coherence(
         gap = curr.start_sec - prev.end_sec
         if gap > time_jump_warning_sec:
             warnings.append(
-                f"[clip {i}] 큰 시간 점프 ({gap:.0f}초) — bridges_from_previous 필요"
+                f"[clip {i}] 큰 시간 점프 ({gap:.0f}초)"
             )
         # 인물 단절
         if prev.character_focus and curr.character_focus:
             prev_set = set(prev.character_focus)
             curr_set = set(curr.character_focus)
-            if not (prev_set & curr_set) and not curr.bridges_from_previous:
+            if not (prev_set & curr_set):
                 warnings.append(
-                    f"[clip {i}] 인물 연속성 없음 ({prev_set} → {curr_set}) — bridges_from_previous 권장"
+                    f"[clip {i}] 인물 연속성 없음 ({prev_set} → {curr_set})"
                 )
     return warnings
 
