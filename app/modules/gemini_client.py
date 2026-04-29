@@ -45,13 +45,17 @@ def _extract_json_from_markdown(text: str) -> str:
 
 
 # ─────────────────────────────────────────────
-# 청크 분석 프롬프트 (바이럴 최적화 버전)
+# 청크 분석 프롬프트 (멀티모달 분석 + 핵심 필드 보존)
 # ─────────────────────────────────────────────
 GEMINI_PROMPT_TEMPLATE = """
-너는 드라마/예능 톤의 쇼츠 편집 어시스턴트다.
-현재 단계에서 분석된 내용은 다음 단계에서 쇼츠 제작을 위한 스토리 구성 단계에서 재료로 사용된다.
+[ROLE]
+당신은 한국 최고의 숏폼 전문 AI 에디터이자 멀티모달 스토리 분석 전문가다.
+텍스트, 영상, 오디오를 통합적으로 이해하여
+바이럴 가능성이 높은 쇼츠 콘텐츠를 기획하고 분석한다.
 반드시 JSON만 출력한다. 코드블록 금지.
 영상에 없는 내용은 절대 창작하지 말 것.
+
+---
 
 [입력 정보]
 - 작품명: {work_title}
@@ -60,6 +64,7 @@ GEMINI_PROMPT_TEMPLATE = """
 {work_context_block}
 {narrative_skeleton_block}
 {previous_episodes_context_block}
+{character_appearances_block}
 - ⚠️ 모든 start_sec / end_sec는 반드시 첨부된 영상 파일의 시작(0초)을 기준으로 한 상대값으로 반환할 것
 
 - 자막(있으면): {transcript_text}
@@ -67,24 +72,22 @@ GEMINI_PROMPT_TEMPLATE = """
 - 자막/대사 참고 (화자명 포함): {transcript_hint}
 {previous_context}
 
-요구 사항:
-- 아래 JSON 스키마 구조를 100% 동일하게 유지하여 출력
-- candidate_moments 최소 {min_candidates}개
-- 드라마/예능 톤, 짧은 리액션 문구는 가능하지만 과도 금지
-- 최신 쇼츠 트렌드 반영: 자연스러운 톤, 짧은 문장, 강조/리액션 요소
-- 분석 결과 해당 항목이 없을 경우 빈 배열 대신 null로 출력
-- 타이틀 시퀀스, 엔딩 크레딧은 제외하기
-- ⚠️ **영상에 실제로 존재하는 장면만** 후보에 포함하라. 추론이나 상상으로 장면을 만들어내지 마라.
-- 각 candidate_moment의 'start_sec'~'end_sec' 구간은 반드시 첨부 영상에서 실제 확인 가능해야 한다.
-- 영상 전체를 빠짐없이 스캔하라. 앞부분에만 집중하지 말고 중반~후반도 균등하게 분석할 것.
-- 확실하지 않은 내용은 넣지 마라.
-- 완결되지 않은 부분(엔딩)은 이후 전개에 대한 궁금증을 유발하는 장면일 수 있으므로 확정된 전개로 장담하지 말 것.
-- "start_sec"~"end_sec" 내의 상황만 봐도 이해가 가능해야 한다.
-- `continues_from`: 이 장면이 다른 candidate_moment와 직접 이어지는 경우 `{{"chunk_index": N, "candidate_index": M}}` 형태로 명시, 독립 장면이면 null
-- `highlight_eligible`: 이 클립 하나만으로 완결된 쇼츠가 될 수 있으면 true.
-  판단 기준: 클립 자체에 감정적 완결성이 있고, 선행 맥락 없이도 단독으로 이해 가능한 경우
-  (웃긴 상황의 시작~반응 등, 특정 상황의 시작과 끝이 클립 하나에 담기는 경우).
-- `highlight_reason`: highlight_eligible이 true인 경우에만 작성. 이 클립이 단독으로 완결성을 갖는 이유를 1문장으로 기술. (false면 null)
+---
+
+[인물 식별 단계]
+
+- 분석 시작 전, 아래 수단을 통해 등장 인물의 이름을 먼저 파악한다:
+    - **face_id 사전 인식 결과** (있을 경우): 위 `[입력 정보]`의 face_id 블록은 외부 얼굴 인식기가 추정한 캐릭터 등장 구간이다. 같은 인물명을 라벨로 일관되게 사용하라.
+    - 화면 자막 또는 이름 자막 (예능/드라마 자막 포함)
+    - 대사 내 호칭 (예: "야 민준아~")
+    - 화면 내 텍스트 (명찰, 이름표 등 OCR 가능한 텍스트)
+- 위 수단으로 이름 확인이 불가능한 인물은 "인물A", "인물B" 등 고유 레이블을 부여한다.
+- 이후 모든 분석 항목에서 확정된 이름 또는 레이블을 일관되게 사용한다.
+- ❌ 복장/헤어스타일 기반 레이블링 금지 (예: "갈색 재킷 남자"). 동일 인물이 다른 씬에 다른 옷으로 등장해도 같은 이름/레이블을 유지하라.
+- **자막 화자태그 > 화면에 보이는 인물**: 반응 컷(cutaway)에서는 화면에 보이는 인물과 실제 화자가 다를 수 있다.
+- **화자 태그 없는 대사는 단정짓지 마라**: 자막에 `화자명:` 태그가 없는 대사의 화자를 서사적 추론으로 채우지 마라.
+
+---
 
 [description 규칙]
 - description은 compose story 단계를 위한 정보이므로 영상과 자막을 기반으로 시간 순서에 맞게 정확하고 객관적으로 최소 5 문장 이상.
@@ -92,45 +95,152 @@ GEMINI_PROMPT_TEMPLATE = """
 - description에서 행동의 범주를 바꾸지 마라. 장면에서 명확히 관찰된 행동(발화·동작·표정)만 그 종류 그대로 기술하고, 확인되지 않은 의도·감정·결과를 덧씌우지 마라.
 - ⚠️ description에서 내레이션·독백·보이스오버(VO)는 반드시 "~의 내레이션", "~가 속으로 독백한다", "VO로 ~가 말한다" 등으로 명시하여 실제 대화와 혼동되지 않도록 할 것.
 
-[Audience Appeal 필드 — 각 candidate_moment에 반드시 포함]
-- character_focus: 이 장면의 주요 인물 이름 배열
-- scene_location: 이 장면의 배경 장소를 구체적으로 기술 (예: "병원 복도", "카페 야외석", "잠수교 위")
-  ※ sequence_id(시간 연속성)와 독립적인 공간 정보다. 같은 장소라도 시간이 달라지면 sequence_id는 달라진다.
-  스토리 구성 단계에서 장소 전환의 자연스러움과 공간 대비를 판단하는 데 사용된다.
-- timeline_position: 이 장면이 현재 시점 사건인지 여부 (해당 없으면 "현재"로 반환).
-  선택값: 현재 | 과거 | 불명
+---
+
+[세그먼트(segments) 분할 — 청크 전체 커버]
+
+청크 전체 시간(`chunk_start_sec` ~ `chunk_end_sec`)을 **빈틈 없이, 겹침 없이** 시간순 세그먼트로 분할하라.
+
+[분할 기준 — 우선순위]
+1. **장면 전환(scene cut)**: 카메라가 새로운 장소/시점/상황으로 바뀌는 지점. 입력으로 주어진 `scene_boundaries`가 있으면 1차 참고.
+2. **서사 단위(beat)**: 같은 장소·등장인물이라도 화제/사건이 명확히 바뀌면 분리.
+3. **대화 단위**: 한 인물이 길게 이야기하다가 다른 인물로 발화 주체가 바뀌고 화제도 바뀌면 분리.
+
+[세그먼트 길이 가이드]
+- 일반적 길이: 10~60초 권장
+- 정적·전환 컷이 길게 이어지면 60초 이상도 허용
+- 너무 짧은 마이크로 컷(1~3초)은 인접 세그먼트에 합쳐라
+
+[세그먼트 연속성 제약 — 절대 규칙]
+- segments[0].start_sec == chunk_start_sec
+- segments[-1].end_sec == chunk_end_sec
+- 모든 i에 대해 segments[i].end_sec == segments[i+1].start_sec (gap/overlap 금지)
+- segments는 빠짐없이 청크 전체를 덮어야 한다 (평범한 구간도 반드시 포함)
+
+[세그먼트 description]
+- 모든 세그먼트는 [description 규칙]에 따라 객관적 묘사를 작성하라
+- 평범한/조용한 구간도 짧은 묘사(2~3문장)는 작성 (예: "복도를 천천히 걷는 인물A. 별다른 대사는 없고 발걸음 소리만 들린다.")
+- 주목할 만한 핵심 세그먼트는 5문장 이상 상세히 작성
+
+---
+
+[SHORTS TYPE DEFINITION]
+
+candidate_moments는 다음 두 가지 유형의 쇼츠 제작에 모두 활용될 수 있도록 추출한다.
+
+[유형 1: 하이라이트 쇼츠]
+- 하나의 강렬한 장면 중심, 맥락 설명 최소화
+- 단일 클립으로 시청자가 "뭐지?" → 감정반응 → 완결까지 느낄 수 있는 장면
+- → highlight_eligible: true 로 표기
+
+[유형 2: 서사형 쇼츠]
+- 가장 드라마틱한 씬을 중심으로 서사가 자연스럽게 흐르도록 구성
+- 다른 장면들과 함께 묶여 hook→build→payoff 흐름을 만들 수 있는 장면
+
+⚠️ hook/build/payoff 역할 결정은 다음 단계(스토리 구성)에서 수행하므로 여기서는 미리 라벨을 붙이지 말 것.
+
+---
+
+[후보 모멘트(candidate_moments) 추출 규칙]
+
+segments 중 **쇼츠 제작에 가치 있는 장면만** 선별해 candidate_moments로 추출한다.
+
+- candidate_moment의 `segment_index`는 segments 배열 인덱스를 가리킨다
+- candidate_moment의 start_sec/end_sec은 해당 segment 범위 안에서, 더 좁게 잡아도 된다(핵심만 발췌). 단, segment 범위 밖으로 나가면 안 된다
+- 후보 최소 {min_candidates}개 이상 선별
+
+---
+
+[TONE & RULES]
+- 모든 출력은 한국어 사용
+- 최신 쇼츠 트렌드 반영: 자연스러운 톤, 짧은 문장, 강조/리액션 요소
+- candidate_moments 최소 {min_candidates}개 (이 청크에서 주목할 만한 모든 장면을 빠짐없이 포함)
+- JSON 스키마 강제. 분석 결과 해당 항목이 없을 경우 빈 배열 대신 null로 출력
+- 타이틀 시퀀스, 엔딩 크레딧은 candidate_moments에서 제외 (단, segments에는 포함)
+- ⚠️ **영상에 실제로 존재하는 장면만** 포함하라. 추론이나 상상으로 장면을 만들어내지 마라.
+- 모든 start_sec/end_sec 구간은 반드시 첨부 영상에서 실제 확인 가능해야 한다.
+- "start_sec"~"end_sec" 내의 상황만 봐도 이해가 가능해야 한다.
 - ⚠️ 대사가 있는 장면에서 인물의 행동/의도를 묘사할 때는 대사 내용을 최우선으로 반영하라.
   캐릭터 설정(질병, 성격 등 배경 지식)이 대사와 충돌하면 대사를 믿어라.
 
+[characters_tracking 필드 정의 (chunk-level)]
+- 청크 전체에 등장하는 인물별 등장 타임스탬프 및 주요 행동을 정리한다.
+- character: 인물명 또는 레이블 (인물 식별 단계에서 확정한 이름과 일관되게)
+- appearances[]: 해당 인물이 등장하는 구간 목록
+    - start_sec / end_sec: 등장 구간
+    - action: 그 구간에서 인물의 핵심 행동/발화 요약 한 문장
+
+[segment 필드 정의]
+- segment_index: 0부터 시작하는 정수 (segments 배열 인덱스)
+- start_sec / end_sec: 이 세그먼트의 시간 범위 (인접 세그먼트와 정확히 맞물려야 함)
+- description: 장면 설명(묘사 위주). 위 [description 규칙]을 엄수. 평범한 구간은 2~3문장, 핵심 구간은 5문장 이상
+- transcript: 이 구간의 핵심 발화. 내레이션/독백/VO인 경우 '[내레이션]' 접두. 발화 없으면 빈 문자열
+- characters_in_scene: 화면에 등장하는 인물 이름 배열
+- scene_location: 장면 배경 장소
+- timeline_position: "현재" | "과거" | "불명"
+
+[candidate_moment 필드 정의]
+- segment_index: 이 후보가 속한 segments 배열의 인덱스 (필수)
+- chunk_index / candidate_index: 자기 식별자 (continues_from 참조용)
+- start_sec / end_sec: 해당 segment 범위 안의 좁은 핵심 구간 (segment 경계를 넘지 말 것)
+- characters_in_scene: 화면에 등장하는 인물 이름 배열
+- character_focus: 이 장면의 주요(핵심) 인물 이름 배열
+- description: 장면 설명. segment의 description을 그대로 복사하거나, 더 상세하게 보강 가능
+- reason: 후보 선정 이유 (재해석된 의미는 여기에만)
+- transcript: '단 한 명'의 주요 발화. 내레이션/독백/VO인 경우 '[내레이션]' 접두
+- scene_location / timeline_position: segment에서 복사
+- continues_from: 다른 candidate_moment와 직접 이어지면 {{"chunk_index": N, "candidate_index": M}}, 독립이면 null
+- requires_context: 이 클립을 이해하려면 다른 장면이 필요하면 true
+- highlight_eligible: requires_context가 false이고 클립 자체에 감정적 완결성이 있으면 true
+- highlight_reason: highlight_eligible이 true인 경우에만 1문장 (false면 null)
 
 다음 스키마로만 응답:
-
 {{
   "chunk_index": 0,
   "chunk_start_sec": 0,
   "chunk_end_sec": 300,
   "summary": "해당 청크 전체의 핵심 내용 요약",
-  "main_plot": "이 구간의 핵심 내용 요약 80자 이내",
+  "characters_tracking": [
+    {{
+      "character": "인물명 또는 레이블",
+      "appearances": [
+        {{"start_sec": 0.0, "end_sec": 32.0, "action": "해당 구간 행동/발화 요약"}}
+      ]
+    }}
+  ],
+  "segments": [
+    {{
+      "segment_index": 0,
+      "start_sec": 0.0,
+      "end_sec": 45.3,
+      "description": "이 구간 묘사 ([description 규칙] 엄수)",
+      "transcript": "이 구간 핵심 발화 (없으면 \\"\\")",
+      "characters_in_scene": ["인물명1"],
+      "scene_location": "장면 배경 장소",
+      "timeline_position": "현재|과거|불명"
+    }}
+  ],
   "candidate_moments": [
     {{
+      "segment_index": 0,
       "chunk_index": 0,
       "candidate_index": 0,
       "start_sec": 12.4,
       "end_sec": 25.8,
-      "importance": 0.0,
-      "hook_score": 0.0,
-      "topic_alignment_score": 0.0,
       "characters_in_scene": ["인물명1", "인물명2"],
-      "description": "장면 설명(묘사 위주)",
-      "transcript": "start_sec~end_sec 구간에서 가장 핵심이 되는 '단 한 명'의 주요 발화. 내레이션/독백/VO인 경우 '[내레이션]' 접두어를 붙일 것",
-      "continues_from": {{"chunk_index": 0, "candidate_index": 0}},
-      "highlight_eligible": false,
-      "highlight_reason": null,
       "character_focus": ["인물명"],
+      "description": "장면 설명(묘사 위주, 5문장 이상)",
+      "reason": "선정 이유",
+      "transcript": "단 한 명의 주요 발화 ([내레이션] 접두 가능)",
       "scene_location": "장면 배경 장소",
-      "timeline_position": "현재|과거|불명"
+      "timeline_position": "현재|과거|불명",
+      "continues_from": null,
+      "requires_context": false,
+      "highlight_eligible": false,
+      "highlight_reason": null
     }}
-  ]
+  ],
+  "title_candidates": ["제목1", "제목2", "제목3"]
 }}
 """
 
@@ -139,40 +249,99 @@ GEMINI_PROMPT_TEMPLATE = """
 # ─────────────────────────────────────────────
 STORY_COMPOSITION_PROMPT = """
 # Role
-너는 쇼츠 영상 편집 전문가다. 전체 영상 분석 결과를 바탕으로 여러 개의 쇼츠 스토리라인을 생성해라.
+너는 드라마/영화/예능 기반 유튜브 쇼츠 100만 조회수 전문 편집자다.
+시청자가 해당 쇼츠를 보고 재미를 느껴 작품을 궁금해하게 만든다.
 
 # Task
-제공된 영상 분석 데이터를 기반으로 시청자의 몰입을 극대화할 수 있는 2가지 타입의 스토리라인(하이라이트형, 서사형)을 3개씩 구성하고,
-그중 가장 성공 가능성이 높은 하나를 최종 선정하여 출력하라.
-원본 영상에 대해 아무 정보가 없는 사람도 만들어진 쇼츠에 대해 흥미를 느낄 수 있어야 한다.
+제공된 영상 분석 데이터를 기반으로 스토리라인 3개를 구성하라.
+해당 작품을 처음 보는 사람도 맥락을 모른채 이해하고 관심을 가질 수 있게 구성하라.
+각 스토리라인은 **storytelling(멀티클립 서사형)** 또는 **highlight(단일클립 완결형)** 중 적합한 타입을 선택하라.
+3개 모두 독립적으로 완성도 높은 쇼츠가 될 수 있어야 한다.
+그중 가장 바이럴 성공 가능성이 높은 하나를 최종 선정하되, 나머지 2개도 사용될 수 있다.
 
-# Input Data
-- 제목: {work_title}
-- 주제: {topic}
-- 후보 장면 및 분석 데이터:
-{candidates_str}
+# 타입 선택 기준
 
-# Constraints & Rules
-1. Highlight Type:
-- candidate_moments들 중, `highlight_eligible`이 true인 것만 선별. 
-- 맥락 설명 없이 시청 지속을 유도할 수 있는 하나를 중심으로 구성할 것.
+후보 클립 목록에서 highlight_eligible: true인 클립 수와 전체 클립 수를 직접 세어 비율을 계산하라.
 
-2. Storytelling Type:
-- 모든 chunk의 candidate_moments 중에서 여러 장면들을 선정해 완결성이 있도록 여러 장면을 유기적으로 연결할 것.
-- 캐릭터의 행적을 조명하거나 영상의 특정 사건을 요약.
-- 각 storyline 내에서는 가장 눈길을 끄는 장면을 hook으로 사용하고, hook이 전개상 앞부분이면 "여정몰입형", 전개상 뒷부분이면 "결과선공개형"으로 분류.
+- 비율 **90% 이상**: 전부 highlight로 구성해도 된다.
+- 비율 **20% 이하**: storytelling을 반드시 하나 이상 구성하라.
+- 그 외 (20%~90%): storytelling과 highlight를 적절히 혼합하라.
+- highlight 타입은 반드시 highlight_eligible: true인 클립에만 사용하라.
 
-3. 연속성 (Storytelling 전용):
-각 후보 장면에는 `sequence_id`(정수)와 `continues_from` 필드가 있다.
-- `sequence_id`가 같은 장면끼리 = 원본에서 직접 이어지는 연속 장면 → 인접 배치 시 자연스럽게 연결됨.
-- `sequence_id`가 다른 장면끼리 = 다른 시간·상황의 장면 → 인접 배치 시 `tts_line`으로 맥락 전환을 반드시 설명할 것.
-- `continues_from`이 있는 장면은 앞 장면의 맥락을 이어받으므로, 선행 장면 없이 단독 배치 시 이해가 어려울 수 있음.
-- build·payoff는 반드시 원본 시간 순(start_sec 오름차순)으로 배치할 것.
+## storytelling 타입 — 멀티클립 서사형
 
-4. 제목 구조 (2줄 필수):
-각 storyline마다 반드시 2줄 제목을 작성할 것.
-- title_line1: 상황/맥락 설명 (15자 이내, 흰색으로 표시됨)
-- title_line2: 캐릭터/주제 중심 후킹 문구 (15자 이내, 노란색 강조로 표시됨)
+**단일 연속 클립 사용 금지.** 반드시 3개 이상의 서로 다른 씬을 조합하여 서사 아크를 구성하라.
+실제 고조회수 쇼츠 레퍼런스를 분석한 결과:
+- 조회수 100만+ 쇼츠는 예외 없이 3~7개의 서로 다른 씬을 편집하여 하나의 서사를 만듬
+- 각 씬 사이에 TTS 나레이션이 맥락을 연결함
+- **반드시 확실히 이어지는 장면끼리 연결하라. 앞뒤 맥락을 모른 채로 이해할 수 없는 클립을 맥락 없이 사용 금지**
+- **`requires_context: true`인 클립은 단독 사용 금지.** 해당 클립을 이해하는 데 필요한 선행 또는 후행 장면을 후보 목록에서 찾아 함께 포함시켜라. 후보 목록에 적절한 맥락 장면이 없으면 해당 클립은 스토리라인에서 제외하라.
+- score는 바이럴 가능성을 0.0~1.0으로 **정직하게** 평가하라 (모두 비슷한 점수 금지)
+- sequence_type: "여정몰입형" 또는 "결과선공개형" 중 선택 (storytelling만 해당)
+   - **결과선공개형**: 에피소드 내 핵심 결과(반전·충격·감정 폭발)가 명확하고, 그 결과만으로도 시청자의 시선을 확 잡아끌 수 있을 때 선택한다. hook에서 결과 장면을 먼저 보여줘 "이게 왜?", "어쩌다 이렇게 됐지?"라는 궁금증을 유발하고, build~payoff에서 그 과정을 시간 순으로 풀어준다.
+   - **여정몰입형**: 에피소드의 전반적인 분위기·긴장감이 처음부터 끝까지 일관되게 유지돼, 굳이 결과를 앞당길 필요가 없을 때 선택한다. 사건이 자연스럽게 고조되는 흐름 자체가 훅이 되므로 hook~payoff를 원본 시간 순서대로 배치한다.
+
+### sequence_id — 연속 장면 그룹 식별자
+
+각 클립에는 `sequence_id` 정수 필드가 있다. 이 값은 원본 영상의 `continues_from` 체인을 분석해 자동 부여된 것으로, **같은 숫자 = 직접 이어지는 연속 장면, 다른 숫자 = 다른 시간·상황의 장면**이다.
+
+- **같은 sequence_id끼리**: 원본에서 바로 이어지므로 편집 시 자연스럽게 연결된다.
+- **다른 sequence_id끼리**: 시간·장소·상황이 달라진 씬이다. 인접 클립으로 사용하면 시청자에게 혼란을 줄 수 있다.
+- **겉으로 비슷해 보여도** (같은 인물, 비슷한 장소) sequence_id가 다르면 다른 상황임을 반드시 인지하라.
+- build 클립들과 payoff는 sequence_id가 달라져도 되지만, 그 경우 bridges_from_previous에서 시청자가 납득할 수 있는 맥락 전환을 반드시 설명해야 한다.
+
+### 연결성 강제 룰
+
+1. 인물 연속성: 인접 클립은 character_focus 교집합이 있거나, bridges_from_previous 문장에서 연결을 명확히 설명해야 한다
+2. 시간 근접성: 원본 타임라인 상 큰 점프가 필요한 경우, 반드시 TTS bridges_from_previous로 맥락을 제공하라
+3. 공간 전환: 인접 클립의 scene_location이 다를 경우, 장소 이동이 시청자에게 자연스럽게 느껴지도록 bridges_from_previous에서 맥락을 제공하라. 단, scene_location이 같고 sequence_id만 다른 경우(같은 장소·다른 시간)는 TTS로 시간 경과를 명시하라.
+4. 감정 흐름: 감정 아크(emotional_arc) 순서를 역행하지 마라 (고조→도입 금지)
+4. 각 storyline에 "coherence_score" (0.0~1.0) 필드 — 위 룰 달성도
+5. 각 클립 객체에 "bridges_from_previous" 필드 — 앞 클립에서 어떻게 이어지는지 한 문장 (hook은 null 가능)
+6. 각 클립 객체에 "character_focus" 배열 — 해당 장면의 주요 인물 이름
+
+### 바이럴 쇼츠 구조
+
+#### Hook (0-5초): 스크롤 멈춤
+- 충격적 반전, 감정 폭발, 의외의 상황으로 시작
+- description, reason, highlight_eligible 등을 종합적으로 검토해 후킹력이 가장 강한 장면을 hook으로 선택
+
+#### Build (5-45초): 몰입 유지 (최소 2개 씬)
+- 감정 강도가 점진적으로 상승
+- 핵심 대사가 포함된 씬 우선 선택
+
+#### Payoff (45-60초): 감정 폭발 + 엔딩
+- 클라이맥스 또는 예상치 못한 반전
+- 여운이 남거나 다음 편 궁금증 유도
+
+⚠️ TTS 나레이션은 별도 단계(tts_planner)에서 결정한다. 이 단계에서는 클립 시간/제목/리듬만 결정하라. tts_line 필드를 출력하지 마라.
+
+### 원본 타임라인 순서 원칙 (절대 규칙)
+
+- hook은 예외적으로 원본상 어느 위치의 장면이든 사용 가능 (결과선공개형 허용)
+- **build 클립들과 payoff는 반드시 원본 영상의 시간 순서(start_sec 오름차순)대로 배치해야 한다**
+  - build[0].start_sec < build[1].start_sec < ... < payoff.start_sec 를 반드시 만족
+- 점수가 높다고 해서 뒤에 나온 장면을 앞으로 당기거나 순서를 임의로 섞는 것은 절대 금지
+- 원본 영상의 전개 흐름을 무시한 뒤죽박죽 구성은 시청자에게 혼란을 줌
+
+## highlight 타입 — 단일클립 완결형
+
+단일 클립만으로 시청자가 "뭐지?" → 감정반응 → 완결까지 느낄 수 있는 경우 선택하라.
+멀티클립으로 이으면 오히려 흐름이 끊기거나 불필요해지는 경우가 여기에 해당한다.
+**반드시 highlight_eligible: true인 클립만 사용할 수 있다.**
+
+# 공통 규칙
+
+## 3개 스토리라인 독립성
+
+- 3개 스토리라인은 **서로 다른 장면을 사용**해야 한다 (동일 씬 중복 사용 금지)
+- 각 스토리라인마다 **독립적인 서사 아크 + 제목(title_line1+title_line2)**을 갖추어야 한다
+
+## 제목 구조 (2줄 필수)
+
+레퍼런스 분석 결과 고조회수 쇼츠 제목은 반드시 2줄 구조:
+- **title_line1**: 상황/맥락 설명 (15자 이내, 흰색으로 표시됨)
+- **title_line2**: 캐릭터/주제 중심 후킹 문구 (15자 이내, 노란색 강조로 표시됨)
 
 예시:
 - "모두 기피하는 깡치사건" / "클리어하는 이한영"
@@ -181,48 +350,231 @@ STORY_COMPOSITION_PROMPT = """
 
 ⚠️ 이모지 금지.
 
-5. Common:
-각 장면의 `start_sec`, `end_sec`를 명시하고, 영상의 '후킹'을 위한 TTS 라인을 반드시 포함할 것.
+## Duration Constraint
 
-다음 JSON 스키마로만 응답:
+- 총 클립 길이 합계: {min_duration_sec}초 ~ {max_duration_sec}초 범위
+- 각 클립의 start_sec, end_sec는 반드시 원본 영상 타임라인 기준
+- 각 장면의 (end_sec - start_sec)를 합산하여 범위 내인지 반드시 확인할 것
+
+# Input Data
+- 작품명: {work_title}
+- 주제: {topic}
+{story_topic_line}
+{work_context_block}
+{episodes_context_block}
+{narrative_skeleton_json_block}
+
+- 후보 장면 및 분석 데이터:
+{candidates_str}
+
+# Constraints & Rules
+1. 각 클립의 start_sec, end_sec 명시
+2. 작품의 전체 맥락을 모르는 사람도 한 번 보고 재미를 느낄 수 있는 장면을 선정
+3. score는 description, reason, requires_context, highlight_eligible 등 후보의 의미적 평가를 종합해 0.0~1.0으로 정직하게 평가하라
+4. 'continues_from'을 참고하여 맥락이 끊기지 않게 하라
+5. 위 # Input Data의 "이전 에피소드 요약"이 비어있지 않으면, 이전 회차에서 묘사된 인물 관계·미해결 갈등을 후킹 포인트로 활용하여 연속극 시청자에게 자연스럽게 이어지도록 hook/payoff를 구성하라
+6. 위 # Input Data의 "작품 서사 스켈레톤(narrative_skeleton)"이 비어있지 않으면, 작품 전체 서사 구조 안에서 이번 회차가 차지하는 위치(도입/전개/위기/절정/결말)를 고려하여 스토리라인의 톤(긴장 강도, 감정 결)이 단계와 부합하도록 구성하라
+
+다음 JSON 스키마로만 응답.
+
+⚠️ **각 storyline의 `narrative_plan`을 해당 storyline의 클립 선택 전에 반드시 먼저 작성하라.**
+점수나 수치가 아니라 "어떤 장면/이야기를 쇼츠로 만들 것인가"를 먼저 결정한 뒤 클립을 찾아라.
+
 {{
-"storylines": [
+  "storylines": [
     {{
-    "storyline_index": 0,
-    "chunk_index": 0,
-    "candidate_index": 0,
-    "shorts_type": "highlight",
-    "topic": "주제명",
-    "topic_reason": "선정 이유",
-    "score": 0.0,
-    "title_line1": "상황/맥락 (15자 이내)",
-    "title_line2": "캐릭터/후킹 (15자 이내)",
-    "start_sec": 0.0,
-    "end_sec": 0.0
+      "storyline_index": 0,
+      "shorts_type": "storytelling",
+      "narrative_plan": {{
+        "type_rationale": "왜 storytelling 타입을 선택했는가",
+        "concept": "이 쇼츠에 담길 내용 (3문장)"
+      }},
+      "sequence_type": "여정몰입형|결과선공개형",
+      "topic": "주제명",
+      "topic_reason": "서사 구성 이유",
+      "score": 0.0,
+      "coherence_score": 0.0,
+      "estimated_duration_sec": 0.0,
+      "viral_titles": ["제목1", "제목2", "제목3"],
+      "title_line1": "상황/맥락 설명 (15자 이내)",
+      "title_line2": "캐릭터/사건 중심 후킹 (15자 이내)",
+      "storyline": {{
+        "hook": {{
+          "chunk_index": 0, "candidate_index": 0,
+          "start_sec": 0.0, "end_sec": 0.0,
+          "description": "장면 설명",
+          "use_original_audio": true,
+          "character_focus": ["인물명"],
+          "bridges_from_previous": null
+        }},
+        "build": [
+          {{
+            "chunk_index": 0, "candidate_index": 0,
+            "start_sec": 0.0, "end_sec": 0.0,
+            "description": "장면 설명",
+            "use_original_audio": true,
+            "character_focus": ["인물명"],
+            "bridges_from_previous": "앞 씬에서 어떻게 이어지는지"
+          }}
+        ],
+        "payoff": {{
+          "chunk_index": 0, "candidate_index": 0,
+          "start_sec": 0.0, "end_sec": 0.0,
+          "description": "장면 설명",
+          "use_original_audio": true,
+          "character_focus": ["인물명"],
+          "bridges_from_previous": "앞 씬에서 어떻게 이어지는지"
+        }}
+      }}
     }},
     {{
-    "storyline_index": 1,
-    "shorts_type": "storytelling",
-    "sequence_type": "여정몰입형|결과선공개형",
-    "topic": "주제명",
-    "topic_reason": "서사 구성 이유",
-    "score": 0.0,
-    "title_line1": "상황/맥락 (15자 이내)",
-    "title_line2": "캐릭터/후킹 (15자 이내)",
-    "storyline": {{
-        "hook": {{ "chunk_index": 0, "candidate_index": 0, "start_sec": 0.0, "end_sec": 0.0, "description": "장면 설명", "tts_line": "", "use_original_audio": true }},
-        "build": [ {{ "chunk_index": 0, "candidate_index": 0, "start_sec": 0.0, "end_sec": 0.0, "description": "장면 설명", "tts_line": "", "use_original_audio": true }} ],
-        "payoff": {{ "chunk_index": 0, "candidate_index": 0, "start_sec": 0.0, "end_sec": 0.0, "description": "장면 설명", "tts_line": "", "use_original_audio": true }}
+      "storyline_index": 1,
+      "shorts_type": "highlight",
+      "narrative_plan": {{
+        "type_rationale": "왜 highlight 타입을 선택했는가 (이 클립이 단독으로 완결성을 갖는 이유)",
+        "concept": "이 쇼츠에 담길 내용 (3문장)"
+      }},
+      "chunk_index": 0,
+      "candidate_index": 0,
+      "start_sec": 0.0,
+      "end_sec": 0.0,
+      "topic": "주제명",
+      "topic_reason": "단독 선정 이유",
+      "score": 0.0,
+      "coherence_score": 0.0,
+      "estimated_duration_sec": 0.0,
+      "viral_titles": ["제목1", "제목2", "제목3"],
+      "title_line1": "상황/맥락 설명 (15자 이내)",
+      "title_line2": "캐릭터/사건 중심 후킹 (15자 이내)",
+      "use_original_audio": true
     }}
+  ],
+  "selected_storyline_index": 0,
+  "shorts_type":"storytelling"|"highlight",
+  "selection_reason": "이 스토리라인을 선택한 이유",
+  "title_line1": "최종 제목 1줄 (맥락)",
+  "title_line2": "최종 제목 2줄 (후킹)",
+  "title_txt": "title_line1 + title_line2 합친 전체 제목",
+  "selected_storyline": {{ "선정된 인덱스의 객체를 그대로 복사해서 출력": "" }}
+}}
+"""
+
+
+TTS_PLANNING_PROMPT = """
+# Role
+너는 한국 쇼츠/예능 콘텐츠를 위한 내레이션 디렉터다. 결정된 클립 시퀀스를 받아
+"어디에 / 무엇을 / 어떤 목소리·속도로" TTS를 얹을지 결정한다.
+
+# 입력
+- 작품명: {work_title}
+- 쇼츠 총 길이(편집 타임라인 기준): {total_duration:.1f}초 (0초 = 쇼츠 시작점)
+{work_context_block}{episodes_context_block}{narrative_skeleton_json_block}
+
+[클립 시퀀스 — 편집 타임라인 절대 시간]
+{clips_str}
+
+# 사용 가능한 voice 프리셋 (정확히 이 라벨만 사용)
+
+[자연스러운 한국어 — 우선 사용]
+- ko_female       : 기본 한국 여성 (차분, 자연스러운 발음)
+- ko_female_high  : 밝은 한국 여성 (피치 높음, 트렌드 톤·임팩트)
+- ko_male         : 기본 한국 남성 (차분 다큐풍)
+- ko_male_low     : 낮은 한국 남성 (피치 낮음, 묵직·진지)
+
+[트렌드 multilingual — 작품 톤이 챗봇/이국·캐주얼/시크 등에 어울릴 때만]
+- chat_emma       : 밝고 명료한 챗봇 여성 (en, 트렌드 AI 보이스 느낌)
+- chat_brian      : 친근한 캐주얼 남성 (en)
+- chat_seraphina  : 차분한 유럽계 여성 (de, 시크·고급)
+- chat_florian    : 차분한 유럽계 남성 (de, 진중)
+
+⚠️ multilingual voice는 한국어를 처리할 수 있지만 약간의 외국 억양이 섞일 수 있다. 작품 톤이 한국 드라마 일반(스릴러·로맨스·예능)이면 ko_* 를 우선 선택하라.
+
+# 사용 가능한 speed 라벨 (정확히 이 5개만)
+- very_slow / slow / normal / fast / very_fast
+
+# 작성 규칙
+1. **TTS는 꼭 필요한 곳에만**. 모든 컷에 다는 것 금지. 보통 클립 1개당 0~2개, 전체 2~5개 cue 정도.
+2. cue.start_sec / end_sec 는 **편집 타임라인 절대 시간** (0초 = 쇼츠 시작). 위 [클립 시퀀스]에 명시된 edit_timeline 범위 안에 들어가야 한다.
+3. cue 길이(end_sec-start_sec)는 보통 2~6초.
+4. cue들끼리 시간이 겹치지 않게 하라(같은 시점에 두 목소리가 동시에 나오면 안 됨).
+5. 결정된 클립의 원본 오디오를 죽이지 않게: cue 텍스트가 클립의 핵심 대사와 동시에 충돌하지 않도록 배치.
+
+# 텍스트 톤 (가장 중요)
+
+**쇼츠 내레이션이다. 뉴스 헤드라인체도, 예능·슬랭 톤도 둘 다 금지.**
+방향: **"상황을 짧게 설명해 다음 장면이 궁금해지게 만든다"** — 후킹·여운·인물 명사화.
+
+[금지]
+- ❌ 격식체 / 헤드라인체: "~합니다, ~됩니다, ~입니다, 마침내, 비로소, 새로운 ~의 탄생"
+- ❌ 가벼운 슬랭·예능톤·반말: "~네, ~함, ~임, ㅋㅋ, 헐, 미친 설계, 통째로 먹었네, 한 방에 다 뒤집힘"
+- ❌ 시청자 직접 호명·말 거는 느낌: "봐봐, 잘 봐, 이거 진짜?"
+
+[권장 — 다음 셋 중 하나의 결로 작성하라]
+1. **명사형 종결 (인물·사건을 라벨링)**
+   - "결국 시장을 통째로 장악한 희로."
+   - "이 판을 뒤집을 한 사람."
+   - "마켓의 진짜 주인이 바뀌는 순간."
+2. **상황 설명 + 여운 (~다 / ~된다 / ~인 셈)**
+   - "조용히 판을 다시 짠다."
+   - "그가 노린 건 시장 그 자체였다."
+   - "이 한 수로 판세가 뒤집힌다."
+3. **궁금증 유발 (~는데? / ~ㄴ데? / 근데 ~)**
+   - "근데 이게 진짜 끝이 아니다."
+   - "그가 진짜 노린 건 따로 있는데?"
+   - "여기까지가 시작이라면?"
+
+[길이·구조]
+- 한 cue = **한 문장**, 12~25자 권장. 너무 짧으면 정보 부족, 너무 길면 후킹력 약해짐.
+- 평서 위주, 의문은 cue 전체의 1/3 이내.
+- 어미는 "~다 / ~ㄴ다 / ~인 셈 / ~의 X / ~는데? / 명사형 점.". "~네 / ~함 / ~임"은 사용하지 않는다.
+
+[좋은 예 vs 나쁜 예]
+- ❌ "결국 시장을 통째로 먹었네." → ✅ "결국 시장을 통째로 장악한 희로."
+- ❌ "한 방에 다 뒤집힘." → ✅ "이 한 수로 판세가 뒤집힌다."
+- ❌ "근데 진짜 노림수는 이거였음." → ✅ "그가 진짜 노린 건 따로 있는데?"
+- ❌ "지옥 같은 마켓에 나타난 천재." → ✅ "지옥 같은 마켓에 들어선 한 사람." (또는 명사 종결 그대로 OK)
+- ❌ "중독까지 계산한 미친 설계." → ✅ "중독까지 계산한 한 수의 설계."
+
+# voice / speed 매핑 가이드
+
+**🚫 한 쇼츠 = 한 voice (절대 규칙)**
+이 storyline의 **모든 cue는 같은 voice 라벨을 사용해야 한다**. cue마다 voice를 바꾸지 마라.
+voice는 작품·storyline 전체 톤 1개를 골라 모든 cue에 일관되게 적용하라.
+(speed 라벨은 cue마다 달라도 좋다 — 톤 강약은 speed로 만들어라.)
+
+**voice 선택 가이드 — 작품/storyline 톤 → 라벨**:
+- 한국 드라마/예능 일반 (디스토피아·스릴러·로맨스·코미디) → 기본 `ko_female` 또는 `ko_male`
+- 진지·묵직한 다큐·내레이션톤 → `ko_male_low`
+- 가벼운 후킹·바이럴·코믹 톤 → `ko_female_high`
+- AI 챗봇/SF/이국적·시크한 분위기 → `chat_emma` / `chat_seraphina` (여성), `chat_brian` / `chat_florian` (남성)
+
+**speed (cue마다 자유 — 같은 voice 안에서 톤 강약 만들기)**:
+- 정적 장면, 진지한 한 마디 → `slow` / `very_slow`
+- 일반 내레이션 → `normal`
+- 임팩트·긴박감·전환 → `fast` / `very_fast`
+
+# 응답 형식 (JSON, 다른 텍스트 금지)
+{{
+  "tts_cues": [
+    {{
+      "start_sec": 0.0,
+      "end_sec": 4.0,
+      "text": "예: 황궁마켓의 유일한 법.",
+      "voice": "ko_male_low",
+      "speed": "slow",
+      "voice_rationale": "디스토피아·스릴러 톤 — 한국 남성 묵직 voice 선택",
+      "speed_rationale": "긴장 고조 직전이라 천천히 깔아둠"
+    }},
+    {{
+      "start_sec": 18.0,
+      "end_sec": 21.5,
+      "text": "근데 진짜 노림수는 따로 있는데?",
+      "voice": "ko_male_low",
+      "speed": "fast",
+      "voice_rationale": "같은 storyline이므로 같은 voice 유지 (절대 규칙)",
+      "speed_rationale": "반전 임팩트라 빠르게"
     }}
-],
-"selected_storyline_index": 0,
-"shorts_type": "storytelling|highlight",
-"selection_reason": "이 스토리라인을 선택한 이유",
-"title_line1": "최종 제목 1줄 (맥락, 15자 이내)",
-"title_line2": "최종 제목 2줄 (후킹, 15자 이내)",
-"title_txt": "title_line1 + title_line2 합친 전체 제목",
-"selected_storyline": {{ "이곳에 선정된 인덱스의 객체를 그대로 복사해서 출력": "" }}
+  ]
 }}
 """
 
@@ -324,6 +676,12 @@ class GeminiClient:
                         for m in prev["candidate_moments"][:3]
                     ])
                     context_parts.append(f"주요 모멘트:\n{moments_text}")
+                if prev.get("segments"):
+                    seg_lines = [
+                        f"  - {s.get('start_sec', 0):.1f}~{s.get('end_sec', 0):.1f}초: {s.get('description', '')[:120]}"
+                        for s in prev["segments"][:8]
+                    ]
+                    context_parts.append("전체 타임라인 묘사 (segments):\n" + "\n".join(seg_lines))
             if context_parts:
                 previous_context = "\n\n이전 청크들의 분석 결과 (전체 흐름 이해용):" + "\n".join(context_parts)
 
@@ -402,6 +760,21 @@ class GeminiClient:
                 )
                 work_context_block = work_context_block + skeleton_char_block
 
+        # face_id 사전 인식 결과 블록 (선택적 — 인덱스가 없으면 빈 문자열)
+        character_appearances_block = ""
+        _appearances = payload.get("character_appearances") or []
+        if _appearances:
+            ap_lines = [
+                f"- {a.get('character', '?')}: {float(a.get('start_sec', 0)):.1f}~{float(a.get('end_sec', 0)):.1f}초"
+                for a in _appearances
+            ]
+            character_appearances_block = (
+                "\n[face_id 사전 인식 결과 — 참고용]\n"
+                "외부 얼굴 인식기가 추정한 캐릭터 등장 구간이다. 같은 인물명을 라벨로 일관되게 사용하되, "
+                "픽셀에서 명백히 다르게 보이는 경우 영상 분석 결과를 우선한다.\n"
+                + "\n".join(ap_lines)
+            )
+
         prompt = GEMINI_PROMPT_TEMPLATE.format(
             work_title=payload["work_title"],
             topic=payload["topic"],
@@ -414,6 +787,7 @@ class GeminiClient:
             previous_episodes_context_block=previous_episodes_context_block,
             work_context_block=work_context_block,
             narrative_skeleton_block=narrative_skeleton_block,
+            character_appearances_block=character_appearances_block,
             min_candidates=min_candidates,
         )
 
@@ -649,7 +1023,7 @@ class GeminiClient:
         slim_fields = (
             "chunk_index", "candidate_index", "start_sec", "end_sec",
             "description", "characters_in_scene",
-            "continues_from", "transcript",
+            "requires_context", "continues_from", "transcript",
         )
         candidates_str = ""
         for m in all_candidates:
@@ -818,13 +1192,13 @@ class GeminiClient:
                     result["selected_storyline_index"] = best_idx
                     selected_idx = best_idx
 
+                # 복합 점수 = viral*0.6 + coherence*0.4
                 for _sl in storylines:
-                    _sl["composite_score"] = float(_sl.get("score", 0) or 0)
+                    _v = float(_sl.get("score", 0) or 0)
+                    _c = float(_sl.get("coherence_score", 0) or 0)
+                    _sl["composite_score"] = _v * 0.6 + _c * 0.4
 
                 result["selected_storyline"] = storylines[selected_idx]
-                # 선정된 storyline의 shorts_type을 top-level에 자동 반영
-                result.setdefault("shorts_type", storylines[selected_idx].get("shorts_type", "storytelling"))
-                result.setdefault("selection_reason", "")
                 # 전체 storylines를 복합 점수 순으로 정렬 (멀티쇼츠용)
                 result["ranked_storylines"] = sorted(
                     storylines, key=lambda s: s.get("composite_score", s.get("score", 0)), reverse=True
@@ -853,21 +1227,157 @@ class GeminiClient:
         print("    [FALLBACK] Gemini 스토리 구성 실패 — 최고 점수 moment로 하이라이트 클립 생성")
         return _build_fallback_story(all_candidates, work_title)
 
+    def plan_tts_cues(
+        self,
+        clips: list,
+        work_title: str,
+        narrative_skeleton: dict | None = None,
+        work_context: str | None = None,
+        previous_episodes_context: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """결정된 storyline의 클립 시퀀스를 받아 TTS cue 리스트를 반환한다.
+
+        cue.start_sec / end_sec은 편집 타임라인 절대 시간(0초 = 쇼츠 시작) 기준.
+        voice/speed는 app.modules.tts의 프리셋 라벨.
+        """
+        # 클립을 편집 타임라인 절대 시간 기준으로 직렬화
+        cum = 0.0
+        clips_lines: list[str] = []
+        for i, c in enumerate(clips):
+            dur = float(c.end_sec - c.start_sec)
+            edit_start = cum
+            edit_end = cum + dur
+            cum = edit_end
+            chars = list(getattr(c, "character_focus", ()) or [])
+            subtitle = getattr(c, "subtitle", "") or ""
+            clips_lines.append(
+                f"- clip {i} (role={c.role}): "
+                f"edit_timeline {edit_start:.1f}~{edit_end:.1f}s "
+                f"(원본 {c.start_sec:.1f}~{c.end_sec:.1f}s), "
+                f"chars={chars}, "
+                f"description={subtitle[:120]!r}"
+            )
+        clips_str = "\n".join(clips_lines) if clips_lines else "(없음)"
+        total_duration = cum
+
+        # 컨텍스트 블록
+        work_context_block = ""
+        if work_context:
+            work_context_block = f"\n[작품 정보]\n{work_context}\n"
+        episodes_context_block = ""
+        if previous_episodes_context:
+            episodes_context_block = f"\n[이전 에피소드 요약]\n{previous_episodes_context}\n"
+        narrative_skeleton_json_block = ""
+        if narrative_skeleton and isinstance(narrative_skeleton, dict):
+            sk_json = json.dumps(narrative_skeleton, ensure_ascii=False, indent=2)
+            sk_escaped = sk_json.replace("{", "{{").replace("}", "}}")
+            narrative_skeleton_json_block = f"\n[작품 서사 스켈레톤]\n{sk_escaped}\n"
+
+        prompt = TTS_PLANNING_PROMPT.format(
+            work_title=work_title,
+            total_duration=total_duration,
+            clips_str=clips_str,
+            work_context_block=work_context_block,
+            episodes_context_block=episodes_context_block,
+            narrative_skeleton_json_block=narrative_skeleton_json_block,
+        )
+
+        valid_voices = {
+            "ko_female", "ko_female_high", "ko_male", "ko_male_low",
+            "chat_emma", "chat_brian", "chat_seraphina", "chat_florian",
+        }
+        valid_speeds = {"very_slow", "slow", "normal", "fast", "very_fast"}
+
+        for attempt in range(self.config.max_retries):
+            try:
+                response = self.client.models.generate_content(
+                    model=self.config.flash_model_name,
+                    contents=[prompt],
+                    config=self.types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.7,
+                    ),
+                )
+                if not response or not response.text:
+                    if attempt == self.config.max_retries - 1:
+                        return []
+                    time.sleep(2 ** attempt)
+                    continue
+                text = _extract_json_from_markdown(response.text)
+                data = json.loads(text)
+                raw_cues = data.get("tts_cues", []) if isinstance(data, dict) else []
+                cues: list[dict[str, Any]] = []
+                for c in raw_cues:
+                    if not isinstance(c, dict):
+                        continue
+                    if "start_sec" not in c or "end_sec" not in c or "text" not in c:
+                        continue
+                    s = float(c["start_sec"])
+                    e = float(c["end_sec"])
+                    if e <= s:
+                        continue
+                    # 편집 타임라인 범위 안 (약간의 여유 허용)
+                    if s < -0.5 or e > total_duration + 0.5:
+                        continue
+                    voice = str(c.get("voice", "ko_female"))
+                    if voice not in valid_voices:
+                        voice = "ko_female"
+                    speed = str(c.get("speed", "normal"))
+                    if speed not in valid_speeds:
+                        speed = "normal"
+                    cues.append({
+                        "start_sec": s,
+                        "end_sec": e,
+                        "text": str(c["text"]).strip(),
+                        "voice": voice,
+                        "speed": speed,
+                    })
+                # 시간순 정렬 + 겹침 제거 (뒤 cue가 앞 cue와 겹치면 뒤 cue 시작을 앞 cue 종료 후로 이동)
+                cues.sort(key=lambda x: x["start_sec"])
+                for i in range(1, len(cues)):
+                    if cues[i]["start_sec"] < cues[i - 1]["end_sec"]:
+                        cues[i]["start_sec"] = cues[i - 1]["end_sec"] + 0.05
+                # 보정으로 end_sec ≤ start_sec가 됐다면 제거
+                cues = [c for c in cues if c["end_sec"] > c["start_sec"]]
+
+                # ── 한 쇼츠 = 한 voice 강제 (LLM이 가이드를 어겼을 때 후처리로 통일) ──
+                if cues:
+                    voice_count: dict[str, int] = {}
+                    for c in cues:
+                        voice_count[c["voice"]] = voice_count.get(c["voice"], 0) + 1
+                    # 다수 등장 voice를 채택, 동률이면 첫 cue voice
+                    majority = max(voice_count.items(), key=lambda kv: (kv[1], -list(c["voice"] for c in cues).index(kv[0])))[0]
+                    if len(voice_count) > 1:
+                        for c in cues:
+                            c["voice"] = majority
+
+                return cues
+            except Exception as e:
+                if attempt == self.config.max_retries - 1:
+                    print(f"    [ERROR] TTS cue 계획 실패: {e}")
+                    return []
+                time.sleep(2 ** attempt)
+        return []
+
 
 def _build_fallback_story(all_candidates: list, work_title: str) -> dict[str, Any]:
     """Gemini 스토리 구성 실패 시 상위 3-4개 moment를 조합하여 서사형 폴백 생성."""
     if not all_candidates:
         raise RuntimeError("후보 장면이 없어 폴백도 불가능합니다.")
 
-    # final_score 기준 정렬
+    # 점수 필드가 더 이상 없으므로 시간순 안정 정렬을 폴백 기준으로 사용
     sorted_candidates = sorted(
         all_candidates,
-        key=lambda m: m.get("final_score", m.get("importance", 0)),
-        reverse=True,
+        key=lambda m: m.get("start_sec", 0),
     )
 
-    # 상위 4개 moment 선택 (최소 3개)
-    top_moments = sorted_candidates[:min(4, len(sorted_candidates))]
+    # 상위 4개 moment 선택 (최소 3개) — 시간순으로 균등하게 샘플링
+    if len(sorted_candidates) <= 4:
+        top_moments = list(sorted_candidates)
+    else:
+        n = len(sorted_candidates)
+        idxs = [0, n // 3, (2 * n) // 3, n - 1]
+        top_moments = [sorted_candidates[i] for i in idxs]
 
     # 시간순 정렬 (서사 흐름)
     top_moments.sort(key=lambda m: m.get("start_sec", 0))
@@ -891,7 +1401,6 @@ def _build_fallback_story(all_candidates: list, work_title: str) -> dict[str, An
             "start_sec": m["start_sec"],
             "end_sec": m["end_sec"],
             "description": m.get("description", ""),
-            "tts_line": m.get("suggested_tts_line", ""),
             "use_original_audio": True,
         }
         for m in build_moments
@@ -904,7 +1413,6 @@ def _build_fallback_story(all_candidates: list, work_title: str) -> dict[str, An
             "start_sec": hook_m["start_sec"],
             "end_sec": hook_m["end_sec"],
             "description": hook_m.get("description", ""),
-            "tts_line": hook_m.get("suggested_tts_line", ""),
             "use_original_audio": True,
         },
         "build": build_clips,
@@ -914,7 +1422,6 @@ def _build_fallback_story(all_candidates: list, work_title: str) -> dict[str, An
             "start_sec": payoff_m["start_sec"],
             "end_sec": payoff_m["end_sec"],
             "description": payoff_m.get("description", ""),
-            "tts_line": payoff_m.get("suggested_tts_line", ""),
             "use_original_audio": True,
         },
     }
@@ -926,7 +1433,7 @@ def _build_fallback_story(all_candidates: list, work_title: str) -> dict[str, An
         "sequence_type": "여정몰입형",
         "topic": best.get("description", work_title)[:30],
         "topic_reason": "Gemini 스토리 구성 실패로 상위 moment 자동 조합",
-        "score": best.get("final_score", best.get("importance", 0)),
+        "score": 0.5,
         "estimated_duration_sec": total_dur,
         "viral_titles": best.get("viral_titles", [work_title]),
         "title_line1": work_title[:15],
@@ -1044,9 +1551,6 @@ def _validate_gemini_schema(data: dict[str, Any]) -> None:
         raise ValueError("candidate_moments must be a list")
 
     for moment in data["candidate_moments"]:
-        for key in [
-            "start_sec", "end_sec", "importance", "hook_score",
-            "topic_alignment_score", "description", "transcript",
-        ]:
+        for key in ["start_sec", "end_sec", "description", "reason", "transcript"]:
             if key not in moment:
                 raise ValueError(f"Missing key {key} in candidate moment")

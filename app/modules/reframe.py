@@ -28,6 +28,7 @@ def build_crop_timeline(
     enable_speaker_tracking: bool = True,
     target_character: str | None = None,
     face_identifier: object | None = None,
+    character_index: list[dict] | None = None,
 ) -> list[CropKeyframe]:
     if _has_cv2():
         keyframes = _detect_faces(
@@ -35,6 +36,7 @@ def build_crop_timeline(
             enable_speaker_tracking=enable_speaker_tracking,
             target_character=target_character,
             face_identifier=face_identifier,
+            character_index=character_index,
         )
     else:
         keyframes = _center_crop(width, height, sample_interval_sec)
@@ -97,6 +99,7 @@ def _detect_faces(
     enable_speaker_tracking: bool = True,
     target_character: str | None = None,
     face_identifier: object | None = None,
+    character_index: list[dict] | None = None,
 ) -> list[CropKeyframe]:
     import cv2
     import numpy as np
@@ -173,16 +176,30 @@ def _detect_faces(
                     fw = gray.shape[1]
                     faces = np.array([[fw - (x + w), y, w, h] for x, y, w, h in faces_flip])
 
-        # Phase 12: face_identifier로 타겟 인물 우선 추적
+        # Phase 12: 인덱스 lookup 우선, 미스 시 face_identifier(ArcFace) 폴백
         face_id_hit = False
-        if face_identifier and target_character:
-            try:
-                result = face_identifier.find_target_in_frame(frame, target_character)
-                if result is not None:
-                    target_x, target_y = result
-                    face_id_hit = True
-            except Exception:
-                pass  # deepface 오류 시 기존 로직 폴백
+        if target_character:
+            t_sec = current_frame / fps
+            if character_index:
+                try:
+                    from app.modules.face_id import find_target_in_index
+                    result = find_target_in_index(
+                        character_index, target_character, t_sec,
+                        frame.shape[1], frame.shape[0],
+                    )
+                    if result is not None:
+                        target_x, target_y = result
+                        face_id_hit = True
+                except Exception:
+                    pass
+            if not face_id_hit and face_identifier:
+                try:
+                    result = face_identifier.find_target_in_frame(frame, target_character)
+                    if result is not None:
+                        target_x, target_y = result
+                        face_id_hit = True
+                except Exception:
+                    pass  # deepface 오류 시 기존 로직 폴백
 
         if not face_id_hit and len(faces) > 0:
             if enable_speaker_tracking:

@@ -147,6 +147,130 @@ class FaceIdentifier:
 
         return results
 
+    def build_appearance_index(
+        self,
+        video_path: Path,
+        sample_interval_sec: float = 2.0,
+        similarity_threshold: float = 0.4,
+    ) -> list[dict[str, Any]]:
+        """영상을 일정 간격으로 샘플링해 캐릭터 등장 구간 인덱스를 만든다.
+
+        proxy(저해상·저fps) 영상을 입력으로 가정. 샘플 간격마다 한 프레임을 뽑아
+        identify_in_frame()으로 등장 캐릭터를 추정하고, 인접 샘플에서 동일 캐릭터가
+        연속하면 하나의 구간으로 병합한다.
+
+        Returns:
+            [{"character": str, "start_sec": float, "end_sec": float,
+              "samples": [{"t": float, "x_norm": float, "y_norm": float, "similarity": float}, ...]}, ...]
+            (start_sec 오름차순 정렬)
+
+            x_norm/y_norm은 입력 프레임 기준의 정규화 좌표(0~1).
+            reframe 단계에서 원본 해상도로 스케일 업해 좌표 lookup에 재사용한다.
+        """
+        if not self.references:
+            return []
+
+        import cv2
+
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            return []
+        try:
+            fps = cap.get(cv2.CAP_PROP_FPS) or 1.0
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            duration = total_frames / fps if fps > 0 else 0.0
+
+            char_intervals: dict[str, list[list[float]]] = {}
+            char_samples: dict[str, list[dict[str, Any]]] = {}
+            last_seen: dict[str, float] = {}
+            merge_gap = sample_interval_sec * 1.6  # 1샘플 누락은 같은 구간으로 간주
+
+            t = 0.0
+            while t < duration:
+                cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                fh, fw = frame.shape[:2]
+                try:
+                    identified = self.identify_in_frame(frame, similarity_threshold)
+                except Exception:
+                    identified = []
+
+                seen_now: set[str] = set()
+                for fd in identified:
+                    name = fd.get("character", "unknown")
+                    if name == "unknown":
+                        continue
+                    x1, y1, x2, y2 = fd["bbox"]
+                    cx = (x1 + x2) / 2.0
+                    cy = (y1 + y2) / 2.0
+                    char_samples.setdefault(name, []).append({
+                        "t": float(t),
+                        "x_norm": float(cx / fw) if fw else 0.0,
+                        "y_norm": float(cy / fh) if fh else 0.0,
+                        "similarity": float(fd.get("similarity", 0.0)),
+                    })
+                    seen_now.add(name)
+
+                end_t = t + sample_interval_sec
+                for name in seen_now:
+                    if name in last_seen and (t - last_seen[name]) <= merge_gap:
+                        char_intervals[name][-1][1] = end_t
+                    else:
+                        char_intervals.setdefault(name, []).append([t, end_t])
+                    last_seen[name] = t
+                t += sample_interval_sec
+        finally:
+            cap.release()
+
+        appearances: list[dict[str, Any]] = []
+        for name, intervals in char_intervals.items():
+            samples_all = char_samples.get(name, [])
+            for s, e in intervals:
+                seg_samples = [smp for smp in samples_all if s <= smp["t"] < e]
+                appearances.append({
+                    "character": name,
+                    "start_sec": float(s),
+                    "end_sec": float(e),
+                    "samples": seg_samples,
+                })
+        appearances.sort(key=lambda x: x["start_sec"])
+        return appearances
+
+
+def find_target_in_index(
+    appearances: list[dict[str, Any]],
+    target_character: str,
+    t_sec: float,
+    frame_width: int,
+    frame_height: int,
+    max_dt_sec: float = 3.0,
+) -> tuple[float, float] | None:
+    """character_index에서 target_character의 t_sec 시점 좌표를 lookup한다.
+
+    가장 가까운 sample을 사용 (선형 보간 미적용 — reframe의 EMA 스무딩이 부드럽게 만든다).
+    sample이 없거나 가장 가까운 sample이 max_dt_sec를 넘으면 None.
+    좌표는 정규화된 sample을 frame_width/height로 스케일 업한 픽셀 값.
+    """
+    best_sample: dict[str, Any] | None = None
+    best_dt = float("inf")
+    for ap in appearances:
+        if ap.get("character") != target_character:
+            continue
+        if ap["start_sec"] - 1.0 <= t_sec <= ap["end_sec"] + 1.0:
+            for smp in ap.get("samples") or []:
+                dt = abs(smp["t"] - t_sec)
+                if dt < best_dt:
+                    best_dt = dt
+                    best_sample = smp
+    if best_sample is None or best_dt > max_dt_sec:
+        return None
+    return (
+        best_sample["x_norm"] * frame_width,
+        best_sample["y_norm"] * frame_height,
+    )
+
     def find_target_in_frame(
         self,
         frame: np.ndarray,
