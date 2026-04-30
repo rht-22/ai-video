@@ -1486,6 +1486,46 @@ class GeminiClient:
                 time.sleep(2 ** attempt)
         return []
 
+    # ─────────────────────────────────────────
+    # 텍스트 단축 (TTS fit 용도, Flash 모델)
+    # ─────────────────────────────────────────
+    def shorten_text(self, text: str, *, target_chars: int) -> str:
+        """target_chars 이내로 의미를 보존하며 한국어 문장 단축. Flash 모델 사용.
+
+        TTS 합성 결과가 cue 시간 초과 시 호출되어 텍스트를 줄인다.
+        실패 시 입력 그대로 반환 (호출부가 단순 절단으로 폴백).
+        """
+        if not text or target_chars <= 0:
+            return text
+        if len(text) <= target_chars:
+            return text
+        prompt = (
+            f"다음 한국어 쇼츠 나레이션 문장을 의미·뉘앙스를 보존하며 {target_chars}자 이내로 줄여라. "
+            "결과 텍스트만 출력. 따옴표·설명·접두사 금지.\n\n"
+            f"{text}"
+        )
+        for attempt in range(2):
+            try:
+                response = self.client.models.generate_content(
+                    model=self.config.flash_model_name,
+                    contents=[prompt],
+                    config=self.types.GenerateContentConfig(
+                        temperature=0.4,
+                    ),
+                )
+                if response and response.text:
+                    out = response.text.strip().strip('"').strip("'")
+                    # 첫 줄만 사용 (Flash가 가끔 설명 추가)
+                    if "\n" in out:
+                        out = out.split("\n", 1)[0].strip()
+                    if out and len(out) <= len(text):
+                        return out
+            except Exception as e:
+                if attempt == 1:
+                    print(f"    [WARN] shorten_text 실패: {e}")
+                time.sleep(1)
+        return text
+
 
 def _build_fallback_story(all_candidates: list, work_title: str) -> dict[str, Any]:
     """Gemini 스토리 구성 실패 시 상위 3-4개 moment를 조합하여 서사형 폴백 생성."""

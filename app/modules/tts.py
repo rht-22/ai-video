@@ -55,6 +55,73 @@ def synthesize_tts(
     return _synthesize_silence(output_path, duration_sec=1.0)
 
 
+def get_audio_duration(path: Path) -> float:
+    """ffprobe로 mp3/audio 파일의 재생 시간(초)을 반환."""
+    try:
+        ffprobe = find_ffmpeg_command("ffprobe")
+    except Exception:
+        return 0.0
+    cmd = [
+        ffprobe, "-v", "quiet",
+        "-show_entries", "format=duration",
+        "-of", "csv=p=0",
+        str(path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return float(result.stdout.strip())
+    except (ValueError, AttributeError, subprocess.SubprocessError):
+        return 0.0
+
+
+def synthesize_tts_with_fit(
+    text: str,
+    output_path: Path,
+    target_sec: float,
+    *,
+    voice: str = DEFAULT_VOICE,
+    speed: str = DEFAULT_SPEED,
+    shorten_fn=None,
+    max_retries: int = 2,
+    safety_margin: float = 0.95,
+) -> tuple[str, float]:
+    """target_sec 안에 들어가도록 TTS 합성. 초과 시 shorten_fn으로 텍스트를 줄여 재합성.
+
+    shorten_fn: callable(text: str, target_chars: int) -> str
+        제공되지 않으면 단순 절단 (의미 손상 위험) 폴백.
+
+    반환: (최종 사용된 텍스트, 실제 합성 길이 초)
+    """
+    current_text = text
+    last_actual = 0.0
+    for attempt in range(max_retries + 1):
+        synthesize_tts(current_text, output_path, voice=voice, speed=speed)
+        actual = get_audio_duration(output_path)
+        last_actual = actual
+        if actual <= target_sec or actual <= 0.0:
+            return current_text, actual
+        if attempt == max_retries:
+            print(f"  [TTS-fit-WARN] {len(current_text)}자 → {actual:.1f}s > target {target_sec:.1f}s — 잘림 감수")
+            return current_text, actual
+        # 줄여야 하는 비율 계산 (안전 마진 5% 추가 단축)
+        shrink_ratio = (target_sec / actual) * safety_margin
+        target_chars = max(8, int(len(current_text) * shrink_ratio))
+        if shorten_fn:
+            try:
+                shorter = shorten_fn(current_text, target_chars=target_chars)
+                shorter = (shorter or "").strip()
+                if shorter and shorter != current_text:
+                    print(f"  [TTS-fit] 재합성 시도 {attempt + 1}: {len(current_text)}자 → {len(shorter)}자 (target {target_chars}자)")
+                    current_text = shorter
+                    continue
+            except Exception as e:
+                print(f"  [TTS-fit] shorten 실패 ({e}) — 단순 절단 폴백")
+        # shorten_fn 미제공 또는 실패 → 단순 절단
+        current_text = current_text[:target_chars].rstrip("., \t\n") + "."
+        print(f"  [TTS-fit] 재합성 시도 {attempt + 1} (단순 절단): {len(current_text)}자")
+    return current_text, last_actual
+
+
 def _has_edge_tts() -> bool:
     import importlib.util
 

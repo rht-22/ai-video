@@ -1130,7 +1130,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
         # 무음 제거 (이미 전사 데이터가 있으므로 바로 실행)
         print("  무음 구간 제거 중...")
-        cut_results = cut_silence_from_clips(clips, transcript_text, max_gap_sec=0.8, padding_sec=0.15)
+        cut_results = cut_silence_from_clips(clips, transcript_text, max_gap_sec=0.4, padding_sec=0.15)
         print_silence_cut_summary(cut_results)
         clips = flatten_to_clips(cut_results)
         print(f"[OK] 전사 로드 + 무음 제거 완료 ({len(clips)}개 클립)")
@@ -1220,7 +1220,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             print("  무음 제거 건너뜀 (Gemini 폴백 데이터는 타이밍이 부정확)")
         else:
             print("  무음 구간 제거 중...")
-            cut_results = cut_silence_from_clips(clips, transcript_text, max_gap_sec=0.8, padding_sec=0.15)
+            cut_results = cut_silence_from_clips(clips, transcript_text, max_gap_sec=0.4, padding_sec=0.15)
             print_silence_cut_summary(cut_results)
             clips = flatten_to_clips(cut_results)
         print(f"[OK] 전사 완료 ({len(clips)}개 클립)")
@@ -1326,16 +1326,24 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 print(f"    진행 중... ({idx + 1}/{len(clips)})")
 
         # TTS 오디오 생성 (cue별 — voice/speed 적용)
-        print("  TTS 오디오 생성 중 (cue별)...")
+        # cue 시간(end_sec - start_sec) 안에 들어가도록 fit. 초과 시 Flash로 텍스트 단축.
+        print("  TTS 오디오 생성 중 (cue별, fit 적용)...")
+        from app.modules.tts import synthesize_tts_with_fit
+        _flash_for_shorten = locals().get("gemini") or load_gemini_client()
+        _shorten = getattr(_flash_for_shorten, "shorten_text", None) if _flash_for_shorten else None
         tts_cue_files: list[dict[str, Any]] = []
         for ci, cue in enumerate(tts_cues):
             tts_path = output_dir / f"tts_cue_{ci}.mp3"
-            synthesize_tts(
-                cue["text"], tts_path,
-                lang=payload.language,
+            target_sec = max(0.5, float(cue.get("end_sec", 0.0)) - float(cue.get("start_sec", 0.0)))
+            final_text, actual_sec = synthesize_tts_with_fit(
+                cue["text"], tts_path, target_sec=target_sec,
                 voice=cue.get("voice", "narrative_female"),
                 speed=cue.get("speed", "normal"),
+                shorten_fn=_shorten,
             )
+            # fit 결과를 cue에 반영(자막 일관성 + 디버깅용)
+            cue["text"] = final_text
+            cue["fit_actual_sec"] = actual_sec
             tts_cue_files.append({
                 "cue_index": ci,
                 "path": str(tts_path),
@@ -1563,18 +1571,24 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     ) for s in var_merged
                 ]
 
-                # TTS 생성 (variant별 cue 사용)
+                # TTS 생성 (variant별 cue 사용) — fit 적용으로 cue 시간 안에 들어가게 합성
+                from app.modules.tts import synthesize_tts_with_fit
+                _g_v = locals().get("gemini") or load_gemini_client()
+                _shorten_v = getattr(_g_v, "shorten_text", None) if _g_v else None
                 var_cues = tts_cues_per_variant[var_idx] if var_idx < len(tts_cues_per_variant) else []
                 var_tts_cue_files: list[dict[str, Any]] = []
                 for ci, cue in enumerate(var_cues):
                     tts_out = output_dir / f"tts_{var_num}_cue_{ci}.mp3"
                     if not tts_out.exists():
-                        synthesize_tts(
-                            cue["text"], tts_out,
-                            lang=payload.language,
+                        target_sec = max(0.5, float(cue.get("end_sec", 0.0)) - float(cue.get("start_sec", 0.0)))
+                        final_text, actual_sec = synthesize_tts_with_fit(
+                            cue["text"], tts_out, target_sec=target_sec,
                             voice=cue.get("voice", "narrative_female"),
                             speed=cue.get("speed", "normal"),
+                            shorten_fn=_shorten_v,
                         )
+                        cue["text"] = final_text
+                        cue["fit_actual_sec"] = actual_sec
                     var_tts_cue_files.append({
                         "cue_index": ci,
                         "path": str(tts_out),

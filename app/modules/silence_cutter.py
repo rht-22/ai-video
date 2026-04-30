@@ -25,7 +25,7 @@ def cut_silence_from_clips(
     clips: list[StoryClip],
     transcript_segments: list[SpeechSegment],
     *,
-    max_gap_sec: float = 0.8,   # 이 이상 침묵이면 컷 (드라마는 넉넉하게)
+    max_gap_sec: float = 0.4,   # 이 이상 침묵이면 컷 — 0.8 → 0.4 (영상 템포 ↑, 라운드 3b)
     padding_sec: float = 0.15,  # 대사 앞뒤 여유 (너무 빡빡하게 자르면 어색함)
     min_interval_sec: float = 0.3,  # 너무 짧은 구간은 합치기
 ) -> list[SilenceCutResult]:
