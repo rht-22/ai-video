@@ -152,6 +152,7 @@ candidate_moments는 다음 두 가지 유형의 쇼츠 제작에 모두 활용�
 [유형 1: 하이라이트 쇼츠]
 - 하나의 강렬한 장면 중심, 맥락 설명 최소화
 - 단일 클립으로 시청자가 "뭐지?" → 감정반응 → 완결까지 느낄 수 있는 장면
+- 이전 맥락이나 이후 결과에 대한 설명이 전혀 필요하지 않은 장면
 - → highlight_eligible: true 로 표기
 
 [유형 2: 서사형 쇼츠]
@@ -320,13 +321,13 @@ STORY_COMPOSITION_PROMPT = """
 후보 클립 목록에서 highlight_eligible: true인 클립 수와 전체 클립 수를 직접 세어 비율을 계산하라.
 
 - 비율 **90% 이상**: 전부 highlight로 구성해도 된다.
-- 비율 **20% 이하**: storytelling을 반드시 하나 이상 구성하라.
+- 비율 **20% 이하**: storytelling을 반드시 둘 이상 구성하라.
 - 그 외 (20%~90%): storytelling과 highlight를 적절히 혼합하라.
 - highlight 타입은 반드시 highlight_eligible: true인 클립에만 사용하라.
 
 ## storytelling 타입 — 멀티클립 서사형
 
-- 모든 chunk의 candidate_moments 중에서 여러 장면들을 선정해 기승전결이 있도록 여러 장면을 유기적으로 연결할 것.
+- 모든 chunk의 candidate_moments 중에서 여러 장면들을 선정해 원본의 서사를 반영한 기승전결이 있도록 여러 장면을 유기적으로 연결할 것.
 - 캐릭터의 행적을 조명하거나 영상의 주요 서사를 요약.
 - sequence_type: "여정몰입형" 또는 "결과선공개형" 중 선택 (storytelling만 해당)
    - **결과선공개형**: 에피소드 내 핵심 결과(반전·충격·감정 폭발)가 명확하고, 그 결과만으로도 시청자의 시선을 확 잡아끌 수 있을 때 선택한다. hook에서 결과 장면을 먼저 보여줘 "이게 왜?", "어쩌다 이렇게 됐지?"라는 궁금증을 유발하고, build~payoff에서 그 과정을 시간 순으로 풀어준다.
@@ -395,6 +396,15 @@ needed=false면 candidate의 원래 start_sec/end_sec 그대로 사용 (`"contex
 
 # 공통 규칙
 
+## topic-title-스토리 일관성 (최상위 원칙)
+
+topic은 이 쇼츠가 결국 무엇에 관한 이야기인지를 정의하는 척추다.
+topic이 바뀌지 않는 한 제목과 결말은 같은 이야기를 가리켜야 한다.
+
+- **title_line1 / title_line2**는 topic을 시청자의 언어로 압축한 것이어야 한다
+- **hook → build → payoff**의 흐름은 topic이 전개되고 완결되는 과정이어야 한다
+- 셋 중 하나라도 topic에서 벗어난다면 topic을 재정의하거나 클립/제목을 교체하라
+
 ## 3개 스토리라인 독립성
 
 - 3개 스토리라인은 **서로 다른 장면을 사용**해야 한다 (동일 씬 중복 사용 금지)
@@ -425,7 +435,6 @@ needed=false면 candidate의 원래 start_sec/end_sec 그대로 사용 (`"contex
 {story_topic_line}
 {work_context_block}
 {episodes_context_block}
-{narrative_skeleton_json_block}
 {segments_summary_block}
 
 - 후보 장면 및 분석 데이터:
@@ -1028,7 +1037,7 @@ class GeminiClient:
             '    }\n'
             "  ],\n"
             "⚠️ key_characters 수집 원칙:\n"
-            "  - 자막/대사에서 불린 이름이 있으면 반드시 그 이름을 사용\n"
+            "  -'work_context'에 없더라도 자막/대사에서 불린 이름이 있으면 반드시 그 이름을 사용\n"
             "  - 한 번이라도 이름이 언급된 인물은 모두 포함 (주연뿐 아니라 조연/게스트 포함)\n"
             "  - 이름을 전혀 알 수 없는 경우에만 '30대 여성 주인공' 형태 사용\n"
             "  - name_sources: 이름을 어떻게 알았는지 명시 (이름 신뢰도 판단용)\n"
