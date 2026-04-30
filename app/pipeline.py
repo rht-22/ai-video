@@ -77,14 +77,88 @@ def _build_candidates_lookup(all_candidates: list[dict]) -> dict[tuple[int, int]
     return lookup
 
 
-def _resolve_clip_times(src: dict, candidates_lookup: dict[tuple[int, int], dict]) -> dict:
+def _dedup_boundary_candidates(
+    all_candidates: list[dict], *,
+    overlap_threshold: float = 0.5,
+) -> dict[tuple[int, int], tuple[int, int]]:
+    """청크 경계에서 같은 장면이 양쪽 청크에 따로 등록된 candidate 페어를 감지해 alias 맵 반환.
+
+    예: chunk0_cand9(570~600, 청크 끝에서 잘림) ↔ chunk1_cand0(598~615) → 같은 장면
+        → alias[(0, 9)] = (1, 0) 또는 그 반대로 정본 선택 후 alias 등록
+
+    정본 선택 기준:
+    1. 더 긴 시간 범위 (청크 경계에서 잘리지 않은 쪽 우선)
+    2. 같으면 더 일찍 시작하는 쪽
+
+    Returns:
+        alias dict: 중복 candidate (slave) → 정본 candidate (master)
+    """
+    by_chunk: dict[int, list[dict]] = {}
+    for c in all_candidates or []:
+        ci = int(c.get("chunk_index", -1))
+        if ci < 0:
+            continue
+        by_chunk.setdefault(ci, []).append(c)
+
+    alias: dict[tuple[int, int], tuple[int, int]] = {}
+    chunks_sorted = sorted(by_chunk.keys())
+    for i in range(len(chunks_sorted) - 1):
+        c1, c2 = chunks_sorted[i], chunks_sorted[i + 1]
+        for a in by_chunk[c1]:
+            for b in by_chunk[c2]:
+                a_s, a_e = float(a.get("start_sec", 0)), float(a.get("end_sec", 0))
+                b_s, b_e = float(b.get("start_sec", 0)), float(b.get("end_sec", 0))
+                if a_e <= a_s or b_e <= b_s:
+                    continue
+                lap = max(0.0, min(a_e, b_e) - max(a_s, b_s))
+                if lap <= 0:
+                    continue
+                # 같은 장면 판정: (a) 작은 쪽 클립의 overlap_threshold 이상 겹치거나
+                # (b) 절대 1.5초 이상 겹침 (청크 경계 잘린 케이스 대응 — 사용자 사례:
+                #     chunk0_cand9(570~600) ↔ chunk1_cand0(598~615), overlap 2초)
+                a_dur = a_e - a_s
+                b_dur = b_e - b_s
+                if lap < min(a_dur, b_dur) * overlap_threshold and lap < 1.5:
+                    continue
+                # 두 candidate가 같은 장면 → 합친 시간 범위가 정본
+                # (청크 경계에서 잘린 쪽이 어느 쪽이든 둘을 합치면 잘리지 않은 전체 장면이 됨)
+                merged_start = min(a_s, b_s)
+                merged_end = max(a_e, b_e)
+                # master는 다음 청크의 candidate (보통 청크 시작이 자연스러운 장면 시작점)
+                master, slave = b, a
+                m_key = (int(master.get("chunk_index")), int(master.get("candidate_index")))
+                s_key = (int(slave.get("chunk_index")), int(slave.get("candidate_index")))
+                # master candidate의 시간을 합친 범위로 덮어씀 (in-place — 라운타임 사본)
+                master["start_sec"] = merged_start
+                master["end_sec"] = merged_end
+                alias[s_key] = m_key
+                print(
+                    f"  [dedup] chunk{s_key[0]} cand{s_key[1]}({slave.get('start_sec')}~{slave.get('end_sec')}) "
+                    f"+ chunk{m_key[0]} cand{m_key[1]}({b_s}~{b_e}) "
+                    f"→ 합친 정본 chunk{m_key[0]} cand{m_key[1]}({merged_start}~{merged_end}) "
+                    f"(overlap {lap:.1f}s, 청크 경계 잘림 보정)"
+                )
+    return alias
+
+
+def _resolve_clip_times(
+    src: dict,
+    candidates_lookup: dict[tuple[int, int], dict],
+    boundary_alias: dict[tuple[int, int], tuple[int, int]] | None = None,
+) -> dict:
     """LLM 출력의 start_sec/end_sec을 무시하고 candidate에서 lookup해 정본 시간으로 복원.
 
+    - boundary_alias: 청크 경계 중복 candidate를 정본으로 redirect
     - context_extended=true면 candidate.context_extension의 extended_start/end_sec을 적용
     - lookup 실패 시 입력 그대로 폴백
     """
     ci = int(src.get("chunk_index", -1))
     cj = int(src.get("candidate_index", -1))
+    if boundary_alias:
+        # 청크 경계 dedup: alias가 있으면 정본 candidate로 redirect
+        master = boundary_alias.get((ci, cj))
+        if master is not None:
+            ci, cj = master
     cand = candidates_lookup.get((ci, cj))
     if cand is None:
         return src  # 폴백
@@ -99,6 +173,9 @@ def _resolve_clip_times(src: dict, candidates_lookup: dict[tuple[int, int], dict
     out = dict(src)
     out["start_sec"] = start
     out["end_sec"] = end
+    # 정본 candidate의 chunk_index/candidate_index로도 갱신 (alias가 적용된 경우)
+    out["chunk_index"] = ci
+    out["candidate_index"] = cj
     # description은 candidate가 더 풍부 (LLM이 잘랐을 가능성 → candidate.description 우선)
     if not src.get("description") and cand.get("description"):
         out["description"] = cand["description"]
@@ -107,15 +184,41 @@ def _resolve_clip_times(src: dict, candidates_lookup: dict[tuple[int, int], dict
     return out
 
 
+def _apply_lookup_to_storyline(
+    sl: dict,
+    candidates_lookup: dict[tuple[int, int], dict],
+    boundary_alias: dict[tuple[int, int], tuple[int, int]] | None = None,
+) -> dict:
+    """storyline dict 안의 모든 클립 노드(hook/build/payoff/highlight 자체)에 _resolve_clip_times 적용.
+
+    저장 시점에 사용 — checkpoint_story.json에 LLM 환각이 남지 않도록 정본으로 덮어쓴다.
+    """
+    out = dict(sl)
+    if sl.get("shorts_type") == "highlight":
+        out.update(_resolve_clip_times(sl, candidates_lookup, boundary_alias))
+    else:
+        st = dict(sl.get("storyline", {}) or {})
+        if isinstance(st.get("hook"), dict):
+            st["hook"] = _resolve_clip_times(st["hook"], candidates_lookup, boundary_alias)
+        if isinstance(st.get("build"), list):
+            st["build"] = [_resolve_clip_times(b, candidates_lookup, boundary_alias) for b in st["build"]]
+        if isinstance(st.get("payoff"), dict):
+            st["payoff"] = _resolve_clip_times(st["payoff"], candidates_lookup, boundary_alias)
+        out["storyline"] = st
+    return out
+
+
 def _clips_from_storyline(
     storyline_data: dict,
     fallback_title: str = "",
     candidates_lookup: dict[tuple[int, int], dict] | None = None,
+    boundary_alias: dict[tuple[int, int], tuple[int, int]] | None = None,
 ) -> tuple[list[StoryClip], str]:
     """스토리라인 dict에서 (clips, title_text)를 추출합니다.
 
     candidates_lookup: (chunk_index, candidate_index) → candidate dict 맵.
     제공되면 LLM 출력의 start_sec/end_sec을 무시하고 candidate 시간으로 복원 (이슈 2·6 해결).
+    boundary_alias: 청크 경계 dedup alias (라운드 4) — 같은 장면 양쪽 청크 등록 케이스 통합.
     """
     clips: list[StoryClip] = []
 
@@ -130,7 +233,7 @@ def _clips_from_storyline(
     # 시간 고정: LLM이 어떻게 출력했든 candidate 정본 시간으로 복원
     def _resolve(src: dict) -> dict:
         if candidates_lookup:
-            return _resolve_clip_times(src, candidates_lookup)
+            return _resolve_clip_times(src, candidates_lookup, boundary_alias)
         return src
 
     if storyline_data.get("shorts_type") == "highlight":
@@ -979,6 +1082,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         # 시간 고정 lookup 빌드: LLM이 출력한 start/end_sec를 candidate 정본으로 복원
         candidates_lookup = _build_candidates_lookup(all_candidates)
         print(f"  - 시간 고정 lookup: {len(candidates_lookup)}개 candidate 인덱싱")
+        # 청크 경계 dedup alias: 같은 장면이 양쪽 청크에 등록된 경우 합친 정본으로 redirect (라운드 4)
+        boundary_alias = _dedup_boundary_candidates(all_candidates)
+        if boundary_alias:
+            print(f"  - 청크 경계 dedup: {len(boundary_alias)}개 중복 alias 적용")
 
         # 다양성 우선 재선정: 같은 chunk/phase가 max_shorts개 모두 차지하지 않게
         # 점수 1위는 무조건 유지하고, 이후는 chunk_index/emotional_phase가 다른 후보를 우선
@@ -998,7 +1105,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
             try:
                 sl_clips, sl_title = _clips_from_storyline(
-                    sl_data, payload.work_title, candidates_lookup=candidates_lookup,
+                    sl_data, payload.work_title,
+                    candidates_lookup=candidates_lookup,
+                    boundary_alias=boundary_alias,
                 )
             except (KeyError, TypeError) as e:
                 print(f"  - 스토리라인 {sl_idx + 1} 파싱 실패: {e}")
@@ -1033,10 +1142,29 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             sel = story_plan.get("selected_storyline", {})
             if sel:
                 fb_clips, fb_title = _clips_from_storyline(
-                    sel, payload.work_title, candidates_lookup=candidates_lookup,
+                    sel, payload.work_title,
+                    candidates_lookup=candidates_lookup,
+                    boundary_alias=boundary_alias,
                 )
                 all_storyline_variants.append((fb_clips, fb_title, sel.get("score", 0.5)))
                 print(f"  - 폴백 스토리라인: {len(fb_clips)}개 클립")
+
+        # 라운드 4: story_plan에 정본 시간 덮어쓰기 → checkpoint_story.json에 LLM 환각이 안 남음
+        # 모든 storylines (rank/selected/diverse 변형) 안의 클립 노드에 candidates_lookup 적용
+        if "storylines" in story_plan and isinstance(story_plan["storylines"], list):
+            story_plan["storylines"] = [
+                _apply_lookup_to_storyline(sl, candidates_lookup, boundary_alias)
+                for sl in story_plan["storylines"]
+            ]
+        if isinstance(story_plan.get("ranked_storylines"), list):
+            story_plan["ranked_storylines"] = [
+                _apply_lookup_to_storyline(sl, candidates_lookup, boundary_alias)
+                for sl in story_plan["ranked_storylines"]
+            ]
+        if isinstance(story_plan.get("selected_storyline"), dict):
+            story_plan["selected_storyline"] = _apply_lookup_to_storyline(
+                story_plan["selected_storyline"], candidates_lookup, boundary_alias
+            )
 
         story_elapsed = time.time() - story_start
         print(f"  → 총 {len(all_storyline_variants)}개 쇼츠 생성 예정")
