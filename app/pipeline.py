@@ -32,6 +32,28 @@ def _strip_emoji(text: str) -> str:
     return _EMOJI_RE.sub("", text).strip()
 
 
+def _enforce_title_line2_limit(text: str, max_chars: int = 13) -> str:
+    """LLM이 title_line2 글자수 가이드를 어겼을 때 안전판 — 13자 이내로 강제 절단.
+
+    어절 경계 기준으로 자르되, 단어 하나가 13자 초과면 그대로 잘림.
+    """
+    if not text:
+        return text
+    if len(text) <= max_chars:
+        return text
+    # 어절 경계로 자르기
+    words = text.split()
+    out = ""
+    for w in words:
+        candidate = (out + " " + w).strip() if out else w
+        if len(candidate) > max_chars:
+            break
+        out = candidate
+    if not out:
+        out = text[:max_chars]
+    return out.strip()
+
+
 from app.config import AppConfig, Paths, DesignConfig, get_font_path
 from app.modules.chunker import build_chunks, split_video_chunk
 from app.modules.gemini_client import load_gemini_client
@@ -61,6 +83,37 @@ from app.modules.validator import validate_output
 from app.modules.ffmpeg_utils import find_ffmpeg_command
 from types import SimpleNamespace
 from app.modules.silence_cutter import cut_silence_from_clips, flatten_to_clips, print_silence_cut_summary
+
+
+def _compute_subtitle_margin_v(
+    design: DesignConfig,
+    *,
+    canvas_width: int = 1080,
+    canvas_height: int = 1920,
+    padding_px: int = 10,
+) -> int:
+    """ASS 자막의 margin_v를 영상 영역 끝에서 padding_px 위에 위치하도록 동적으로 계산.
+
+    캔버스 canvas_width×canvas_height에 영상이 aspect_ratio로 중앙 배치될 때:
+    - 영상 영역 끝점 = overlay_y + scaled_h
+    - 자막 baseline = 영상 영역 끝 - padding_px
+    - ASS alignment=2(하단 중앙) 기준 margin_v = canvas_height - 자막 baseline = canvas_height - (overlay_y + scaled_h) + padding_px
+
+    aspect_ratio는 DesignConfig에, 캔버스 크기는 AppConfig에 있으므로 호출부에서 명시 전달.
+    """
+    H = canvas_height
+    W = canvas_width
+    try:
+        r_w, r_h = map(int, str(getattr(design, "aspect_ratio", "1:1")).split(":"))
+        scaled_h = int(W * r_h / r_w)
+    except Exception:
+        scaled_h = W
+    scaled_h -= scaled_h % 2
+    if scaled_h >= H:
+        # 영상이 캔버스 전체 채움 → 하단 끝에서 padding_px 위
+        return padding_px
+    overlay_y = max(0, (H - scaled_h) // 2)
+    return max(padding_px, H - (overlay_y + scaled_h) + padding_px)
 
 
 def _build_candidates_lookup(all_candidates: list[dict]) -> dict[tuple[int, int], dict]:
@@ -224,7 +277,7 @@ def _clips_from_storyline(
 
     # 제목 구성 (이모지 제거)
     title_line1 = _strip_emoji(storyline_data.get("title_line1", ""))
-    title_line2 = _strip_emoji(storyline_data.get("title_line2", ""))
+    title_line2 = _enforce_title_line2_limit(_strip_emoji(storyline_data.get("title_line2", "")))
     if title_line1 and title_line2:
         title_text = f"{title_line1}\n{title_line2}"
     else:
@@ -1116,7 +1169,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             # 최상위 제목 (첫 번째 스토리라인만 story_plan의 title 사용 가능)
             if len(all_storyline_variants) == 0:
                 top_line1 = _strip_emoji(story_plan.get("title_line1", ""))
-                top_line2 = _strip_emoji(story_plan.get("title_line2", ""))
+                top_line2 = _enforce_title_line2_limit(_strip_emoji(story_plan.get("title_line2", "")))
                 if top_line1 and top_line2:
                     sl_title = f"{top_line1}\n{top_line2}"
 
@@ -1558,11 +1611,18 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
         tts_subtitle_path = None
         if final_segments:
+            # 자막 위치: 영상 영역 끝에서 10px 위 (사용자 요구)
+            _sub_margin_v = _compute_subtitle_margin_v(
+                payload.design,
+                canvas_width=config.canvas_width,
+                canvas_height=config.canvas_height,
+                padding_px=10,
+            )
             sub_style = SubtitleStyle(
                 font_name=payload.design.subtitle_font,
                 font_size=payload.design.subtitle_size,
                 primary_color=payload.design.subtitle_color,
-                margin_v=payload.design.subtitle_y_margin,
+                margin_v=_sub_margin_v,
             )
 
             # TTS 자막 세그먼트 생성 (cue 절대시간 그대로 사용)
@@ -1767,7 +1827,12 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     font_name=payload.design.subtitle_font,
                     font_size=payload.design.subtitle_size,
                     primary_color=payload.design.subtitle_color,
-                    margin_v=payload.design.subtitle_y_margin,
+                    margin_v=_compute_subtitle_margin_v(
+                        payload.design,
+                        canvas_width=config.canvas_width,
+                        canvas_height=config.canvas_height,
+                        padding_px=10,
+                    ),
                 )
                 var_tts_ranges = [(s.start_sec, s.end_sec) for s in var_tts_segs] if var_tts_segs else None
                 build_ass_from_segments(var_final_segs, var_sub_path, sub_style, tts_time_ranges=var_tts_ranges)
