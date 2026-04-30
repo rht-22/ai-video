@@ -516,9 +516,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     paths = Paths(app_root=Path(__file__).resolve().parent)
 
     # ═══════════════════════════════════════
-    # [1/16] 초기화
+    # [1/15] 초기화
     # ═══════════════════════════════════════
-    print("\n[1/16] 초기화 중...")
+    print("\n[1/15] 초기화 중...")
     if job_id:
         output_dir = payload.outdir / job_id
         if not output_dir.exists():
@@ -559,14 +559,14 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     print("[OK] 초기화 완료")
 
     # ═══════════════════════════════════════
-    # [2/16] 작품 자동 리서치
+    # [2/15] 작품 자동 리서치
     # ═══════════════════════════════════════
     checkpoint_research = output_dir / "checkpoint_research.json"
     cast_images: list[CharacterInfo] = []
 
     if not payload.skip_research and not payload.work_context:
         if checkpoint_research.exists():
-            print("\n[2/16] 작품 리서치 로드 중... (체크포인트)")
+            print("\n[2/15] 작품 리서치 로드 중... (체크포인트)")
             _rdata = json.loads(checkpoint_research.read_text(encoding="utf-8"))
             payload = replace(payload,
                 work_context=_rdata.get("work_context", ""),
@@ -584,7 +584,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 ))
             print(f"  리서치 로드 완료 ({len(cast_images)}명 캐릭터)")
         else:
-            print("\n[2/16] 작품 자동 리서치 중...")
+            print("\n[2/15] 작품 자동 리서치 중...")
             research_start = time.time()
             gemini = load_gemini_client()
             research = research_work(payload.work_title, payload.episode, gemini)
@@ -637,28 +637,28 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             else:
                 print("  [WARN] 리서치 결과 없음 — 작품 정보 없이 진행")
     elif payload.work_context:
-        print("\n[2/16] 작품 리서치 건너뜀 (수동 work_context 제공)")
+        print("\n[2/15] 작품 리서치 건너뜀 (수동 work_context 제공)")
     else:
-        print("\n[2/16] 작품 리서치 건너뜀 (--no-research)")
+        print("\n[2/15] 작품 리서치 건너뜀 (--no-research)")
 
     # 단계별 실행 플래그 (16단계)
+    # 라운드 6b: skeleton 단계 완전 제거. 총 15단계로 재구성.
     step_order = [
-        "init",            # 0  -> [1/16]
-        "research",        # 1  -> [2/16]
-        "probe",           # 2  -> [3/16]
-        "proxy",           # 3  -> [4/16]
-        "exclusion",       # 4  -> [5/16]
-        "chunk",           # 5  -> [6/16]
-        "skeleton",        # 6  -> [7/16]
-        "character_index", # 7  -> [8/16]
-        "gemini",          # 8  -> [9/16]
-        "graph",           # 9  -> [10/16]
-        "story",           # 10 -> [11/16]
-        "transcribe",      # 11 -> [12/16]   (라운드 6a: tts_plan과 swap)
-        "tts_plan",        # 12 -> [13/16]
-        "resources",       # 13 -> [14/16]
-        "render",          # 14 -> [15/16]
-        "validate",        # 15 -> [16/16]
+        "init",            # 0  -> [1/15]
+        "research",        # 1  -> [2/15]
+        "probe",           # 2  -> [3/15]
+        "proxy",           # 3  -> [4/15]
+        "exclusion",       # 4  -> [5/15]
+        "chunk",           # 5  -> [6/15]
+        "character_index", # 6  -> [7/15]
+        "gemini",          # 7  -> [8/15]
+        "graph",           # 8  -> [9/15]
+        "story",           # 9  -> [10/15]
+        "transcribe",      # 10 -> [11/15]   (라운드 6a: tts_plan과 swap)
+        "tts_plan",        # 11 -> [12/15]
+        "resources",       # 12 -> [13/15]
+        "render",          # 13 -> [14/15]
+        "validate",        # 14 -> [15/15]
     ]
     if from_step:
         start_idx = step_order.index(from_step)
@@ -667,11 +667,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         start_idx = 0
 
     # ═══════════════════════════════════════
-    # [3/16] 미디어 프로브
+    # [3/15] 미디어 프로브
     # ═══════════════════════════════════════
     checkpoint_probe = output_dir / "checkpoint_probe.json"
     if start_idx <= 2 and checkpoint_probe.exists() and from_step != "probe":
-        print("\n[3/16] 미디어 정보 로드 중...")
+        print("\n[3/15] 미디어 정보 로드 중...")
         probe_data = json.loads(checkpoint_probe.read_text(encoding="utf-8"))
         from app.modules.media_probe import MediaInfo
         media_info = MediaInfo(**probe_data)
@@ -681,7 +681,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print(f"  - 오디오: {'있음' if media_info.has_audio else '없음'}")
         print("[OK] 미디어 정보 로드 완료 (체크포인트에서)")
     elif start_idx <= 2:
-        print("\n[3/16] 미디어 정보 수집 중...")
+        print("\n[3/15] 미디어 정보 수집 중...")
         probe_start = time.time()
         media_info = probe_media(payload.video_path)
         probe_elapsed = time.time() - probe_start
@@ -702,11 +702,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         media_info = MediaInfo(**probe_data)
 
     # ═══════════════════════════════════════
-    # [4/16] 프록시 영상 생성
+    # [4/15] 프록시 영상 생성
     # ═══════════════════════════════════════
     proxy_video_path = output_dir / f"{payload.work_title}_480.mp4"
     if not proxy_video_path.exists():
-        print("\n[4/16] 분석용 프록시 영상 생성 중...")
+        print("\n[4/15] 분석용 프록시 영상 생성 중...")
         proxy_start = time.time()
         ffmpeg_exe = find_ffmpeg_command("ffmpeg")
         subprocess.run([
@@ -723,10 +723,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         proxy_elapsed = time.time() - proxy_start
         print(f"[OK] 프록시 영상 생성 완료 (소요 시간: {proxy_elapsed:.1f}초)")
     else:
-        print("\n[4/16] 프록시 영상 이미 존재 — 건너뜀")
+        print("\n[4/15] 프록시 영상 이미 존재 — 건너뜀")
 
     # ═══════════════════════════════════════
-    # [5/16] 인트로/크레딧 제외 구간 감지
+    # [5/15] 인트로/크레딧 제외 구간 감지
     # ═══════════════════════════════════════
     from app.modules.intro_credits_detector import (
         detect_exclusion_zones, filter_excluded_moments, print_exclusion_summary, ExclusionZones,
@@ -736,7 +736,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     if checkpoint_exclusion.exists():
         _ez_data = json.loads(checkpoint_exclusion.read_text(encoding="utf-8"))
         exclusion_zones = ExclusionZones.from_dict(_ez_data)
-        print(f"\n[5/16] 제외 구간 로드 완료")
+        print(f"\n[5/15] 제외 구간 로드 완료")
         print_exclusion_summary(exclusion_zones, media_info.duration_sec)
     else:
         # SRT가 있으면 자동 감지에 활용
@@ -755,7 +755,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             srt_segments=_srt_segs_for_detect,
         )
         if exclusion_zones.detection_method != "none":
-            print(f"\n[5/16] 인트로/크레딧 제외 구간 감지")
+            print(f"\n[5/15] 인트로/크레딧 제외 구간 감지")
             print_exclusion_summary(exclusion_zones, media_info.duration_sec)
             checkpoint_exclusion.write_text(
                 json.dumps(exclusion_zones.to_dict(), ensure_ascii=False, indent=2),
@@ -763,9 +763,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             )
 
     # ═══════════════════════════════════════
-    # [6/16] 청크 분할
+    # [6/15] 청크 분할
     # ═══════════════════════════════════════
-    print("\n[6/16] 영상 청크 분할 중...")
+    print("\n[6/15] 영상 청크 분할 중...")
     chunks = build_chunks(
         proxy_video_path,
         media_info.duration_sec,
@@ -794,17 +794,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     print("[OK] 청크 분할 완료")
 
     # ═══════════════════════════════════════
-    # [7/16] skeleton 단계 — 라운드 6a에서 완전 제거 (Pro 풀스캔 ~120s 절약)
-    # ═══════════════════════════════════════
-    # 인트로/크레딧 감지는 [5/16] SRT 기반 자동 감지(detect_exclusion_zones)로 충분.
-    # narrative_skeleton의 다른 필드(intent/emotional_arc/key_characters/story_beats)는
-    # 라운드 3c에서 LLM에 전달하지 않도록 차단 → 본 라운드 6a에서 단계 자체를 제거.
-    # 후속 단계(analyze_chunk / compose_story)는 narrative_skeleton=None 그대로 받음.
-    print("\n[7/16] skeleton 단계 — 제거됨 (인트로/크레딧은 [5/16] SRT 감지가 처리)")
-    narrative_skeleton: dict[str, Any] | None = None
-
-    # ═══════════════════════════════════════
-    # [8/16] 인물 등장 인덱스 (face_id 사전 패스)
+    # [7/15] 인물 등장 인덱스 (face_id 사전 패스)
     # ═══════════════════════════════════════
     # 프록시 영상을 일정 간격으로 샘플링하여 등장 인물별 구간을 미리 산출.
     # 결과는 chunk별로 필터링되어 Gemini analyze_chunk 페이로드에 첨부된다.
@@ -813,15 +803,15 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     if checkpoint_char_idx.exists() and from_step not in ("gemini",):
         try:
             character_appearances = json.loads(checkpoint_char_idx.read_text(encoding="utf-8"))
-            print(f"\n[8/16] 인물 등장 인덱스 로드 ({len(character_appearances)}개 구간)")
+            print(f"\n[7/15] 인물 등장 인덱스 로드 ({len(character_appearances)}개 구간)")
         except Exception as e:
-            print(f"\n[8/16] 인물 등장 인덱스 로드 실패: {e} — 새로 생성")
+            print(f"\n[7/15] 인물 등장 인덱스 로드 실패: {e} — 새로 생성")
             character_appearances = []
 
     if not character_appearances and cast_images and payload.design.enable_face_recognition:
         try:
             from app.modules.face_id import FaceIdentifier
-            print("\n[8/16] 인물 등장 인덱스 생성 중 (face_id 사전 패스)...")
+            print("\n[7/15] 인물 등장 인덱스 생성 중 (face_id 사전 패스)...")
             char_idx_start = time.time()
             _fi_pre = FaceIdentifier()
             _fi_pre.build_references(cast_images)
@@ -844,22 +834,22 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             character_appearances = []
 
     # ═══════════════════════════════════════
-    # [9/16] Gemini 분석 (바이럴 최적화)
+    # [8/15] Gemini 분석 (바이럴 최적화)
     # ═══════════════════════════════════════
     checkpoint_gemini = output_dir / "checkpoint_gemini.json"
     if start_idx <= 8 and checkpoint_gemini.exists() and from_step != "gemini":
-        print("\n[9/16] Gemini 분析 결과 로드 중...")
+        print("\n[8/15] Gemini 분析 결과 로드 중...")
         gemini_data = json.loads(checkpoint_gemini.read_text(encoding="utf-8"))
         all_candidates = gemini_data["all_candidates"]
         chunk_meta_list = gemini_data.get("chunk_meta", [])
         print(f"  - 총 {len(all_candidates)}개 후보 모멘트, chunk_meta {len(chunk_meta_list)}건")
         print("[OK] Gemini 분석 결과 로드 완료 (체크포인트에서)")
     elif start_idx <= 8:
-        print("\n[9/16] Gemini 분석 준비 중...")
+        print("\n[8/15] Gemini 분석 준비 중...")
         gemini = load_gemini_client()
         print("[OK] Gemini 클라이언트 로드 완료")
 
-        print("\n[9/16] Gemini 분석 진행 중...")
+        print("\n[8/15] Gemini 분석 진행 중...")
         all_candidates: list[dict[str, Any]] = []
         chunk_meta_list: list[dict[str, Any]] = []
         gemini_start = time.time()
@@ -918,7 +908,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 "video_path": str(split_path) if split_path else None,
                 "previous_analyses": previous_analyses.copy(),
                 "transcript_segments": chunk_transcript_segs,
-                "narrative_skeleton": narrative_skeleton,
                 "character_appearances": chunk_appearances,
             }
 
@@ -1039,19 +1028,19 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             print(f"  인트로/크레딧 필터 적용: {before_count} → {len(all_candidates)}개 후보")
 
     # ═══════════════════════════════════════
-    # [10/16] 관계 그래프 추출
+    # [9/15] 관계 그래프 추출
     # ═══════════════════════════════════════
     checkpoint_graph = output_dir / "checkpoint_graph.json"
     relationship_edges: list[dict[str, Any]] = []
 
     if start_idx <= 9 and checkpoint_graph.exists() and from_step not in ("gemini", "graph"):
-        print("\n[10/16] 관계 그래프 로드 중...")
+        print("\n[9/15] 관계 그래프 로드 중...")
         graph_data = json.loads(checkpoint_graph.read_text(encoding="utf-8"))
         relationship_edges = graph_data.get("edges", [])
         print(f"  - {len(relationship_edges)}개 관계 엣지 로드")
         print("[OK] 관계 그래프 로드 완료 (체크포인트에서)")
     elif start_idx <= 9:
-        print("\n[10/16] 관계 그래프 추출 중...")
+        print("\n[9/15] 관계 그래프 추출 중...")
         gemini = load_gemini_client()
         relationship_edges = gemini.extract_relationships(all_candidates)
         checkpoint_graph.write_text(
@@ -1061,7 +1050,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print(f"[OK] 관계 그래프 추출 완료 ({len(relationship_edges)}개 엣지)")
 
     # ═══════════════════════════════════════
-    # [11/16] 스토리 구성 (바이럴 최적화 — 멀티쇼츠)
+    # [10/15] 스토리 구성 (바이럴 최적화 — 멀티쇼츠)
     # ═══════════════════════════════════════
     # all_storyline_variants: list of (clips, title_text, score)
     all_storyline_variants: list[tuple[list[StoryClip], str, float]] = []
@@ -1070,7 +1059,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
     checkpoint_story = output_dir / "checkpoint_story.json"
     if start_idx <= 10 and checkpoint_story.exists() and from_step != "story":
-        print("\n[11/16] 스토리 구성 결과 로드 중...")
+        print("\n[10/15] 스토리 구성 결과 로드 중...")
         story_data = json.loads(checkpoint_story.read_text(encoding="utf-8"))
 
         # 멀티쇼츠 체크포인트 로드
@@ -1088,7 +1077,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print("[OK] 스토리 구성 결과 로드 완료 (체크포인트에서)")
 
     elif start_idx <= 10:
-        print("\n[11/16] 스토리 구성 중...")
+        print("\n[10/15] 스토리 구성 중...")
         gemini = load_gemini_client()
         story_start = time.time()
 
@@ -1104,7 +1093,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             max_duration_sec=config.max_duration_sec,
             work_context=payload.work_context,
             previous_episodes_context=payload.previous_episodes_context,
-            narrative_skeleton=narrative_skeleton,
             relationship_edges=relationship_edges or None,
             chunk_meta=chunk_meta_list or None,
         )
@@ -1130,7 +1118,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         diverse_pool = select_diverse_storylines(
             ranked_storylines,
             max_count=max(max_shorts * 2, len(ranked_storylines)),  # 폴백 여유분 확보
-            skeleton=narrative_skeleton if narrative_skeleton else None,
+            skeleton=None,  # skeleton 단계 제거 (라운드 6b) — chunk_index 다양성으로만 폴백
         )
 
         for sl_idx, sl_data in enumerate(diverse_pool):
@@ -1236,7 +1224,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 title_text = story_data["title_text"]
                 all_storyline_variants.append((clips, title_text, 1.0))
         elif edit_plan_path.exists():
-            print("\n[11/16] 기존 파일에서 스토리 복원 중...")
+            print("\n[10/15] 기존 파일에서 스토리 복원 중...")
             edit_plan = json.loads(edit_plan_path.read_text(encoding="utf-8"))
             clips = []
             for clip_data in edit_plan["timeline"]:
@@ -1258,7 +1246,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     clips, title_text, _ = all_storyline_variants[0]
 
     # ═══════════════════════════════════════
-    # [12/16] 선택된 클립 전사 + 무음 제거 (라운드 6a — TTS cue 계획 *전*에 수행)
+    # [11/15] 선택된 클립 전사 + 무음 제거 (라운드 6a — TTS cue 계획 *전*에 수행)
     # ═══════════════════════════════════════
     # 무음 컷으로 clips가 짧아지므로 그 *후*의 새 clips 기준으로 TTS cue 시간을 계산해야
     # 자막·TTS 밀림이 발생하지 않는다. 라운드 6a 핵심: tts_plan을 transcribe 뒤로 이동.
@@ -1271,7 +1259,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     _full_audio_invalidate = from_step in ("graph", "story", "transcribe", "tts_plan", "resources")
 
     if start_idx <= 11 and full_audio_path.exists() and not _full_audio_invalidate:
-        print("\n[12/16] 전사 데이터 로드 중...")
+        print("\n[11/15] 전사 데이터 로드 중...")
         loaded_data = json.loads(full_audio_path.read_text(encoding="utf-8"))
         transcript_text = [SimpleNamespace(**seg) for seg in loaded_data]
         print(f"  - {len(transcript_text)}개 세그먼트 로드 완료")
@@ -1289,7 +1277,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print(f"[OK] 전사 로드 + 무음 제거 완료 ({len(clips)}개 클립)")
 
     elif start_idx <= 11:
-        print("\n[12/16] 선택된 클립 구간 전사 중...")
+        print("\n[11/15] 선택된 클립 구간 전사 중...")
         transcribe_start = time.time()
 
         if payload.srt_path:
@@ -1386,7 +1374,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         if full_audio_path.exists():
             loaded_data = json.loads(full_audio_path.read_text(encoding="utf-8"))
             transcript_text = [SimpleNamespace(**seg) for seg in loaded_data]
-        print(f"\n[12/16] 전사 단계 건너뜀 ({len(transcript_text)}개 세그먼트 로드)")
+        print(f"\n[11/15] 전사 단계 건너뜀 ({len(transcript_text)}개 세그먼트 로드)")
 
     # 자막 데이터 생성 (전사 → 편집 타임라인 매핑)
     # transcribe 이전(graph/story) 단계부터 재실행이면 클립 구성/길이가 달라졌으므로
@@ -1422,15 +1410,15 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print(f"  자막 캐시 로드 완료 ({len(final_segments)} segments)")
 
     # ═══════════════════════════════════════
-    # [13/16] TTS 큐 계획 (voice/speed/위치 결정) — 라운드 6a: transcribe 뒤로 이동
+    # [12/15] TTS 큐 계획 (voice/speed/위치 결정) — 라운드 6a: transcribe 뒤로 이동
     # ═══════════════════════════════════════
     # 결정된 storyline의 *무음 컷 후* 클립 시퀀스를 받아 편집 타임라인 절대 시간 기준으로
-    # cue 리스트를 만든다. cue 시간/voice/speed는 다음 [14/16]에서 mp3 합성에 사용.
+    # cue 리스트를 만든다. cue 시간/voice/speed는 다음 [13/15]에서 mp3 합성에 사용.
     # 무음 컷이 clips 길이를 줄여놓은 *후* cue를 계산하므로 TTS·자막 밀림이 발생하지 않는다.
     checkpoint_tts = output_dir / "checkpoint_tts_plan.json"
     tts_cues_per_variant: list[list[dict[str, Any]]] = []
     if checkpoint_tts.exists() and from_step not in ("graph", "story", "transcribe", "tts_plan"):
-        print("\n[13/16] TTS cue 계획 로드 중...")
+        print("\n[12/15] TTS cue 계획 로드 중...")
         try:
             cached = json.loads(checkpoint_tts.read_text(encoding="utf-8"))
             tts_cues_per_variant = cached.get("variants", [])
@@ -1440,7 +1428,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             tts_cues_per_variant = []
 
     if not tts_cues_per_variant and start_idx <= 12:
-        print("\n[13/16] TTS cue 계획 중 (Flash, 무음 컷 후 clips 기준)...")
+        print("\n[12/15] TTS cue 계획 중 (Flash, 무음 컷 후 clips 기준)...")
         tts_start = time.time()
         gemini = load_gemini_client()
         for sl_idx, (sl_clips, _t, _s) in enumerate(all_storyline_variants):
@@ -1448,7 +1436,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 cues = gemini.plan_tts_cues(
                     sl_clips,
                     payload.work_title,
-                    narrative_skeleton=narrative_skeleton,
                     work_context=payload.work_context,
                     previous_episodes_context=payload.previous_episodes_context,
                 )
@@ -1468,11 +1455,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 라운드 6a-2 후처리 안전판: 각 variant의 cue.end_sec가 그 variant의 영상 길이를 넘지 않도록 cap.
     tts_cues_per_variant = _clamp_cues_to_variants(tts_cues_per_variant, all_storyline_variants)
 
-    # 첫 번째 variant의 cue를 기본으로 사용 (다중 쇼츠는 [15/16]에서 variant마다 따로)
+    # 첫 번째 variant의 cue를 기본으로 사용 (다중 쇼츠는 [14/15]에서 variant마다 따로)
     tts_cues = tts_cues_per_variant[0] if tts_cues_per_variant else []
 
     # ═══════════════════════════════════════
-    # [14/16] 리소스 생성 (크롭, TTS, 편집 계획)
+    # [13/15] 리소스 생성 (크롭, TTS, 편집 계획)
     # ═══════════════════════════════════════
     checkpoint_resources = output_dir / "checkpoint_resources.json"
     edit_plan_path = output_dir / "edit_plan.json"
@@ -1481,14 +1468,14 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 이전 라운드의 crop_map 키(role_idx)와 새 라운드의 clip 키가 어긋나면 KeyError 발생.
     _resources_invalidate = from_step in ("graph", "story", "tts_plan", "transcribe", "resources")
     if start_idx <= 13 and checkpoint_resources.exists() and not _resources_invalidate:
-        print("\n[14/16] 리소스 로드 중...")
+        print("\n[13/15] 리소스 로드 중...")
         resources_data = json.loads(checkpoint_resources.read_text(encoding="utf-8"))
         crop_map = {k: Path(v) for k, v in resources_data["crop_map"].items()}
         tts_cue_files = resources_data.get("tts_cue_files", []) or []
         print(f"  - 크롭 타임라인: {len(crop_map)}개, TTS cue 오디오: {len(tts_cue_files)}개")
         print("[OK] 리소스 로드 완료 (체크포인트에서)")
     elif start_idx <= 13:
-        print("\n[14/16] 리소스 생성 중...")
+        print("\n[13/15] 리소스 생성 중...")
         resource_start = time.time()
 
         # Phase 12: 인물 인식 레퍼런스 빌드 (배우 사진이 있을 때만)
@@ -1590,20 +1577,19 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     if start_idx <= 13:
         print("  편집 계획 생성 중...")
         edit_plan = _build_edit_plan(payload, title_text, clips, crop_map, config)
-        # NOTE: narrative_skeleton은 같은 디렉토리의 narrative_skeleton.json에 별도 저장됨.
-        # edit_plan에 임베드하면 ~4KB 중복 + 렌더 단계가 사용하지 않는 죽은 데이터.
+        # 라운드 6b: skeleton 단계 제거됨. edit_plan에 임베드하던 narrative_skeleton 키도 사라짐.
         edit_plan_path.write_text(json.dumps(edit_plan, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"  - 편집 계획 저장: {edit_plan_path}")
 
     # ═══════════════════════════════════════
-    # [15/16] 자막 디자인 + 최종 렌더링
+    # [14/15] 자막 디자인 + 최종 렌더링
     # ═══════════════════════════════════════
     output_video = output_dir / "shorts.mp4"
     subtitle_path = output_dir / "subtitles.ass"
 
     if start_idx <= 14 or from_step == "render" or not output_video.exists():
         # 자막 디자인 적용
-        print("\n[15/16] 자막 디자인 적용 및 최종 렌더링 중...")
+        print("\n[14/15] 자막 디자인 적용 및 최종 렌더링 중...")
 
         if not final_segments and segments_cache_path.exists():
             cached_data = json.loads(segments_cache_path.read_text(encoding="utf-8"))
@@ -1696,13 +1682,13 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         run_log["steps"].append({"step": "render", "command": cmd_serializable})
         print(f"[OK] 최종 렌더링 완료 (소요 시간: {render_elapsed:.1f}초)")
     else:
-        print(f"\n[15/16] 렌더링 스킵 (이미 파일 존재: {output_video.name})")
+        print(f"\n[14/15] 렌더링 스킵 (이미 파일 존재: {output_video.name})")
 
     # ═══════════════════════════════════════
-    # [16/16] 출력 검증
+    # [15/15] 출력 검증
     # ═══════════════════════════════════════
     if start_idx <= 15:
-        print("\n[16/16] 출력 검증 중...")
+        print("\n[15/15] 출력 검증 중...")
         if not output_video.exists():
             raise FileNotFoundError(f"검증할 영상 파일을 찾을 수 없습니다: {output_video}")
 
@@ -1721,7 +1707,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print(f"  - 검은 프레임 검증: {'OK' if validation.black_frames_ok else 'FAIL'}")
         print("[OK] 검증 완료")
     else:
-        print("\n[16/16] 검증 단계 스킵")
+        print("\n[15/15] 검증 단계 스킵")
 
     # ═══════════════════════════════════════
     # 추가 쇼츠 렌더링 (2번째, 3번째 스토리라인)
