@@ -583,50 +583,76 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     print("[OK] 청크 분할 완료")
 
     # ═══════════════════════════════════════
-    # [7/16] 영상 의도 사전 분석 (narrative_skeleton)
+    # [7/16] 인트로/크레딧 감지 (skeleton 단계 제거 — 라운드 3c)
     # ═══════════════════════════════════════
+    # 사용자 결정: narrative_skeleton의 무거운 필드(intent/emotional_arc/key_characters/story_beats)는
+    # 더 이상 사용하지 않는다. 이 단계는 인트로/크레딧 시점 감지 전용으로 축소.
+    # 다만 analyze_video_intent의 has_intro/intro_end_sec/has_credits/credits_start_sec 4개 필드는
+    # 그대로 활용 (가벼운 detect_intro_credits 신규 함수로 대체는 별도 라운드).
+    # 후속 단계(analyze_chunk / compose_story)에는 narrative_skeleton=None을 전달해 LLM에
+    # skeleton 정보가 흘러가지 않게 한다.
     skeleton_path = output_dir / "narrative_skeleton.json"
-    narrative_skeleton: dict[str, Any] = {}
+    intro_credits_info: dict[str, Any] = {}  # has_intro/intro_end_sec/has_credits/credits_start_sec만 유지
+    _full_skeleton: dict[str, Any] = {}  # 인트로/크레딧 감지에만 사용 (캐시 호환용)
     if start_idx <= 6 and skeleton_path.exists() and from_step != "skeleton":
-        print("\n[7/16] narrative_skeleton 로드 중...")
+        print("\n[7/16] 인트로/크레딧 정보 로드 중...")
         try:
-            narrative_skeleton = json.loads(skeleton_path.read_text(encoding="utf-8"))
-            print(f"  - skeleton intent: {narrative_skeleton.get('intent', '')[:60]}")
+            _full_skeleton = json.loads(skeleton_path.read_text(encoding="utf-8"))
+            intro_credits_info = {
+                k: _full_skeleton.get(k)
+                for k in ("has_intro", "intro_end_sec", "has_credits", "credits_start_sec")
+                if k in _full_skeleton
+            }
+            print(f"  - 인트로 종료: {intro_credits_info.get('intro_end_sec', 0)}s / 크레딧 시작: {intro_credits_info.get('credits_start_sec', 0)}s")
         except Exception as e:
-            print(f"  [WARN] skeleton 로드 실패: {e}")
-            narrative_skeleton = {}
+            print(f"  [WARN] 인트로/크레딧 캐시 로드 실패: {e}")
+            intro_credits_info = {}
     elif start_idx <= 6:
-        print("\n[7/16] 전체 영상 의도 사전 분석 중 (Flash)...")
+        print("\n[7/16] 인트로/크레딧 감지 중 (Flash)...")
         try:
             _intent_gemini = load_gemini_client()
-            narrative_skeleton = _intent_gemini.analyze_video_intent(
+            _full_skeleton = _intent_gemini.analyze_video_intent(
                 proxy_path=proxy_video_path,
                 work_title=payload.work_title,
                 topic=payload.topic,
                 work_context=payload.work_context,
                 previous_episodes_context=payload.previous_episodes_context,
             )
-            if narrative_skeleton:
+            if _full_skeleton:
+                # 4개 필드만 추출. 나머지(intent/emotional_arc 등)는 사용자 결정으로 폐기.
+                intro_credits_info = {
+                    k: _full_skeleton.get(k)
+                    for k in ("has_intro", "intro_end_sec", "has_credits", "credits_start_sec")
+                    if k in _full_skeleton
+                }
+                # 캐시는 전체 dict 유지 (재실행 호환성)
                 skeleton_path.write_text(
-                    json.dumps(narrative_skeleton, ensure_ascii=False, indent=2),
+                    json.dumps(_full_skeleton, ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
-                print(f"  [OK] skeleton 저장: intent={narrative_skeleton.get('intent', '')[:60]}")
-                print(f"       mandatory_scenes: {len(narrative_skeleton.get('mandatory_scenes', []))}개")
+                print(f"  [OK] 인트로 종료: {intro_credits_info.get('intro_end_sec', 0)}s / 크레딧 시작: {intro_credits_info.get('credits_start_sec', 0)}s")
             else:
-                print("  [WARN] skeleton이 비어 있음 — 청크 분석 시 생략")
+                print("  [WARN] 영상 분석 결과가 비어 있음 — 인트로/크레딧 미반영")
         except Exception as e:
-            print(f"  [WARN] 영상 의도 분석 실패: {e} — skeleton 없이 진행")
-            narrative_skeleton = {}
+            print(f"  [WARN] 영상 의도 분석 실패: {e} — 인트로/크레딧 미반영")
+            intro_credits_info = {}
     else:
         if skeleton_path.exists():
             try:
-                narrative_skeleton = json.loads(skeleton_path.read_text(encoding="utf-8"))
+                _full_skeleton = json.loads(skeleton_path.read_text(encoding="utf-8"))
+                intro_credits_info = {
+                    k: _full_skeleton.get(k)
+                    for k in ("has_intro", "intro_end_sec", "has_credits", "credits_start_sec")
+                    if k in _full_skeleton
+                }
             except Exception:
-                narrative_skeleton = {}
+                intro_credits_info = {}
 
-    # ── Gemini skeleton으로 인트로/크레딧 제외 구간 업데이트 ──
-    if narrative_skeleton and (narrative_skeleton.get("has_intro") or narrative_skeleton.get("has_credits")):
+    # narrative_skeleton 변수는 후속 단계로 None 전달 → LLM에 영상 의도/감정 아크 정보 안 흘러감
+    narrative_skeleton: dict[str, Any] | None = None
+
+    # ── Gemini 분석으로 인트로/크레딧 제외 구간 업데이트 ──
+    if intro_credits_info and (intro_credits_info.get("has_intro") or intro_credits_info.get("has_credits")):
         _srt_for_ez = None
         if payload.srt_path and payload.srt_path.exists():
             try:
@@ -639,7 +665,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             skip_credits_sec=payload.skip_credits_sec,
             auto_detect=True,
             srt_segments=_srt_for_ez,
-            gemini_result=narrative_skeleton,
+            gemini_result=intro_credits_info,
         )
         if exclusion_zones.detection_method != "none":
             print("  [인트로/크레딧] Gemini 영상 분석 결과 반영")
