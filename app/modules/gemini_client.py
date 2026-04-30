@@ -63,14 +63,12 @@ GEMINI_PROMPT_TEMPLATE = """
 - **현재 청크 번호 (chunk_index): {chunk_index}** ← 출력의 모든 chunk_index 필드는 이 값을 사용할 것
 - 청크 범위: {chunk_start_sec} ~ {chunk_end_sec} 초
 {work_context_block}
-{narrative_skeleton_block}
 {previous_episodes_context_block}
 {character_appearances_block}
 - ⚠️ 모든 start_sec / end_sec는 반드시 첨부된 영상 파일의 시작(0초)을 기준으로 한 상대값으로 반환할 것
 
 - 자막(있으면): {transcript_text}
 - 씬 경계(있으면): {scene_boundaries}
-- 자막/대사 참고 (화자명 포함): {transcript_hint}
 {previous_context}
 
 ---
@@ -568,7 +566,7 @@ TTS_PLANNING_PROMPT = """
 # 입력
 - 작품명: {work_title}
 - 쇼츠 총 길이(편집 타임라인 기준): {total_duration:.1f}초 (0초 = 쇼츠 시작점)
-{work_context_block}{episodes_context_block}{narrative_skeleton_json_block}
+{work_context_block}{episodes_context_block}
 
 [클립 시퀀스 — 편집 타임라인 절대 시간]
 {clips_str}
@@ -810,13 +808,6 @@ class GeminiClient:
         else:
             transcript_text_str = "없음"
 
-        # 자막 텍스트(화자명 포함)를 Gemini에 전달
-        transcript_hint = "없음"
-        if payload.get("transcript_segments"):
-            segs = payload["transcript_segments"]
-            lines = [f"  {s.start_sec:.0f}~{s.end_sec:.0f}초: {s.text}" for s in segs[:50]]
-            transcript_hint = "\n".join(lines)
-
         # 작품 컨텍스트 (시놉시스/장르/핵심 요소)
         work_context_block = ""
         if payload.get("work_context"):
@@ -830,43 +821,7 @@ class GeminiClient:
         chunk_duration = chunk_end - chunk_start
         min_candidates = max(1, -(-int(chunk_duration) // 60))
 
-        # ── 전체 영상 skeleton 블록 주입 ──
-        narrative_skeleton_block = ""
-        sk = payload.get("narrative_skeleton")
-        if sk and isinstance(sk, dict):
-            sk_json = json.dumps(sk, ensure_ascii=False, indent=2)
-            sk_json_escaped = sk_json.replace("{", "{{").replace("}", "}}")
-            narrative_skeleton_block = (
-                "\n[전체 영상 배경 정보 — 인물 식별 및 맥락 파악용]\n"
-                f"{sk_json_escaped}\n"
-                "⚠️ 위 정보는 인물 이름을 일관되게 식별하고 현재 청크가 영상 전체에서 어느 위치인지 파악하기 위한 참고용이다.\n"
-                "⚠️ 장면 선택 기준은 이 skeleton이 아니라 오직 현재 첨부 영상 안에서의 재미·흥미도·반응성이다.\n"
-                "⚠️ skeleton에 등장하지 않은 장면이라도 자체적으로 흥미롭거나 반응이 강하면 candidate로 포함하라.\n"
-            )
-
-            # skeleton의 key_characters를 work_context_block에 보완 주입
-            # (SRT 없이 리서치도 부실한 경우 영상 스캔 단계에서 추출한 이름이 유일한 단서)
-            skeleton_chars = sk.get("key_characters", [])
-            if skeleton_chars:
-                reliable = [
-                    c for c in skeleton_chars
-                    if c.get("name") and "추정" not in (c.get("name_sources") or [])
-                ]
-                all_chars = skeleton_chars  # 추정 포함 전체도 참고용으로 전달
-                char_lines = []
-                for c in all_chars:
-                    name = c.get("name", "")
-                    role = c.get("role", "")
-                    sources = c.get("name_sources", [])
-                    src_note = f" [출처: {', '.join(sources)}]" if sources else ""
-                    char_lines.append(f"- {name}: {role}{src_note}")
-                skeleton_char_block = (
-                    "\n[영상 스캔에서 감지된 인물 — 이름 식별에 활용]\n"
-                    + "\n".join(char_lines)
-                    + "\n⚠️ '출처: 자막에서 직접 언급' 또는 '다른 인물이 부름'인 이름은 신뢰도 높음. "
-                    "'추정'인 이름은 참고만 하고 실제 영상 내 발화로 재확인하라.\n"
-                )
-                work_context_block = work_context_block + skeleton_char_block
+        # narrative_skeleton 블록 — 라운드 6a에서 단계 자체 제거. payload의 skeleton은 무시.
 
         # face_id 사전 인식 결과 블록 (선택적 — 인덱스가 없으면 빈 문자열)
         character_appearances_block = ""
@@ -891,11 +846,9 @@ class GeminiClient:
             chunk_end_sec=chunk_end,
             transcript_text=transcript_text_str,
             scene_boundaries=payload.get("scene_boundaries") or "없음",
-            transcript_hint=transcript_hint,
             previous_context=previous_context,
             previous_episodes_context_block=previous_episodes_context_block,
             work_context_block=work_context_block,
-            narrative_skeleton_block=narrative_skeleton_block,
             character_appearances_block=character_appearances_block,
             min_candidates=min_candidates,
         )
@@ -1210,17 +1163,7 @@ class GeminiClient:
 
         story_topic_line = f"[핵심 주제] {topic}" if topic else ""
 
-        # ── narrative_skeleton 블록 ──
-        narrative_skeleton_json_block = ""
-        if narrative_skeleton and isinstance(narrative_skeleton, dict):
-            sk_json = json.dumps(narrative_skeleton, ensure_ascii=False, indent=2)
-            sk_escaped = sk_json.replace("{", "{{").replace("}", "}}")
-            narrative_skeleton_json_block = (
-                "\n[전체 영상 배경 정보 — 인물·맥락 참고용]\n" + sk_escaped +
-                "\n⚠️ 위 정보는 인물 이름 일관성과 전체 영상 분위기 파악을 위한 참고용이다.\n"
-                "⚠️ 스토리라인은 후보 장면들의 재미·반응·흥미도만을 기준으로 자유롭게 구성하라. "
-                "skeleton에 없는 장면이어도 매력적이면 우선 선택하라.\n"
-            )
+        # narrative_skeleton 블록 — 라운드 6a에서 단계 자체 제거. 인자는 호환성 유지용.
 
         # ── segments 요약 블록 (청크별 시간순 — 영상 전체 흐름 빈틈없이 보여주기) ──
         segments_summary_block = ""
@@ -1257,7 +1200,6 @@ class GeminiClient:
             episodes_context_block=episodes_context_block,
             segments_summary_block=segments_summary_block,
             story_topic_line=story_topic_line,
-            narrative_skeleton_json_block=narrative_skeleton_json_block,
         )
 
         # ── 관계 그래프 블록 (프롬프트 뒤에 추가) ──
@@ -1403,11 +1345,7 @@ class GeminiClient:
         episodes_context_block = ""
         if previous_episodes_context:
             episodes_context_block = f"\n[이전 에피소드 요약]\n{previous_episodes_context}\n"
-        narrative_skeleton_json_block = ""
-        if narrative_skeleton and isinstance(narrative_skeleton, dict):
-            sk_json = json.dumps(narrative_skeleton, ensure_ascii=False, indent=2)
-            sk_escaped = sk_json.replace("{", "{{").replace("}", "}}")
-            narrative_skeleton_json_block = f"\n[작품 서사 스켈레톤]\n{sk_escaped}\n"
+        # narrative_skeleton 블록 — 라운드 6a에서 단계 자체 제거. 인자는 호환성 유지용.
 
         prompt = TTS_PLANNING_PROMPT.format(
             work_title=work_title,
@@ -1415,7 +1353,6 @@ class GeminiClient:
             clips_str=clips_str,
             work_context_block=work_context_block,
             episodes_context_block=episodes_context_block,
-            narrative_skeleton_json_block=narrative_skeleton_json_block,
         )
 
         valid_voices = {

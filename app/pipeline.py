@@ -32,6 +32,61 @@ def _strip_emoji(text: str) -> str:
     return _EMOJI_RE.sub("", text).strip()
 
 
+def _apply_silence_cut_to_variants(
+    variants: list[tuple[list[StoryClip], str, float]],
+    transcript_segments: list,
+) -> list[tuple[list[StoryClip], str, float]]:
+    """모든 storyline variant의 sl_clips에 무음 컷 적용 후 갱신.
+
+    라운드 6a-2: tts_plan이 무음 컷 *전* clips를 받으면 cue 시간이 영상 길이 초과 가능.
+    각 variant의 sl_clips에 cut_silence_from_clips → flatten_to_clips 적용해 동일 처리.
+    """
+    if not variants:
+        return variants
+    new_variants: list[tuple[list[StoryClip], str, float]] = []
+    for sl_clips, sl_title, sl_score in variants:
+        try:
+            cut = cut_silence_from_clips(sl_clips, transcript_segments, max_gap_sec=0.4, padding_sec=0.15)
+            sl_clips_new = flatten_to_clips(cut)
+        except Exception:
+            sl_clips_new = sl_clips  # 폴백: 변경 없음
+        new_variants.append((sl_clips_new, sl_title, sl_score))
+    return new_variants
+
+
+def _clamp_cues_to_variants(
+    tts_cues_per_variant: list[list[dict]],
+    variants: list[tuple[list[StoryClip], str, float]],
+) -> list[list[dict]]:
+    """각 variant의 cue.end_sec가 그 variant의 영상 총 길이를 초과하지 않도록 강제.
+
+    라운드 6a-2 후처리 안전판: LLM 환각 또는 무음 컷 추정 오차로 cue가 영상 끝을 넘기는
+    케이스를 마지막에 cap.
+    """
+    out: list[list[dict]] = []
+    for v_idx, cues in enumerate(tts_cues_per_variant or []):
+        if v_idx >= len(variants) or not cues:
+            out.append(cues or [])
+            continue
+        sl_clips = variants[v_idx][0]
+        total = sum(float(c.end_sec - c.start_sec) for c in sl_clips)
+        clamped: list[dict] = []
+        for cue in cues:
+            new_cue = dict(cue)
+            s = float(new_cue.get("start_sec", 0.0))
+            e = float(new_cue.get("end_sec", 0.0))
+            if e > total:
+                new_cue["end_sec"] = total
+                if s >= total:
+                    # cue가 통째로 영상 밖이면 무효화 (start = end로 만들어 자막에 안 찍힘)
+                    new_cue["start_sec"] = max(0.0, total - 0.1)
+                    new_cue["end_sec"] = total
+                print(f"  [cue-clamp] variant {v_idx + 1} cue: {e:.1f}s → {new_cue['end_sec']:.1f}s (영상 {total:.1f}s 초과 방지)")
+            clamped.append(new_cue)
+        out.append(clamped)
+    return out
+
+
 def _enforce_title_line2_limit(text: str, max_chars: int = 13) -> str:
     """LLM이 title_line2 글자수 가이드를 어겼을 때 안전판 — 13자 이내로 강제 절단.
 
@@ -599,8 +654,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         "gemini",          # 8  -> [9/16]
         "graph",           # 9  -> [10/16]
         "story",           # 10 -> [11/16]
-        "tts_plan",        # 11 -> [12/16]
-        "transcribe",      # 12 -> [13/16]
+        "transcribe",      # 11 -> [12/16]   (라운드 6a: tts_plan과 swap)
+        "tts_plan",        # 12 -> [13/16]
         "resources",       # 13 -> [14/16]
         "render",          # 14 -> [15/16]
         "validate",        # 15 -> [16/16]
@@ -739,97 +794,14 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     print("[OK] 청크 분할 완료")
 
     # ═══════════════════════════════════════
-    # [7/16] 인트로/크레딧 감지 (skeleton 단계 제거 — 라운드 3c)
+    # [7/16] skeleton 단계 — 라운드 6a에서 완전 제거 (Pro 풀스캔 ~120s 절약)
     # ═══════════════════════════════════════
-    # 사용자 결정: narrative_skeleton의 무거운 필드(intent/emotional_arc/key_characters/story_beats)는
-    # 더 이상 사용하지 않는다. 이 단계는 인트로/크레딧 시점 감지 전용으로 축소.
-    # 다만 analyze_video_intent의 has_intro/intro_end_sec/has_credits/credits_start_sec 4개 필드는
-    # 그대로 활용 (가벼운 detect_intro_credits 신규 함수로 대체는 별도 라운드).
-    # 후속 단계(analyze_chunk / compose_story)에는 narrative_skeleton=None을 전달해 LLM에
-    # skeleton 정보가 흘러가지 않게 한다.
-    skeleton_path = output_dir / "narrative_skeleton.json"
-    intro_credits_info: dict[str, Any] = {}  # has_intro/intro_end_sec/has_credits/credits_start_sec만 유지
-    _full_skeleton: dict[str, Any] = {}  # 인트로/크레딧 감지에만 사용 (캐시 호환용)
-    if start_idx <= 6 and skeleton_path.exists() and from_step != "skeleton":
-        print("\n[7/16] 인트로/크레딧 정보 로드 중...")
-        try:
-            _full_skeleton = json.loads(skeleton_path.read_text(encoding="utf-8"))
-            intro_credits_info = {
-                k: _full_skeleton.get(k)
-                for k in ("has_intro", "intro_end_sec", "has_credits", "credits_start_sec")
-                if k in _full_skeleton
-            }
-            print(f"  - 인트로 종료: {intro_credits_info.get('intro_end_sec', 0)}s / 크레딧 시작: {intro_credits_info.get('credits_start_sec', 0)}s")
-        except Exception as e:
-            print(f"  [WARN] 인트로/크레딧 캐시 로드 실패: {e}")
-            intro_credits_info = {}
-    elif start_idx <= 6:
-        print("\n[7/16] 인트로/크레딧 감지 중 (Flash)...")
-        try:
-            _intent_gemini = load_gemini_client()
-            _full_skeleton = _intent_gemini.analyze_video_intent(
-                proxy_path=proxy_video_path,
-                work_title=payload.work_title,
-                topic=payload.topic,
-                work_context=payload.work_context,
-                previous_episodes_context=payload.previous_episodes_context,
-            )
-            if _full_skeleton:
-                # 4개 필드만 추출. 나머지(intent/emotional_arc 등)는 사용자 결정으로 폐기.
-                intro_credits_info = {
-                    k: _full_skeleton.get(k)
-                    for k in ("has_intro", "intro_end_sec", "has_credits", "credits_start_sec")
-                    if k in _full_skeleton
-                }
-                # 캐시는 전체 dict 유지 (재실행 호환성)
-                skeleton_path.write_text(
-                    json.dumps(_full_skeleton, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-                print(f"  [OK] 인트로 종료: {intro_credits_info.get('intro_end_sec', 0)}s / 크레딧 시작: {intro_credits_info.get('credits_start_sec', 0)}s")
-            else:
-                print("  [WARN] 영상 분석 결과가 비어 있음 — 인트로/크레딧 미반영")
-        except Exception as e:
-            print(f"  [WARN] 영상 의도 분석 실패: {e} — 인트로/크레딧 미반영")
-            intro_credits_info = {}
-    else:
-        if skeleton_path.exists():
-            try:
-                _full_skeleton = json.loads(skeleton_path.read_text(encoding="utf-8"))
-                intro_credits_info = {
-                    k: _full_skeleton.get(k)
-                    for k in ("has_intro", "intro_end_sec", "has_credits", "credits_start_sec")
-                    if k in _full_skeleton
-                }
-            except Exception:
-                intro_credits_info = {}
-
-    # narrative_skeleton 변수는 후속 단계로 None 전달 → LLM에 영상 의도/감정 아크 정보 안 흘러감
+    # 인트로/크레딧 감지는 [5/16] SRT 기반 자동 감지(detect_exclusion_zones)로 충분.
+    # narrative_skeleton의 다른 필드(intent/emotional_arc/key_characters/story_beats)는
+    # 라운드 3c에서 LLM에 전달하지 않도록 차단 → 본 라운드 6a에서 단계 자체를 제거.
+    # 후속 단계(analyze_chunk / compose_story)는 narrative_skeleton=None 그대로 받음.
+    print("\n[7/16] skeleton 단계 — 제거됨 (인트로/크레딧은 [5/16] SRT 감지가 처리)")
     narrative_skeleton: dict[str, Any] | None = None
-
-    # ── Gemini 분석으로 인트로/크레딧 제외 구간 업데이트 ──
-    if intro_credits_info and (intro_credits_info.get("has_intro") or intro_credits_info.get("has_credits")):
-        _srt_for_ez = None
-        if payload.srt_path and payload.srt_path.exists():
-            try:
-                _srt_for_ez = parse_subtitle(payload.srt_path)
-            except Exception:
-                pass
-        exclusion_zones = detect_exclusion_zones(
-            media_info.duration_sec,
-            skip_intro_sec=payload.skip_intro_sec,
-            skip_credits_sec=payload.skip_credits_sec,
-            auto_detect=True,
-            srt_segments=_srt_for_ez,
-            gemini_result=intro_credits_info,
-        )
-        if exclusion_zones.detection_method != "none":
-            print("  [인트로/크레딧] Gemini 영상 분석 결과 반영")
-            print_exclusion_summary(exclusion_zones, media_info.duration_sec)
-            checkpoint_exclusion.write_text(
-                json.dumps(exclusion_zones.to_dict(), ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
 
     # ═══════════════════════════════════════
     # [8/16] 인물 등장 인덱스 (face_id 사전 패스)
@@ -1018,6 +990,19 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                                 ce["needed"] = False
                             elif not (es <= moment["start_sec"] and moment["end_sec"] <= ee):
                                 ce["needed"] = False
+                            else:
+                                # 라운드 6a (B): 청크 범위 벗어남 검증 — LLM 환각 차단
+                                # extended가 청크 절대 시간 범위 [chunk.start_sec, chunk.end_sec]를
+                                # ±0.5초 완충 두고 벗어나면 needed=false 강등.
+                                _chunk_lo = chunk.start_sec - 0.5
+                                _chunk_hi = chunk.end_sec + 0.5
+                                if es < _chunk_lo or ee > _chunk_hi:
+                                    ce["needed"] = False
+                                    print(
+                                        f"    [WARN] context_extension 청크 범위 벗어남 "
+                                        f"(es={es:.1f}, ee={ee:.1f} vs chunk[{chunk.start_sec:.1f}~{chunk.end_sec:.1f}]) "
+                                        f"→ needed=false 강등"
+                                    )
 
                     all_candidates.append(moment)
             finally:
@@ -1273,64 +1258,20 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     clips, title_text, _ = all_storyline_variants[0]
 
     # ═══════════════════════════════════════
-    # [12/16] TTS 큐 계획 (voice/speed/위치 결정)
+    # [12/16] 선택된 클립 전사 + 무음 제거 (라운드 6a — TTS cue 계획 *전*에 수행)
     # ═══════════════════════════════════════
-    # 결정된 storyline의 클립 시퀀스를 받아 편집 타임라인 절대 시간 기준으로
-    # cue 리스트를 만든다. cue 시간/voice/speed는 다음 [14/16]에서 mp3 합성에 사용.
-    checkpoint_tts = output_dir / "checkpoint_tts_plan.json"
-    tts_cues_per_variant: list[list[dict[str, Any]]] = []
-    if checkpoint_tts.exists() and from_step not in ("tts_plan", "story"):
-        print("\n[12/16] TTS cue 계획 로드 중...")
-        try:
-            cached = json.loads(checkpoint_tts.read_text(encoding="utf-8"))
-            tts_cues_per_variant = cached.get("variants", [])
-            print(f"  - {len(tts_cues_per_variant)}개 variant cue 로드")
-        except Exception as e:
-            print(f"  [WARN] cue 캐시 로드 실패: {e} — 새로 계획")
-            tts_cues_per_variant = []
-
-    if not tts_cues_per_variant and start_idx <= 11:
-        print("\n[12/16] TTS cue 계획 중 (Flash)...")
-        tts_start = time.time()
-        gemini = load_gemini_client()
-        for sl_idx, (sl_clips, _t, _s) in enumerate(all_storyline_variants):
-            try:
-                cues = gemini.plan_tts_cues(
-                    sl_clips,
-                    payload.work_title,
-                    narrative_skeleton=narrative_skeleton,
-                    work_context=payload.work_context,
-                    previous_episodes_context=payload.previous_episodes_context,
-                )
-                tts_cues_per_variant.append(cues)
-                voices = sorted({c["voice"] for c in cues})
-                speeds = sorted({c["speed"] for c in cues})
-                print(f"  - variant {sl_idx + 1}: {len(cues)}개 cue (voice={voices}, speed={speeds})")
-            except Exception as e:
-                print(f"  [WARN] variant {sl_idx + 1} cue 계획 실패: {e} — TTS 없이 진행")
-                tts_cues_per_variant.append([])
-        checkpoint_tts.write_text(
-            json.dumps({"variants": tts_cues_per_variant}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        print(f"[OK] TTS cue 계획 완료 (소요 시간: {time.time() - tts_start:.1f}초)")
-
-    # 첫 번째 variant의 cue를 기본으로 사용 (다중 쇼츠는 [15/16]에서 variant마다 따로)
-    tts_cues = tts_cues_per_variant[0] if tts_cues_per_variant else []
-
-    # ═══════════════════════════════════════
-    # [13/16] 선택된 클립 전사 + 무음 제거
-    # ═══════════════════════════════════════
+    # 무음 컷으로 clips가 짧아지므로 그 *후*의 새 clips 기준으로 TTS cue 시간을 계산해야
+    # 자막·TTS 밀림이 발생하지 않는다. 라운드 6a 핵심: tts_plan을 transcribe 뒤로 이동.
     transcript_text: list = []
     full_audio_path = output_dir / "full_audio.json"
     segments_cache_path = output_dir / "subtitle_segments.json"
 
     # full_audio는 선택된 클립 범위에만 전사된 데이터. story/graph 단계부터 재실행 시
     # 클립 범위가 달라지면 매핑 미스(0 segments)가 발생하므로 full_audio도 재생성한다.
-    _full_audio_invalidate = from_step in ("graph", "story", "tts_plan", "transcribe", "resources")
+    _full_audio_invalidate = from_step in ("graph", "story", "transcribe", "tts_plan", "resources")
 
-    if start_idx <= 12 and full_audio_path.exists() and not _full_audio_invalidate:
-        print("\n[13/16] 전사 데이터 로드 중...")
+    if start_idx <= 11 and full_audio_path.exists() and not _full_audio_invalidate:
+        print("\n[12/16] 전사 데이터 로드 중...")
         loaded_data = json.loads(full_audio_path.read_text(encoding="utf-8"))
         transcript_text = [SimpleNamespace(**seg) for seg in loaded_data]
         print(f"  - {len(transcript_text)}개 세그먼트 로드 완료")
@@ -1340,10 +1281,15 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         cut_results = cut_silence_from_clips(clips, transcript_text, max_gap_sec=0.4, padding_sec=0.15)
         print_silence_cut_summary(cut_results)
         clips = flatten_to_clips(cut_results)
+        # 라운드 6a-2: 모든 storyline variant의 sl_clips도 무음 컷 적용 후 갱신.
+        # tts_plan이 변형되지 않은 sl_clips를 받으면 cue 시간이 영상 길이 초과 가능.
+        all_storyline_variants = _apply_silence_cut_to_variants(
+            all_storyline_variants, transcript_text
+        )
         print(f"[OK] 전사 로드 + 무음 제거 완료 ({len(clips)}개 클립)")
 
-    elif start_idx <= 12:
-        print("\n[13/16] 선택된 클립 구간 전사 중...")
+    elif start_idx <= 11:
+        print("\n[12/16] 선택된 클립 구간 전사 중...")
         transcribe_start = time.time()
 
         if payload.srt_path:
@@ -1430,20 +1376,24 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             cut_results = cut_silence_from_clips(clips, transcript_text, max_gap_sec=0.4, padding_sec=0.15)
             print_silence_cut_summary(cut_results)
             clips = flatten_to_clips(cut_results)
+            # 라운드 6a-2: 모든 storyline variant의 sl_clips도 갱신 (cue 영상 길이 초과 방지)
+            all_storyline_variants = _apply_silence_cut_to_variants(
+                all_storyline_variants, transcript_text
+            )
         print(f"[OK] 전사 완료 ({len(clips)}개 클립)")
     else:
         # 이전 단계 데이터 로드
         if full_audio_path.exists():
             loaded_data = json.loads(full_audio_path.read_text(encoding="utf-8"))
             transcript_text = [SimpleNamespace(**seg) for seg in loaded_data]
-        print(f"\n[13/16] 전사 단계 건너뜀 ({len(transcript_text)}개 세그먼트 로드)")
+        print(f"\n[12/16] 전사 단계 건너뜀 ({len(transcript_text)}개 세그먼트 로드)")
 
     # 자막 데이터 생성 (전사 → 편집 타임라인 매핑)
-    # transcribe 이전(graph/story/tts_plan) 단계부터 재실행이면 클립 구성/길이가 달라졌으므로
+    # transcribe 이전(graph/story) 단계부터 재실행이면 클립 구성/길이가 달라졌으므로
     # 자막 캐시도 무효화해서 새 클립 기준으로 remap + merge(환각 필터 포함) 재수행.
     final_segments = []
-    _transcribe_invalidate = from_step in ("graph", "story", "tts_plan", "transcribe", "resources")
-    if start_idx <= 13 and (not segments_cache_path.exists() or _transcribe_invalidate):
+    _transcribe_invalidate = from_step in ("graph", "story", "transcribe", "tts_plan", "resources")
+    if start_idx <= 11 and (not segments_cache_path.exists() or _transcribe_invalidate):
         print("  자막 타임라인 매핑 중...")
         remapped = remap_transcript_to_edited_timeline(
             clips, transcript_text, tts_only_when_no_orig=True,
@@ -1470,6 +1420,56 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         cached_data = json.loads(segments_cache_path.read_text(encoding="utf-8"))
         final_segments = [SimpleNamespace(**seg) for seg in cached_data]
         print(f"  자막 캐시 로드 완료 ({len(final_segments)} segments)")
+
+    # ═══════════════════════════════════════
+    # [13/16] TTS 큐 계획 (voice/speed/위치 결정) — 라운드 6a: transcribe 뒤로 이동
+    # ═══════════════════════════════════════
+    # 결정된 storyline의 *무음 컷 후* 클립 시퀀스를 받아 편집 타임라인 절대 시간 기준으로
+    # cue 리스트를 만든다. cue 시간/voice/speed는 다음 [14/16]에서 mp3 합성에 사용.
+    # 무음 컷이 clips 길이를 줄여놓은 *후* cue를 계산하므로 TTS·자막 밀림이 발생하지 않는다.
+    checkpoint_tts = output_dir / "checkpoint_tts_plan.json"
+    tts_cues_per_variant: list[list[dict[str, Any]]] = []
+    if checkpoint_tts.exists() and from_step not in ("graph", "story", "transcribe", "tts_plan"):
+        print("\n[13/16] TTS cue 계획 로드 중...")
+        try:
+            cached = json.loads(checkpoint_tts.read_text(encoding="utf-8"))
+            tts_cues_per_variant = cached.get("variants", [])
+            print(f"  - {len(tts_cues_per_variant)}개 variant cue 로드")
+        except Exception as e:
+            print(f"  [WARN] cue 캐시 로드 실패: {e} — 새로 계획")
+            tts_cues_per_variant = []
+
+    if not tts_cues_per_variant and start_idx <= 12:
+        print("\n[13/16] TTS cue 계획 중 (Flash, 무음 컷 후 clips 기준)...")
+        tts_start = time.time()
+        gemini = load_gemini_client()
+        for sl_idx, (sl_clips, _t, _s) in enumerate(all_storyline_variants):
+            try:
+                cues = gemini.plan_tts_cues(
+                    sl_clips,
+                    payload.work_title,
+                    narrative_skeleton=narrative_skeleton,
+                    work_context=payload.work_context,
+                    previous_episodes_context=payload.previous_episodes_context,
+                )
+                tts_cues_per_variant.append(cues)
+                voices = sorted({c["voice"] for c in cues})
+                speeds = sorted({c["speed"] for c in cues})
+                print(f"  - variant {sl_idx + 1}: {len(cues)}개 cue (voice={voices}, speed={speeds})")
+            except Exception as e:
+                print(f"  [WARN] variant {sl_idx + 1} cue 계획 실패: {e} — TTS 없이 진행")
+                tts_cues_per_variant.append([])
+        checkpoint_tts.write_text(
+            json.dumps({"variants": tts_cues_per_variant}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"[OK] TTS cue 계획 완료 (소요 시간: {time.time() - tts_start:.1f}초)")
+
+    # 라운드 6a-2 후처리 안전판: 각 variant의 cue.end_sec가 그 variant의 영상 길이를 넘지 않도록 cap.
+    tts_cues_per_variant = _clamp_cues_to_variants(tts_cues_per_variant, all_storyline_variants)
+
+    # 첫 번째 variant의 cue를 기본으로 사용 (다중 쇼츠는 [15/16]에서 variant마다 따로)
+    tts_cues = tts_cues_per_variant[0] if tts_cues_per_variant else []
 
     # ═══════════════════════════════════════
     # [14/16] 리소스 생성 (크롭, TTS, 편집 계획)
