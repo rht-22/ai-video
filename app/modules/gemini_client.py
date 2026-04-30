@@ -381,15 +381,17 @@ extended 시간을 적용한 클립에는 `"context_extended": true` 플래그�
 
 ### context_extension 활용 (highlight 시간 자동 확장)
 
-선택한 highlight candidate의 `context_extension.needed`가 true면 다음을 따른다:
-- highlight 클립의 `start_sec`을 candidate.context_extension.extended_start_sec로 설정 (앞쪽 setup 포함)
-- highlight 클립의 `end_sec`을 candidate.context_extension.extended_end_sec로 설정 (뒤쪽 aftermath 포함)
-- 결과: 핵심 장면이 setup → 핵심 → 결과 흐름으로 컷 없이 한 번에 흘러감 → 시청자 이해도 ↑
-- storyline 출력에 `"context_extended": true` 플래그를 함께 표기 (디버그용)
+⭐ highlight candidate 후보 중 **`context_extension.needed=true`인 candidate를 우선 채택하라**.
+이 candidate들은 setup → 핵심 → 결과 흐름이 자동으로 묶여서 완결성·맥락이 강해진다.
+needed=true 후보가 동일한 점수대에서 경쟁하면, 일반 candidate보다 needed=true 쪽을 선택하라.
 
-needed가 false면 candidate의 원래 start_sec/end_sec 그대로 사용.
+needed=true 채택 시:
+- storyline 출력에 `"context_extended": true` 플래그만 표기
+- start_sec/end_sec은 후처리에서 candidate.context_extension.extended_start_sec / extended_end_sec로 자동 적용됨 (LLM이 시간 변형 금지)
 
-⚠️ extended 구간 길이가 max_duration_sec(약 75초)를 초과하면 candidate의 원래 start_sec/end_sec로 폴백하라.
+needed=false면 candidate의 원래 start_sec/end_sec 그대로 사용 (`"context_extended": false`).
+
+⚠️ extended 구간이 max_duration_sec를 초과하면 needed=false 폴백 후보로 교체.
 
 # 공통 규칙
 
@@ -430,22 +432,30 @@ needed가 false면 candidate의 원래 start_sec/end_sec 그대로 사용.
 {candidates_str}
 
 # Constraints & Rules
-1. 각 클립의 start_sec, end_sec 명시
+
+⚠️⚠️ **시간 절대 고정 정책 — 가장 중요** ⚠️⚠️
+- candidate_moments에 있는 start_sec, end_sec, context_extension.extended_start_sec, extended_end_sec는
+  **절대 변형하지 마라.** 1초도 줄이거나 늘리지 마라.
+- LLM 출력의 start_sec/end_sec 값은 후처리 단계에서 chunk_index/candidate_index 기반 lookup으로 덮어씀 →
+  네가 수치를 적었어도 무시된다. 그러므로 candidate에 적힌 값을 정확히 인용하기만 하라.
+- 클립 시간 합이 max_duration_sec를 초과해도 **시간을 줄여서 맞추지 마라.**
+  대신 (a) build 후보 개수를 줄이거나 (b) 더 짧은 다른 candidate로 교체해서 맞춰라.
+- context_extension 적용은 "context_extended": true 플래그 표기로만 표현. 시간은 후처리에서 ext 적용.
+
+1. 각 클립의 chunk_index, candidate_index만 정확히 명시 (start_sec/end_sec는 candidate 그대로 인용)
 2. 작품의 전체 맥락을 모르는 사람도 한 번 보고 재미를 느낄 수 있는 장면을 선정
 3. score는 description, reason, requires_context, highlight_eligible 등 후보의 의미적 평가를 종합해 0.0~1.0으로 정직하게 평가하라
 4. 'continues_from'을 참고하여 맥락이 끊기지 않게 하라
 5. 위 # Input Data의 "이전 에피소드 요약"이 비어있지 않으면, 이전 회차에서 묘사된 인물 관계·미해결 갈등을 후킹 포인트로 활용하여 연속극 시청자에게 자연스럽게 이어지도록 hook/payoff를 구성하라
-6. 위 # Input Data의 "작품 서사 스켈레톤(narrative_skeleton)"이 비어있지 않으면, 작품 전체 서사 구조 안에서 이번 회차가 차지하는 위치(도입/전개/위기/절정/결말)를 고려하여 스토리라인의 톤(긴장 강도, 감정 결)이 단계와 부합하도록 구성하라
+6. (예약됨 — narrative_skeleton 단계 제거됨)
 7. 위 # Input Data의 "[전체 장면 흐름 (segments)]"이 비어있지 않으면, 다음 용도로만 활용하라:
    - candidate_moments가 영상 어느 흐름에 위치하는지 맥락 파악
    - 두 candidate 사이 갭이 큰 경우 그 사이 segments 묘사를 참고해 자연스러운 흐름 작성
-   - hook 직전·payoff 직후 장면을 segments에서 확인해 클립 시작/종료 시점 정밀 조정
+   - hook 직전·payoff 직후 장면을 segments에서 확인해 후보 선택 시 참고
    ⚠️ segments에 있는 평범한 구간을 새 candidate로 만들지 마라. 후보는 반드시 candidate_moments에서만 선택.
 8. (storytelling) 각 클립(hook / build[*] / payoff)도 해당 candidate.context_extension을 검토하라.
-   - needed=true면 그 클립의 start_sec/end_sec을 extended 값으로 설정 가능
-   - 인접 클립과 시간 충돌 시 충돌 없는 범위로 잘라 쓰거나 needed=false 폴백
-   - 클립 시간 합 ≤ max_duration_sec 보장 (확장 우선순위: payoff > hook > 클라이맥스 build > 나머지 build)
-   - 적용한 클립에 "context_extended": true 표기
+   - needed=true면 "context_extended": true 플래그만 출력 (시간은 후처리에서 ext 적용)
+   - 클립 시간 합 ≤ max_duration_sec 초과 시: candidate를 줄이거나 교체. **절대 시간을 줄이지 마라.**
 9. (storytelling) hook이 build와 payoff 시간대 사이에 있으면(케이스 3) 반드시 hook_preview를 출력하라.
    - hook_preview.start_sec/end_sec은 hook 시간 안 짧은 발췌 (3~7초 권장)
    - 같은 장면이 두 번 등장하므로 hook_preview는 임팩트 핵심만 짧게

@@ -63,8 +63,60 @@ from types import SimpleNamespace
 from app.modules.silence_cutter import cut_silence_from_clips, flatten_to_clips, print_silence_cut_summary
 
 
-def _clips_from_storyline(storyline_data: dict, fallback_title: str = "") -> tuple[list[StoryClip], str]:
-    """스토리라인 dict에서 (clips, title_text)를 추출합니다."""
+def _build_candidates_lookup(all_candidates: list[dict]) -> dict[tuple[int, int], dict]:
+    """all_candidates에서 (chunk_index, candidate_index) → candidate dict 맵 생성.
+
+    LLM이 storyline 출력 시 시간을 변형해도 이 lookup으로 정본 candidate 시간을 복원할 수 있게 한다.
+    """
+    lookup: dict[tuple[int, int], dict] = {}
+    for cand in all_candidates or []:
+        ci = int(cand.get("chunk_index", -1))
+        cj = int(cand.get("candidate_index", -1))
+        if ci >= 0 and cj >= 0:
+            lookup[(ci, cj)] = cand
+    return lookup
+
+
+def _resolve_clip_times(src: dict, candidates_lookup: dict[tuple[int, int], dict]) -> dict:
+    """LLM 출력의 start_sec/end_sec을 무시하고 candidate에서 lookup해 정본 시간으로 복원.
+
+    - context_extended=true면 candidate.context_extension의 extended_start/end_sec을 적용
+    - lookup 실패 시 입력 그대로 폴백
+    """
+    ci = int(src.get("chunk_index", -1))
+    cj = int(src.get("candidate_index", -1))
+    cand = candidates_lookup.get((ci, cj))
+    if cand is None:
+        return src  # 폴백
+    extended = bool(src.get("context_extended"))
+    ext = cand.get("context_extension") or {}
+    if extended and ext.get("needed"):
+        start = float(ext.get("extended_start_sec", cand.get("start_sec", src.get("start_sec", 0.0))))
+        end = float(ext.get("extended_end_sec", cand.get("end_sec", src.get("end_sec", 0.0))))
+    else:
+        start = float(cand.get("start_sec", src.get("start_sec", 0.0)))
+        end = float(cand.get("end_sec", src.get("end_sec", 0.0)))
+    out = dict(src)
+    out["start_sec"] = start
+    out["end_sec"] = end
+    # description은 candidate가 더 풍부 (LLM이 잘랐을 가능성 → candidate.description 우선)
+    if not src.get("description") and cand.get("description"):
+        out["description"] = cand["description"]
+    if "character_focus" not in out and cand.get("characters_in_scene"):
+        out["character_focus"] = cand.get("characters_in_scene")
+    return out
+
+
+def _clips_from_storyline(
+    storyline_data: dict,
+    fallback_title: str = "",
+    candidates_lookup: dict[tuple[int, int], dict] | None = None,
+) -> tuple[list[StoryClip], str]:
+    """스토리라인 dict에서 (clips, title_text)를 추출합니다.
+
+    candidates_lookup: (chunk_index, candidate_index) → candidate dict 맵.
+    제공되면 LLM 출력의 start_sec/end_sec을 무시하고 candidate 시간으로 복원 (이슈 2·6 해결).
+    """
     clips: list[StoryClip] = []
 
     # 제목 구성 (이모지 제거)
@@ -75,25 +127,32 @@ def _clips_from_storyline(storyline_data: dict, fallback_title: str = "") -> tup
     else:
         title_text = storyline_data.get("topic", fallback_title)
 
+    # 시간 고정: LLM이 어떻게 출력했든 candidate 정본 시간으로 복원
+    def _resolve(src: dict) -> dict:
+        if candidates_lookup:
+            return _resolve_clip_times(src, candidates_lookup)
+        return src
+
     if storyline_data.get("shorts_type") == "highlight":
-        _hl_dur = storyline_data["end_sec"] - storyline_data["start_sec"]
-        _hl_extended = bool(storyline_data.get("context_extended", False))
+        resolved = _resolve(storyline_data)
+        _hl_dur = resolved["end_sec"] - resolved["start_sec"]
+        _hl_extended = bool(resolved.get("context_extended", False))
         print(f"  - highlight 클립 길이 {_hl_dur:.1f}s" + (" (context 확장됨)" if _hl_extended else ""))
         clips.append(StoryClip(
             role="payoff",
-            start_sec=storyline_data["start_sec"],
-            end_sec=storyline_data["end_sec"],
-            subtitle=storyline_data.get("topic", ""),
-            use_original_audio=storyline_data.get("use_original_audio", True),
-            chunk_index=storyline_data.get("chunk_index", -1),
-            candidate_index=storyline_data.get("candidate_index", -1),
+            start_sec=resolved["start_sec"],
+            end_sec=resolved["end_sec"],
+            subtitle=resolved.get("topic", "") or storyline_data.get("topic", ""),
+            use_original_audio=resolved.get("use_original_audio", True),
+            chunk_index=resolved.get("chunk_index", -1),
+            candidate_index=resolved.get("candidate_index", -1),
         ))
     else:
         actual_storyline = storyline_data.get("storyline", {})
 
         def _make_clip(role: str, src: dict) -> StoryClip:
-            # NOTE: bridges_from_previous는 origin이 StoryClip에서 제거함 (story_builder.py)
-            # → 인자에서 제외. src에 그 키가 와도 무시.
+            # 시간 고정: candidate lookup으로 정본 start/end 복원
+            src = _resolve(src)
             return StoryClip(
                 role=role,
                 start_sec=float(src["start_sec"]),
@@ -891,6 +950,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             if sel:
                 ranked_storylines = [sel]
 
+        # 시간 고정 lookup 빌드: LLM이 출력한 start/end_sec를 candidate 정본으로 복원
+        candidates_lookup = _build_candidates_lookup(all_candidates)
+        print(f"  - 시간 고정 lookup: {len(candidates_lookup)}개 candidate 인덱싱")
+
         # 다양성 우선 재선정: 같은 chunk/phase가 max_shorts개 모두 차지하지 않게
         # 점수 1위는 무조건 유지하고, 이후는 chunk_index/emotional_phase가 다른 후보를 우선
         diverse_pool = select_diverse_storylines(
@@ -908,7 +971,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 continue
 
             try:
-                sl_clips, sl_title = _clips_from_storyline(sl_data, payload.work_title)
+                sl_clips, sl_title = _clips_from_storyline(
+                    sl_data, payload.work_title, candidates_lookup=candidates_lookup,
+                )
             except (KeyError, TypeError) as e:
                 print(f"  - 스토리라인 {sl_idx + 1} 파싱 실패: {e}")
                 continue
@@ -941,7 +1006,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         if not all_storyline_variants:
             sel = story_plan.get("selected_storyline", {})
             if sel:
-                fb_clips, fb_title = _clips_from_storyline(sel, payload.work_title)
+                fb_clips, fb_title = _clips_from_storyline(
+                    sel, payload.work_title, candidates_lookup=candidates_lookup,
+                )
                 all_storyline_variants.append((fb_clips, fb_title, sel.get("score", 0.5)))
                 print(f"  - 폴백 스토리라인: {len(fb_clips)}개 클립")
 
