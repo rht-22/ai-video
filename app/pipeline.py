@@ -1139,12 +1139,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 print(f"  - 스토리라인 {sl_idx + 1} 파싱 실패: {e}")
                 continue
 
-            # 최상위 제목 (첫 번째 스토리라인만 story_plan의 title 사용 가능)
-            if len(all_storyline_variants) == 0:
-                top_line1 = _strip_emoji(story_plan.get("title_line1", ""))
-                top_line2 = _enforce_title_line2_limit(_strip_emoji(story_plan.get("title_line2", "")))
-                if top_line1 and top_line2:
-                    sl_title = f"{top_line1}\n{top_line2}"
+            # 라운드 6c — 첫 쇼츠 title을 story_plan top-level title로 덮어쓰는 로직 제거.
+            # 각 storyline의 LLM 출력 title_line1/line2가 정본. select_diverse_storylines로 정렬이
+            # 바뀌면서 #1 자리 storyline의 title이 다른 storyline의 top-level title로 교체되어
+            # 1·2번 쇼츠 제목이 동일해지는 버그를 직접 발생시켰음.
 
             # 클립 수 검증: highlight형은 1개도 OK, storytelling형은 최소 3개
             is_highlight = (sl_data.get("shorts_type") == "highlight")
