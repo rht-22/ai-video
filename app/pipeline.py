@@ -1487,6 +1487,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # story/graph 단계부터 재실행 시 클립 구성이 달라질 수 있으므로 resources 캐시 무효화.
     # 이전 라운드의 crop_map 키(role_idx)와 새 라운드의 clip 키가 어긋나면 KeyError 발생.
     _resources_invalidate = from_step in ("graph", "story", "tts_plan", "transcribe", "resources")
+    # 라운드 9-fix: face_identifier를 resources 단계 *밖*에서도 안전하게 사용할 수 있도록 미리 None 초기화.
+    # --from-step render로 들어와 라인 1490 캐시 로드 분기를 타면 face_identifier가 정의되지 않아
+    # 멀티 variant 렌더링 단계(라인 1862, 1873)에서 UnboundLocalError 발생.
+    face_identifier = None
     if start_idx <= 13 and checkpoint_resources.exists() and not _resources_invalidate:
         print("\n[13/15] 리소스 로드 중...")
         resources_data = json.loads(checkpoint_resources.read_text(encoding="utf-8"))
