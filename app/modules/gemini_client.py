@@ -410,28 +410,21 @@ topic이 바뀌지 않는 한 제목과 결말은 같은 이야기를 가리켜�
 
 ## 제목 구조 (2줄 필수)
 
-레퍼런스 분석 결과 고조회수 쇼츠 제목은 반드시 2줄 구조:
-- **title_line1** (위·흰색, **13자 권장 / 최대 15자, 16자 이상 절대 금지**): **상황/배경/도입 설명**.
+레퍼런스 분석 결과 고조회수 쇼츠 제목은 2줄 구조 권장:
+- **title_line1** (위·흰색, 13자 권장, 최대 15자): **상황/배경/도입 설명**.
   인물 자체보다 *무슨 일이 일어났는지* 또는 *어떤 상황인지*를 압축.
-- **title_line2** (아래·노란색 강조, **13자 권장 / 최대 15자, 16자 이상 절대 금지**): **캐릭터·반전·핵심 후킹**.
+- **title_line2** (아래·노란색 강조, 13자 권장, 최대 15자): **캐릭터·반전·핵심 후킹**.
   시청자 시선을 잡는 핵심 문구. 강조 자리.
 
-ℹ️ 글자 수 가이드: 13자 이내가 가독성 가장 좋음. 14~15자 허용(폰트 자동 축소), 16자 이상은 강제 절단됨.
+글자 수 가이드: 13자 이내 가독성 최고, 14~15자 허용(폰트 자동 축소), 16자 이상은 후처리에서 절단되니 가능한 한 15자 이하 권장.
 
-⚠️ **두 줄의 의미 역할을 반대로 출력하지 마라**. 강조 자리(line2)에 약한 상황 묘사가 들어가면 후킹이 무너진다.
+두 줄의 의미 역할을 일관되게 유지 권장 — 강조 자리(line2)에 캐릭터·반전이 와야 후킹 효과↑.
 
 올바른 예 (상황 → 후킹):
-- line1: "모두 기피하는 깡치사건"  (상황) / line2: "클리어하는 이한영" (캐릭터 강조)
-- line1: "일만 하는 꼰대인 줄 알았는데" (상황) / line2: "알고보니 29살 연하남" (반전)
-- line1: "교우 불화의 원인이" (상황) / line2: "부모님 재력인 현실" (반전)
+- line1: "모두 기피하는 깡치사건" / line2: "클리어하는 이한영"
+- line1: "일만 하는 꼰대인 줄 알았는데" / line2: "알고보니 29살 연하남"
 
-잘못된 예 (역할 swap — 금지):
-- line1: "철두철미한 완벽주의 편집장" (캐릭터 — line2 자리에 와야 함)
-  line2: "기차 놓치고 멘붕 온" (상황 — line1 자리에 와야 함)
-  → 강조 자리에 약한 상황이 들어가 후킹 효과 ↓
-
-⚠️ 두 줄 모두 16자 이상 시 13자로 강제 절단. 절대 16자 이상 출력 금지.
-⚠️ 이모지 금지.
+이모지는 사용하지 않음.
 
 ## Duration Constraint
 
@@ -489,9 +482,12 @@ topic이 바뀌지 않는 한 제목과 결말은 같은 이야기를 가리켜�
     - 1~2개 클립으로는 스토리 흐름이 만들어지지 않음 → 후처리에서 reject 됨
     - build를 충분히 찾기 어려우면 해당 storyline의 score를 낮추고, 다른 storyline 우선 추천
 
-다음 JSON 스키마로만 응답.
+## 출력 형식 (필수)
 
-⚠️ **각 storyline의 `narrative_plan`을 해당 storyline의 클립 선택 전에 반드시 먼저 작성하라.**
+응답은 반드시 **JSON 객체 1개**여야 하며, 최상위 키 `storylines` (배열) 가 **반드시 포함**되어야 한다.
+다른 키 이름(예: shorts, proposals, options 등) 사용 금지. 마크다운 ```json 펜스는 허용되나, 텍스트 설명은 금지.
+
+각 storyline의 `narrative_plan`을 해당 storyline의 클립 선택 전에 먼저 작성하라.
 점수나 수치가 아니라 "어떤 장면/이야기를 쇼츠로 만들 것인가"를 먼저 결정한 뒤 클립을 찾아라.
 {{
   "storylines": [
@@ -1580,7 +1576,33 @@ def _build_fallback_story(all_candidates: list, work_title: str) -> dict[str, An
 
 
 def _validate_story_response(data: dict[str, Any]) -> None:
-    """스토리 구성 응답의 필수 구조를 검증합니다."""
+    """스토리 구성 응답의 필수 구조를 검증합니다.
+
+    라운드 9: LLM이 'storylines' 외 다른 키로 응답하는 케이스를 자동 정규화
+    하여 폴백 빈도를 낮춘다.
+    """
+    # 라운드 9-A: alias 매핑 (LLM이 다른 키 이름으로 출력해도 정상 처리).
+    if "storylines" not in data or not isinstance(data.get("storylines"), list):
+        for alias in (
+            "shorts", "proposals", "storyline_options", "options",
+            "story_proposals", "stories", "story_list", "results", "output"
+        ):
+            if alias in data and isinstance(data[alias], list) and data[alias]:
+                data["storylines"] = data[alias]
+                break
+
+    # 라운드 9-B: 단일 selected_storyline만 있는 경우 storylines로 wrap.
+    if "storylines" not in data or not isinstance(data.get("storylines"), list):
+        sel = data.get("selected_storyline")
+        if isinstance(sel, dict) and sel:
+            data["storylines"] = [sel]
+
+    # 라운드 9-C: 응답 자체가 단일 storyline dict (배열 누락) 인 경우 wrap.
+    # `shorts_type` 키 존재로 단일 storyline 형태 추정.
+    if "storylines" not in data or not isinstance(data.get("storylines"), list):
+        if "shorts_type" in data and ("storyline" in data or "start_sec" in data):
+            data["storylines"] = [dict(data)]
+
     if "storylines" not in data or not isinstance(data["storylines"], list):
         raise ValueError("응답에 'storylines' 배열이 없습니다.")
     if len(data["storylines"]) == 0:
