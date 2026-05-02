@@ -327,10 +327,19 @@ STORY_COMPOSITION_PROMPT = """
 
 - 모든 chunk의 candidate_moments 중에서 여러 장면들을 선정해 원본의 서사를 반영한 기승전결이 있도록 여러 장면을 유기적으로 연결할 것.
 - 캐릭터의 행적을 조명하거나 영상의 주요 서사를 요약.
-- sequence_type: "여정몰입형" 또는 "결과선공개형" 중 선택 (storytelling만 해당)
+- sequence_type: "여정몰입형" / "결과선공개형" / "반전형" / "시퀀스블록형" 중 선택 (storytelling만 해당)
+   - **여정몰입형**: 에피소드의 전반적인 분위기·긴장감이 처음부터 끝까지 일관되게 유지돼, 굳이 결과를 앞당길 필요가 없을 때 선택한다. 사건이 자연스럽게 고조되는 흐름 자체가 훅이 되므로 hook~payoff를 원본 시간 순서대로 배치한다. build·payoff 흐름 모두 같은 방향.
    - **결과선공개형**: 에피소드 내 핵심 결과(반전·충격·감정 폭발)가 명확하고, 그 결과만으로도 시청자의 시선을 확 잡아끌 수 있을 때 선택한다. hook에서 결과 장면을 먼저 보여줘 "이게 왜?", "어쩌다 이렇게 됐지?"라는 궁금증을 유발하고, build~payoff에서 그 과정을 시간 순으로 풀어준다.
      ⚠️ **결과선공개형 hook 제약**: hook은 반드시 build/payoff와 동일 인물이 1명 이상 겹치거나, hook의 상황이 build/payoff의 직접적 결과여야 한다.
-   - **여정몰입형**: 에피소드의 전반적인 분위기·긴장감이 처음부터 끝까지 일관되게 유지돼, 굳이 결과를 앞당길 필요가 없을 때 선택한다. 사건이 자연스럽게 고조되는 흐름 자체가 훅이 되므로 hook~payoff를 원본 시간 순서대로 배치한다.
+   - **반전형 (NEW)**: hook/build의 흐름이 한 방향(예: 주인공 승리)인데 payoff에서 *반대 결말*(주인공 패배·굴욕)이 일어나는 경우 선택한다.
+     ⚠️ **반전형 핵심 규칙**: title_line2는 *반드시 payoff 결말 방향*을 따라 라벨링한다. hook/build의 점수·결과 패턴을 외삽해서 payoff와 반대 방향 title을 출력하면 안 된다.
+     예: hook(주인공 1대0 승) → build(2대0 승) → payoff(셀프 제모 발각 굴욕)
+       올바른 line2: "막판 대참사" / "한순간 대굴욕"
+       ❌ 잘못된 line2: "3대0으로 박살낸 주인공" — 패턴 외삽으로 payoff 반전 무시
+   - **시퀀스블록형 (NEW)**: 같은 sequence_id에 속한 candidate들이 자체로 완결된 코너/씬을 이루고 있어 그대로 묶어 사용하기 좋을 때 선택. hook(선택) + sequence_block(필수) 구성. build·payoff 구분 없이 sequence 통째 사용.
+     - sequence_block 필드: `[{{"chunk_index": N, "candidate_index": M}}, ...]` 형태로 같은 sequence_id 안 candidate 참조
+     - 예: SNL 한 콩트의 시작~중간~끝이 한 sequence_id면 그대로 사용
+     ⚠️ sequence_block 안 candidate들은 **같은 sequence_id**여야 한다.
 
 ### sequence_id — 인접 배치 시 안전 여부 판별용 (강제 규칙 아님)
 
@@ -424,6 +433,23 @@ topic이 바뀌지 않는 한 제목과 결말은 같은 이야기를 가리켜�
 - line1: "모두 기피하는 깡치사건" / line2: "클리어하는 이한영"
 - line1: "일만 하는 꼰대인 줄 알았는데" / line2: "알고보니 29살 연하남"
 
+## title_line2 ↔ payoff 결말 일관성 (필수)
+
+title_line2는 단순 후킹 문구가 아니라, **payoff 클립의 실제 결말 방향과 의미가 일치**해야 한다.
+hook/build의 흐름 패턴을 외삽해서 *반대 방향* 결말을 라벨링하지 마라.
+
+### 올바른 예 (결말과 일치)
+- payoff: 주인공이 셀프 제모 발각으로 굴욕 (반전 패배)
+  - line2: "막판 대참사로 무너진" / "마지막에 무너진 주인공" / "한순간 대굴욕"
+  - ❌ 잘못: "3대0으로 박살낸 주인공" — hook/build 패턴(1→2→3) 외삽, payoff 반전 무시
+- payoff: 유미가 마음 인정 (긍정 결말)
+  - line2: "사랑에 빠진걸 인정한 유미"
+  - ❌ 잘못: "철벽 친 유미" — payoff는 마음 인정인데 line2는 정반대
+
+### 검증 방법
+title_line2를 작성한 후 payoff description을 다시 읽어 결말 방향이 일치하는지 확인.
+불일치하면 line2를 payoff 결말에 맞게 재작성. **반전형은 반드시 payoff 결말을 따른다.**
+
 이모지는 사용하지 않음.
 
 ## Duration Constraint (요즘 쇼츠 표준)
@@ -516,7 +542,7 @@ topic이 바뀌지 않는 한 제목과 결말은 같은 이야기를 가리켜�
     {{
       "storyline_index": 0,
       "shorts_type": "storytelling",
-      "sequence_type": "여정몰입형|결과선공개형",
+      "sequence_type": "여정몰입형|결과선공개형|반전형|시퀀스블록형",
       "topic": "주제명",
       "topic_reason": "서사 구성 이유",
       "score": 0.0,
@@ -552,11 +578,33 @@ topic이 바뀌지 않는 한 제목과 결말은 같은 이야기를 가리켜�
           "use_original_audio": true,
           "character_focus": ["인물명"],
           "context_extended": false
-        }}
+        }},
+        "sequence_block": []
       }}
     }},
     {{
       "storyline_index": 1,
+      "shorts_type": "storytelling",
+      "sequence_type": "시퀀스블록형",
+      "topic": "시퀀스블록형 예: 한 콩트 통째 사용",
+      "topic_reason": "같은 sequence_id의 candidate가 자체 완결",
+      "score": 0.0,
+      "title_line1": "상황 설명",
+      "title_line2": "후킹 강조",
+      "storyline": {{
+        "hook": null,
+        "hook_preview": null,
+        "build": [],
+        "payoff": null,
+        "sequence_block": [
+          {{"chunk_index": 1, "candidate_index": 0}},
+          {{"chunk_index": 1, "candidate_index": 2}},
+          {{"chunk_index": 1, "candidate_index": 3}}
+        ]
+      }}
+    }},
+    {{
+      "storyline_index": 2,
       "shorts_type": "highlight",
       "chunk_index": 0,
       "candidate_index": 0,
@@ -1647,11 +1695,20 @@ def _validate_story_response(data: dict[str, Any]) -> None:
     # ending_hook 기본값
     data.setdefault("ending_hook", "")
 
+    # 라운드 12: sequence_type 미지의 값이면 "여정몰입형"으로 fallback (LLM 출력 안정성)
+    _ALLOWED_SEQUENCE_TYPES = {"여정몰입형", "결과선공개형", "반전형", "시퀀스블록형"}
+
     for idx, sl in enumerate(data["storylines"]):
         if "shorts_type" not in sl:
             raise ValueError(f"storyline[{idx}]에 'shorts_type'이 없습니다.")
         if "score" not in sl:
             raise ValueError(f"storyline[{idx}]에 'score'가 없습니다.")
+
+        # 라운드 12: sequence_type 검증·정규화
+        if sl.get("shorts_type") == "storytelling":
+            seq_type = sl.get("sequence_type")
+            if seq_type not in _ALLOWED_SEQUENCE_TYPES:
+                sl["sequence_type"] = "여정몰입형"
 
         # storyline별 title_line1/line2 기본값
         sl.setdefault("title_line1", data.get("title_line1", ""))

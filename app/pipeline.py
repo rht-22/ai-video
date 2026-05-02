@@ -525,6 +525,51 @@ def _clips_from_storyline(
                 character_focus=tuple(src.get("character_focus") or []),
             )
 
+        # 라운드 12: 시퀀스블록형 분기 — 같은 sequence_id의 candidate들을 시간순으로 추출
+        seq_type = storyline_data.get("sequence_type", "여정몰입형")
+        if seq_type == "시퀀스블록형":
+            hook = actual_storyline.get("hook")
+            sequence_block = actual_storyline.get("sequence_block", []) or []
+
+            if isinstance(hook, dict):
+                clips.append(_make_clip("hook", hook))
+
+            block_clips: list[StoryClip] = []
+            for ref in sequence_block:
+                if not isinstance(ref, dict):
+                    continue
+                ci = int(ref.get("chunk_index", -1))
+                cj = int(ref.get("candidate_index", -1))
+                if candidates_lookup is None:
+                    continue
+                cand = candidates_lookup.get((ci, cj))
+                if cand is None:
+                    continue
+                block_clips.append(StoryClip(
+                    role="build",
+                    start_sec=float(cand.get("start_sec", 0.0)),
+                    end_sec=float(cand.get("end_sec", 0.0)),
+                    subtitle=cand.get("description", ""),
+                    use_original_audio=True,
+                    chunk_index=ci, candidate_index=cj,
+                    character_focus=tuple(cand.get("characters_in_scene") or cand.get("character_focus") or []),
+                ))
+            block_clips.sort(key=lambda c: c.start_sec)
+            # 마지막 clip을 payoff role로 — 자막·렌더 일관성
+            if block_clips:
+                last = block_clips[-1]
+                block_clips[-1] = StoryClip(
+                    role="payoff",
+                    start_sec=last.start_sec, end_sec=last.end_sec,
+                    subtitle=last.subtitle, use_original_audio=last.use_original_audio,
+                    pacing_note=last.pacing_note,
+                    chunk_index=last.chunk_index, candidate_index=last.candidate_index,
+                    character_focus=last.character_focus,
+                )
+            clips.extend(block_clips)
+            print(f"  - 시퀀스블록형: hook {1 if isinstance(hook, dict) else 0}개 + sequence_block {len(block_clips)}개")
+            return clips, title_text  # 기존 hook/build/payoff 분기 건너뜀
+
         hook = actual_storyline.get("hook")
         hook_preview = actual_storyline.get("hook_preview")
         build_list = actual_storyline.get("build", []) or []
@@ -1327,9 +1372,18 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             # 바뀌면서 #1 자리 storyline의 title이 다른 storyline의 top-level title로 교체되어
             # 1·2번 쇼츠 제목이 동일해지는 버그를 직접 발생시켰음.
 
-            # 클립 수 검증: highlight형은 1개도 OK, storytelling형은 최소 3개
+            # 클립 수 검증: 라운드 12 — sequence_type별 차등화
+            # - highlight: 1개 (단일 강한 장면)
+            # - storytelling 시퀀스블록형: 1개 (sequence 1 candidate도 OK)
+            # - storytelling 그 외 (여정몰입형/결과선공개형/반전형): 2개 완화 (3 → 2, hook+build/payoff)
             is_highlight = (sl_data.get("shorts_type") == "highlight")
-            min_clip_count = 1 if is_highlight else 3
+            _seq_type = sl_data.get("sequence_type", "여정몰입형")
+            if is_highlight:
+                min_clip_count = 1
+            elif _seq_type == "시퀀스블록형":
+                min_clip_count = 1
+            else:
+                min_clip_count = 2
             is_valid, msg = validate_story_clips(
                 sl_clips, config.min_duration_sec, config.max_duration_sec,
                 min_clip_count=min_clip_count,
