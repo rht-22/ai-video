@@ -87,10 +87,11 @@ def _clamp_cues_to_variants(
     return out
 
 
-def _enforce_title_line2_limit(text: str, max_chars: int = 13) -> str:
-    """LLM이 title_line2 글자수 가이드를 어겼을 때 안전판 — 13자 이내로 강제 절단.
+def _enforce_title_line_limit(text: str, max_chars: int = 13) -> str:
+    """LLM이 title_line1/line2 글자수 가이드를 어겼을 때 안전판 — max_chars 이내로 강제 절단.
 
-    어절 경계 기준으로 자르되, 단어 하나가 13자 초과면 그대로 잘림.
+    어절 경계 기준으로 자르되, 단어 하나가 max_chars 초과면 그대로 잘림.
+    라운드 7-B에서 line2 전용 함수를 line1·line2 공용으로 일반화.
     """
     if not text:
         return text
@@ -107,6 +108,10 @@ def _enforce_title_line2_limit(text: str, max_chars: int = 13) -> str:
     if not out:
         out = text[:max_chars]
     return out.strip()
+
+
+# 라운드 5에서 도입된 이름의 호환성 유지를 위한 별칭 (line2 전용 호출처)
+_enforce_title_line2_limit = _enforce_title_line_limit
 
 
 from app.config import AppConfig, Paths, DesignConfig, get_font_path
@@ -331,8 +336,9 @@ def _clips_from_storyline(
     clips: list[StoryClip] = []
 
     # 제목 구성 (이모지 제거)
-    title_line1 = _strip_emoji(storyline_data.get("title_line1", ""))
-    title_line2 = _enforce_title_line2_limit(_strip_emoji(storyline_data.get("title_line2", "")))
+    # 라운드 7-B: line1도 13자 강제 (이전엔 line2만 강제) → renderer에서 자동 줄바꿈 방지 → 무조건 2줄
+    title_line1 = _enforce_title_line_limit(_strip_emoji(storyline_data.get("title_line1", "")))
+    title_line2 = _enforce_title_line_limit(_strip_emoji(storyline_data.get("title_line2", "")))
     if title_line1 and title_line2:
         title_text = f"{title_line1}\n{title_line2}"
     else:

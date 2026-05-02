@@ -813,12 +813,20 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
 
     ratio = getattr(d, 'aspect_ratio', '16:9')
 
-    # [1] 제목 줄바꿈 로직 (기존 유지)
-    def split_text_smart(text: str, max_chars: int = 14) -> list[str]:
+    # [1] 제목 줄바꿈 로직 — 라운드 7-A: orig_line_idx 보존하여 색상/폰트 매핑 정확히
+    def split_text_smart(text: str, max_chars: int = 14) -> list[tuple[int, str]]:
+        """입력 text를 \\n 구분으로 원본 라인 분리 후 각 라인을 max_chars 어절 경계로 wrap.
+
+        반환: [(orig_line_idx, wrapped_text), ...]
+        예: split_text_smart("긴line1\\n짧line2", 14) →
+            [(0, "긴line1_part1"), (0, "긴line1_part2"), (1, "짧line2")]
+        호출부는 orig_idx로 custom_colors/title_sizes를 lookup해야 wrap이 일어나도
+        line1 모든 줄이 line1 색상, line2 모든 줄이 line2 색상으로 정확히 렌더된다.
+        """
         if not text: return []
         lines = text.split('\n')
-        res_lines = []
-        for line in lines:
+        res_lines: list[tuple[int, str]] = []
+        for orig_idx, line in enumerate(lines):
             words = line.split()
             current_line = ""
             for word in words:
@@ -826,13 +834,10 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
                 if len(current_line) + len(clean_word) <= max_chars:
                     current_line = (current_line + " " + word).strip()
                 else:
-                    if current_line: res_lines.append(current_line)
+                    if current_line: res_lines.append((orig_idx, current_line))
                     current_line = word
-            if current_line: res_lines.append(current_line)
+            if current_line: res_lines.append((orig_idx, current_line))
         return res_lines
-
-
-    
 
 
     title_lines = split_text_smart(inputs.title_text, 14)
@@ -845,8 +850,8 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
 
     line_spacing = 30
     title_total_height = sum(
-        (title_sizes[i] if i < len(title_sizes) else title_sizes[-1])
-        for i in range(len(title_lines))
+        (title_sizes[orig_idx] if orig_idx < len(title_sizes) else title_sizes[-1])
+        for orig_idx, _ in title_lines
     ) + max(0, len(title_lines) - 1) * line_spacing
 
     try:
@@ -961,14 +966,24 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         clean_path = short_path.replace("\\", "/").replace(":", "\\:")
         font_arg = clean_path
 
-    cumulative_y = d.title_y
-    for idx, raw_line in enumerate(title_lines):
-        base_color = custom_colors[idx] if idx < len(custom_colors) else custom_colors[-1]
-        font_size = title_sizes[idx] if idx < len(title_sizes) else title_sizes[-1]
+    # 제목 위치: 영상 영역 시작점 바로 위에 동적 배치 (사용자 요구).
+    # 영상 위쪽 여백(=overlay_y)이 충분히 크면 그 안에 제목 + 20px gap을 두고 배치.
+    # 여백이 부족하면(=영상이 캔버스 위쪽까지 차지) d.title_y 폴백.
+    _gap_above_video = 20
+    _dynamic_title_top = overlay_y - title_total_height - _gap_above_video
+    if _dynamic_title_top >= 10:
+        cumulative_y = _dynamic_title_top
+    else:
+        cumulative_y = d.title_y
+    # 라운드 7-A: title_lines가 (orig_line_idx, text) 튜플 리스트.
+    # 색상·폰트는 orig_idx로 lookup → wrap이 일어나도 line1 모든 줄은 line1 색/폰트, line2도 동일.
+    for visual_idx, (orig_idx, raw_line) in enumerate(title_lines):
+        base_color = custom_colors[orig_idx] if orig_idx < len(custom_colors) else custom_colors[-1]
+        font_size = title_sizes[orig_idx] if orig_idx < len(title_sizes) else title_sizes[-1]
         y_pos = cumulative_y
         cumulative_y += font_size + line_spacing
         escaped_full = _escape_text_for_drawtext(raw_line)
-        next_label = f"[title_{idx}]"
+        next_label = f"[title_{visual_idx}]"
 
         filters.append(
             f"{last_v_label}drawtext=fontfile='{font_arg}':text='{escaped_full}':"

@@ -60,9 +60,11 @@ def parse_srt(srt_path: Path) -> list[SpeechSegment]:
         except (ValueError, IndexError):
             continue
 
-        # 나머지 줄: 자막 텍스트 (HTML 태그 제거 후 합침)
+        # 나머지 줄: 자막 텍스트
+        # 라운드 7-C: HTML 태그(<i>, <b>) + ASS 위치/스타일 태그({\an2}, {\b1} 등) 모두 제거.
+        # parse_ass()는 이미 동일 패턴 사용 — SRT 안에 ASS 태그가 있어도 일관 처리.
         raw_text = " ".join(lines[2:])
-        clean_text = re.sub(r"<[^>]+>", "", raw_text).strip()
+        clean_text = re.sub(r"<[^>]+>|\{[^}]*\}", "", raw_text).strip()
         # 대사 앞 (이름) → "이름: 대사" 변환 (Gemini 발화자 인식용)
         speaker_match = re.match(r"^\(([^)]+)\)\s*", clean_text)
         if speaker_match:
@@ -167,10 +169,11 @@ def parse_vtt(vtt_path: Path) -> list[SpeechSegment]:
         speaker_match = re.match(r"<v\s+([^>]+)>", raw_text)
         if speaker_match:
             speaker = speaker_match.group(1)
-            dialogue = re.sub(r"</?v[^>]*>", "", raw_text).strip()
+            dialogue = re.sub(r"</?v[^>]*>|\{[^}]*\}", "", raw_text).strip()
             clean = f"{speaker}: {dialogue}"
         else:
-            clean = re.sub(r"<[^>]+>", "", raw_text).strip()
+            # 라운드 7-C: HTML 태그 + ASS 중괄호 태그 모두 제거
+            clean = re.sub(r"<[^>]+>|\{[^}]*\}", "", raw_text).strip()
         if not clean:
             continue
         segments.append(SpeechSegment(start_sec=start_sec, end_sec=end_sec, text=clean))

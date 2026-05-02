@@ -75,6 +75,10 @@ def build_parser() -> argparse.ArgumentParser:
     design.add_argument("--design-tts-y-margin", type=int, default=None, help="TTS 자막 MarginV (기본: 580)")
     design.add_argument("--design-work-font-size", type=int, default=None, help="작품명 폰트 크기")
     design.add_argument("--design-work-color", type=str, default=None, help="작품명 색상")
+    design.add_argument("--design-work-image", type=str, default=None,
+                        help="작품명 텍스트 대신 이미지(로고) 사용. 이미지 파일 경로.")
+    design.add_argument("--design-work-image-width", type=int, default=None,
+                        help="로고 이미지 가로 크기(px). 기본 300")
 
     return parser
 
@@ -91,6 +95,7 @@ _CLI_TO_DESIGN_FIELD = {
     "design_tts_y_margin": "tts_line_y_margin",
     "design_work_font_size": "work_font_size",
     "design_work_color": "work_color",
+    "design_work_image_width": "work_image_width",
 }
 
 
@@ -101,6 +106,12 @@ def _build_design_config(args: argparse.Namespace) -> DesignConfig:
         value = getattr(args, cli_name, None)
         if value is not None:
             overrides[field_name] = value
+
+    # --design-work-image 지정 시 work_type="image" + work_value=경로 자동 설정
+    work_image = getattr(args, "design_work_image", None)
+    if work_image:
+        overrides["work_type"] = "image"
+        overrides["work_value"] = work_image
 
     # aspect_ratio 형식 검증
     if "aspect_ratio" in overrides:
