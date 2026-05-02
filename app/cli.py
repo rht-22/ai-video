@@ -79,6 +79,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="작품명 텍스트 대신 이미지(로고) 사용. 이미지 파일 경로.")
     design.add_argument("--design-work-image-width", type=int, default=None,
                         help="로고 이미지 가로 크기(px). 기본 300")
+    # 라운드 10: 자막 스타일 프리셋 (auto = 장르 기반 자동 선택)
+    design.add_argument(
+        "--design-subtitle-style",
+        type=str, default=None,
+        choices=["auto", "hormozi", "kvar_yellow", "drama_cine", "thriller_mono", "y2k_pink", "kakao_bubble"],
+        help="자막 스타일 프리셋. auto(기본)=장르 기반 자동 선택. 그 외=강제 적용.",
+    )
 
     return parser
 
@@ -96,6 +103,7 @@ _CLI_TO_DESIGN_FIELD = {
     "design_work_font_size": "work_font_size",
     "design_work_color": "work_color",
     "design_work_image_width": "work_image_width",
+    "design_subtitle_style": "subtitle_style_preset",
 }
 
 

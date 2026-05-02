@@ -45,6 +45,7 @@ def _build_research_prompt(work_title: str, episode: int | None) -> str:
 {{
   "title": "작품명",
   "genre": "장르 (예: 로맨틱코미디, 스릴러, 예능, 드라마 등)",
+  "genre_tag": "romance | romcom | thriller | variety | talk | docu | vlog | other (정확히 8개 중 1개만 선택. 모호하면 other. 로맨스 멜로=romance, 로맨틱 코미디=romcom, 사건/시사 다큐=docu)",
   "tone": "작품의 전반적 톤/분위기 (예: 잔잔하고 섬세한, 긴장감 넘치는 등)",
   "synopsis": "작품 전체 시놉시스 (3~5문장)",
   "setting": "시대적/공간적 배경",

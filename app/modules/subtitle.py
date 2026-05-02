@@ -248,6 +248,11 @@ class SubtitleStyle:
     outline: int = 2
     shadow: int = 0
     margin_v: int = 480
+    # 라운드 10 — 장르별 자막 프리셋용 신규 필드
+    bold: bool = False
+    alignment: int = 2          # ASS Alignment (1=좌하, 2=중하 기본, 3=우하, 5/6/7=상단)
+    border_style: int = 1       # 1=outline+drop shadow, 3=opaque box
+    back_color: str = "&H00000000"  # BorderStyle=3 박스 배경색
 
 
 def build_ass(
@@ -632,19 +637,22 @@ def _ass_header(style: SubtitleStyle, tts_style: SubtitleStyle | None = None) ->
     from app.config import FONT_NAME_MAP
 
     margin_v = style.margin_v if style.margin_v >= 0 else 480
-    alignment = 2  # 2 = 하단 중앙
     font_name = FONT_NAME_MAP.get(style.font_name, style.font_name)
 
+    # 라운드 10 — Format에 BackColour 컬럼 추가, Style에 동적 Bold/BorderStyle/Alignment/BackColour.
+    # ASS V4+ 표준: BackColour는 BorderStyle=3 (박스)일 때 박스 배경색.
+    bold_flag = -1 if style.bold else 0  # ASS bold: -1=true, 0=false
     styles_block = (
-        "Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Default,{font_name},{style.font_size},{style.primary_color},{style.outline_color},0,0,1,{style.outline},{style.shadow},{alignment},80,80,{margin_v},0\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Default,{font_name},{style.font_size},{style.primary_color},{style.outline_color},{style.back_color},{bold_flag},0,{style.border_style},{style.outline},{style.shadow},{style.alignment},80,80,{margin_v},0\n"
     )
 
     if tts_style:
         tts_font = FONT_NAME_MAP.get(tts_style.font_name, tts_style.font_name)
         tts_margin_v = tts_style.margin_v if tts_style.margin_v >= 0 else 300
+        tts_bold = -1 if tts_style.bold else 0
         styles_block += (
-            f"Style: TtsLine,{tts_font},{tts_style.font_size},{tts_style.primary_color},{tts_style.outline_color},0,0,1,{tts_style.outline},{tts_style.shadow},{alignment},80,80,{tts_margin_v},0\n"
+            f"Style: TtsLine,{tts_font},{tts_style.font_size},{tts_style.primary_color},{tts_style.outline_color},{tts_style.back_color},{tts_bold},0,{tts_style.border_style},{tts_style.outline},{tts_style.shadow},{tts_style.alignment},80,80,{tts_margin_v},0\n"
         )
 
     return (

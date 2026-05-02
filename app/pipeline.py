@@ -585,11 +585,14 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # ═══════════════════════════════════════
     checkpoint_research = output_dir / "checkpoint_research.json"
     cast_images: list[CharacterInfo] = []
+    # 라운드 10: research raw_data를 함수 단위로 보관 — sub_style 자동 선택(genre_tag) 등에 사용.
+    research_raw_data: dict = {}
 
     if not payload.skip_research and not payload.work_context:
         if checkpoint_research.exists():
             print("\n[2/15] 작품 리서치 로드 중... (체크포인트)")
             _rdata = json.loads(checkpoint_research.read_text(encoding="utf-8"))
+            research_raw_data = _rdata.get("raw_data", {}) or {}
             payload = replace(payload,
                 work_context=_rdata.get("work_context", ""),
                 previous_episodes_context=_rdata.get("episodes_context") or payload.previous_episodes_context,
@@ -613,6 +616,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             research_elapsed = time.time() - research_start
 
             if research.work_context:
+                research_raw_data = research.raw_data or {}
                 payload = replace(payload,
                     work_context=research.work_context,
                     previous_episodes_context=research.episodes_context or payload.previous_episodes_context,
@@ -1628,12 +1632,21 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 canvas_height=config.canvas_height,
                 padding_px=10,
             )
-            sub_style = SubtitleStyle(
-                font_name=payload.design.subtitle_font,
-                font_size=payload.design.subtitle_size,
-                primary_color=payload.design.subtitle_color,
-                margin_v=_sub_margin_v,
-            )
+            # 라운드 10: 장르 기반 자막 스타일 자동 선택
+            from app.modules.subtitle_styles import select_subtitle_style
+            from app.config import DesignConfig as _DefaultDC
+            _default_design = _DefaultDC()
+            _genre_tag = research_raw_data.get("genre_tag")
+            _cli_override = getattr(payload.design, "subtitle_style_preset", None)
+            # CLI 사용자가 명시 변경한 필드만 프리셋 위에 덮어쓰기 (기본값과 같으면 None=프리셋 그대로)
+            _user_overrides = {
+                "font_name": payload.design.subtitle_font if payload.design.subtitle_font != _default_design.subtitle_font else None,
+                "font_size": payload.design.subtitle_size if payload.design.subtitle_size != _default_design.subtitle_size else None,
+                "primary_color": payload.design.subtitle_color if payload.design.subtitle_color != _default_design.subtitle_color else None,
+                "margin_v": _sub_margin_v,  # 라운드 5 동적 계산은 항상 우선
+            }
+            sub_style, _applied_preset = select_subtitle_style(_genre_tag, _cli_override, _user_overrides)
+            print(f"  [SubtitleStyle] genre_tag={_genre_tag!r} cli={_cli_override!r} → preset={_applied_preset}")
 
             # TTS 자막 세그먼트 생성 (cue 절대시간 그대로 사용)
             tts_line_segs: list[SimpleNamespace] = []
@@ -1833,17 +1846,20 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 var_sub_path = output_dir / f"subtitles_{var_num}.ass"
                 var_tts_sub_path = output_dir / f"tts_subtitles_{var_num}.ass"
 
-                sub_style = SubtitleStyle(
-                    font_name=payload.design.subtitle_font,
-                    font_size=payload.design.subtitle_size,
-                    primary_color=payload.design.subtitle_color,
-                    margin_v=_compute_subtitle_margin_v(
-                        payload.design,
-                        canvas_width=config.canvas_width,
-                        canvas_height=config.canvas_height,
-                        padding_px=10,
-                    ),
+                # 라운드 10: variant도 같은 자막 프리셋 적용 (영상 1개당 동일 스타일)
+                _var_margin_v = _compute_subtitle_margin_v(
+                    payload.design,
+                    canvas_width=config.canvas_width,
+                    canvas_height=config.canvas_height,
+                    padding_px=10,
                 )
+                _var_user_overrides = {
+                    "font_name": payload.design.subtitle_font if payload.design.subtitle_font != _default_design.subtitle_font else None,
+                    "font_size": payload.design.subtitle_size if payload.design.subtitle_size != _default_design.subtitle_size else None,
+                    "primary_color": payload.design.subtitle_color if payload.design.subtitle_color != _default_design.subtitle_color else None,
+                    "margin_v": _var_margin_v,
+                }
+                sub_style, _ = select_subtitle_style(_genre_tag, _cli_override, _var_user_overrides)
                 var_tts_ranges = [(s.start_sec, s.end_sec) for s in var_tts_segs] if var_tts_segs else None
                 build_ass_from_segments(var_final_segs, var_sub_path, sub_style, tts_time_ranges=var_tts_ranges)
 

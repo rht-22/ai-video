@@ -26,6 +26,8 @@ class DesignConfig:
     subtitle_size: int = 65
     subtitle_color: str = "&H0000FFFF"
     subtitle_y_margin: int = 380
+    # 라운드 10: 자막 스타일 프리셋 (None / "auto" → 장르 기반 자동 선택)
+    subtitle_style_preset: str | None = None
 
     # TTS 자막 설정 (원본 자막과 별도 위치)
     tts_line_font_size: int = 70
