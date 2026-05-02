@@ -537,9 +537,47 @@ def merge_subtitle_segments(
         if not absorbed:
             deoverlapped.append(seg)
 
-    if dropped_hallucinations or dropped_duplicates:
+    # 라운드 8a: 인접 세그먼트 동일 텍스트 환각 처리.
+    # Whisper 폴백에서 같은 문장이 N개 세그먼트 연속 반복되는 케이스(예: "강아수도 갖다주더니
+    # 왜 저래" × 10회)를 통합/제거. SRT 있을 때는 거의 발생 안 함.
+    # - 3회+ 연속 동일 → 1개 세그먼트로 통합 (시간만 합침)
+    # - 5회+ 연속 동일 → 환각으로 간주, 통째로 reject (자막 0이 깜빡임 11회보다 나음)
+    deoverlapped.sort(key=lambda s: (s.start_sec, s.end_sec))
+    consecutive_collapsed = 0
+    consecutive_rejected = 0
+    if deoverlapped:
+        run_start_idx = 0
+        i = 1
+        result: list[SpeechSegment] = []
+        while i <= len(deoverlapped):
+            same_as_prev = (
+                i < len(deoverlapped)
+                and deoverlapped[i].text == deoverlapped[run_start_idx].text
+            )
+            if not same_as_prev:
+                run = deoverlapped[run_start_idx:i]
+                run_len = len(run)
+                if run_len >= 5:
+                    # 환각 의심 — 통째로 reject
+                    consecutive_rejected += run_len
+                elif run_len >= 3:
+                    # 통합 (시간 범위만 합침)
+                    result.append(SpeechSegment(
+                        start_sec=run[0].start_sec,
+                        end_sec=run[-1].end_sec,
+                        text=run[0].text,
+                    ))
+                    consecutive_collapsed += run_len - 1
+                else:
+                    result.extend(run)
+                run_start_idx = i
+            i += 1
+        deoverlapped = result
+
+    if dropped_hallucinations or dropped_duplicates or consecutive_collapsed or consecutive_rejected:
         print(
-            f"  [SubtitleClean] 환각 {dropped_hallucinations}건 / 중복 {dropped_duplicates}건 제거"
+            f"  [SubtitleClean] 환각 {dropped_hallucinations}건 / 중복 {dropped_duplicates}건 / "
+            f"연속 통합 {consecutive_collapsed}건 / 연속 환각 reject {consecutive_rejected}건"
         )
 
     if not deoverlapped:
