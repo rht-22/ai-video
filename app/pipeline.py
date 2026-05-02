@@ -336,9 +336,10 @@ def _clips_from_storyline(
     clips: list[StoryClip] = []
 
     # 제목 구성 (이모지 제거)
-    # 라운드 7-B: line1도 13자 강제 (이전엔 line2만 강제) → renderer에서 자동 줄바꿈 방지 → 무조건 2줄
-    title_line1 = _enforce_title_line_limit(_strip_emoji(storyline_data.get("title_line1", "")))
-    title_line2 = _enforce_title_line_limit(_strip_emoji(storyline_data.get("title_line2", "")))
+    # 라운드 8b: line1·line2 최대 15자 허용 (이전 13자) — renderer가 14·15자에서 폰트 자동 축소.
+    # 16자 이상이면 어절 경계 절단 (그래도 줄바꿈은 발생 안 함).
+    title_line1 = _enforce_title_line_limit(_strip_emoji(storyline_data.get("title_line1", "")), max_chars=15)
+    title_line2 = _enforce_title_line_limit(_strip_emoji(storyline_data.get("title_line2", "")), max_chars=15)
     if title_line1 and title_line2:
         title_text = f"{title_line1}\n{title_line2}"
     else:

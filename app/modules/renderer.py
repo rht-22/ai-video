@@ -840,7 +840,8 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         return res_lines
 
 
-    title_lines = split_text_smart(inputs.title_text, 14)
+    # 라운드 8b: 최대 15자까지 한 줄 유지 (이전 14자). 16자 이상은 pipeline에서 절단 처리.
+    title_lines = split_text_smart(inputs.title_text, 15)
 
     # 줄별 폰트 크기 (title_sizes가 있으면 사용, 없으면 title_size로 통일)
     title_sizes = getattr(d, 'title_sizes', [d.title_size])
@@ -977,9 +978,20 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         cumulative_y = d.title_y
     # 라운드 7-A: title_lines가 (orig_line_idx, text) 튜플 리스트.
     # 색상·폰트는 orig_idx로 lookup → wrap이 일어나도 line1 모든 줄은 line1 색/폰트, line2도 동일.
+    # 라운드 8b: 14·15자에서 폰트 자동 축소 — 13자 기준 폰트가 영상 폭에 거의 꽉 차므로
+    #            14자는 13/14, 15자는 13/15 비율로 줄여 양옆 잘림/줄바꿈 방지.
+    def _scale_font_for_length(base_size: int, char_count: int) -> int:
+        if char_count <= 13:
+            return base_size
+        if char_count == 14:
+            return max(1, int(round(base_size * 13 / 14)))
+        # 15자 이상 (16자+는 pipeline에서 절단됨)
+        return max(1, int(round(base_size * 13 / 15)))
+
     for visual_idx, (orig_idx, raw_line) in enumerate(title_lines):
         base_color = custom_colors[orig_idx] if orig_idx < len(custom_colors) else custom_colors[-1]
-        font_size = title_sizes[orig_idx] if orig_idx < len(title_sizes) else title_sizes[-1]
+        base_font_size = title_sizes[orig_idx] if orig_idx < len(title_sizes) else title_sizes[-1]
+        font_size = _scale_font_for_length(base_font_size, len(raw_line))
         y_pos = cumulative_y
         cumulative_y += font_size + line_spacing
         escaped_full = _escape_text_for_drawtext(raw_line)
