@@ -56,10 +56,10 @@ class DesignConfig:
 class AppConfig:
     chunk_seconds: int = 600
     chunk_overlap: int = 30
-    target_duration_sec: int = 60
-    target_duration_tolerance_sec: int = 40
+    target_duration_sec: int = 50
+    target_duration_tolerance_sec: int = 10
     min_duration_sec: int = 40
-    max_duration_sec: int = 100
+    max_duration_sec: int = 60  # 라운드 11: 100 → 60 (요즘 쇼츠 표준 40~60s)
     canvas_width: int = 1080
     canvas_height: int = 1920
     top_title_height: int = 250

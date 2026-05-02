@@ -115,6 +115,149 @@ _enforce_title_line2_limit = _enforce_title_line_limit
 
 
 from app.config import AppConfig, Paths, DesignConfig, get_font_path
+from app.modules.story_builder import StoryClip
+
+
+def _fit_storyline_to_duration(
+    clips: list,
+    candidates_lookup: dict,
+    target_min: float = 40.0,
+    target_max: float = 60.0,
+) -> tuple[list, str]:
+    """라운드 11: storyline clips 합계 길이를 target 범위로 단축/확장 자동 보정.
+
+    동작:
+    - 합계 ≤ target_max 그리고 ≥ target_min → 변경 없음
+    - 합계 > target_max → 점수 낮은 build부터 제거. build 모두 제거 후에도 초과면
+      가장 긴 clip의 끝을 잘라 단축. hook/payoff는 가능한 보존.
+    - 합계 < target_min → 마지막 clip의 끝을 같은 candidate.end_sec까지 확장 (있으면).
+      그래도 부족하면 워닝 메시지 (호출부에서 reject 또는 다음 storyline 시도).
+
+    반환: (조정된 clips, 처방 메시지) — 메시지가 비어 있으면 변경 없음.
+    """
+    if not clips:
+        return clips, ""
+
+    def total_dur(cs):
+        return sum(float(c.end_sec - c.start_sec) for c in cs)
+
+    msgs: list[str] = []
+    out = list(clips)
+    cur_total = total_dur(out)
+    orig_total = cur_total
+
+    # 1) 단축: 합계 > target_max
+    if cur_total > target_max:
+        # build 클립만 추출, score 오름차순 (낮은 점수 먼저 제거 후보)
+        def build_score(c):
+            cand = candidates_lookup.get((c.chunk_index, c.candidate_index)) if candidates_lookup else None
+            if cand is None:
+                return 0.0
+            return float(cand.get("viral_score", cand.get("score", 0.0)) or 0.0)
+
+        # build 인덱스 + score 페어
+        build_indices = [(i, build_score(c)) for i, c in enumerate(out) if c.role == "build"]
+        # 점수 낮은 순으로 정렬 — 낮은 점수부터 제거 후보
+        build_indices.sort(key=lambda x: x[1])
+
+        removed_count = 0
+        # 점수 낮은 build부터 1개씩 제거하며 target_max 이하로
+        # 단, 다음 제거가 target_min 미만으로 떨어뜨리면 *부분 단축*으로 전환
+        partial_trim = False
+        while cur_total > target_max and build_indices:
+            idx, _score = build_indices[0]
+            build_clip = out[idx]
+            build_dur = build_clip.end_sec - build_clip.start_sec
+            proposed_total = cur_total - build_dur
+            if proposed_total < target_min:
+                # 통째로 제거 시 너무 짧아짐 → 이 build의 끝만 잘라 target_max에 맞춤
+                cut_amount = cur_total - target_max
+                if cut_amount < build_dur:
+                    new_end = build_clip.end_sec - cut_amount
+                    out[idx] = StoryClip(
+                        role=build_clip.role,
+                        start_sec=build_clip.start_sec,
+                        end_sec=new_end,
+                        subtitle=build_clip.subtitle,
+                        use_original_audio=build_clip.use_original_audio,
+                        pacing_note=build_clip.pacing_note,
+                        chunk_index=build_clip.chunk_index,
+                        candidate_index=build_clip.candidate_index,
+                        character_focus=build_clip.character_focus,
+                    )
+                    cur_total = total_dur(out)
+                    partial_trim = True
+                break  # 더 이상 build 제거 안 함
+            # 통째로 제거
+            build_indices.pop(0)
+            out = [c for i, c in enumerate(out) if i != idx]
+            build_indices = [(i if i < idx else i - 1, s) for i, s in build_indices]
+            removed_count += 1
+            cur_total = total_dur(out)
+        if removed_count or partial_trim:
+            parts = []
+            if removed_count:
+                parts.append(f"build {removed_count}개 제거")
+            if partial_trim:
+                parts.append("build 부분 단축")
+            msgs.append(f"{' + '.join(parts)} ({orig_total:.1f}s→{cur_total:.1f}s)")
+
+        # build 모두 제거 후에도 target_max 초과 → 가장 긴 clip 끝을 잘라 단축
+        if cur_total > target_max and out:
+            longest_idx = max(range(len(out)), key=lambda i: out[i].end_sec - out[i].start_sec)
+            longest = out[longest_idx]
+            excess = cur_total - target_max
+            new_end = max(longest.start_sec + 1.0, longest.end_sec - excess)
+            out[longest_idx] = StoryClip(
+                role=longest.role,
+                start_sec=longest.start_sec,
+                end_sec=new_end,
+                subtitle=longest.subtitle,
+                use_original_audio=longest.use_original_audio,
+                pacing_note=longest.pacing_note,
+                chunk_index=longest.chunk_index,
+                candidate_index=longest.candidate_index,
+                character_focus=longest.character_focus,
+            )
+            cur_total = total_dur(out)
+            msgs.append(f"가장 긴 clip 끝 자르기 ({(longest.end_sec - longest.start_sec):.1f}s→{(new_end - longest.start_sec):.1f}s)")
+
+    # 2) 확장: 합계 < target_min
+    elif cur_total < target_min:
+        shortage = target_min - cur_total
+        # 마지막 clip의 끝을 candidate.end_sec까지 확장 가능한지 확인
+        last_idx = len(out) - 1
+        last = out[last_idx]
+        cand = candidates_lookup.get((last.chunk_index, last.candidate_index)) if candidates_lookup else None
+        if cand is not None:
+            cand_end = float(cand.get("end_sec", last.end_sec))
+            # context_extension이 있으면 그쪽까지
+            ext = cand.get("context_extension") or {}
+            if ext.get("needed"):
+                cand_end = max(cand_end, float(ext.get("extended_end_sec", cand_end)))
+            available = cand_end - last.end_sec
+            if available > 0:
+                ext_amount = min(shortage, available)
+                new_end = last.end_sec + ext_amount
+                out[last_idx] = StoryClip(
+                    role=last.role,
+                    start_sec=last.start_sec,
+                    end_sec=new_end,
+                    subtitle=last.subtitle,
+                    use_original_audio=last.use_original_audio,
+                    pacing_note=last.pacing_note,
+                    chunk_index=last.chunk_index,
+                    candidate_index=last.candidate_index,
+                    character_focus=last.character_focus,
+                )
+                cur_total = total_dur(out)
+                msgs.append(f"마지막 clip 확장 ({orig_total:.1f}s→{cur_total:.1f}s, +{ext_amount:.1f}s)")
+
+        # 그래도 부족하면 워닝 (호출부가 결정)
+        if cur_total < target_min:
+            msgs.append(f"⚠️ 길이 부족 {cur_total:.1f}s < {target_min:.0f}s — 확장 한계")
+
+    return out, "; ".join(msgs)
 from app.modules.chunker import build_chunks, split_video_chunk
 from app.modules.gemini_client import load_gemini_client
 from app.modules.media_probe import probe_media
@@ -1165,6 +1308,15 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 print(f"  - 스토리라인 {sl_idx + 1} 파싱 실패: {e}")
                 continue
 
+            # 라운드 11: 길이 자동 보정 — 60s 초과 시 점수 낮은 build 제거 / 40s 미만 시 인접 candidate 확장
+            sl_clips, fit_msg = _fit_storyline_to_duration(
+                sl_clips, candidates_lookup,
+                target_min=float(config.min_duration_sec),
+                target_max=float(config.max_duration_sec),
+            )
+            if fit_msg:
+                print(f"  [LengthFit] 스토리라인 {sl_idx + 1}: {fit_msg}")
+
             # 라운드 6c — 첫 쇼츠 title을 story_plan top-level title로 덮어쓰는 로직 제거.
             # 각 storyline의 LLM 출력 title_line1/line2가 정본. select_diverse_storylines로 정렬이
             # 바뀌면서 #1 자리 storyline의 title이 다른 storyline의 top-level title로 교체되어
@@ -1495,6 +1647,14 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # --from-step render로 들어와 라인 1490 캐시 로드 분기를 타면 face_identifier가 정의되지 않아
     # 멀티 variant 렌더링 단계(라인 1862, 1873)에서 UnboundLocalError 발생.
     face_identifier = None
+    # 라운드 11-fix: 라운드 10 자막 스타일 관련 변수들을 모두 함수 단위로 호이스팅 —
+    # 멀티 variant 분기에서도 안전하게 사용. 라운드 10이 첫 variant 분기 안에서만 정의해서
+    # 멀티 variant #2/#3 렌더링 시 NameError 발생했음 (face_identifier 라운드 9-fix와 동일 패턴).
+    from app.config import DesignConfig as _DefaultDC
+    from app.modules.subtitle_styles import select_subtitle_style
+    _default_design = _DefaultDC()
+    _genre_tag = research_raw_data.get("genre_tag")
+    _cli_override = getattr(payload.design, "subtitle_style_preset", None)
     if start_idx <= 13 and checkpoint_resources.exists() and not _resources_invalidate:
         print("\n[13/15] 리소스 로드 중...")
         resources_data = json.loads(checkpoint_resources.read_text(encoding="utf-8"))
@@ -1633,11 +1793,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 padding_px=10,
             )
             # 라운드 10: 장르 기반 자막 스타일 자동 선택
-            from app.modules.subtitle_styles import select_subtitle_style
-            from app.config import DesignConfig as _DefaultDC
-            _default_design = _DefaultDC()
-            _genre_tag = research_raw_data.get("genre_tag")
-            _cli_override = getattr(payload.design, "subtitle_style_preset", None)
+            # (_default_design / select_subtitle_style / _genre_tag / _cli_override 모두
+            #  함수 단위로 미리 초기화됨 — 라운드 11-fix)
             # CLI 사용자가 명시 변경한 필드만 프리셋 위에 덮어쓰기 (기본값과 같으면 None=프리셋 그대로)
             _user_overrides = {
                 "font_name": payload.design.subtitle_font if payload.design.subtitle_font != _default_design.subtitle_font else None,

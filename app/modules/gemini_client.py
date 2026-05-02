@@ -426,11 +426,33 @@ topic이 바뀌지 않는 한 제목과 결말은 같은 이야기를 가리켜�
 
 이모지는 사용하지 않음.
 
-## Duration Constraint
+## Duration Constraint (요즘 쇼츠 표준)
 
-- 총 클립 길이 합계: {min_duration_sec}초 ~ {max_duration_sec}초 범위
-- 각 클립의 start_sec, end_sec는 반드시 원본 영상 타임라인 기준
-- 각 장면의 (end_sec - start_sec)를 합산하여 범위 내인지 반드시 확인할 것
+총 클립 길이 합계: **{min_duration_sec}초 ~ {max_duration_sec}초** (이상적: 50초 부근).
+
+### 타입형별 구성 가이드
+
+**highlight형** (shorts_type="highlight"):
+- 1개 클립이 자체로 후킹 + 본문 + 결말을 포함하는 강한 장면
+- 길이: 40~60초 (이상적 50초)
+- candidate가 30초 미만이면 context_extended=true로 인접 영역까지 확장 요청
+
+**storytelling형** (shorts_type="storytelling"):
+- **총 3~4 클립**으로 hook → build → payoff 구성
+- 클립 길이 가이드:
+  - hook: **5~8초** (강한 후킹 한 장면)
+  - build: **1~2개** × 각 **15~20초** (서사 풀이의 핵심 1~2 장면만 — 너무 많이 넣지 말 것)
+  - payoff: **15~20초** (감정 정점 / 반전 결말)
+- 합계 40~60초 안에 들어오게 클립 수와 길이 조절
+- 5개 이상 build로 늘이지 말 것 — 1~2개 핵심 build만 선택
+
+⚠️ 합계가 60초 초과 시 후처리에서 점수 낮은 build부터 자동 제거됨.
+   처음부터 핵심만 선택해 60초 이내로 출력하는 것이 가장 효과적.
+⚠️ 합계가 40초 미만 시 후처리에서 인접 candidate로 자동 확장 시도.
+   가능한 40초 이상 확보.
+
+각 클립의 start_sec, end_sec는 원본 영상 타임라인 기준.
+각 장면의 (end_sec - start_sec)를 합산하여 범위 내인지 반드시 확인.
 
 # Input Data
 - 작품명: {work_title}
