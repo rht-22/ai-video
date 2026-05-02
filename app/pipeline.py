@@ -429,15 +429,30 @@ def _clips_from_storyline(
                     f"+ payoff(hook 본체 흡수, {merged_dur:.1f}s) — 자막 중복 방지"
                 )
             else:
-                # 겹침 없음: 기존 시퀀스 (hook 본체 → payoff 별도)
-                if hook is not None:
+                # 겹침 없음: hook 본체 처리
+                # 라운드 8c — hook_preview와 hook 본체가 같은 candidate (chunk·cand 동일)면
+                # 본체 추가 생략. 같은 영역이 두 번 등장하면 자막 없는 영상 길이만 늘어남.
+                # 실제 사례 (유미 EP03 스토리라인 3): hook_preview·hook 본체 모두 (2,0) 1194~1215
+                # → 이전엔 hook 본체가 build로 끼어 86초 영상 중 자막 6초밖에 없음.
+                same_cand = bool(
+                    hook is not None
+                    and hook.get("chunk_index") == hook_preview.get("chunk_index")
+                    and hook.get("candidate_index") == hook_preview.get("candidate_index")
+                )
+                if hook is not None and not same_cand:
                     clips.append(_make_clip("build", hook))
                 if payoff is not None:
                     clips.append(_make_clip("payoff", payoff))
-                print(
-                    f"  - hook_preview({hp_dur:.1f}s) + build×{len(build_list)} "
-                    f"+ hook(본체) + payoff (이중 사용)"
-                )
+                if same_cand:
+                    print(
+                        f"  - hook_preview({hp_dur:.1f}s) + build×{len(build_list)} + payoff "
+                        f"(hook 본체는 preview와 동일 candidate라 생략)"
+                    )
+                else:
+                    print(
+                        f"  - hook_preview({hp_dur:.1f}s) + build×{len(build_list)} "
+                        f"+ hook(본체) + payoff (이중 사용)"
+                    )
         else:
             # 케이스 1·2 또는 hook_preview 무효: 기존 흐름
             if hook is not None:
