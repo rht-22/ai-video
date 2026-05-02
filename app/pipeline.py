@@ -1290,6 +1290,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             skeleton=None,  # skeleton 단계 제거 (라운드 6b) — chunk_index 다양성으로만 폴백
         )
 
+        # 라운드 11.1-A: _fit_storyline_to_duration이 clips 변경하면 그 시점 자막 캐시는
+        # 옛 storyline 영역 기준이라 무효화해야 한다. 루프 안에서 변경 감지 후 종료 시 일괄 처리.
+        _storyline_fit_changed = False
         for sl_idx, sl_data in enumerate(diverse_pool):
             if len(all_storyline_variants) >= max_shorts:
                 break
@@ -1316,6 +1319,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             )
             if fit_msg:
                 print(f"  [LengthFit] 스토리라인 {sl_idx + 1}: {fit_msg}")
+                # 라운드 11.1-A: clips 시간 변경됨 → 자막 캐시 무효화 신호
+                _storyline_fit_changed = True
 
             # 라운드 6c — 첫 쇼츠 title을 story_plan top-level title로 덮어쓰는 로직 제거.
             # 각 storyline의 LLM 출력 title_line1/line2가 정본. select_diverse_storylines로 정렬이
@@ -1367,6 +1372,26 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             story_plan["selected_storyline"] = _apply_lookup_to_storyline(
                 story_plan["selected_storyline"], candidates_lookup, boundary_alias
             )
+
+        # 라운드 11.1-A: storyline clips 변경됐으면 자막·TTS·resources 캐시 무효화 + transcribe 단계로
+        # start_idx 다운그레이드 → 새 영역 기준으로 재전사. from_step="render"로 들어왔어도 작동.
+        if _storyline_fit_changed:
+            print("  [LengthFit] storyline clips 변경 감지 → 자막·TTS·리소스 캐시 무효화")
+            for _fname in ("subtitle_segments.json", "full_audio.json",
+                           "checkpoint_tts_plan.json", "checkpoint_resources.json"):
+                _p = output_dir / _fname
+                if _p.exists():
+                    try:
+                        _p.unlink()
+                    except OSError:
+                        pass
+            try:
+                _transcribe_idx = step_order.index("transcribe")
+                if start_idx > _transcribe_idx:
+                    start_idx = _transcribe_idx
+                    print(f"  [LengthFit] start_idx → {_transcribe_idx} (transcribe부터 재실행)")
+            except ValueError:
+                pass
 
         story_elapsed = time.time() - story_start
         print(f"  → 총 {len(all_storyline_variants)}개 쇼츠 생성 예정")
@@ -1835,7 +1860,15 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             else:
                 tts_subtitle_path = None
         else:
-            print("  - [주의] 자막 데이터가 없어 .ass 생성을 건너뜁니다.")
+            # 라운드 11.1-B: final_segments=[]면 *빈 ass*를 작성해서 옛 ass 잔재가
+            # ffmpeg에 들어가지 않게 한다. 이전엔 skip해서 옛 storyline 시점의 자막이
+            # 새 영상에 그대로 입혀지는 어긋남 발생.
+            print("  - [주의] 자막 데이터 0건 — 빈 .ass로 옛 자막 잔재 제거")
+            _genre_tag = research_raw_data.get("genre_tag")
+            _cli_override = getattr(payload.design, "subtitle_style_preset", None)
+            _empty_sub_style, _ = select_subtitle_style(_genre_tag, _cli_override, None)
+            build_ass_from_segments([], subtitle_path, _empty_sub_style, tts_time_ranges=None)
+            tts_subtitle_path = None
 
         # 최종 렌더링
         print(f"  최종 영상 렌더링 중... (출력: {output_video})")
