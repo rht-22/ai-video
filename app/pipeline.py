@@ -58,6 +58,16 @@ def _apply_silence_cut_to_variants(
         except Exception:
             sl_clips_new = sl_clips  # 폴백: 변경 없음
 
+        # 라운드 13-B: 무음 컷 롤백 — 무음 컷 후 길이가 target_min 미만으로 떨어지고
+        # 무음 컷 *전* 길이가 target_max 안에 들어오면 무음 컷 *전* clips 사용 (영상 길이 회복).
+        def _total(cs):
+            return sum(c.end_sec - c.start_sec for c in cs)
+        new_total = _total(sl_clips_new)
+        orig_total = _total(sl_clips)
+        if new_total < target_min and orig_total <= target_max:
+            print(f"  [LengthFit-rollback] 무음 컷 후 {new_total:.1f}s < {target_min:.0f}s → 무음 컷 전 ({orig_total:.1f}s) 사용")
+            sl_clips_new = list(sl_clips)
+
         # 라운드 12.1-A: 무음 컷 후 길이 재보정 (40~60s 보장)
         if candidates_lookup is not None:
             sl_clips_new, _fit_msg = _fit_storyline_to_duration(
@@ -245,36 +255,59 @@ def _fit_storyline_to_duration(
             if cut_summary:
                 msgs.append(f"비례 자르기 [{', '.join(cut_summary)}] (총 {orig_total:.1f}s→{cur_total:.1f}s)")
 
-    # 2) 확장: 합계 < target_min
+    # 2) 확장: 합계 < target_min — 라운드 13: 양방향 확장 (첫 시작 + 마지막 끝)
     elif cur_total < target_min:
+        # 2-1) 마지막 clip 끝 확장 (기존)
         shortage = target_min - cur_total
-        # 마지막 clip의 끝을 candidate.end_sec까지 확장 가능한지 확인
         last_idx = len(out) - 1
         last = out[last_idx]
-        cand = candidates_lookup.get((last.chunk_index, last.candidate_index)) if candidates_lookup else None
-        if cand is not None:
-            cand_end = float(cand.get("end_sec", last.end_sec))
-            # context_extension이 있으면 그쪽까지
-            ext = cand.get("context_extension") or {}
+        last_cand = candidates_lookup.get((last.chunk_index, last.candidate_index)) if candidates_lookup else None
+        if last_cand is not None:
+            cand_end = float(last_cand.get("end_sec", last.end_sec))
+            ext = last_cand.get("context_extension") or {}
             if ext.get("needed"):
                 cand_end = max(cand_end, float(ext.get("extended_end_sec", cand_end)))
-            available = cand_end - last.end_sec
-            if available > 0:
-                ext_amount = min(shortage, available)
+            available_post = cand_end - last.end_sec
+            if available_post > 0:
+                ext_amount = min(shortage, available_post)
                 new_end = last.end_sec + ext_amount
                 out[last_idx] = StoryClip(
                     role=last.role,
-                    start_sec=last.start_sec,
-                    end_sec=new_end,
-                    subtitle=last.subtitle,
-                    use_original_audio=last.use_original_audio,
+                    start_sec=last.start_sec, end_sec=new_end,
+                    subtitle=last.subtitle, use_original_audio=last.use_original_audio,
                     pacing_note=last.pacing_note,
-                    chunk_index=last.chunk_index,
-                    candidate_index=last.candidate_index,
+                    chunk_index=last.chunk_index, candidate_index=last.candidate_index,
                     character_focus=last.character_focus,
                 )
                 cur_total = total_dur(out)
-                msgs.append(f"마지막 clip 확장 ({orig_total:.1f}s→{cur_total:.1f}s, +{ext_amount:.1f}s)")
+                msgs.append(f"마지막 clip 끝 확장 ({orig_total:.1f}s→{cur_total:.1f}s, +{ext_amount:.1f}s)")
+
+        # 2-2) 라운드 13 신규 — 첫 clip 시작 확장 (역방향)
+        if cur_total < target_min:
+            shortage = target_min - cur_total
+            first = out[0]
+            first_cand = candidates_lookup.get((first.chunk_index, first.candidate_index)) if candidates_lookup else None
+            if first_cand is not None:
+                cand_start = float(first_cand.get("start_sec", first.start_sec))
+                ext = first_cand.get("context_extension") or {}
+                if ext.get("needed"):
+                    cand_start = min(cand_start, float(ext.get("extended_start_sec", cand_start)))
+                available_pre = first.start_sec - cand_start
+                if available_pre > 0:
+                    ext_amount = min(shortage, available_pre)
+                    new_start = first.start_sec - ext_amount
+                    # 첫 clip start 변경 시 _start 0초 보장
+                    new_start = max(0.0, new_start)
+                    out[0] = StoryClip(
+                        role=first.role,
+                        start_sec=new_start, end_sec=first.end_sec,
+                        subtitle=first.subtitle, use_original_audio=first.use_original_audio,
+                        pacing_note=first.pacing_note,
+                        chunk_index=first.chunk_index, candidate_index=first.candidate_index,
+                        character_focus=first.character_focus,
+                    )
+                    cur_total = total_dur(out)
+                    msgs.append(f"첫 clip 시작 확장 (+{(first.start_sec - new_start):.1f}s, 총 {cur_total:.1f}s)")
 
         # 그래도 부족하면 워닝 (호출부가 결정)
         if cur_total < target_min:
