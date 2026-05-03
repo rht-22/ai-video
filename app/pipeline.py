@@ -1697,8 +1697,13 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             print_silence_cut_summary(cut_results)
             clips = flatten_to_clips(cut_results)
             # 라운드 6a-2: 모든 storyline variant의 sl_clips도 갱신 (cue 영상 길이 초과 방지)
+            # 라운드 14-fix: candidates_lookup + target_min/max 인자 누락 fix —
+            # transcribe 직접 실행 분기에서도 라운드 12.1 무음 컷 후 fit 재호출 + 라운드 13 양방향 확장 작동.
             all_storyline_variants = _apply_silence_cut_to_variants(
-                all_storyline_variants, transcript_text
+                all_storyline_variants, transcript_text,
+                candidates_lookup=_build_candidates_lookup(all_candidates),
+                target_min=float(config.min_duration_sec),
+                target_max=float(config.max_duration_sec),
             )
         print(f"[OK] 전사 완료 ({len(clips)}개 클립)")
     else:

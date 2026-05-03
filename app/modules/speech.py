@@ -189,6 +189,9 @@ def _extract_with_faster_whisper(
     print(f"  [Whisper] 프롬프트: {initial_prompt[:80]}...")
 
     print("  [Whisper] 전사 시작...")
+    # 라운드 14.1: word_timestamps=True 활성화 + segment 내 문장 단위 재분할.
+    # 이전엔 Whisper가 24초 영역을 한 덩어리 segment로 출력 → build_ass가 균등 시간 분할
+    # → 자막이 음성 박자와 어긋남. word·문장 시간 활용으로 정확 매핑.
     segments_generator, info = model.transcribe(
         str(audio_path),
         language="ko",
@@ -196,6 +199,7 @@ def _extract_with_faster_whisper(
         no_speech_threshold=0.6,
         temperature=0.0,
         condition_on_previous_text=False,
+        word_timestamps=True,
         vad_filter=True,
         vad_parameters=dict(
             min_silence_duration_ms=500,
@@ -204,18 +208,63 @@ def _extract_with_faster_whisper(
 
     print(f"  [Whisper] 감지된 언어: {info.language} (확률: {info.language_probability:.2f})")
 
+    import re as _re
+    _SENTENCE_END = _re.compile(r"[.!?]")
+
     segments = []
     for seg in segments_generator:
         text = seg.text.strip()
         if not text:
             continue
+        seg_start = float(seg.start)
+        seg_end = float(seg.end)
+
+        # 라운드 14.1: words 정보가 있으면 문장 끝 단어의 word.end를 시간 경계로 활용.
+        # 한 segment 안 여러 문장(마침표·물음표·느낌표)을 별도 SpeechSegment로 분할.
+        # word.start/end가 None인 케이스는 안전하게 필터링 (faster-whisper 일부 버전).
+        words_raw = getattr(seg, "words", None) or []
+        words = [w for w in words_raw
+                 if getattr(w, "start", None) is not None and getattr(w, "end", None) is not None]
+        if words and len(text) > 30:
+            # 문장 분할: 단어 단위로 누적하면서 [.!?] 만나면 chunk 마감
+            sentence_chunks: list[tuple[str, float, float]] = []
+            cur_text = ""
+            cur_start: float | None = float(words[0].start)
+            cur_end: float = cur_start
+            for w in words:
+                w_text = (w.word or "").strip()
+                if not w_text:
+                    continue
+                if cur_start is None:
+                    cur_start = float(w.start)
+                cur_text = (cur_text + " " + w_text).strip() if cur_text else w_text
+                cur_end = float(w.end)
+                # 단어 끝이 문장 종결 부호로 끝나면 chunk 마감
+                if _SENTENCE_END.search(w_text):
+                    sentence_chunks.append((cur_text, cur_start, cur_end))
+                    cur_text = ""
+                    cur_start = None
+            # 잔여 텍스트
+            if cur_text and cur_start is not None:
+                sentence_chunks.append((cur_text, cur_start, cur_end))
+
+            if len(sentence_chunks) >= 2:
+                for ch_text, ch_start, ch_end in sentence_chunks:
+                    if ch_end - ch_start < 0.05:
+                        continue
+                    segments.append(SpeechSegment(
+                        start_sec=ch_start, end_sec=ch_end, text=ch_text,
+                    ))
+                continue  # 분할 성공 → 원본 segment 추가 안 함
+
+        # 분할 안 됨: 원본 segment 그대로
         segments.append(
             SpeechSegment(
-                start_sec=float(seg.start),
-                end_sec=float(seg.end),
+                start_sec=seg_start,
+                end_sec=seg_end,
                 text=text,
             )
         )
 
-    print(f"  [Whisper] 전사 완료: {len(segments)}개 세그먼트")
+    print(f"  [Whisper] 전사 완료: {len(segments)}개 세그먼트 (문장 단위 분할 적용)")
     return segments
