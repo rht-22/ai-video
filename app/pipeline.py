@@ -1354,6 +1354,86 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         # sequence_id 부여: continues_from + 관계 그래프 continuous 엣지 기반
         all_candidates = assign_sequence_ids(all_candidates, edges=relationship_edges or None)
 
+        # 라운드 15: candidate.transcript Whisper 갱신 (storyline 정확도 향상)
+        # Pro analyze_chunk가 시각만 보고 추정한 transcript는 통화 상대·대사 인물 같은
+        # 음성 정보 부정확. 예: 유미 EP04 #1 — "주호한테 전화"로 잘못 라벨링.
+        # 실제 Whisper: "여보세요? 피디님, 저예요" → 순록한테 전화. 본 단계가 그 오류 차단.
+        print("\n[10-pre/15] candidate.transcript Whisper 갱신 (LLM 추정 → 실제 음성)")
+        _cand_clips_tr: list[StoryClip] = []
+        _cand_seen: set[tuple[float, float]] = set()
+        for _m in all_candidates:
+            _s = float(_m.get("start_sec", 0))
+            _e = float(_m.get("end_sec", 0))
+            if _e <= _s:
+                continue
+            _k = (round(_s, 2), round(_e, 2))
+            if _k in _cand_seen:
+                continue
+            _cand_seen.add(_k)
+            _cand_clips_tr.append(StoryClip(
+                role="hook", start_sec=_s, end_sec=_e,
+                subtitle="", use_original_audio=True,
+                chunk_index=int(_m.get("chunk_index", -1)),
+                candidate_index=int(_m.get("candidate_index", -1)),
+            ))
+        _cand_clips_tr.sort(key=lambda c: c.start_sec)
+        _cand_segs: list[SpeechSegment] = []
+        if payload.srt_path and Path(str(payload.srt_path)).exists():
+            print(f"  SRT 사용 ({len(_cand_clips_tr)} candidate 영역)")
+            _all_srt = parse_subtitle(payload.srt_path)
+            _seen_srt = set()
+            for _clip in _cand_clips_tr:
+                for _seg in _all_srt:
+                    if _seg.end_sec > _clip.start_sec and _seg.start_sec < _clip.end_sec:
+                        _kk = (round(_seg.start_sec, 2), round(_seg.end_sec, 2), _seg.text)
+                        if _kk not in _seen_srt:
+                            _seen_srt.add(_kk)
+                            _cand_segs.append(_seg)
+        else:
+            print(f"  Whisper 전사 ({len(_cand_clips_tr)} candidate 영역)")
+            _char_names_tr = list(dict.fromkeys(
+                [ci.character_name for ci in cast_images if ci.character_name]
+                + [ci.actor_name for ci in cast_images if ci.actor_name]
+            ))
+            for _idx, _clip in enumerate(_cand_clips_tr):
+                _audio_p = output_dir / f"_cand_audio_{_idx}.wav"
+                try:
+                    _, _actual_start = extract_audio_segment(
+                        payload.video_path, _audio_p,
+                        start_sec=_clip.start_sec, end_sec=_clip.end_sec, padding_sec=2.0,
+                    )
+                    _segs = extract_transcript(
+                        _audio_p, work_title=payload.work_title,
+                        character_names=_char_names_tr, work_context=payload.work_context,
+                    )
+                    for _seg in _segs:
+                        _adj_s = _seg.start_sec + _actual_start
+                        _adj_e = _seg.end_sec + _actual_start
+                        if _adj_e > _clip.start_sec and _adj_s < _clip.end_sec:
+                            _cand_segs.append(SpeechSegment(
+                                start_sec=max(_adj_s, _clip.start_sec),
+                                end_sec=min(_adj_e, _clip.end_sec),
+                                text=_seg.text,
+                            ))
+                finally:
+                    if _audio_p.exists():
+                        _audio_p.unlink()
+        # candidate.transcript 갱신 (Whisper 결과 우선, 음성이 없는 candidate는 LLM 추정 그대로)
+        _updated = 0
+        for _m in all_candidates:
+            _s = float(_m.get("start_sec", 0))
+            _e = float(_m.get("end_sec", 0))
+            _related = sorted(
+                [seg for seg in _cand_segs if seg.end_sec > _s and seg.start_sec < _e],
+                key=lambda x: x.start_sec,
+            )
+            if _related:
+                _combined = " ".join(seg.text.strip() for seg in _related if seg.text and seg.text.strip()).strip()
+                if _combined:
+                    _m["transcript"] = _combined
+                    _updated += 1
+        print(f"  candidate.transcript 갱신: {_updated}/{len(all_candidates)}건")
+
         # Gemini 바이럴 스토리 구성 (Flash + skeleton). 점수 산정은 Gemini가 description/highlight_eligible 등으로 직접 판단
         story_plan = gemini.compose_story_with_context(
             all_candidates,

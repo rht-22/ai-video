@@ -376,6 +376,26 @@ STORY_COMPOSITION_PROMPT = """
 
 ⚠️ TTS 나레이션은 별도 단계(tts_planner)에서 결정한다. 이 단계에서는 클립 시간/제목/리듬만 결정하라. tts_line 필드를 출력하지 마라.
 
+### candidate.description vs transcript — 음성 우선 (라운드 15)
+
+각 candidate에는 `description`(시각 분석)과 `transcript`(실제 음성 전사) 두 필드가 있다.
+**transcript는 영상 안 실제 음성을 Whisper로 전사한 정확한 텍스트**다.
+description은 LLM의 시각 분석 추정이라 *통화 상대*, *대사 인물*, *화면 전환 후 등장 인물*
+같은 음성 의존 정보가 부정확할 수 있다.
+
+⚠️ **transcript와 description이 충돌하면 transcript를 신뢰하라**.
+
+예 (실제 발생한 LLM 오류):
+- description: "유미가 통화 후 주호가 등장 → 주호한테 전화한 것"
+- transcript: "여보세요? 피디님, 저예요. 그 영화 같이 볼까요?"
+- 옳은 라벨: 유미가 *피디(순록)*에게 전화 (transcript 명시), 주호 등장은 별개 장면
+- 잘못된 title (X): "주호한테 전화한 대참사"
+- 옳은 title (O): "피디한테 영화 같이 보자고" 같이 transcript 기반
+
+title_line2에 통화 상대·대사 인물·등장 인물 같은 *음성 의존 정보*를 단정적으로
+사용하려면 반드시 transcript에서 그 인물명·대사가 명확히 확인되어야 한다. transcript에
+명시 없는 추정 라벨은 *부정확 위험* 라벨로 간주하고 보다 일반적인 표현으로 대체하라.
+
 ### 원본 타임라인 순서 원칙 (절대 규칙)
 
 - **build 클립들과 payoff는 반드시 원본 영상의 시간 순서(start_sec 오름차순)대로 배치해야 한다**
