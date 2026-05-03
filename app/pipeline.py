@@ -35,11 +35,18 @@ def _strip_emoji(text: str) -> str:
 def _apply_silence_cut_to_variants(
     variants: list[tuple[list[StoryClip], str, float]],
     transcript_segments: list,
+    candidates_lookup: dict | None = None,
+    target_min: float = 40.0,
+    target_max: float = 60.0,
 ) -> list[tuple[list[StoryClip], str, float]]:
-    """모든 storyline variant의 sl_clips에 무음 컷 적용 후 갱신.
+    """모든 storyline variant의 sl_clips에 무음 컷 적용 후 갱신 + 길이 재보정.
 
     라운드 6a-2: tts_plan이 무음 컷 *전* clips를 받으면 cue 시간이 영상 길이 초과 가능.
     각 variant의 sl_clips에 cut_silence_from_clips → flatten_to_clips 적용해 동일 처리.
+
+    라운드 12.1-A: 무음 컷 후 길이가 target_min(40s) 미만으로 떨어지는 케이스가 발생함
+    (highlight 40s → 무음 컷 후 25s 같은 사례). candidates_lookup이 제공되면 _fit_storyline_to_duration
+    재호출로 길이 재보정 (마지막 clip 끝을 candidate.end_sec까지 확장).
     """
     if not variants:
         return variants
@@ -50,6 +57,16 @@ def _apply_silence_cut_to_variants(
             sl_clips_new = flatten_to_clips(cut)
         except Exception:
             sl_clips_new = sl_clips  # 폴백: 변경 없음
+
+        # 라운드 12.1-A: 무음 컷 후 길이 재보정 (40~60s 보장)
+        if candidates_lookup is not None:
+            sl_clips_new, _fit_msg = _fit_storyline_to_duration(
+                sl_clips_new, candidates_lookup,
+                target_min=target_min, target_max=target_max,
+            )
+            if _fit_msg:
+                print(f"  [LengthFit-postsilence] {_fit_msg}")
+
         new_variants.append((sl_clips_new, sl_title, sl_score))
     return new_variants
 
@@ -202,25 +219,31 @@ def _fit_storyline_to_duration(
                 parts.append("build 부분 단축")
             msgs.append(f"{' + '.join(parts)} ({orig_total:.1f}s→{cur_total:.1f}s)")
 
-        # build 모두 제거 후에도 target_max 초과 → 가장 긴 clip 끝을 잘라 단축
+        # build 모두 제거 후에도 target_max 초과 → 모든 clip을 *비례적으로* 끝 자르기.
+        # 라운드 12.1-B: 이전엔 가장 긴 clip 하나만 잘라 excess==build_dur 케이스에서 1초까지 잘리던 버그.
+        # 이제 ratio = target_max / cur_total 로 모든 clip을 균등 비례로 단축 (각 clip ≥3초 보장).
         if cur_total > target_max and out:
-            longest_idx = max(range(len(out)), key=lambda i: out[i].end_sec - out[i].start_sec)
-            longest = out[longest_idx]
-            excess = cur_total - target_max
-            new_end = max(longest.start_sec + 1.0, longest.end_sec - excess)
-            out[longest_idx] = StoryClip(
-                role=longest.role,
-                start_sec=longest.start_sec,
-                end_sec=new_end,
-                subtitle=longest.subtitle,
-                use_original_audio=longest.use_original_audio,
-                pacing_note=longest.pacing_note,
-                chunk_index=longest.chunk_index,
-                candidate_index=longest.candidate_index,
-                character_focus=longest.character_focus,
-            )
+            ratio = target_max / cur_total
+            min_clip_dur = 3.0  # 너무 짧은 clip 방지
+            cut_summary = []
+            for idx, clip in enumerate(out):
+                clip_dur = clip.end_sec - clip.start_sec
+                new_dur = max(min_clip_dur, clip_dur * ratio)
+                if new_dur >= clip_dur:
+                    continue
+                new_end = clip.start_sec + new_dur
+                out[idx] = StoryClip(
+                    role=clip.role,
+                    start_sec=clip.start_sec, end_sec=new_end,
+                    subtitle=clip.subtitle, use_original_audio=clip.use_original_audio,
+                    pacing_note=clip.pacing_note,
+                    chunk_index=clip.chunk_index, candidate_index=clip.candidate_index,
+                    character_focus=clip.character_focus,
+                )
+                cut_summary.append(f"{clip_dur:.1f}s→{new_dur:.1f}s")
             cur_total = total_dur(out)
-            msgs.append(f"가장 긴 clip 끝 자르기 ({(longest.end_sec - longest.start_sec):.1f}s→{(new_end - longest.start_sec):.1f}s)")
+            if cut_summary:
+                msgs.append(f"비례 자르기 [{', '.join(cut_summary)}] (총 {orig_total:.1f}s→{cur_total:.1f}s)")
 
     # 2) 확장: 합계 < target_min
     elif cur_total < target_min:
@@ -1527,7 +1550,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         # 라운드 6a-2: 모든 storyline variant의 sl_clips도 무음 컷 적용 후 갱신.
         # tts_plan이 변형되지 않은 sl_clips를 받으면 cue 시간이 영상 길이 초과 가능.
         all_storyline_variants = _apply_silence_cut_to_variants(
-            all_storyline_variants, transcript_text
+            all_storyline_variants, transcript_text,
+            candidates_lookup=_build_candidates_lookup(all_candidates),
+            target_min=float(config.min_duration_sec),
+            target_max=float(config.max_duration_sec),
         )
         print(f"[OK] 전사 로드 + 무음 제거 완료 ({len(clips)}개 클립)")
 

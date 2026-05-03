@@ -328,18 +328,46 @@ STORY_COMPOSITION_PROMPT = """
 - 모든 chunk의 candidate_moments 중에서 여러 장면들을 선정해 원본의 서사를 반영한 기승전결이 있도록 여러 장면을 유기적으로 연결할 것.
 - 캐릭터의 행적을 조명하거나 영상의 주요 서사를 요약.
 - sequence_type: "여정몰입형" / "결과선공개형" / "반전형" / "시퀀스블록형" 중 선택 (storytelling만 해당)
-   - **여정몰입형**: 에피소드의 전반적인 분위기·긴장감이 처음부터 끝까지 일관되게 유지돼, 굳이 결과를 앞당길 필요가 없을 때 선택한다. 사건이 자연스럽게 고조되는 흐름 자체가 훅이 되므로 hook~payoff를 원본 시간 순서대로 배치한다. build·payoff 흐름 모두 같은 방향.
-   - **결과선공개형**: 에피소드 내 핵심 결과(반전·충격·감정 폭발)가 명확하고, 그 결과만으로도 시청자의 시선을 확 잡아끌 수 있을 때 선택한다. hook에서 결과 장면을 먼저 보여줘 "이게 왜?", "어쩌다 이렇게 됐지?"라는 궁금증을 유발하고, build~payoff에서 그 과정을 시간 순으로 풀어준다.
-     ⚠️ **결과선공개형 hook 제약**: hook은 반드시 build/payoff와 동일 인물이 1명 이상 겹치거나, hook의 상황이 build/payoff의 직접적 결과여야 한다.
-   - **반전형 (NEW)**: hook/build의 흐름이 한 방향(예: 주인공 승리)인데 payoff에서 *반대 결말*(주인공 패배·굴욕)이 일어나는 경우 선택한다.
-     ⚠️ **반전형 핵심 규칙**: title_line2는 *반드시 payoff 결말 방향*을 따라 라벨링한다. hook/build의 점수·결과 패턴을 외삽해서 payoff와 반대 방향 title을 출력하면 안 된다.
-     예: hook(주인공 1대0 승) → build(2대0 승) → payoff(셀프 제모 발각 굴욕)
-       올바른 line2: "막판 대참사" / "한순간 대굴욕"
-       ❌ 잘못된 line2: "3대0으로 박살낸 주인공" — 패턴 외삽으로 payoff 반전 무시
-   - **시퀀스블록형 (NEW)**: 같은 sequence_id에 속한 candidate들이 자체로 완결된 코너/씬을 이루고 있어 그대로 묶어 사용하기 좋을 때 선택. hook(선택) + sequence_block(필수) 구성. build·payoff 구분 없이 sequence 통째 사용.
-     - sequence_block 필드: `[{{"chunk_index": N, "candidate_index": M}}, ...]` 형태로 같은 sequence_id 안 candidate 참조
-     - 예: SNL 한 콩트의 시작~중간~끝이 한 sequence_id면 그대로 사용
-     ⚠️ sequence_block 안 candidate들은 **같은 sequence_id**여야 한다.
+
+### sequence_type 선택 결정 트리 (반드시 이 순서로 검토)
+
+**1단계 — 시퀀스블록형 우선 검토**:
+- candidate 입력에 같은 `sequence_id`를 가진 candidate가 **3개 이상** 묶여 있고, 그 묶음이 자체로 hook→발전→결말을 모두 포함하면 → **시퀀스블록형 선택**
+- 한 sequence_id의 묶음이 자연스러운 코너/씬이므로 build·payoff 구분 없이 통째로 사용
+- 예: SNL 한 콩트의 시작~중간~끝이 한 sequence_id (같은 sequence_id 4~5개)
+- ⚠️ 이 조건이 충족되는데 다른 sequence_type을 선택하면 시퀀스 정보를 낭비하는 것이다.
+
+**2단계 — 반전형 검토**:
+- 1단계에 해당 안 하고, candidate description에서 **hook/build와 payoff의 결말 방향이 반대**이면 → **반전형 선택**
+- 판별: hook/build에서 *주인공 승리·정상·평온* 묘사 → payoff에서 *반전 패배·굴욕·대참사·발각·실패*
+- 시간 순서는 자연스러움 (결과선공개형처럼 시간 역순 아님)
+- ⚠️ **반전형 title_line2는 반드시 payoff 결말 방향을 따른다** — hook/build의 점수·결과 패턴을 외삽해서 payoff와 반대 방향 title을 출력하면 안 된다.
+- 예: hook(주인공 1대0 승) → build(2대0 승) → payoff(셀프 제모 발각 굴욕)
+  - 올바른 line2: "막판 대참사" / "한순간 대굴욕" / "역대급 굴욕"
+  - ❌ 잘못된 line2: "3대0으로 박살낸 주인공" — 패턴 외삽으로 payoff 반전 무시
+
+**3단계 — 결과선공개형 검토**:
+- 1·2단계 해당 안 하고, 핵심 결과 장면을 **hook에 *시간 역순*으로 미리 노출**해 "이게 왜?" 궁금증 유발하면 → **결과선공개형 선택**
+- 판별: hook이 시간상 build·payoff *뒤*에 일어난 장면 (시간 역순 hook)
+- ⚠️ **결과선공개형 hook 제약**: hook은 반드시 build/payoff와 동일 인물이 1명 이상 겹치거나, hook의 상황이 build/payoff의 직접적 결과여야 한다.
+
+**4단계 — 여정몰입형 (디폴트)**:
+- 1·2·3단계 해당 안 하면 → 여정몰입형. hook~payoff 시간 순서, 같은 방향 흐름.
+
+### 결과선공개형 vs 반전형 (가장 헷갈리는 차이)
+
+| 구분 | 시간 순서 | 결말 방향 | 예 |
+|------|-----------|-----------|-----|
+| 결과선공개형 | hook이 시간 *역순* (결말 미리) | hook과 build·payoff 결말이 *동일* | hook(셀프 제모 발각) → build(1대0 승) → payoff(2대0 승) |
+| 반전형 | hook→build→payoff 시간 *순서* 그대로 | hook/build와 payoff 결말이 *반대* | hook(1대0 승) → build(2대0 승) → payoff(셀프 제모 발각) |
+
+**핵심 차이**: 결과선공개형은 "결말을 hook에 미리 보여주는 시간 역순", 반전형은 "시간 순서대로지만 끝에 반전".
+
+### 시퀀스블록형 schema
+
+   - sequence_block 필드: `[{{"chunk_index": N, "candidate_index": M}}, ...]` 형태로 같은 sequence_id 안 candidate 참조
+   - hook(선택) + sequence_block(필수) 구성
+   - ⚠️ sequence_block 안 candidate들은 **같은 sequence_id**여야 한다.
 
 ### sequence_id — 인접 배치 시 안전 여부 판별용 (강제 규칙 아님)
 
