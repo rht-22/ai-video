@@ -695,6 +695,17 @@ TTS_PLANNING_PROMPT = """
 {work_context_block}{episodes_context_block}
 
 [클립 시퀀스 — 편집 타임라인 절대 시간]
+각 클립에는 두 가지 텍스트 정보가 있다:
+- description: LLM의 시각 분석 추정 (인물·동작 추정 — 부정확할 수 있음)
+- transcript: Whisper로 전사한 **실제 음성 대사** (정확한 사실)
+
+⚠️ **transcript 우선 원칙 (라운드 16)**: 내레이션을 쓸 때는 transcript를 1순위 사실로 신뢰하라.
+description과 transcript가 어긋나면 transcript를 따른다.
+- 예: description="유미가 주호에게 전화" / transcript="피디님, 저예요" → 내레이션은
+  "유미가 PD에게 전화했다"는 사실을 반영해야 한다 ("주호에게 보낸 문자" 같은 LLM 추정 금지).
+- 예: description="문자를 보낸다" / transcript="여보세요? 작가님" → 통화 사실을 반영
+  ("보낸 설레는 문자" ❌ → "건넨 한 통의 전화" / "밤늦게 걸려온 그의 한 마디" ✅).
+
 {clips_str}
 
 # 사용 가능한 voice 프리셋 (정확히 이 라벨만 사용)
@@ -1438,15 +1449,20 @@ class GeminiClient:
         narrative_skeleton: dict | None = None,
         work_context: str | None = None,
         previous_episodes_context: str | None = None,
+        transcript_segments: list | None = None,
     ) -> list[dict[str, Any]]:
         """결정된 storyline의 클립 시퀀스를 받아 TTS cue 리스트를 반환한다.
 
         cue.start_sec / end_sec은 편집 타임라인 절대 시간(0초 = 쇼츠 시작) 기준.
         voice/speed는 app.modules.tts의 프리셋 라벨.
+
+        라운드 16: transcript_segments(원본 시간 기준 Whisper 전사)를 받아
+        각 clip의 실제 대사를 프롬프트에 포함 → LLM 시각 추정 오류 방지.
         """
         # 클립을 편집 타임라인 절대 시간 기준으로 직렬화
         cum = 0.0
         clips_lines: list[str] = []
+        # 각 clip 원본 영역에 겹치는 transcript 모음
         for i, c in enumerate(clips):
             dur = float(c.end_sec - c.start_sec)
             edit_start = cum
@@ -1454,12 +1470,28 @@ class GeminiClient:
             cum = edit_end
             chars = list(getattr(c, "character_focus", ()) or [])
             subtitle = getattr(c, "subtitle", "") or ""
+            # 라운드 16: clip 원본 영역과 겹치는 Whisper 전사 텍스트 수집
+            clip_transcript_parts: list[str] = []
+            if transcript_segments:
+                _segs_in_clip = sorted(
+                    [s for s in transcript_segments
+                     if float(getattr(s, "end_sec", 0)) > c.start_sec
+                     and float(getattr(s, "start_sec", 0)) < c.end_sec],
+                    key=lambda s: float(getattr(s, "start_sec", 0)),
+                )
+                for s in _segs_in_clip:
+                    t = (getattr(s, "text", "") or "").strip()
+                    if t:
+                        clip_transcript_parts.append(t)
+            transcript_text = " ".join(clip_transcript_parts).strip()
+            transcript_repr = transcript_text[:200] if transcript_text else "(전사 없음)"
             clips_lines.append(
                 f"- clip {i} (role={c.role}): "
                 f"edit_timeline {edit_start:.1f}~{edit_end:.1f}s "
                 f"(원본 {c.start_sec:.1f}~{c.end_sec:.1f}s), "
-                f"chars={chars}, "
-                f"description={subtitle[:120]!r}"
+                f"chars={chars}\n"
+                f"    description={subtitle[:120]!r}\n"
+                f"    transcript={transcript_repr!r}"
             )
         clips_str = "\n".join(clips_lines) if clips_lines else "(없음)"
         total_duration = cum

@@ -1855,6 +1855,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     payload.work_title,
                     work_context=payload.work_context,
                     previous_episodes_context=payload.previous_episodes_context,
+                    transcript_segments=transcript_text,  # 라운드 16: Whisper 전사 전달
                 )
                 tts_cues_per_variant.append(cues)
                 voices = sorted({c["voice"] for c in cues})
