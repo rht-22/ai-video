@@ -1910,13 +1910,23 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             sub_style, _applied_preset = select_subtitle_style(_genre_tag, _cli_override, _user_overrides)
             print(f"  [SubtitleStyle] genre_tag={_genre_tag!r} cli={_cli_override!r} → preset={_applied_preset}")
 
-            # TTS 자막 세그먼트 생성 (cue 절대시간 그대로 사용)
+            # TTS 자막 세그먼트 생성 — 라운드 12.2: end_sec을 *mp3 실제 길이* 기준으로 갱신.
+            # 이전엔 cue 계획 시간 그대로 사용 → mp3가 cue 길이보다 짧으면(0.5~1s) 음성 끝난 후 자막
+            # 잔류. 사용자 보고 "TTS 자막이 오디오와 다르다"의 원인.
             tts_line_segs: list[SimpleNamespace] = []
             for _cf in tts_cue_files:
                 _cue = _cf.get("cue", {})
+                _cue_start = float(_cue.get("start_sec", 0.0))
+                _cue_end_planned = float(_cue.get("end_sec", 0.0))
+                _mp3_path = _cf.get("path")
+                _cue_end = _cue_end_planned
+                if _mp3_path and Path(_mp3_path).exists():
+                    _mp3_dur = _get_audio_duration(Path(_mp3_path))
+                    if _mp3_dur > 0:
+                        _cue_end = _cue_start + _mp3_dur
                 tts_line_segs.append(SimpleNamespace(
-                    start_sec=float(_cue.get("start_sec", 0.0)),
-                    end_sec=float(_cue.get("end_sec", 0.0)),
+                    start_sec=_cue_start,
+                    end_sec=_cue_end,
                     text=str(_cue.get("text", "")),
                 ))
 
@@ -2102,13 +2112,21 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                         "cue": cue,
                     })
 
-                # TTS 자막 (cue 절대시간 그대로)
+                # TTS 자막 — 라운드 12.2: end_sec을 mp3 실제 길이로 갱신 (자막↔오디오 동기화)
                 var_tts_segs: list[SimpleNamespace] = []
                 for _cf in var_tts_cue_files:
                     _cue = _cf.get("cue", {})
+                    _cue_start = float(_cue.get("start_sec", 0.0))
+                    _cue_end_planned = float(_cue.get("end_sec", 0.0))
+                    _mp3_path = _cf.get("path")
+                    _cue_end = _cue_end_planned
+                    if _mp3_path and Path(_mp3_path).exists():
+                        _mp3_dur = _get_audio_duration(Path(_mp3_path))
+                        if _mp3_dur > 0:
+                            _cue_end = _cue_start + _mp3_dur
                     var_tts_segs.append(SimpleNamespace(
-                        start_sec=float(_cue.get("start_sec", 0.0)),
-                        end_sec=float(_cue.get("end_sec", 0.0)),
+                        start_sec=_cue_start,
+                        end_sec=_cue_end,
                         text=str(_cue.get("text", "")),
                     ))
 
