@@ -1556,6 +1556,20 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 첫 번째 스토리라인을 기본 clips/title_text로 설정 (하위 호환)
     clips, title_text, _ = all_storyline_variants[0]
 
+    # 라운드 14: transcribe는 모든 variant clips의 union 영역에 대해 수행한다.
+    # 이전엔 첫 variant clips만 transcribe → variant 2/3는 candidate.transcript(LLM 추정) 폴백 사용
+    # → 자막이 음성과 다르고 균등 분할로 박자 어긋남.
+    # union으로 transcribe하면 모든 variant 자막이 Whisper segment 단위 정확 매핑.
+    union_clips: list[StoryClip] = []
+    _seen_keys: set[tuple[float, float]] = set()
+    for _vc, _, _ in all_storyline_variants:
+        for _c in _vc:
+            _key = (round(_c.start_sec, 2), round(_c.end_sec, 2))
+            if _key not in _seen_keys:
+                _seen_keys.add(_key)
+                union_clips.append(_c)
+    union_clips.sort(key=lambda c: c.start_sec)
+
     # ═══════════════════════════════════════
     # [11/15] 선택된 클립 전사 + 무음 제거 (라운드 6a — TTS cue 계획 *전*에 수행)
     # ═══════════════════════════════════════
@@ -1597,20 +1611,24 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         if payload.srt_path:
             print(f"  SRT 파일 사용 중: {payload.srt_path}")
             all_srt_segments = parse_subtitle(payload.srt_path)
-            # 선택된 클립 범위에 해당하는 세그먼트만 필터링
-            for clip in clips:
+            # 라운드 14: 모든 variant union 영역 필터링 (variant 2/3 자막 정확 매핑)
+            _seen_seg_keys: set[tuple[float, float, str]] = set()
+            for clip in union_clips:
                 for seg in all_srt_segments:
                     if seg.end_sec > clip.start_sec and seg.start_sec < clip.end_sec:
-                        transcript_text.append(seg)
-            print(f"  - SRT 필터링 완료: {len(transcript_text)}개 세그먼트")
+                        _k = (round(seg.start_sec, 2), round(seg.end_sec, 2), seg.text)
+                        if _k not in _seen_seg_keys:
+                            _seen_seg_keys.add(_k)
+                            transcript_text.append(seg)
+            print(f"  - SRT 필터링 완료: {len(transcript_text)}개 세그먼트 ({len(union_clips)} clips union)")
         else:
-            print("  Whisper 전사 중... (선택된 클립만)")
+            print(f"  Whisper 전사 중... ({len(union_clips)}개 clip union, 모든 variant 영역)")
             # 리서치 결과에서 인물명 추출 (Whisper 프롬프트용)
             _char_names = list(dict.fromkeys(
                 [ci.character_name for ci in cast_images if ci.character_name]
                 + [ci.actor_name for ci in cast_images if ci.actor_name]
             ))
-            for idx, clip in enumerate(clips):
+            for idx, clip in enumerate(union_clips):
                 clip_audio_path = output_dir / f"clip_audio_{idx}.wav"
                 try:
                     _, actual_start = extract_audio_segment(
@@ -1637,7 +1655,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                                 end_sec=min(adjusted_end, clip.end_sec),
                                 text=seg.text,
                             ))
-                    print(f"    클립 {idx + 1}/{len(clips)} 전사 완료")
+                    print(f"    클립 {idx + 1}/{len(union_clips)} 전사 완료")
                 finally:
                     if clip_audio_path.exists():
                         clip_audio_path.unlink()
@@ -2090,22 +2108,43 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             try:
                 var_start = time.time()
 
-                # 전사: SRT가 있으면 라인 단위 SRT를 그대로 사용 (remap이 clip 범위로 잘라냄).
-                # SRT가 없을 때만 Gemini candidate transcript로 폴백.
+                # 전사 — 라운드 14 우선순위:
+                # 1. SRT (라인 단위) — remap이 clip 범위로 잘라냄
+                # 2. 통합 transcript_text (Whisper 전사 — 모든 variant union 영역 포함, 라운드 14)
+                # 3. candidate.transcript (Gemini 추정) — 위 둘 다 비어있을 때 폴백
                 var_transcript: list = []
                 if srt_segments_for_variants:
                     var_transcript = list(srt_segments_for_variants)
-                elif all_candidates:
-                    for clip in var_clips:
-                        for m in all_candidates:
-                            m_start = float(m.get("start_sec", 0))
-                            m_end = float(m.get("end_sec", 0))
-                            if m_end > clip.start_sec and m_start < clip.end_sec and m.get("transcript"):
-                                # 실제 candidate 구간 시간을 보존 (clip 전체 덮어쓰기 금지)
-                                var_transcript.append(SpeechSegment(
-                                    start_sec=m_start, end_sec=m_end, text=m["transcript"],
-                                ))
-                                break
+                else:
+                    # 라운드 14-B: 통합 transcript_text에서 var_clips 영역과 겹치는 segment 추출
+                    # 자막 텍스트·시간 모두 Whisper 전사 결과 → variant 2/3도 음성과 정확히 일치.
+                    if transcript_text:
+                        for seg in transcript_text:
+                            seg_start = getattr(seg, "start_sec", None)
+                            seg_end = getattr(seg, "end_sec", None)
+                            seg_text = getattr(seg, "text", None)
+                            if seg_start is None or seg_end is None or not seg_text:
+                                continue
+                            for clip in var_clips:
+                                if seg_end > clip.start_sec and seg_start < clip.end_sec:
+                                    var_transcript.append(SpeechSegment(
+                                        start_sec=float(seg_start), end_sec=float(seg_end),
+                                        text=str(seg_text),
+                                    ))
+                                    break
+
+                    # 폴백: transcript_text에 var_clips 영역 segment가 없으면 candidate.transcript 사용
+                    if not var_transcript and all_candidates:
+                        for clip in var_clips:
+                            for m in all_candidates:
+                                m_start = float(m.get("start_sec", 0))
+                                m_end = float(m.get("end_sec", 0))
+                                if m_end > clip.start_sec and m_start < clip.end_sec and m.get("transcript"):
+                                    # 실제 candidate 구간 시간을 보존 (clip 전체 덮어쓰기 금지)
+                                    var_transcript.append(SpeechSegment(
+                                        start_sec=m_start, end_sec=m_end, text=m["transcript"],
+                                    ))
+                                    break
 
                 # 자막 타임라인 매핑
                 var_remapped = remap_transcript_to_edited_timeline(var_clips, var_transcript, tts_only_when_no_orig=True)
