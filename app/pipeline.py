@@ -32,6 +32,179 @@ def _strip_emoji(text: str) -> str:
     return _EMOJI_RE.sub("", text).strip()
 
 
+def _snap_clip_boundaries_to_dialogue(
+    variants: list[tuple[list[StoryClip], str, float]],
+    transcript_segments: list,
+    snap_back_max: float = 5.0,
+    snap_forward_max: float = 5.0,
+) -> list[tuple[list[StoryClip], str, float]]:
+    """라운드 19C-2: 각 variant의 첫 clip start·마지막 clip end를 문장 경계에 스냅.
+
+    - 첫 clip start: -snap_back_max ~ +1s 범위 안 가장 가까운 *문장 시작* (segment.start_sec - 0.2s)으로 조정.
+    - 마지막 clip end: -1s ~ +snap_forward_max 범위 안 가장 가까운 *문장 끝* (segment.end_sec + 0.3s)으로 조정.
+
+    transcript_segments: list[SpeechSegment | SimpleNamespace] (start_sec, end_sec, text 속성)
+    """
+    if not variants or not transcript_segments:
+        return variants
+    segs = sorted(
+        [(float(getattr(s, "start_sec", 0)), float(getattr(s, "end_sec", 0))) for s in transcript_segments],
+        key=lambda t: t[0],
+    )
+    if not segs:
+        return variants
+
+    new_variants: list[tuple[list[StoryClip], str, float]] = []
+    for sl_clips, sl_title, sl_score in variants:
+        if not sl_clips:
+            new_variants.append((sl_clips, sl_title, sl_score))
+            continue
+        first = sl_clips[0]
+        last = sl_clips[-1]
+        # 첫 clip start 스냅 — 가장 가까운 segment.start_sec - 0.2s, 단 [first.start_sec - snap_back_max, first.start_sec + 1.0] 범위 안
+        cand_starts = [s_start - 0.2 for s_start, _ in segs
+                       if (first.start_sec - snap_back_max) <= (s_start - 0.2) <= (first.start_sec + 1.0)]
+        new_first_start = min(cand_starts, key=lambda x: abs(x - first.start_sec)) if cand_starts else first.start_sec
+        new_first_start = max(0.0, new_first_start)
+
+        # 마지막 clip end 스냅 — 가장 가까운 segment.end_sec + 0.3s, 단 [last.end_sec - 1.0, last.end_sec + snap_forward_max] 범위 안
+        cand_ends = [s_end + 0.3 for _, s_end in segs
+                     if (last.end_sec - 1.0) <= (s_end + 0.3) <= (last.end_sec + snap_forward_max)]
+        new_last_end = max(cand_ends, key=lambda x: x) if cand_ends else last.end_sec
+
+        # 변경 적용
+        new_clips = list(sl_clips)
+        if abs(new_first_start - first.start_sec) > 0.05:
+            new_clips[0] = StoryClip(
+                role=first.role, start_sec=new_first_start, end_sec=first.end_sec,
+                subtitle=first.subtitle, use_original_audio=first.use_original_audio,
+                pacing_note=first.pacing_note,
+                chunk_index=first.chunk_index, candidate_index=first.candidate_index,
+                character_focus=first.character_focus,
+            )
+            print(f"  [snap] 첫 clip start: {first.start_sec:.2f}s → {new_first_start:.2f}s (대사 도입 포함)")
+        if abs(new_last_end - last.end_sec) > 0.05:
+            last_idx = len(new_clips) - 1
+            last_now = new_clips[last_idx]
+            new_clips[last_idx] = StoryClip(
+                role=last_now.role, start_sec=last_now.start_sec, end_sec=new_last_end,
+                subtitle=last_now.subtitle, use_original_audio=last_now.use_original_audio,
+                pacing_note=last_now.pacing_note,
+                chunk_index=last_now.chunk_index, candidate_index=last_now.candidate_index,
+                character_focus=last_now.character_focus,
+            )
+            print(f"  [snap] 마지막 clip end: {last.end_sec:.2f}s → {new_last_end:.2f}s (대사 여운 포함)")
+        new_variants.append((new_clips, sl_title, sl_score))
+    return new_variants
+
+
+def _extend_storyline_for_narrative(
+    variants: list[tuple[list[StoryClip], str, float]],
+    candidates_lookup: dict,
+    target_max: float = 60.0,
+    max_extend_per_side: float = 8.0,
+) -> list[tuple[list[StoryClip], str, float]]:
+    """라운드 19C-3: 길이 < target_max면 candidate.context_extension까지 always-on 확장.
+
+    - 첫 clip: candidate.extended_start_sec까지 앞 확장 (max +max_extend_per_side, target_max 초과 안 함)
+    - 마지막 clip: candidate.extended_end_sec까지 뒤 확장 (max +max_extend_per_side, target_max 초과 안 함)
+    """
+    if not variants or not candidates_lookup:
+        return variants
+    new_variants: list[tuple[list[StoryClip], str, float]] = []
+    for sl_clips, sl_title, sl_score in variants:
+        if not sl_clips:
+            new_variants.append((sl_clips, sl_title, sl_score))
+            continue
+        cur_total = sum(c.end_sec - c.start_sec for c in sl_clips)
+        if cur_total >= target_max:
+            new_variants.append((sl_clips, sl_title, sl_score))
+            continue
+        budget = target_max - cur_total
+        new_clips = list(sl_clips)
+
+        # 첫 clip 앞 확장
+        first = new_clips[0]
+        first_cand = candidates_lookup.get((first.chunk_index, first.candidate_index))
+        if first_cand is not None and budget > 0.5:
+            ext = first_cand.get("context_extension") or {}
+            ext_start = float(ext.get("extended_start_sec", first.start_sec)) if ext else first.start_sec
+            available = first.start_sec - max(0.0, ext_start)
+            if available > 0:
+                ext_amount = min(budget, max_extend_per_side, available)
+                if ext_amount > 0.5:
+                    new_clips[0] = StoryClip(
+                        role=first.role, start_sec=first.start_sec - ext_amount, end_sec=first.end_sec,
+                        subtitle=first.subtitle, use_original_audio=first.use_original_audio,
+                        pacing_note=first.pacing_note,
+                        chunk_index=first.chunk_index, candidate_index=first.candidate_index,
+                        character_focus=first.character_focus,
+                    )
+                    budget -= ext_amount
+                    print(f"  [narrative-ext] 첫 clip 앞 +{ext_amount:.1f}s ({first.start_sec:.1f}→{first.start_sec - ext_amount:.1f})")
+
+        # 마지막 clip 뒤 확장
+        last = new_clips[-1]
+        last_cand = candidates_lookup.get((last.chunk_index, last.candidate_index))
+        if last_cand is not None and budget > 0.5:
+            ext = last_cand.get("context_extension") or {}
+            ext_end = float(ext.get("extended_end_sec", last.end_sec)) if ext else last.end_sec
+            available = ext_end - last.end_sec
+            if available > 0:
+                ext_amount = min(budget, max_extend_per_side, available)
+                if ext_amount > 0.5:
+                    last_idx = len(new_clips) - 1
+                    new_clips[last_idx] = StoryClip(
+                        role=last.role, start_sec=last.start_sec, end_sec=last.end_sec + ext_amount,
+                        subtitle=last.subtitle, use_original_audio=last.use_original_audio,
+                        pacing_note=last.pacing_note,
+                        chunk_index=last.chunk_index, candidate_index=last.candidate_index,
+                        character_focus=last.character_focus,
+                    )
+                    print(f"  [narrative-ext] 마지막 clip 뒤 +{ext_amount:.1f}s ({last.end_sec:.1f}→{last.end_sec + ext_amount:.1f})")
+
+        new_variants.append((new_clips, sl_title, sl_score))
+    return new_variants
+
+
+def _fill_intra_storyline_gaps(
+    variants: list[tuple[list[StoryClip], str, float]],
+    max_gap_sec: float = 3.0,
+) -> list[tuple[list[StoryClip], str, float]]:
+    """라운드 19C-4: 인접 clip 사이 갭이 ≤ max_gap_sec + character_focus 교집합 ≥ 1명이면
+    pre clip의 end_sec을 next clip의 start_sec까지 확장 (=두 clip 결합).
+
+    무음·암전 검증은 단순화: 갭 길이만 보고 결정 (정밀 검증은 silence cut 단계에서 이미 처리됨).
+    """
+    if not variants:
+        return variants
+    new_variants: list[tuple[list[StoryClip], str, float]] = []
+    for sl_clips, sl_title, sl_score in variants:
+        if len(sl_clips) < 2:
+            new_variants.append((sl_clips, sl_title, sl_score))
+            continue
+        new_clips: list[StoryClip] = []
+        for i, cur in enumerate(sl_clips):
+            # 이어지는 다음 clip이 있고 갭 채움 조건이면 cur.end_sec 연장
+            if i + 1 < len(sl_clips):
+                nxt = sl_clips[i + 1]
+                gap = nxt.start_sec - cur.end_sec
+                cur_chars = set(cur.character_focus or ())
+                nxt_chars = set(nxt.character_focus or ())
+                if 0 < gap <= max_gap_sec and (cur_chars & nxt_chars):
+                    cur = StoryClip(
+                        role=cur.role, start_sec=cur.start_sec, end_sec=nxt.start_sec,
+                        subtitle=cur.subtitle, use_original_audio=cur.use_original_audio,
+                        pacing_note=cur.pacing_note,
+                        chunk_index=cur.chunk_index, candidate_index=cur.candidate_index,
+                        character_focus=cur.character_focus,
+                    )
+                    print(f"  [gap-fill] clip {i}↔{i+1} 갭 {gap:.2f}s 채움 (공통 character: {cur_chars & nxt_chars})")
+            new_clips.append(cur)
+        new_variants.append((new_clips, sl_title, sl_score))
+    return new_variants
+
+
 def _apply_silence_cut_to_variants(
     variants: list[tuple[list[StoryClip], str, float]],
     transcript_segments: list,
@@ -79,6 +252,60 @@ def _apply_silence_cut_to_variants(
 
         new_variants.append((sl_clips_new, sl_title, sl_score))
     return new_variants
+
+
+def _dedup_overlapping_candidates(
+    candidates: list[dict],
+    iou_threshold: float = 0.7,
+) -> list[dict]:
+    """라운드 19B: 청크 오버랩(180s)으로 동일 사건이 두 청크에서 보고된 경우, IoU 기반 dedup.
+
+    chunk N과 N+1이 180s 영역을 공유하므로 동일 moment가 약간 다른 boundary로
+    두 번 보고됨. (start_sec, end_sec) IoU ≥ threshold이면 score(또는 viral_score)
+    높은 쪽만 유지.
+
+    Args:
+        candidates: all_candidates list (각 dict에 start_sec, end_sec, score, chunk_index 등)
+        iou_threshold: IoU >= 이 값이면 중복으로 간주 (기본 0.7)
+
+    Returns:
+        dedup된 candidates list (정렬 보존, score 높은 쪽 유지)
+    """
+    if not candidates:
+        return candidates
+
+    def _iou(a: dict, b: dict) -> float:
+        a_s, a_e = float(a.get("start_sec", 0)), float(a.get("end_sec", 0))
+        b_s, b_e = float(b.get("start_sec", 0)), float(b.get("end_sec", 0))
+        if a_e <= a_s or b_e <= b_s:
+            return 0.0
+        inter = max(0.0, min(a_e, b_e) - max(a_s, b_s))
+        union = (a_e - a_s) + (b_e - b_s) - inter
+        return inter / union if union > 0 else 0.0
+
+    def _score(c: dict) -> float:
+        # viral_score, score 중 큰 값 사용 (둘 다 없으면 0.5 fallback)
+        return float(c.get("viral_score", c.get("score", 0.5)) or 0.5)
+
+    # 시간순 정렬
+    sorted_cands = sorted(candidates, key=lambda c: (float(c.get("start_sec", 0)), float(c.get("end_sec", 0))))
+    keep: list[dict] = []
+    drops = 0
+    for cand in sorted_cands:
+        merged = False
+        for i, kept in enumerate(keep):
+            if _iou(cand, kept) >= iou_threshold:
+                # 중복 감지 → score 높은 쪽 유지
+                if _score(cand) > _score(kept):
+                    keep[i] = cand
+                drops += 1
+                merged = True
+                break
+        if not merged:
+            keep.append(cand)
+    if drops:
+        print(f"  [cand-dedup] IoU ≥ {iou_threshold} 중복 {drops}개 제거 ({len(candidates)} → {len(keep)})")
+    return keep
 
 
 def _clamp_cues_to_variants(
@@ -1297,6 +1524,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         if before_count != len(all_candidates):
             print(f"  인트로/크레딧 필터 적용: {before_count} → {len(all_candidates)}개 후보")
 
+    # ── 라운드 19B: 청크 오버랩(180s) 중복 candidate dedup (IoU 기반) ──
+    all_candidates = _dedup_overlapping_candidates(all_candidates, iou_threshold=0.7)
+
     # ═══════════════════════════════════════
     # [9/15] 관계 그래프 추출
     # ═══════════════════════════════════════
@@ -1682,6 +1912,19 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             target_min=float(config.min_duration_sec),
             target_max=float(config.max_duration_sec),
         )
+        # 라운드 19C — 서사 컨텍스트: 문장 경계 스냅 → 능동 확장 → 갭 채우기
+        all_storyline_variants = _snap_clip_boundaries_to_dialogue(
+            all_storyline_variants, transcript_text, snap_back_max=5.0, snap_forward_max=5.0,
+        )
+        all_storyline_variants = _extend_storyline_for_narrative(
+            all_storyline_variants,
+            candidates_lookup=_build_candidates_lookup(all_candidates),
+            target_max=float(config.max_duration_sec),
+            max_extend_per_side=8.0,
+        )
+        all_storyline_variants = _fill_intra_storyline_gaps(
+            all_storyline_variants, max_gap_sec=3.0,
+        )
         print(f"[OK] 전사 로드 + 무음 제거 완료 ({len(clips)}개 클립)")
 
     elif start_idx <= 11:
@@ -1784,6 +2027,19 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 candidates_lookup=_build_candidates_lookup(all_candidates),
                 target_min=float(config.min_duration_sec),
                 target_max=float(config.max_duration_sec),
+            )
+            # 라운드 19C — 서사 컨텍스트: 문장 경계 스냅 → 능동 확장 → 갭 채우기
+            all_storyline_variants = _snap_clip_boundaries_to_dialogue(
+                all_storyline_variants, transcript_text, snap_back_max=5.0, snap_forward_max=5.0,
+            )
+            all_storyline_variants = _extend_storyline_for_narrative(
+                all_storyline_variants,
+                candidates_lookup=_build_candidates_lookup(all_candidates),
+                target_max=float(config.max_duration_sec),
+                max_extend_per_side=8.0,
+            )
+            all_storyline_variants = _fill_intra_storyline_gaps(
+                all_storyline_variants, max_gap_sec=3.0,
             )
             # 라운드 17: clips ↔ all_storyline_variants[0] 동기화.
             # 무음 컷 롤백/재보정으로 variant clips가 변경된 경우, shorts #1 렌더용 clips도 동일하게 맞춰야
@@ -1941,21 +2197,39 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print(f"  크롭 타임라인 생성 중... ({len(clips)}개 클립)")
         for idx, clip in enumerate(clips):
             crop_path = output_dir / f"crop_{clip.role}_{idx}.json"
-            # Phase 12: character_focus 첫 번째 인물을 타겟으로
-            target_char = clip.character_focus[0] if clip.character_focus and face_identifier else None
-            build_crop_timeline(
-                payload.video_path.resolve(),
-                crop_path,
-                media_info.width,
-                media_info.height,
-                config.crop_sample_interval_sec,
-                start_sec=clip.start_sec,
-                end_sec=clip.end_sec,
-                enable_speaker_tracking=payload.design.enable_speaker_tracking,
-                target_character=target_char,
-                face_identifier=face_identifier,
-                character_index=character_appearances,
-            )
+            # 라운드 19A: ≥2 character_focus + face_identifier/character_index 가능하면 멀티 크롭 (와이드 프레이밍)
+            multi_targets = list(clip.character_focus) if (clip.character_focus and len(clip.character_focus) >= 2) else None
+            if multi_targets and (face_identifier or character_appearances) and payload.design.enable_face_recognition:
+                from app.modules.reframe import build_multi_face_crop_timeline
+                print(f"    [multi-crop] clip {idx}: {multi_targets} 와이드 프레이밍")
+                build_multi_face_crop_timeline(
+                    payload.video_path.resolve(),
+                    crop_path,
+                    media_info.width,
+                    media_info.height,
+                    config.crop_sample_interval_sec,
+                    start_sec=clip.start_sec,
+                    end_sec=clip.end_sec,
+                    target_characters=multi_targets,
+                    face_identifier=face_identifier,
+                    character_index=character_appearances,
+                )
+            else:
+                # Phase 12: character_focus 첫 번째 인물을 타겟으로
+                target_char = clip.character_focus[0] if clip.character_focus and face_identifier else None
+                build_crop_timeline(
+                    payload.video_path.resolve(),
+                    crop_path,
+                    media_info.width,
+                    media_info.height,
+                    config.crop_sample_interval_sec,
+                    start_sec=clip.start_sec,
+                    end_sec=clip.end_sec,
+                    enable_speaker_tracking=payload.design.enable_speaker_tracking,
+                    target_character=target_char,
+                    face_identifier=face_identifier,
+                    character_index=character_appearances,
+                )
             crop_map[f"{clip.role}_{idx}"] = crop_path
             if (idx + 1) % 5 == 0 or (idx + 1) == len(clips):
                 print(f"    진행 중... ({idx + 1}/{len(clips)})")

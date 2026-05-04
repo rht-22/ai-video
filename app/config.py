@@ -55,7 +55,7 @@ class DesignConfig:
 @dataclass(frozen=True)
 class AppConfig:
     chunk_seconds: int = 600
-    chunk_overlap: int = 30
+    chunk_overlap: int = 180  # 라운드 19B: 30 → 180. chunks 1+에서 앞 청크 3분 prepend로 경계 사건 손실 방지.
     target_duration_sec: int = 50
     target_duration_tolerance_sec: int = 10
     min_duration_sec: int = 40

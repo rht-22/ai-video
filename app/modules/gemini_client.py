@@ -223,14 +223,30 @@ segments 중 **쇼츠 제작에 가치 있는 장면만** 선별해 candidate_mo
 - highlight_reason: highlight_eligible이 true인 경우에만 1문장 (false면 null)
 - context_extension: **모든 candidate**에 대해 다음을 판단·출력 (highlight 여부와 무관)
     - needed: 이 candidate를 단독 클립으로 보여줬을 때 시청자가 "뭐지?" 없이 흐름을 따라가려면 앞뒤 맥락이 필요한가?
-    - extended_start_sec: needed=true면 인접 segment까지 확장한 시작점 (보통 핵심 직전 5~15초). false면 start_sec와 동일
-    - extended_end_sec: needed=true면 인접 segment까지 확장한 종료점 (보통 핵심 직후 3~10초). false면 end_sec와 동일
+    - extended_start_sec: needed=true면 인접 segment까지 확장한 시작점 (보통 핵심 직전 5~25초). false면 start_sec와 동일
+    - extended_end_sec: needed=true면 인접 segment까지 확장한 종료점 (보통 핵심 직후 5~25초). false면 end_sec와 동일
     - before_summary / after_summary: 확장 부분에 무엇이 있는지 한 문장씩
     - reason: 왜 그 앞뒤가 필수인지 한 줄
     - 강제 조건: extended_start_sec ≤ start_sec ≤ end_sec ≤ extended_end_sec (양쪽 확장만 허용)
     - 확장 구간 안에 컷·장소 변경이 너무 많으면(>2회) needed:false 로 강등하라
-    - 확장은 정말 필요한 경우에만 (불필요 시 needed:false 가 기본)
+    - **라운드 19C-1 기준 완화**: 다음 신호 중 하나라도 있으면 needed=true 적극 적용:
+      - candidate 시작 직전 5초 안에 *도입·배경 대사·인물 등장*이 있음
+      - candidate 끝 직후 5초 안에 *반응·여운 대사·결과 표정/액션*이 있음
+      - 핵심 사건의 의미가 앞뒤 1~2개 segment 없이는 모호해짐
     - storytelling의 hook/build/payoff에서도 활용되어 클립 사이 시간 점프를 줄이는 데 사용된다.
+
+- event_template: **라운드 19D — 행동 의미 라벨링 필수**. 이 후보의 *행동 의미*를 (subject, action, target, mode, location)로 명시.
+    - subject: 행동의 주체 (캐릭터명; 영상 안 인물 이름과 일치)
+    - action: 무슨 행동인지 간결한 동사구 (예: "맥주 권유", "병문안", "통화로 업무 위임", "고백")
+    - target: 행동의 대상 (캐릭터명·장소·물건; 없으면 null)
+    - mode: 행동 방식 — `in_person` | `phone_call` | `narration` | `observation` | `mixed`
+        - in_person: 두 인물이 같은 장소에서 직접 대면
+        - phone_call: 전화·영상통화로 *떨어진 두 사람* 간 소통. 직접 대면 아님
+        - narration: 내레이션·독백·VO
+        - observation: 한 인물이 다른 인물·상황을 *관찰*만 함 (개입 없음)
+        - mixed: 한 candidate 안에서 둘 이상 모드가 섞임 (드물게)
+    - location: 장면 발생 장소 (예: "극장 로비", "병원", "야외 거리")
+    - ⚠️ phone_call vs in_person 구분 매우 중요. 통화 장면을 in_person으로 잘못 라벨하면 다음 단계(스토리 구성)에서 "X가 Y에게 직접 고백" 같은 잘못된 title 생성됨.
 
 다음 스키마로만 응답 (※ 아래 예시의 숫자는 placeholder다. 실제 값은 [입력 정보]의 "현재 청크 번호"·"청크 범위"를 그대로 사용하라):
 {{
@@ -285,6 +301,13 @@ segments 중 **쇼츠 제작에 가치 있는 장면만** 선별해 candidate_mo
         "before_summary": null,
         "after_summary": null,
         "reason": null
+      }},
+      "event_template": {{
+        "subject": "주체 캐릭터명",
+        "action": "행동 동사구 (예: '통화로 업무 위임', '맥주 권유', '병문안')",
+        "target": "대상 캐릭터명/장소/물건 또는 null",
+        "mode": "in_person | phone_call | narration | observation | mixed",
+        "location": "장면 발생 장소"
       }}
     }}
   ],
@@ -395,6 +418,32 @@ description은 LLM의 시각 분석 추정이라 *통화 상대*, *대사 인물
 title_line2에 통화 상대·대사 인물·등장 인물 같은 *음성 의존 정보*를 단정적으로
 사용하려면 반드시 transcript에서 그 인물명·대사가 명확히 확인되어야 한다. transcript에
 명시 없는 추정 라벨은 *부정확 위험* 라벨로 간주하고 보다 일반적인 표현으로 대체하라.
+
+### candidate.event_template — 행동 의미 라벨링 (라운드 19D)
+
+각 candidate에는 `event_template` 필드가 있다 (subject, action, target, mode, location).
+이는 분석 단계에서 결정된 *행동 의미*다. title 작성 시 이 정보를 1순위로 사용하라.
+
+⚠️ **phone_call 모드 라벨 규칙 — 발신자 행동만 라벨링**:
+- mode == "phone_call"이면 subject = 발신자, target = 수신자.
+- title은 **발신자가 수신자에게 *시킨/알린 행동* 위주**로 작성하라.
+  - ✅ 옳은 예: "유미가 PD에게 일을 맡김", "유미가 작가에게 전화로 통보"
+  - ❌ 잘못된 예: "유미에게 고백", "PD에게 마음을 전한 유미" (수신자 시점 라벨)
+
+⚠️ **confession/사랑/제안 단어 차단 (mode=phone_call)**:
+- phone_call에서 발화된 대사라도 직접 대면 아니면 title에 '고백/사랑/제안/프러포즈' 단어 사용 금지.
+- 대신 위임/통보/알림/지시/확인 같은 *기능적 행동* 단어 사용.
+
+⚠️ **검증 단계 — title 작성 후 event_template 재확인**:
+1. 선택된 storyline의 모든 clip의 event_template.mode 목록을 확인
+2. mode=phone_call이 1개 이상 포함됐고, title_line1 또는 title_line2에 '고백/사랑/제안/프러포즈' 단어가 있으면 **재작성**
+3. 재작성 시: 발신자 subject가 target에게 행한 *기능적 action*을 위주로
+
+예 (실제 케이스 — 라운드 18 결함):
+- 장면: 유미가 *병원 병문안 와서* 다른 사람에게 *전화로 일을 맡김*
+- event_template: {{subject:"유미", action:"통화로 업무 위임", target:"PD", mode:"phone_call", location:"병원"}}
+- ❌ 잘못된 title: "유미에게 고백한 PD" (mode 무시)
+- ✅ 옳은 title: "병문안 중 통화로 일 맡긴 유미" (subject·action·mode 반영)
 
 ### 원본 타임라인 순서 원칙 (절대 규칙)
 
