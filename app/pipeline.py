@@ -1785,6 +1785,17 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 target_min=float(config.min_duration_sec),
                 target_max=float(config.max_duration_sec),
             )
+            # 라운드 17: clips ↔ all_storyline_variants[0] 동기화.
+            # 무음 컷 롤백/재보정으로 variant clips가 변경된 경우, shorts #1 렌더용 clips도 동일하게 맞춰야
+            # TTS cue 시간(variant 기준)과 video 길이(clips 기준) 불일치로 인한 마지막 프레임 freeze 방지.
+            if all_storyline_variants:
+                synced_first = list(all_storyline_variants[0][0])
+                if synced_first:
+                    old_total = sum(c.end_sec - c.start_sec for c in clips)
+                    new_total = sum(c.end_sec - c.start_sec for c in synced_first)
+                    if abs(old_total - new_total) > 0.5:
+                        print(f"  [clips-sync] shorts #1 clips 동기화: {old_total:.1f}s → {new_total:.1f}s (variant 1 기준)")
+                    clips = synced_first
         print(f"[OK] 전사 완료 ({len(clips)}개 클립)")
     else:
         # 이전 단계 데이터 로드
