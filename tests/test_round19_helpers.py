@@ -11,7 +11,9 @@ from app.pipeline import (
     _dedup_overlapping_candidates,
     _extend_storyline_for_narrative,
     _fill_intra_storyline_gaps,
+    _fit_storyline_to_duration,
     _snap_clip_boundaries_to_dialogue,
+    _validate_storyline_timeline,
 )
 
 
@@ -157,3 +159,161 @@ def test_fill_gap_skipped_when_gap_too_large():
     variants = [(clips, "T", 1.0)]
     out = _fill_intra_storyline_gaps(variants, max_gap_sec=3.0)
     assert out[0][0][0].end_sec == 110.0  # 갭 10s > 3s
+
+
+# ── 라운드 20: storyline timeline 검증 테스트 ──
+
+def test_validate_rejects_hook_payoff_same_timestamp():
+    """hook과 payoff가 같은 timestamp인 환각 케이스 폐기 (SNL EP06 #2 실제 사례)."""
+    sl_data = {
+        "storyline": {
+            "hook": {"start_sec": 2131.0, "end_sec": 2224.0},
+            "build": [{"start_sec": 1692.0, "end_sec": 1700.0}],
+            "payoff": {"start_sec": 2131.0, "end_sec": 2224.0},
+        },
+    }
+    is_valid, reason = _validate_storyline_timeline(sl_data)
+    assert not is_valid
+    assert "IoU" in reason
+
+
+def test_validate_rejects_high_iou_overlap():
+    """hook ↔ payoff IoU > 0.3 폐기."""
+    sl_data = {
+        "storyline": {
+            "hook": {"start_sec": 100.0, "end_sec": 130.0},
+            "build": [{"start_sec": 50.0, "end_sec": 90.0}],
+            "payoff": {"start_sec": 110.0, "end_sec": 140.0},  # IoU≈0.5
+        },
+    }
+    is_valid, reason = _validate_storyline_timeline(sl_data)
+    assert not is_valid
+
+
+def test_validate_accepts_chronological_order():
+    """정시간순 (hook < build < payoff) 통과."""
+    sl_data = {
+        "storyline": {
+            "hook": {"start_sec": 100.0, "end_sec": 110.0},
+            "build": [{"start_sec": 120.0, "end_sec": 130.0}],
+            "payoff": {"start_sec": 140.0, "end_sec": 150.0},
+        },
+    }
+    is_valid, reason = _validate_storyline_timeline(sl_data)
+    assert is_valid, f"chronological order should pass: {reason}"
+
+
+def test_validate_accepts_result_first_pattern():
+    """결과선공개 (build < payoff < hook, hook이 끝) 통과."""
+    sl_data = {
+        "storyline": {
+            "hook": {"start_sec": 200.0, "end_sec": 210.0},  # hook이 끝
+            "build": [{"start_sec": 50.0, "end_sec": 60.0}],
+            "payoff": {"start_sec": 100.0, "end_sec": 110.0},  # 중간
+        },
+    }
+    is_valid, reason = _validate_storyline_timeline(sl_data)
+    assert is_valid, f"result-first should pass: {reason}"
+
+
+def test_validate_rejects_time_reversal():
+    """build가 hook보다 7분 앞선 시간 역행 (SNL EP06 #2 실제 사례) 폐기."""
+    sl_data = {
+        "storyline": {
+            "hook": {"start_sec": 2131.0, "end_sec": 2200.0},
+            "build": [{"start_sec": 1692.0, "end_sec": 1700.0}],  # hook보다 7분 앞
+            "payoff": {"start_sec": 2300.0, "end_sec": 2350.0},
+        },
+    }
+    is_valid, reason = _validate_storyline_timeline(sl_data)
+    assert not is_valid
+    assert "timeline" in reason or "IoU" in reason
+
+
+def test_validate_passes_highlight_type():
+    """highlight 타입 (storyline 키 없음) 통과."""
+    sl_data = {
+        "shorts_type": "highlight",
+        "start_sec": 100.0,
+        "end_sec": 140.0,
+    }
+    is_valid, _ = _validate_storyline_timeline(sl_data)
+    assert is_valid
+
+
+def test_validate_rejects_invalid_durations():
+    """end_sec <= start_sec 폐기."""
+    sl_data = {
+        "storyline": {
+            "hook": {"start_sec": 100.0, "end_sec": 100.0},
+            "payoff": {"start_sec": 200.0, "end_sec": 210.0},
+        },
+    }
+    is_valid, _ = _validate_storyline_timeline(sl_data)
+    assert not is_valid
+
+
+# ── 라운드 21: 역할별(role-aware) trim 테스트 ──
+
+def test_role_aware_trim_payoff_keeps_end():
+    """payoff: 끝 보존, 시작에서 자름 (reveal/punchline 보존)."""
+    # 80s 합계 → 60s로 단축. clips: hook 30s + payoff 50s.
+    clips = [
+        _mk_clip(0.0, 30.0, role="hook"),
+        _mk_clip(100.0, 150.0, role="payoff"),
+    ]
+    # candidates_lookup 빈 dict (build 제거 로직 안 탐 → 비례 trim 분기로 직접 들어감)
+    out, msg = _fit_storyline_to_duration(clips, {}, target_min=40.0, target_max=60.0)
+    # ratio = 60/80 = 0.75, hook_new=22.5, payoff_new=37.5
+    # hook(end-trim): start=0, end=22.5
+    # payoff(start-trim): start=100+12.5=112.5, end=150
+    assert abs(out[0].start_sec - 0.0) < 0.01
+    assert abs(out[0].end_sec - 22.5) < 0.01
+    assert abs(out[1].start_sec - 112.5) < 0.01
+    assert abs(out[1].end_sec - 150.0) < 0.01
+    assert "역할별 trim" in msg
+    assert "payoff(start)" in msg
+    assert "hook(end)" in msg
+
+
+def test_role_aware_trim_with_build_in_pipeline():
+    """hook + build + payoff 시나리오: 현재 로직은 build 먼저 제거 후 비례 trim.
+
+    build branch는 build가 통째로 제거된 후 hook+payoff만 남고 그 합이 여전히 target_max를
+    초과하는 케이스에서만 hook/payoff로 적용. build branch 자체는 build가 살아 있는 채
+    role-aware 단계에 도달하는 경우의 defensive code.
+    """
+    clips = [
+        _mk_clip(0.0, 50.0, role="hook"),  # 50s
+        _mk_clip(100.0, 130.0, role="build"),  # 30s
+        _mk_clip(200.0, 250.0, role="payoff"),  # 50s. 합계 130s
+    ]
+    out, msg = _fit_storyline_to_duration(clips, {}, target_min=40.0, target_max=60.0)
+    # build 제거됨 → hook 50s + payoff 50s = 100s, 여전히 > 60
+    # ratio = 60/100 = 0.6, hook→30s (end-trim), payoff→30s (start-trim)
+    assert len(out) == 2
+    assert out[0].role == "hook"
+    assert out[1].role == "payoff"
+    assert abs(out[0].start_sec - 0.0) < 0.01
+    assert abs(out[0].end_sec - 30.0) < 0.01
+    assert abs(out[1].start_sec - 220.0) < 0.01
+    assert abs(out[1].end_sec - 250.0) < 0.01
+    assert "build" in msg or "hook(end)" in msg or "payoff(start)" in msg
+
+
+def test_role_aware_trim_hook_keeps_start():
+    """hook: 시작 보존, 끝에서 자름 (후킹 모먼트 보존)."""
+    clips = [_mk_clip(0.0, 80.0, role="hook")]
+    out, msg = _fit_storyline_to_duration(clips, {}, target_min=40.0, target_max=60.0)
+    assert abs(out[0].start_sec - 0.0) < 0.01
+    assert abs(out[0].end_sec - 60.0) < 0.01
+    assert "hook(end)" in msg
+
+
+def test_role_aware_trim_no_change_when_under_max():
+    """target_max 이하면 변경 없음."""
+    clips = [_mk_clip(0.0, 30.0, role="hook"), _mk_clip(100.0, 120.0, role="payoff")]  # 50s
+    out, msg = _fit_storyline_to_duration(clips, {}, target_min=40.0, target_max=60.0)
+    assert out[0].end_sec == 30.0
+    assert out[1].start_sec == 100.0
+    assert msg == ""

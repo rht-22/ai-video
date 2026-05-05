@@ -205,6 +205,74 @@ def _fill_intra_storyline_gaps(
     return new_variants
 
 
+def _validate_storyline_timeline(sl_data: dict, iou_max: float = 0.3) -> tuple[bool, str]:
+    """라운드 20: storyline 시간 일관성 검증.
+
+    LLM이 hook/payoff에 같은 timestamp 부여하거나 build가 hook보다 앞선 시간 역행 케이스
+    감지. 이런 storyline은 폐기하고 다음 ranked로 넘어간다.
+
+    검증 항목:
+    1. hook ↔ payoff IoU > iou_max 이면 같은 장면을 두 번 라벨한 환각 (예: SNL EP06 #2의
+       2131-2224 같은 timestamp)
+    2. 시간순 검증: build < hook < payoff (정시간순) 또는 build < payoff < hook (결과선공개)
+       어느 쪽도 만족 안 하면 시간 역행
+
+    highlight 타입은 hook만 있으므로 통과.
+    """
+    if not isinstance(sl_data, dict):
+        return False, "not a dict"
+
+    sl = sl_data.get("storyline") or {}
+    hook = sl.get("hook") if isinstance(sl, dict) else None
+    payoff = sl.get("payoff") if isinstance(sl, dict) else None
+    builds = sl.get("build") or [] if isinstance(sl, dict) else []
+
+    # highlight 타입 (storyline 키 없거나 hook만): 통과
+    if not isinstance(hook, dict) or not isinstance(payoff, dict):
+        return True, "highlight or simple structure"
+
+    try:
+        h_s = float(hook.get("start_sec", 0))
+        h_e = float(hook.get("end_sec", 0))
+        p_s = float(payoff.get("start_sec", 0))
+        p_e = float(payoff.get("end_sec", 0))
+    except (TypeError, ValueError):
+        return False, "invalid hook/payoff timestamps"
+
+    if h_e <= h_s or p_e <= p_s:
+        return False, "non-positive duration"
+
+    # IoU 검증
+    inter = max(0.0, min(h_e, p_e) - max(h_s, p_s))
+    union = (h_e - h_s) + (p_e - p_s) - inter
+    iou = (inter / union) if union > 0 else 0.0
+    if iou > iou_max:
+        return False, f"hook ↔ payoff IoU={iou:.2f} > {iou_max} (같은 장면 중복 환각)"
+
+    # 시간순 검증
+    if builds:
+        try:
+            b_starts = [float(b.get("start_sec", 0)) for b in builds if isinstance(b, dict)]
+            b_ends = [float(b.get("end_sec", 0)) for b in builds if isinstance(b, dict)]
+        except (TypeError, ValueError):
+            return False, "invalid build timestamps"
+        if b_starts and b_ends:
+            min_b_start = min(b_starts)
+            max_b_end = max(b_ends)
+            # Case 1 (정시간순): hook ≤ build ≤ payoff (build가 hook과 payoff 사이)
+            case1 = (h_s - 0.5) <= min_b_start and max_b_end <= (p_e + 0.5) and h_e <= (p_s + 0.5)
+            # Case 2 (결과선공개): build < payoff < hook (hook이 끝)
+            case2 = max_b_end <= (p_s + 0.5) and p_e <= (h_s + 0.5)
+            if not (case1 or case2):
+                return False, (
+                    f"timeline violation: hook[{h_s:.0f},{h_e:.0f}] "
+                    f"build[{min_b_start:.0f}~{max_b_end:.0f}] "
+                    f"payoff[{p_s:.0f},{p_e:.0f}]"
+                )
+
+    return True, "ok"
+
+
 def _apply_silence_cut_to_variants(
     variants: list[tuple[list[StoryClip], str, float]],
     transcript_segments: list,
@@ -456,31 +524,50 @@ def _fit_storyline_to_duration(
                 parts.append("build 부분 단축")
             msgs.append(f"{' + '.join(parts)} ({orig_total:.1f}s→{cur_total:.1f}s)")
 
-        # build 모두 제거 후에도 target_max 초과 → 모든 clip을 *비례적으로* 끝 자르기.
-        # 라운드 12.1-B: 이전엔 가장 긴 clip 하나만 잘라 excess==build_dur 케이스에서 1초까지 잘리던 버그.
-        # 이제 ratio = target_max / cur_total 로 모든 clip을 균등 비례로 단축 (각 clip ≥3초 보장).
+        # build 모두 제거 후에도 target_max 초과 → 라운드 21: 역할별(role-aware) 지능형 trim.
+        # - hook: 시작 보존(후킹 모먼트), 끝 자름
+        # - build: 양 끝 균등 자름 (피크 보존)
+        # - payoff: 끝 보존(reveal/punchline), 시작 자름
+        # 각 clip 비례 단축하되 role에 따라 어느 쪽에서 잘리는지 결정.
+        # 라운드 12.1-B: 모든 clip 비례적 단축 (각 clip ≥3초 보장).
         if cur_total > target_max and out:
             ratio = target_max / cur_total
-            min_clip_dur = 3.0  # 너무 짧은 clip 방지
+            min_clip_dur = 3.0
             cut_summary = []
             for idx, clip in enumerate(out):
                 clip_dur = clip.end_sec - clip.start_sec
                 new_dur = max(min_clip_dur, clip_dur * ratio)
                 if new_dur >= clip_dur:
                     continue
-                new_end = clip.start_sec + new_dur
+                excess = clip_dur - new_dur
+                # 역할별 trim 위치 결정
+                if clip.role == "payoff":
+                    # payoff: 끝 보존(reveal), 시작에서 자름
+                    new_start = clip.start_sec + excess
+                    new_end = clip.end_sec
+                    side = "start"
+                elif clip.role == "build":
+                    # build: 양 끝 균등 (피크 중간 보존)
+                    new_start = clip.start_sec + excess / 2
+                    new_end = clip.end_sec - excess / 2
+                    side = "both"
+                else:
+                    # hook 및 기타: 시작 보존(후킹 모먼트), 끝에서 자름
+                    new_start = clip.start_sec
+                    new_end = clip.end_sec - excess
+                    side = "end"
                 out[idx] = StoryClip(
                     role=clip.role,
-                    start_sec=clip.start_sec, end_sec=new_end,
+                    start_sec=new_start, end_sec=new_end,
                     subtitle=clip.subtitle, use_original_audio=clip.use_original_audio,
                     pacing_note=clip.pacing_note,
                     chunk_index=clip.chunk_index, candidate_index=clip.candidate_index,
                     character_focus=clip.character_focus,
                 )
-                cut_summary.append(f"{clip_dur:.1f}s→{new_dur:.1f}s")
+                cut_summary.append(f"{clip.role}({side}) {clip_dur:.1f}s→{new_dur:.1f}s")
             cur_total = total_dur(out)
             if cut_summary:
-                msgs.append(f"비례 자르기 [{', '.join(cut_summary)}] (총 {orig_total:.1f}s→{cur_total:.1f}s)")
+                msgs.append(f"역할별 trim [{', '.join(cut_summary)}] (총 {orig_total:.1f}s→{cur_total:.1f}s)")
 
     # 2) 확장: 합계 < target_min — 라운드 13: 양방향 확장 (첫 시작 + 마지막 끝)
     elif cur_total < target_min:
@@ -1710,6 +1797,12 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             score = sl_data.get("score", 0.0)
             if score < config.viral_score_min_threshold and len(all_storyline_variants) > 0:
                 print(f"  - 스토리라인 {sl_idx + 1} 스킵 (점수 {score:.2f} < 임계값 {config.viral_score_min_threshold})")
+                continue
+
+            # 라운드 20: storyline 시간 검증 — hook ↔ payoff 같은 timestamp / 시간 역행 폐기
+            tl_valid, tl_reason = _validate_storyline_timeline(sl_data)
+            if not tl_valid:
+                print(f"  [SKIP-timeline] 스토리라인 {sl_idx + 1} 시간 검증 실패: {tl_reason}")
                 continue
 
             try:
