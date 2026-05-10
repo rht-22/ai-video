@@ -840,8 +840,8 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         return res_lines
 
 
-    # 라운드 8b: 최대 15자까지 한 줄 유지 (이전 14자). 16자 이상은 pipeline에서 절단 처리.
-    title_lines = split_text_smart(inputs.title_text, 15)
+    # 라운드 22: 최대 20자까지 한 줄 유지 (이전 15자). 20자 초과는 pipeline에서 LLM 재작성 또는 절단.
+    title_lines = split_text_smart(inputs.title_text, 20)
 
     # 줄별 폰트 크기 (title_sizes가 있으면 사용, 없으면 title_size로 통일)
     title_sizes = getattr(d, 'title_sizes', [d.title_size])
@@ -978,15 +978,17 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         cumulative_y = d.title_y
     # 라운드 7-A: title_lines가 (orig_line_idx, text) 튜플 리스트.
     # 색상·폰트는 orig_idx로 lookup → wrap이 일어나도 line1 모든 줄은 line1 색/폰트, line2도 동일.
-    # 라운드 8b: 14·15자에서 폰트 자동 축소 — 13자 기준 폰트가 영상 폭에 거의 꽉 차므로
-    #            14자는 13/14, 15자는 13/15 비율로 줄여 양옆 잘림/줄바꿈 방지.
+    # 라운드 22: 13자까지 풀사이즈, 14~20자 sqrt 비례 축소.
+    # - sqrt(13/chars) 비례 — 선형(base*13/chars)는 너무 가파름.
+    # - 14자: ×0.964, 17자: ×0.875, 20자: ×0.806 → canvas 1080px 가로 잘림 방지.
+    # - 21자+ pipeline에서 LLM 재작성 또는 절단되므로 20자에서 cap.
     def _scale_font_for_length(base_size: int, char_count: int) -> int:
+        import math
         if char_count <= 13:
             return base_size
-        if char_count == 14:
-            return max(1, int(round(base_size * 13 / 14)))
-        # 15자 이상 (16자+는 pipeline에서 절단됨)
-        return max(1, int(round(base_size * 13 / 15)))
+        cc = min(char_count, 20)
+        scale = math.sqrt(13.0 / cc)
+        return max(1, int(round(base_size * scale)))
 
     for visual_idx, (orig_idx, raw_line) in enumerate(title_lines):
         base_color = custom_colors[orig_idx] if orig_idx < len(custom_colors) else custom_colors[-1]
@@ -1011,7 +1013,7 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     work_value = getattr(d, 'work_value', inputs.work_title)
     if work_type == "image" and work_value:
         logo_path_str = str(Path(work_value).resolve()).replace("\\", "/").replace(":", "\\:")
-        logo_w = getattr(d, 'work_image_width', 300)
+        logo_w = getattr(d, 'work_image_width', 350)  # 라운드 23: fallback도 DesignConfig default와 동기화
         filters.append(f"movie='{logo_path_str}',scale={logo_w}:-1[logo];{last_v_label}[logo]overlay=(W-w)/2:{d.work_title_y}{work_label}")
     else:
         raw_work = work_value if work_value else inputs.work_title

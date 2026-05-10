@@ -517,12 +517,13 @@ topic이 바뀌지 않는 한 제목과 결말은 같은 이야기를 가리켜�
 ## 제목 구조 (2줄 필수)
 
 레퍼런스 분석 결과 고조회수 쇼츠 제목은 2줄 구조 권장:
-- **title_line1** (위·흰색, 13자 권장, 최대 15자): **상황/배경/도입 설명**.
+- **title_line1** (위·흰색, 15자 권장, 최대 20자): **상황/배경/도입 설명**.
   인물 자체보다 *무슨 일이 일어났는지* 또는 *어떤 상황인지*를 압축.
-- **title_line2** (아래·노란색 강조, 13자 권장, 최대 15자): **캐릭터·반전·핵심 후킹**.
+- **title_line2** (아래·노란색 강조, 15자 권장, 최대 20자): **캐릭터·반전·핵심 후킹**.
   시청자 시선을 잡는 핵심 문구. 강조 자리.
 
-글자 수 가이드: 13자 이내 가독성 최고, 14~15자 허용(폰트 자동 축소), 16자 이상은 후처리에서 절단되니 가능한 한 15자 이하 권장.
+글자 수 가이드 (라운드 22): 13자 이내 가독성 최고, 14~20자 허용(폰트 sqrt 자동 축소).
+20자 초과 시 LLM 재작성 호출되니 가능한 한 20자 이하로 작성하라.
 
 두 줄의 의미 역할을 일관되게 유지 권장 — 강조 자리(line2)에 캐릭터·반전이 와야 후킹 효과↑.
 
@@ -1775,8 +1776,8 @@ def _build_fallback_story(all_candidates: list, work_title: str) -> dict[str, An
         "score": 0.5,
         "estimated_duration_sec": total_dur,
         "viral_titles": best.get("viral_titles", [work_title]),
-        "title_line1": work_title[:15],
-        "title_line2": best.get("description", "")[:15],
+        "title_line1": work_title[:20],
+        "title_line2": best.get("description", "")[:20],
         "ending_hook": "",
         "storyline": storyline_obj,
     }
@@ -1785,9 +1786,9 @@ def _build_fallback_story(all_candidates: list, work_title: str) -> dict[str, An
         "storylines": [fallback_storyline],
         "selected_storyline_index": 0,
         "selection_reason": "폴백: Gemini 응답 실패 — 상위 moment 자동 조합",
-        "title_line1": work_title[:15],
-        "title_line2": best.get("description", "")[:15],
-        "title_txt": f"{work_title[:15]} {best.get('description', '')[:15]}",
+        "title_line1": work_title[:20],
+        "title_line2": best.get("description", "")[:20],
+        "title_txt": f"{work_title[:20]} {best.get('description', '')[:20]}",
         "ending_hook": "",
         "selected_storyline": fallback_storyline,
     }
@@ -1830,11 +1831,11 @@ def _validate_story_response(data: dict[str, Any]) -> None:
     if "title_txt" not in data and "title_line1" not in data:
         raise ValueError("응답에 'title_txt' 또는 'title_line1'이 없습니다.")
 
-    # title_line1/line2 기본값 설정 (하위 호환)
+    # title_line1/line2 기본값 설정 (하위 호환) — 라운드 22: 15→20자
     if "title_line1" not in data:
         title = data.get("title_txt", "")
-        data["title_line1"] = title[:15] if len(title) > 15 else title
-        data["title_line2"] = title[15:30] if len(title) > 15 else ""
+        data["title_line1"] = title[:20] if len(title) > 20 else title
+        data["title_line2"] = title[20:40] if len(title) > 20 else ""
     if "title_line2" not in data:
         data["title_line2"] = ""
     if "title_txt" not in data:

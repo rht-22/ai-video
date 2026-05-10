@@ -42,7 +42,8 @@ class DesignConfig:
 
     work_type: str = "text"
     work_value: str | None = None
-    work_image_width: int = 200
+    # 라운드 23: 200 → 350. 입력 이미지 dimension 무관 항상 W=350px로 scale, 높이는 -1(자동)로 비율 보존.
+    work_image_width: int = 350
 
     overlay_image_path: str | None = None # 필요 시 이미지 경로
 

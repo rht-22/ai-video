@@ -409,11 +409,12 @@ def _clamp_cues_to_variants(
     return out
 
 
-def _enforce_title_line_limit(text: str, max_chars: int = 13) -> str:
+def _enforce_title_line_limit(text: str, max_chars: int = 20) -> str:
     """LLM이 title_line1/line2 글자수 가이드를 어겼을 때 안전판 — max_chars 이내로 강제 절단.
 
     어절 경계 기준으로 자르되, 단어 하나가 max_chars 초과면 그대로 잘림.
     라운드 7-B에서 line2 전용 함수를 line1·line2 공용으로 일반화.
+    라운드 22: default 13 → 20 (사용자 요청). 단 22C에서 LLM 재작성 먼저 시도 후 안전판으로 사용.
     """
     if not text:
         return text
@@ -849,10 +850,32 @@ def _clips_from_storyline(
     clips: list[StoryClip] = []
 
     # 제목 구성 (이모지 제거)
-    # 라운드 8b: line1·line2 최대 15자 허용 (이전 13자) — renderer가 14·15자에서 폰트 자동 축소.
-    # 16자 이상이면 어절 경계 절단 (그래도 줄바꿈은 발생 안 함).
-    title_line1 = _enforce_title_line_limit(_strip_emoji(storyline_data.get("title_line1", "")), max_chars=15)
-    title_line2 = _enforce_title_line_limit(_strip_emoji(storyline_data.get("title_line2", "")), max_chars=15)
+    # 라운드 22: line1·line2 최대 20자 허용 (이전 15자) — renderer가 14~20자에서 sqrt 폰트 자동 축소.
+    # 20자 초과 시 LLM `shorten_text` 재작성 시도 → 실패 시 어절 경계 절단 안전판.
+    title_line1_raw = _strip_emoji(storyline_data.get("title_line1", ""))
+    title_line2_raw = _strip_emoji(storyline_data.get("title_line2", ""))
+
+    # 라운드 22C: 20자 초과 시 LLM 재작성 (의미·뉘앙스 보존)
+    if len(title_line1_raw) > 20 or len(title_line2_raw) > 20:
+        try:
+            _gem = load_gemini_client()
+            _shorten = getattr(_gem, "shorten_text", None)
+            if callable(_shorten):
+                if len(title_line1_raw) > 20:
+                    _new1 = _shorten(title_line1_raw, target_chars=20)
+                    if _new1 and len(_new1) <= 20:
+                        print(f"  [title-shorten] line1 {len(title_line1_raw)}자 → {len(_new1)}자: {_new1!r}")
+                        title_line1_raw = _new1
+                if len(title_line2_raw) > 20:
+                    _new2 = _shorten(title_line2_raw, target_chars=20)
+                    if _new2 and len(_new2) <= 20:
+                        print(f"  [title-shorten] line2 {len(title_line2_raw)}자 → {len(_new2)}자: {_new2!r}")
+                        title_line2_raw = _new2
+        except Exception as e:
+            print(f"  [WARN] title shorten 실패: {e} — 어절 절단 폴백")
+
+    title_line1 = _enforce_title_line_limit(title_line1_raw, max_chars=20)
+    title_line2 = _enforce_title_line_limit(title_line2_raw, max_chars=20)
     if title_line1 and title_line2:
         title_text = f"{title_line1}\n{title_line2}"
     else:
