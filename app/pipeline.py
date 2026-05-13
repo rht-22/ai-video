@@ -896,7 +896,12 @@ def _clips_from_storyline(
             role="payoff",
             start_sec=resolved["start_sec"],
             end_sec=resolved["end_sec"],
-            subtitle=resolved.get("topic", "") or storyline_data.get("topic", ""),
+            subtitle=(
+                resolved.get("description")
+                or storyline_data.get("description")
+                or resolved.get("topic", "")
+                or storyline_data.get("topic", "")
+            ),
             use_original_audio=resolved.get("use_original_audio", True),
             chunk_index=resolved.get("chunk_index", -1),
             candidate_index=resolved.get("candidate_index", -1),
