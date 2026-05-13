@@ -620,6 +620,45 @@ line2는 그 **결과·반응·결말을 완결하는 절**이어야 한다 (동
 title_line1과 title_line2를 *공백 한 칸*으로 이어 읽어 본다. 어색하면 둘 중 하나를 다시 작성.
 조건절(...면)으로 끝났다면 line2는 반드시 동사 종결 결과절이어야 한다.
 
+## 제목 사실성 원칙 (절대 규칙) — 입력 데이터에 없는 내용은 제목에 쓰지 마라
+
+⚠️ 이 단계는 영상을 보지 않는다. analyze_chunk가 넘긴 텍스트 입력
+(transcript / event_template / description / characters_in_scene / segments 등)만
+제목의 사실 근거로 사용할 수 있다. **입력에 없는 행동·감정·관계·결과를 만들어내지 마라.**
+
+[입력 신뢰도 위계 — 충돌 시 위쪽을 따른다]
+1순위: transcript (실제 음성 전사 — 가장 정확)
+2순위: event_template.action / mode / subject / target (analyze 단계가 라벨링한 행동 의미)
+3순위: description (LLM의 시각 추정 — 통화 상대·등장 인물·의도 같은 음성 의존 정보 부정확 가능)
+보조: characters_in_scene, scene_location, timeline_position, segments
+
+[금지 — "한 단계 앞선" 라벨링]
+- 행동의 범주 변경 금지:
+  - description에 "서류 건넴"만 있고 transcript에 서류 종류가 없으면 → "사표 제출"로 쓰지 마라
+  - description에 "마주 본다"만 있고 transcript에 고백 대사가 없으면 → "사랑 고백"으로 쓰지 마라
+  - event_template.mode == "phone_call"이면 → "직접 만남/대면"으로 쓰지 마라 (기존 규칙 재확인)
+- 감정·강도 과장 금지:
+  - description의 "표정이 굳는다" → "분노 폭발", "당황한다" → "충격 대참사" 같이 강도를 한 칸 올리지 마라
+  - 형용사 강화(놀라움 → 충격, 의외 → 반전, 좋아함 → 사랑)는 transcript나 event_template에 명백한 근거가 있을 때만
+- 결과·인과 외삽 금지:
+  - description에서 1→2 추이만 확인되면 "3대0 압승" 라벨 금지 (외삽)
+  - "곧 ~할 것이다" 식 미래 예단 금지 — payoff description이 결과를 명시한 경우에만 결말 라벨링
+- 인물 관계·지위 단정 금지:
+  - transcript의 호칭이나 event_template의 target 외 정보로 "연인/형제/적/상사" 같은 관계를 단정하지 마라
+
+[검증 — 제목 작성 후 반드시 자가 점검]
+선택된 storyline의 hook/build/payoff 각 클립에 대해, title_line1·title_line2의 모든
+명사·동사·형용사가 다음 중 하나에 *직접* 출처를 가지는지 확인하라:
+- transcript에 그 단어 또는 동의어가 들어 있는가?
+- event_template.action / mode / subject / target / location 중 하나에 대응되는가?
+- description에서 그대로 묘사된 행동·표정·상황인가?
+셋 중 하나에도 대응 안 되는 단어가 있으면 그 단어는 *입력에 없는 추론*이다 → 입력에서 직접 인용 가능한 표현으로 교체.
+
+[권장 — 입력 기반 라벨 작성법]
+- event_template.action을 동사구로 그대로 사용 ("통화로 업무 위임", "병문안", "맥주 권유")
+- transcript의 핵심 어구를 따옴표 없이 의역 인용
+- 감정 라벨은 description에 명시된 표정/행동을 그대로 인용 ("굳은 표정", "고개 돌림", "한숨")
+
 ## title_line2 ↔ payoff 결말 일관성 (필수)
 
 title_line2는 단순 후킹 문구가 아니라, **payoff 클립의 실제 결말 방향과 의미가 일치**해야 한다.
@@ -727,6 +766,13 @@ title_line2를 작성한 후 payoff description을 다시 읽어 결말 방향�
 
 각 storyline의 `narrative_plan`을 해당 storyline의 클립 선택 전에 먼저 작성하라.
 점수나 수치가 아니라 "어떤 장면/이야기를 쇼츠로 만들 것인가"를 먼저 결정한 뒤 클립을 찾아라.
+
+⚠️ **필드 작성 순서 — title은 가장 마지막에 작성하라**:
+각 storyline 객체와 최상위 객체 모두에서 `viral_titles` / `title_line1` / `title_line2` / `title_txt` 는
+**스키마 말미에 위치**한다. 다른 모든 필드(특히 storyline·description·event_template 정보)를 먼저
+작성한 뒤, 그 내용에 *직접 근거*해서 제목을 마지막에 작성하라. 제목을 먼저 결정하고 거기에
+맞춰 내용을 끼워 넣지 마라 — 그러면 [제목 사실성 원칙]을 위반하기 쉽다.
+
 {{
   "storylines": [
     {{
@@ -738,9 +784,6 @@ title_line2를 작성한 후 payoff description을 다시 읽어 결말 방향�
       "score": 0.0,
       "coherence_score": 0.0,
       "estimated_duration_sec": 0.0,
-      "viral_titles": ["제목1", "제목2", "제목3"],
-      "title_line1": "상황/배경 설명 (13자 이내, 초과 금지)",
-      "title_line2": "캐릭터/사건 중심 후킹 (13자 이내, 초과 금지)",
       "storyline": {{
         "hook": {{
           "chunk_index": 0, "candidate_index": 0,
@@ -770,7 +813,11 @@ title_line2를 작성한 후 payoff description을 다시 읽어 결말 방향�
           "context_extended": false
         }},
         "sequence_block": []
-      }}
+      }},
+      // ▼ 제목은 위 내용을 모두 작성한 뒤 마지막에 작성 (제목 사실성 원칙 준수)
+      "viral_titles": ["제목1", "제목2", "제목3"],
+      "title_line1": "상황/배경 설명 (13자 이내, 초과 금지)",
+      "title_line2": "캐릭터/사건 중심 후킹 (13자 이내, 초과 금지)"
     }},
     {{
       "storyline_index": 1,
@@ -779,8 +826,6 @@ title_line2를 작성한 후 payoff description을 다시 읽어 결말 방향�
       "topic": "시퀀스블록형 예: 한 콩트 통째 사용",
       "topic_reason": "같은 sequence_id의 candidate가 자체 완결",
       "score": 0.0,
-      "title_line1": "상황 설명",
-      "title_line2": "후킹 강조",
       "storyline": {{
         "hook": null,
         "hook_preview": null,
@@ -791,7 +836,10 @@ title_line2를 작성한 후 payoff description을 다시 읽어 결말 방향�
           {{"chunk_index": 1, "candidate_index": 2}},
           {{"chunk_index": 1, "candidate_index": 3}}
         ]
-      }}
+      }},
+      // ▼ 제목은 마지막
+      "title_line1": "상황 설명",
+      "title_line2": "후킹 강조"
     }},
     {{
       "storyline_index": 2,
@@ -806,19 +854,23 @@ title_line2를 작성한 후 payoff description을 다시 읽어 결말 방향�
       "score": 0.0,
       "coherence_score": 0.0,
       "estimated_duration_sec": 0.0,
+      "description": "장면 설명 (candidate.description 그대로 또는 더 상세하게 — 후처리에서 자막으로 사용됨)",
+      "character_focus": ["인물명"],
+      "use_original_audio": true,
+      // ▼ 제목은 위 내용(특히 description)을 작성한 뒤 마지막에 작성
       "viral_titles": ["제목1", "제목2", "제목3"],
       "title_line1": "상황/배경 설명 (13자 이내, 초과 금지)",
-      "title_line2": "캐릭터/사건 중심 후킹 (13자 이내, 초과 금지)",
-      "use_original_audio": true
+      "title_line2": "캐릭터/사건 중심 후킹 (13자 이내, 초과 금지)"
     }}
   ],
   "selected_storyline_index": 0,
   "shorts_type":"storytelling"|"highlight",
   "selection_reason": "이 스토리라인을 선택한 이유",
+  "selected_storyline": {{ "선정된 인덱스의 객체를 그대로 복사해서 출력": "" }},
+  // ▼ 최상위 title도 selected_storyline을 작성한 뒤 마지막에 작성
   "title_line1": "최종 제목 1줄 (맥락)",
   "title_line2": "최종 제목 2줄 (후킹)",
-  "title_txt": "title_line1 + title_line2 합친 전체 제목",
-  "selected_storyline": {{ "선정된 인덱스의 객체를 그대로 복사해서 출력": "" }}
+  "title_txt": "title_line1 + title_line2 합친 전체 제목"
 }}
 """
 
