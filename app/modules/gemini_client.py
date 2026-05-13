@@ -86,6 +86,40 @@ GEMINI_PROMPT_TEMPLATE = """
 - **자막 화자태그 > 화면에 보이는 인물**: 반응 컷(cutaway)에서는 화면에 보이는 인물과 실제 화자가 다를 수 있다.
 - **화자 태그 없는 대사는 단정짓지 마라**: 자막에 `화자명:` 태그가 없는 대사의 화자를 서사적 추론으로 채우지 마라.
 
+[열린 라벨 허용 — 명명 편향(Named-Character Bias) 차단]
+- `characters_in_scene`, `character_focus`, `characters_tracking[].character`, `event_template.subject/target` 등 *모든 인물 필드*에는 식별된 주요 인물명 외에 다음 열린 라벨도 사용 가능하다:
+    - `"엑스트라"` — 이름 없는 단일 행인·조연
+    - `"엑스트라(다수)"` — 군중·여러 행인이 함께 등장·행동
+    - `"행인"` — 배경 통행자
+    - `"불명"` — 화면에 인물은 있으나 누구인지 단정 불가
+- ⚠️ **행위자가 식별된 주요 인물 중 *반드시* 한 명일 필요는 없다.** 이름이 부여된 인물에게 *그럴듯하다는 이유로* 행동·발화를 귀속시키지 마라. 엑스트라가 실제 행위자일 가능성을 항상 열어두어라.
+- ⚠️ **확신 부족 시 디폴트는 단정이 아닌 열린 라벨**: 행위자·화자 확신도가 낮으면 `subject = "불명"` 또는 `"엑스트라"`로 두는 것이, 잘못된 주요 인물명을 채워넣는 것보다 우선한다. 빈 칸 회피용으로 디폴트 인물을 쓰지 마라.
+
+---
+
+[원칙 P1 — 시각 단서 근거 추적]
+
+⚠️ 자막·호칭 단서가 없는 장면에서 행위자·화자·행동을 *서사적으로 그럴듯한 인물*에 디폴트로 귀속시키는 결함이 반복 관찰되었다. 이를 막기 위한 자기검토 절차다.
+
+**적용 범위**: description, transcript의 화자 추정, `characters_in_scene`, `character_focus`, `event_template.subject/target/action`, `scene_location`, `event_template.location`에 행위자·화자·행동·관계·상태·장소를 기록할 때마다 적용. 자막 유무와 무관.
+
+**자기검토 절차**: 각 진술 직전, 그 진술이 다음 시각 단서 중 어느 것에 근거하는지 식별하라.
+
+1. **입 모양 동기화** — 화자 결정 시. 대사가 들리는 시점에 *누구의 입이 실제로 움직이는가*. 화면에 입이 보이지 않거나 동기화 확인 불가 → 화자 = `"불명"`. 자막에 화자 태그가 있으면 그것이 우선.
+2. **시선·얼굴 방향** — 행위자로 추정한 인물의 시선·얼굴이 행동 대상을 향하는가. 두리번거리거나 다른 방향을 보면 그 인물은 행위자가 아닐 가능성이 높다.
+3. **신체 방향·동선** — 접근·이동·다가감 같은 *움직임이 있는 행동*은 화면 안에서 *실제로 움직이는 인물*이 누구인가. 정지해 있는 주요 인물에게 이동 행동을 귀속시키지 마라.
+4. **공간 거리·위치** — 행동 대상과의 거리가 그 행동과 부합하는가. 멀리 떨어진 인물 사이에 *근접 행동* — "다가갔다"·"속삭였다"·"건넸다"·"손을 잡았다"·"어깨를 두드렸다" — 을 부여하지 마라.
+5. **카메라 컷·앵글** — 컷 사이 인물 동일성 가정 금지. 컷이 바뀌면 새로 식별하라. 반응 컷에서 화면에 보이는 인물이 *직전* 행동·발화의 주체라고 단정 금지.
+
+**근거 부재 시 처리**:
+- 행위자·화자가 불명확 → 디폴트 주요 인물 채우지 말고 `"불명"` 또는 `"엑스트라"`로 두어라.
+- 행동의 주체가 화면에 명확히 안 보이거나 추정 불가 → 행동을 디폴트 인물에 귀속시키지 말고 *수동태·관찰형*으로 표현하라 (예: "누군가 다가온다", "주변 인물이 모여든다", "어디선가 목소리가 들린다").
+
+⚠️ **장소(`scene_location` / `event_template.location`)는 서사 맥락이 아닌 화면·대사 단서로 결정하라**:
+- "외국에서 한국으로 왔다" → "공항 입국장" ❌
+- "의사다" → "병원" ❌
+- 화면·대사에 단서 부재 시 `"불명"`, `"실내(불명)"`, `"실외(불명)"` 같은 일반 라벨 사용.
+
 ---
 
 [description 규칙]
@@ -93,6 +127,38 @@ GEMINI_PROMPT_TEMPLATE = """
 - description은 실제 장면 묘사를 유지하고, 앞 장면이 나중 내용에 의해 재해석되는 경우 재해석된 의미는 reason 필드에만 반영할 것. 과대해석 및 과장 금지.
 - description에서 행동의 범주를 바꾸지 마라. 장면에서 명확히 관찰된 행동(발화·동작·표정)만 그 종류 그대로 기술하고, 확인되지 않은 의도·감정·결과를 덧씌우지 마라.
 - ⚠️ description에서 내레이션·독백·보이스오버(VO)는 반드시 "~의 내레이션", "~가 속으로 독백한다", "VO로 ~가 말한다" 등으로 명시하여 실제 대화와 혼동되지 않도록 할 것.
+
+---
+
+[원칙 P2 — 관찰 비약 금지 (Observation-to-Relation Leap)]
+
+⚠️ 한쪽 인물의 단편 관찰을 *둘 사이의 상호작용·관계*로 비약하는 결함이 반복 관찰되었다 (예: 찬은 하란을 보고 하란은 두리번거리는 장면을 "서로 바라본다"고 단정).
+
+**원칙**: description은 *개별 인물의 관찰 가능한 행동·표정·시선·동선*을 나열하는 것이 원칙이다. 둘 이상 인물 사이의 *관계·상호작용·공동 의도·상호 인지*를 표현하려면 **양쪽 인물의 시각 단서가 모두 명시적으로 확인**되어야 한다.
+
+**양방 단서 필수 표현 — 카테고리별 예시 (열린 목록)**:
+
+- **상호 시선**: "서로 본다", "마주본다", "눈이 마주친다", "시선이 마주친다", "응시한다" → 양쪽 시선·얼굴 방향이 *서로를 향함*이 동시에 확인되어야 사용
+- **상호 발화**: "대화한다", "이야기를 나눈다", "말다툼한다", "주고받는다" → 양쪽 모두의 발화 단서(입 모양·교대)가 확인되어야 사용. 한쪽만 말하면 `"A가 B에게 말한다"`
+- **상호 인지**: "서로 알아본다", "서로를 발견한다", "마주친다" → 양쪽 인지 반응(표정·시선 이동)이 모두 확인되어야 사용
+- **공동 행동**: "함께 걷는다", "같이 간다", "동행한다", "함께 X한다" → 같은 방향·근접 동선이 양쪽 모두 확인되어야 사용
+- **신체 접촉**: "포옹한다", "악수한다", "키스한다", "손을 잡는다", "어깨동무한다" → 양쪽 신체가 실제로 접촉하는 것이 화면에 명시적으로 보여야 사용
+- **감정·관계 상호**: "교감한다", "공감한다", "서로 의지한다", "유대를 느낀다" → 표면 단서로 단정 금지. 명시적 상호 행동(끄덕임·미소 교환·시선 교환 등)이 *양방* 확인되어야 사용
+
+⚠️ 위 목록은 **닫힌 차단 리스트가 아니다.** 어떤 행동 표현이든 "두 인물 사이의 관계·상호작용·공동 의도"를 함의하면 양방 단서 확인 후 사용하라.
+
+**확신 부족 시 처리 — 단편 관찰 나열**:
+
+상호작용 표현 대신 *각 인물의 관찰을 개별 문장으로 분해*하여 적어라.
+
+- ❌ "찬과 하란이 서로 바라본다." (한쪽만 단서 확인)
+- ✅ "찬이 멀리서 하란을 바라본다. 하란은 주변을 두리번거리며 누군가를 찾는다."
+
+- ❌ "두 사람이 대화한다." (한쪽 발화만 확인)
+- ✅ "A가 B에게 말을 건다. B는 표정 변화 없이 듣고 있다."
+
+- ❌ "함께 걸어간다." (방향·동선 미확인)
+- ✅ "A가 앞장서서 걷는다. B는 뒤에서 천천히 따라간다."
 
 ---
 
@@ -112,6 +178,11 @@ GEMINI_PROMPT_TEMPLATE = """
    - 각 candidate의 transcript가 그 timestamp 위치에서 실제로 들리는가?
    - segments[i].end_sec == segments[i+1].start_sec 가 정확히 같은가?
    - context_extension.needed=true면 extended가 start/end를 정확히 감싸는가?
+   - **[원칙 P1]** 각 description·transcript·event_template 진술이 시각 단서(입 모양·시선·신체 방향·공간 거리·카메라 컷) 중 어느 것에 근거하는가? 근거가 한 개도 없는 진술은 없는가?
+   - **[원칙 P2]** description 안 *상호작용·관계·공동 의도* 표현(서로 본다/대화한다/함께 X한다/포옹한다/교감한다 등)이 양쪽 인물의 단서로 모두 확인되는가? 확인 안 되는 표현은 단편 관찰 나열로 분해했는가?
+   - 엑스트라·행인의 행동을 식별된 주요 인물에 귀속시키지 않았는가?
+   - 확신 없는 행위자·화자를 디폴트 주요 인물로 채우지 않고 `"불명"`/`"엑스트라"`로 두었는가?
+   - 멀리 떨어진 인물 사이에 근접 행동(다가가다·속삭이다·건네다·잡다·어깨를 두드리다)을 부여하지 않았는가?
    하나라도 No 면 출력 직전에 보정하라.
 
 ---
@@ -188,17 +259,17 @@ segments 중 **쇼츠 제작에 가치 있는 장면만** 선별해 candidate_mo
 
 [characters_tracking 필드 정의 (chunk-level)]
 - 청크 전체에 등장하는 인물별 등장 타임스탬프 및 주요 행동을 정리한다.
-- character: 인물명 또는 레이블 (인물 식별 단계에서 확정한 이름과 일관되게)
+- character: 인물명 또는 레이블 (인물 식별 단계에서 확정한 이름과 일관되게). [열린 라벨 허용] 규칙에 따라 `"엑스트라"`·`"엑스트라(다수)"`·`"행인"`·`"불명"`도 사용 가능
 - appearances[]: 해당 인물이 등장하는 구간 목록
     - start_sec / end_sec: 등장 구간
-    - action: 그 구간에서 인물의 핵심 행동/발화 요약 한 문장
+    - action: 그 구간에서 인물의 핵심 행동/발화 요약 한 문장. [원칙 P1] 시각 단서 근거 없는 추정 금지
 
 [segment 필드 정의]
 - segment_index: 0부터 시작하는 정수 (segments 배열 인덱스)
 - start_sec / end_sec: 이 세그먼트의 시간 범위 (인접 세그먼트와 정확히 맞물려야 함)
-- description: 장면 설명(묘사 위주). 위 [description 규칙]을 엄수. 평범한 구간은 2~3문장, 핵심 구간은 5문장 이상
+- description: 장면 설명(묘사 위주). 위 [description 규칙] 및 [원칙 P2 — 관찰 비약 금지]를 엄수. 평범한 구간은 2~3문장, 핵심 구간은 5문장 이상
 - transcript: 이 구간의 핵심 발화. 내레이션/독백/VO인 경우 '[내레이션]' 접두. 발화 없으면 빈 문자열
-- characters_in_scene: 화면에 등장하는 인물 이름 배열
+- characters_in_scene: 화면에 등장하는 인물 이름 배열. 엑스트라 다수 등장 시 `"엑스트라(다수)"` 가능. 화면 안 모든 인물을 식별된 주요 인물명으로 채우지 마라
 - scene_location: 장면 배경 장소
 - timeline_position: "현재" | "과거" | "불명"
 
@@ -208,9 +279,9 @@ segments 중 **쇼츠 제작에 가치 있는 장면만** 선별해 candidate_mo
 - candidate_index: 이 청크 내 후보 순서 (0부터 시작)
 - continues_from의 chunk_index: 같은 청크 내 후보를 참조하면 위 "현재 청크 번호"와 동일. 이전 청크의 후보를 참조할 때만 [이전 청크들의 분석 결과] 블록에 명시된 chunk_index 값을 그대로 사용할 것.
 - start_sec / end_sec: 해당 segment 범위 안의 좁은 핵심 구간 (segment 경계를 넘지 말 것)
-- characters_in_scene: 화면에 등장하는 인물 이름 배열
-- character_focus: 이 장면의 주요(핵심) 인물 이름 배열
-- description: 장면 설명. segment의 description을 그대로 복사하거나, 더 상세하게 보강 가능
+- characters_in_scene: 화면에 등장하는 인물 이름 배열. 엑스트라 다수면 `"엑스트라(다수)"` 가능. 디폴트로 주요 인물명을 채우지 마라
+- character_focus: 이 장면의 주요(핵심) 인물 이름 배열. 행위자가 엑스트라면 `"엑스트라"`, 불명확하면 `"불명"`
+- description: 장면 설명. segment의 description을 그대로 복사하거나, 더 상세하게 보강 가능. [원칙 P2 — 관찰 비약 금지] 엄수
 - reason: 후보 선정 이유 (재해석된 의미는 여기에만)
 - transcript: '단 한 명'의 주요 발화. 내레이션/독백/VO인 경우 '[내레이션]' 접두
 - scene_location / timeline_position: segment에서 복사
@@ -236,9 +307,9 @@ segments 중 **쇼츠 제작에 가치 있는 장면만** 선별해 candidate_mo
     - storytelling의 hook/build/payoff에서도 활용되어 클립 사이 시간 점프를 줄이는 데 사용된다.
 
 - event_template: **라운드 19D — 행동 의미 라벨링 필수**. 이 후보의 *행동 의미*를 (subject, action, target, mode, location)로 명시.
-    - subject: 행동의 주체 (캐릭터명; 영상 안 인물 이름과 일치)
-    - action: 무슨 행동인지 간결한 동사구 (예: "맥주 권유", "병문안", "통화로 업무 위임", "고백")
-    - target: 행동의 대상 (캐릭터명·장소·물건; 없으면 null)
+    - subject: 행동의 주체 (캐릭터명; 영상 안 인물 이름과 일치). **[열린 라벨 허용]** 적용: 행위자가 엑스트라·행인이면 `"엑스트라"`, 누구인지 단정 불가하면 `"불명"`. ⚠️ 디폴트로 주요 인물명을 채우지 마라 — 잘못된 단정보다 `"불명"`이 우선.
+    - action: 무슨 행동인지 간결한 동사구 (예: "맥주 권유", "병문안", "통화로 업무 위임", "고백"). [원칙 P1] 시각 단서 근거 필수
+    - target: 행동의 대상 (캐릭터명·장소·물건; 없으면 null). 대상이 엑스트라·불명확하면 마찬가지로 `"엑스트라"`·`"불명"` 사용 가능
     - mode: 행동 방식 — `in_person` | `phone_call` | `narration` | `observation` | `mixed`
         - in_person: 두 인물이 같은 장소에서 직접 대면
         - phone_call: 전화·영상통화로 *떨어진 두 사람* 간 소통. 직접 대면 아님
@@ -517,13 +588,12 @@ topic이 바뀌지 않는 한 제목과 결말은 같은 이야기를 가리켜�
 ## 제목 구조 (2줄 필수)
 
 레퍼런스 분석 결과 고조회수 쇼츠 제목은 2줄 구조 권장:
-- **title_line1** (위·흰색, 15자 권장, 최대 20자): **상황/배경/도입 설명**.
+- **title_line1** (위·흰색, 10자 권장, 최대 15자): **상황/배경/도입 설명**.
   인물 자체보다 *무슨 일이 일어났는지* 또는 *어떤 상황인지*를 압축.
-- **title_line2** (아래·노란색 강조, 15자 권장, 최대 20자): **캐릭터·반전·핵심 후킹**.
+- **title_line2** (아래·노란색 강조, 10자 권장, 최대 15자): **캐릭터·반전·핵심 후킹**.
   시청자 시선을 잡는 핵심 문구. 강조 자리.
 
-글자 수 가이드 (라운드 22): 13자 이내 가독성 최고, 14~20자 허용(폰트 sqrt 자동 축소).
-20자 초과 시 LLM 재작성 호출되니 가능한 한 20자 이하로 작성하라.
+글자 수 가이드 (라운드 22): 13자 이내 가독성 최고 (폰트 sqrt 자동 축소).
 
 두 줄의 의미 역할을 일관되게 유지 권장 — 강조 자리(line2)에 캐릭터·반전이 와야 후킹 효과↑.
 
@@ -652,6 +722,9 @@ title_line2를 작성한 후 payoff description을 다시 읽어 결말 방향�
 응답은 반드시 **JSON 객체 1개**여야 하며, 최상위 키 `storylines` (배열) 가 **반드시 포함**되어야 한다.
 다른 키 이름(예: shorts, proposals, options 등) 사용 금지. 마크다운 ```json 펜스는 허용되나, 텍스트 설명은 금지.
 
+⚠️ **hook / build[*] / payoff의 `description` 필드는 입력 candidate의 `description`을 *그대로 복사*하라.**
+재작성·압축·요약·재해석 금지. analyze_chunk 단계에서 작성된 원본 시각 분석을 그대로 통과시켜야 다음 단계(TTS plan 등)에서 정보 손실이 없다.
+
 각 storyline의 `narrative_plan`을 해당 storyline의 클립 선택 전에 먼저 작성하라.
 점수나 수치가 아니라 "어떤 장면/이야기를 쇼츠로 만들 것인가"를 먼저 결정한 뒤 클립을 찾아라.
 {{
@@ -761,7 +834,7 @@ TTS_PLANNING_PROMPT = """
 # 입력
 - 작품명: {work_title}
 - 쇼츠 총 길이(편집 타임라인 기준): {total_duration:.1f}초 (0초 = 쇼츠 시작점)
-{work_context_block}{episodes_context_block}
+{work_context_block}{episodes_context_block}{segments_summary_block}
 
 [클립 시퀀스 — 편집 타임라인 절대 시간]
 각 클립에는 두 가지 텍스트 정보가 있다:
@@ -1519,6 +1592,7 @@ class GeminiClient:
         work_context: str | None = None,
         previous_episodes_context: str | None = None,
         transcript_segments: list | None = None,
+        chunk_meta: list[dict] | None = None,
     ) -> list[dict[str, Any]]:
         """결정된 storyline의 클립 시퀀스를 받아 TTS cue 리스트를 반환한다.
 
@@ -1559,7 +1633,7 @@ class GeminiClient:
                 f"edit_timeline {edit_start:.1f}~{edit_end:.1f}s "
                 f"(원본 {c.start_sec:.1f}~{c.end_sec:.1f}s), "
                 f"chars={chars}\n"
-                f"    description={subtitle[:120]!r}\n"
+                f"    description={subtitle[:400]!r}\n"
                 f"    transcript={transcript_repr!r}"
             )
         clips_str = "\n".join(clips_lines) if clips_lines else "(없음)"
@@ -1574,12 +1648,42 @@ class GeminiClient:
             episodes_context_block = f"\n[이전 에피소드 요약]\n{previous_episodes_context}\n"
         # narrative_skeleton 블록 — 라운드 6a에서 단계 자체 제거. 인자는 호환성 유지용.
 
+        # ── segments 요약 블록 (회차 전체 흐름 — 클립 사이 행간 보강) ──
+        # compose_story와 동일 패턴. 시간 단위는 원본 영상 절대 시간이므로
+        # 위 [클립 시퀀스]의 '원본 X.X~Y.Y초'와 같은 축.
+        segments_summary_block = ""
+        if chunk_meta:
+            parts: list[str] = []
+            for cm in chunk_meta:
+                ci = cm.get("chunk_index", 0)
+                summary = (cm.get("summary") or "").strip().replace("\n", " ")
+                segs = cm.get("segments") or []
+                lines: list[str] = [f"\n[chunk {ci}] 요약: {summary[:120]}"]
+                for s in segs:
+                    ss = float(s.get("start_sec", 0))
+                    ee = float(s.get("end_sec", 0))
+                    desc = (s.get("description") or "").strip().replace("\n", " ")
+                    if len(desc) > 100:
+                        desc = desc[:100] + "…"
+                    lines.append(f"  - {ss:>6.1f}~{ee:>6.1f}s  {desc}")
+                parts.append("\n".join(lines))
+            if parts:
+                joined = "\n".join(parts).replace("{", "{{").replace("}", "}}")
+                segments_summary_block = (
+                    "\n\n[현재 회차 전체 흐름 (segments) — 청크별 시간순]\n"
+                    "(시간은 원본 영상 절대 시간 — 위 [클립 시퀀스]의 '원본 X.X~Y.Y초'와 같은 축. "
+                    "선정된 클립은 이 전체 흐름의 일부다. 클립 사이의 행간을 메우는 cue를 작성할 때 "
+                    "이 정보로 *그 사이에 무엇이 있었는지* 파악하라.)\n"
+                    + joined
+                )
+
         prompt = TTS_PLANNING_PROMPT.format(
             work_title=work_title,
             total_duration=total_duration,
             clips_str=clips_str,
             work_context_block=work_context_block,
             episodes_context_block=episodes_context_block,
+            segments_summary_block=segments_summary_block,
         )
 
         valid_voices = {

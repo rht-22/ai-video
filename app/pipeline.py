@@ -803,8 +803,10 @@ def _resolve_clip_times(
     # 정본 candidate의 chunk_index/candidate_index로도 갱신 (alias가 적용된 경우)
     out["chunk_index"] = ci
     out["candidate_index"] = cj
-    # description은 candidate가 더 풍부 (LLM이 잘랐을 가능성 → candidate.description 우선)
-    if not src.get("description") and cand.get("description"):
+    # description은 항상 candidate(analyze_chunk) 원본 사용.
+    # compose_story 단계의 재작성을 우회해 swap·압축·도식 매핑 등의 변형 위험 차단.
+    # (compose_story 프롬프트에도 "그대로 복사" 지시가 있으나 그것을 어겨도 여기서 강제)
+    if cand.get("description"):
         out["description"] = cand["description"]
     if "character_focus" not in out and cand.get("characters_in_scene"):
         out["character_focus"] = cand.get("characters_in_scene")
@@ -2239,6 +2241,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     work_context=payload.work_context,
                     previous_episodes_context=payload.previous_episodes_context,
                     transcript_segments=transcript_text,  # 라운드 16: Whisper 전사 전달
+                    chunk_meta=chunk_meta_list or None,  # 회차 전체 흐름 (클립 사이 행간 보강용)
                 )
                 tts_cues_per_variant.append(cues)
                 voices = sorted({c["voice"] for c in cues})
