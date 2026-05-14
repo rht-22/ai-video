@@ -83,8 +83,8 @@ GEMINI_PROMPT_TEMPLATE = """
 - 위 수단으로 이름 확인이 불가능한 인물은 "인물A", "인물B" 등 고유 레이블을 부여한다.
 - 이후 모든 분석 항목에서 확정된 이름 또는 레이블을 일관되게 사용한다.
 - ❌ 복장/헤어스타일 기반 레이블링 금지 (예: "갈색 재킷 남자"). 동일 인물이 다른 씬에 다른 옷으로 등장해도 같은 이름/레이블을 유지하라.
-- **자막 화자태그 > 화면에 보이는 인물**: 반응 컷(cutaway)에서는 화면에 보이는 인물과 실제 화자가 다를 수 있다.
-- **화자 태그 없는 대사는 단정짓지 마라**: 자막에 `화자명:` 태그가 없는 대사의 화자를 서사적 추론으로 채우지 마라.
+
+(※ 자막 화자태그 우선 / 입 모양 동기화 없으면 화자 = 불명 등 화자 판정 규칙은 아래 [원칙 P1] 단서 1 참조)
 
 [열린 라벨 허용 — 명명 편향(Named-Character Bias) 차단]
 - `characters_in_scene`, `character_focus`, `characters_tracking[].character`, `event_template.subject/target` 등 *모든 인물 필드*에는 식별된 주요 인물명 외에 다음 열린 라벨도 사용 가능하다:
@@ -127,6 +127,7 @@ GEMINI_PROMPT_TEMPLATE = """
 - description은 실제 장면 묘사를 유지하고, 앞 장면이 나중 내용에 의해 재해석되는 경우 재해석된 의미는 reason 필드에만 반영할 것. 과대해석 및 과장 금지.
 - description에서 행동의 범주를 바꾸지 마라. 장면에서 명확히 관찰된 행동(발화·동작·표정)만 그 종류 그대로 기술하고, 확인되지 않은 의도·감정·결과를 덧씌우지 마라.
 - ⚠️ description에서 내레이션·독백·보이스오버(VO)는 반드시 "~의 내레이션", "~가 속으로 독백한다", "VO로 ~가 말한다" 등으로 명시하여 실제 대화와 혼동되지 않도록 할 것.
+- ⚠️ **description의 모든 사건·동작은 같은 candidate의 `start_sec` ~ `end_sec` 구간 안에서 일어난 것만 적어라.** 시간 범위 밖 사건은 *서사 인과로 자연스럽게 이어져 보여도* 별개 candidate로 분리하라. 한 candidate description에 두 개 이상의 시·공간적으로 분리된 비트(예: 사건 발생 + 한참 뒤 후일담)를 압축해 넣지 마라.
 
 ---
 
@@ -173,17 +174,12 @@ GEMINI_PROMPT_TEMPLATE = """
 5. **각 candidate_moments의 start_sec / end_sec는 반드시 영상에서 직접 확인 가능한 구간이어야 한다.** 보지 않은 시점을 추측해서 만들지 마라.
 6. **context_extension.extended_start_sec / extended_end_sec 도 chunk-relative 시간**이며 동일하게 [0.0, 첨부 영상 길이] 범위 안에 있어야 한다.
    `extended_start_sec ≤ start_sec ≤ end_sec ≤ extended_end_sec`를 만족시키지 못하면 needed=false로 강등하라.
-7. 응답 직전 자가 점검:
-   - 모든 start_sec / end_sec / extended_start_sec / extended_end_sec 가 [0.0, 첨부 영상 길이] 범위 안인가?
-   - 각 candidate의 transcript가 그 timestamp 위치에서 실제로 들리는가?
-   - segments[i].end_sec == segments[i+1].start_sec 가 정확히 같은가?
-   - context_extension.needed=true면 extended가 start/end를 정확히 감싸는가?
-   - **[원칙 P1]** 각 description·transcript·event_template 진술이 시각 단서(입 모양·시선·신체 방향·공간 거리·카메라 컷) 중 어느 것에 근거하는가? 근거가 한 개도 없는 진술은 없는가?
-   - **[원칙 P2]** description 안 *상호작용·관계·공동 의도* 표현(서로 본다/대화한다/함께 X한다/포옹한다/교감한다 등)이 양쪽 인물의 단서로 모두 확인되는가? 확인 안 되는 표현은 단편 관찰 나열로 분해했는가?
-   - 엑스트라·행인의 행동을 식별된 주요 인물에 귀속시키지 않았는가?
-   - 확신 없는 행위자·화자를 디폴트 주요 인물로 채우지 않고 `"불명"`/`"엑스트라"`로 두었는가?
-   - 멀리 떨어진 인물 사이에 근접 행동(다가가다·속삭이다·건네다·잡다·어깨를 두드리다)을 부여하지 않았는가?
-   하나라도 No 면 출력 직전에 보정하라.
+7. 출력 전 다음 룰을 적용하라 (한 진술을 쓰기 직전마다 확인 — 출력 후 수정은 불가능하므로 *생성 시점에 적용*하라):
+   - 모든 start_sec / end_sec / extended_start_sec / extended_end_sec 가 [0.0, 첨부 영상 길이] 범위 안일 것
+   - segments[i].end_sec == segments[i+1].start_sec (gap/overlap 금지)
+   - **[원칙 P1]** description·transcript·event_template의 모든 진술은 시각 단서(입 모양·시선·신체 방향·공간 거리·카메라 컷) 중 하나에 근거를 둘 것 — 근거 없는 진술은 적지 않음
+   - **[원칙 P2]** 상호작용·관계·공동 의도 표현은 양방 단서 확인 후에만 사용. 한쪽만 확인되면 단편 관찰 나열로 분해
+   - **description의 사건 시간 일치**: description 안 모든 사건이 그 candidate의 start_sec ~ end_sec 안에서 일어났는지. 범위 밖 사건은 적지 않음 (별개 candidate로 분리)
 
 ---
 
@@ -248,11 +244,8 @@ segments 중 **쇼츠 제작에 가치 있는 장면만** 선별해 candidate_mo
 [TONE & RULES]
 - 모든 출력은 한국어 사용
 - 최신 쇼츠 트렌드 반영: 자연스러운 톤, 짧은 문장, 강조/리액션 요소
-- candidate_moments 최소 {min_candidates}개 (이 청크에서 주목할 만한 모든 장면을 빠짐없이 포함)
 - JSON 스키마 강제. 분석 결과 해당 항목이 없을 경우 빈 배열 대신 null로 출력
 - 타이틀 시퀀스, 엔딩 크레딧은 candidate_moments에서 제외 (단, segments에는 포함)
-- ⚠️ **영상에 실제로 존재하는 장면만** 포함하라. 추론이나 상상으로 장면을 만들어내지 마라.
-- 모든 start_sec/end_sec 구간은 반드시 첨부 영상에서 실제 확인 가능해야 한다.
 - "start_sec"~"end_sec" 내의 상황만 봐도 이해가 가능해야 한다.
 - ⚠️ 대사가 있는 장면에서 인물의 행동/의도를 묘사할 때는 대사 내용을 최우선으로 반영하라.
   캐릭터 설정(질병, 성격 등 배경 지식)이 대사와 충돌하면 대사를 믿어라.
@@ -621,16 +614,8 @@ title_line1과 title_line2를 *공백 한 칸*으로 이어 읽어 본다. 어�
 조건절(...면)으로 끝났다면 line2는 반드시 동사 종결 결과절이어야 한다.
 
 ## 제목 사실성 원칙 (절대 규칙) — 입력 데이터에 없는 내용은 제목에 쓰지 마라
-
-⚠️ 이 단계는 영상을 보지 않는다. analyze_chunk가 넘긴 텍스트 입력
 (transcript / event_template / description / characters_in_scene / segments 등)만
 제목의 사실 근거로 사용할 수 있다. **입력에 없는 행동·감정·관계·결과를 만들어내지 마라.**
-
-[입력 신뢰도 위계 — 충돌 시 위쪽을 따른다]
-1순위: transcript (실제 음성 전사 — 가장 정확)
-2순위: event_template.action / mode / subject / target (analyze 단계가 라벨링한 행동 의미)
-3순위: description (LLM의 시각 추정 — 통화 상대·등장 인물·의도 같은 음성 의존 정보 부정확 가능)
-보조: characters_in_scene, scene_location, timeline_position, segments
 
 [금지 — "한 단계 앞선" 라벨링]
 - 행동의 범주 변경 금지:
@@ -645,19 +630,6 @@ title_line1과 title_line2를 *공백 한 칸*으로 이어 읽어 본다. 어�
   - "곧 ~할 것이다" 식 미래 예단 금지 — payoff description이 결과를 명시한 경우에만 결말 라벨링
 - 인물 관계·지위 단정 금지:
   - transcript의 호칭이나 event_template의 target 외 정보로 "연인/형제/적/상사" 같은 관계를 단정하지 마라
-
-[검증 — 제목 작성 후 반드시 자가 점검]
-선택된 storyline의 hook/build/payoff 각 클립에 대해, title_line1·title_line2의 모든
-명사·동사·형용사가 다음 중 하나에 *직접* 출처를 가지는지 확인하라:
-- transcript에 그 단어 또는 동의어가 들어 있는가?
-- event_template.action / mode / subject / target / location 중 하나에 대응되는가?
-- description에서 그대로 묘사된 행동·표정·상황인가?
-셋 중 하나에도 대응 안 되는 단어가 있으면 그 단어는 *입력에 없는 추론*이다 → 입력에서 직접 인용 가능한 표현으로 교체.
-
-[권장 — 입력 기반 라벨 작성법]
-- event_template.action을 동사구로 그대로 사용 ("통화로 업무 위임", "병문안", "맥주 권유")
-- transcript의 핵심 어구를 따옴표 없이 의역 인용
-- 감정 라벨은 description에 명시된 표정/행동을 그대로 인용 ("굳은 표정", "고개 돌림", "한숨")
 
 ## title_line2 ↔ payoff 결말 일관성 (필수)
 
@@ -867,7 +839,6 @@ title_line2를 작성한 후 payoff description을 다시 읽어 결말 방향�
   "shorts_type":"storytelling"|"highlight",
   "selection_reason": "이 스토리라인을 선택한 이유",
   "selected_storyline": {{ "선정된 인덱스의 객체를 그대로 복사해서 출력": "" }},
-  // ▼ 최상위 title도 selected_storyline을 작성한 뒤 마지막에 작성
   "title_line1": "최종 제목 1줄 (맥락)",
   "title_line2": "최종 제목 2줄 (후킹)",
   "title_txt": "title_line1 + title_line2 합친 전체 제목"
