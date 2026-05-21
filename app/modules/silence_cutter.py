@@ -52,6 +52,16 @@ def cut_silence_from_clips(
     results = []
 
     for clip in clips:
+        # visual_essential=True면 시각 비트 보호 — 무음 구간도 그대로 유지.
+        # (예: 펜 각인·표정·소품 클로즈업 등 대사 없는 핵심 비트가 잘려나가는 사례 방지)
+        if getattr(clip, "visual_essential", False):
+            results.append(SilenceCutResult(
+                original_clip=clip,
+                keep_intervals=[Interval(clip.start_sec, clip.end_sec)],
+                total_removed_sec=0.0,
+            ))
+            continue
+
         # 이 클립 구간과 겹치는 세그먼트 추출
         clip_segments = [
             seg for seg in sorted_segments

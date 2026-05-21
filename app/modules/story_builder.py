@@ -14,6 +14,7 @@ class StoryClip:
     chunk_index: int = -1
     candidate_index: int = -1
     character_focus: tuple[str, ...] = ()
+    visual_essential: bool = False
 
 
 @dataclass(frozen=True)

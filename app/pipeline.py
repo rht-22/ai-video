@@ -810,6 +810,9 @@ def _resolve_clip_times(
         out["description"] = cand["description"]
     if "character_focus" not in out and cand.get("characters_in_scene"):
         out["character_focus"] = cand.get("characters_in_scene")
+    # visual_essential은 candidate 정본 값을 그대로 통과 (compose_story가 누락해도 보전).
+    if "visual_essential" not in out:
+        out["visual_essential"] = bool(cand.get("visual_essential", False))
     return out
 
 
@@ -907,6 +910,7 @@ def _clips_from_storyline(
             use_original_audio=resolved.get("use_original_audio", True),
             chunk_index=resolved.get("chunk_index", -1),
             candidate_index=resolved.get("candidate_index", -1),
+            visual_essential=bool(resolved.get("visual_essential", False)),
         ))
     else:
         actual_storyline = storyline_data.get("storyline", {})
@@ -923,6 +927,7 @@ def _clips_from_storyline(
                 chunk_index=src.get("chunk_index", -1),
                 candidate_index=src.get("candidate_index", -1),
                 character_focus=tuple(src.get("character_focus") or []),
+                visual_essential=bool(src.get("visual_essential", False)),
             )
 
         # 라운드 12: 시퀀스블록형 분기 — 같은 sequence_id의 candidate들을 시간순으로 추출
@@ -953,6 +958,7 @@ def _clips_from_storyline(
                     use_original_audio=True,
                     chunk_index=ci, candidate_index=cj,
                     character_focus=tuple(cand.get("characters_in_scene") or cand.get("character_focus") or []),
+                    visual_essential=bool(cand.get("visual_essential", False)),
                 ))
             block_clips.sort(key=lambda c: c.start_sec)
             # 마지막 clip을 payoff role로 — 자막·렌더 일관성
@@ -965,6 +971,7 @@ def _clips_from_storyline(
                     pacing_note=last.pacing_note,
                     chunk_index=last.chunk_index, candidate_index=last.candidate_index,
                     character_focus=last.character_focus,
+                    visual_essential=last.visual_essential,
                 )
             clips.extend(block_clips)
             print(f"  - 시퀀스블록형: hook {1 if isinstance(hook, dict) else 0}개 + sequence_block {len(block_clips)}개")
@@ -1414,7 +1421,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 결과는 chunk별로 필터링되어 Gemini analyze_chunk 페이로드에 첨부된다.
     character_appearances: list[dict[str, Any]] = []
     checkpoint_char_idx = output_dir / "checkpoint_character_index.json"
-    if checkpoint_char_idx.exists() and from_step not in ("gemini",):
+    if checkpoint_char_idx.exists() and from_step != "character_index":
         try:
             character_appearances = json.loads(checkpoint_char_idx.read_text(encoding="utf-8"))
             print(f"\n[7/15] 인물 등장 인덱스 로드 ({len(character_appearances)}개 구간)")

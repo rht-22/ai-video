@@ -206,12 +206,15 @@ def _build_episode_cast_prompt(work_title: str, episode: int) -> str:
 def _search_with_grounding(gemini_client: Any, prompt: str, use_grounding: bool = True) -> Any:
     """Google Search grounding으로 Gemini 호출. 미지원 시 일반 호출로 폴백."""
     temperature = getattr(gemini_client.config, "research_temperature", 0.7)
+    thinking_level = getattr(gemini_client.config, "research_thinking_level", "high")
+    thinking_config = gemini_client.types.ThinkingConfig(thinking_level=thinking_level)
     if not use_grounding:
         return gemini_client.client.models.generate_content(
             model=gemini_client.config.model_name,
             contents=[prompt],
             config=gemini_client.types.GenerateContentConfig(
                 temperature=temperature,
+                thinking_config=thinking_config,
             ),
         )
     try:
@@ -223,6 +226,7 @@ def _search_with_grounding(gemini_client: Any, prompt: str, use_grounding: bool 
                     google_search=gemini_client.types.GoogleSearch()
                 )],
                 temperature=temperature,
+                thinking_config=thinking_config,
             ),
         )
     except (TypeError, AttributeError):
@@ -232,6 +236,7 @@ def _search_with_grounding(gemini_client: Any, prompt: str, use_grounding: bool 
             contents=[prompt],
             config=gemini_client.types.GenerateContentConfig(
                 temperature=temperature,
+                thinking_config=thinking_config,
             ),
         )
 
