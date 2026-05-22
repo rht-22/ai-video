@@ -81,6 +81,7 @@ def _snap_clip_boundaries_to_dialogue(
                 pacing_note=first.pacing_note,
                 chunk_index=first.chunk_index, candidate_index=first.candidate_index,
                 character_focus=first.character_focus,
+                tts_draft=first.tts_draft,
             )
             print(f"  [snap] 첫 clip start: {first.start_sec:.2f}s → {new_first_start:.2f}s (대사 도입 포함)")
         if abs(new_last_end - last.end_sec) > 0.05:
@@ -92,6 +93,7 @@ def _snap_clip_boundaries_to_dialogue(
                 pacing_note=last_now.pacing_note,
                 chunk_index=last_now.chunk_index, candidate_index=last_now.candidate_index,
                 character_focus=last_now.character_focus,
+                tts_draft=last_now.tts_draft,
             )
             print(f"  [snap] 마지막 clip end: {last.end_sec:.2f}s → {new_last_end:.2f}s (대사 여운 포함)")
         new_variants.append((new_clips, sl_title, sl_score))
@@ -139,6 +141,7 @@ def _extend_storyline_for_narrative(
                         pacing_note=first.pacing_note,
                         chunk_index=first.chunk_index, candidate_index=first.candidate_index,
                         character_focus=first.character_focus,
+                        tts_draft=first.tts_draft,
                     )
                     budget -= ext_amount
                     print(f"  [narrative-ext] 첫 clip 앞 +{ext_amount:.1f}s ({first.start_sec:.1f}→{first.start_sec - ext_amount:.1f})")
@@ -160,6 +163,7 @@ def _extend_storyline_for_narrative(
                         pacing_note=last.pacing_note,
                         chunk_index=last.chunk_index, candidate_index=last.candidate_index,
                         character_focus=last.character_focus,
+                        tts_draft=last.tts_draft,
                     )
                     print(f"  [narrative-ext] 마지막 clip 뒤 +{ext_amount:.1f}s ({last.end_sec:.1f}→{last.end_sec + ext_amount:.1f})")
 
@@ -198,6 +202,7 @@ def _fill_intra_storyline_gaps(
                         pacing_note=cur.pacing_note,
                         chunk_index=cur.chunk_index, candidate_index=cur.candidate_index,
                         character_focus=cur.character_focus,
+                        tts_draft=cur.tts_draft,
                     )
                     print(f"  [gap-fill] clip {i}↔{i+1} 갭 {gap:.2f}s 채움 (공통 character: {cur_chars & nxt_chars})")
             new_clips.append(cur)
@@ -507,6 +512,7 @@ def _fit_storyline_to_duration(
                         chunk_index=build_clip.chunk_index,
                         candidate_index=build_clip.candidate_index,
                         character_focus=build_clip.character_focus,
+                        tts_draft=build_clip.tts_draft,
                     )
                     cur_total = total_dur(out)
                     partial_trim = True
@@ -564,6 +570,7 @@ def _fit_storyline_to_duration(
                     pacing_note=clip.pacing_note,
                     chunk_index=clip.chunk_index, candidate_index=clip.candidate_index,
                     character_focus=clip.character_focus,
+                    tts_draft=clip.tts_draft,
                 )
                 cut_summary.append(f"{clip.role}({side}) {clip_dur:.1f}s→{new_dur:.1f}s")
             cur_total = total_dur(out)
@@ -593,6 +600,7 @@ def _fit_storyline_to_duration(
                     pacing_note=last.pacing_note,
                     chunk_index=last.chunk_index, candidate_index=last.candidate_index,
                     character_focus=last.character_focus,
+                    tts_draft=last.tts_draft,
                 )
                 cur_total = total_dur(out)
                 msgs.append(f"마지막 clip 끝 확장 ({orig_total:.1f}s→{cur_total:.1f}s, +{ext_amount:.1f}s)")
@@ -620,6 +628,7 @@ def _fit_storyline_to_duration(
                         pacing_note=first.pacing_note,
                         chunk_index=first.chunk_index, candidate_index=first.candidate_index,
                         character_focus=first.character_focus,
+                        tts_draft=first.tts_draft,
                     )
                     cur_total = total_dur(out)
                     msgs.append(f"첫 clip 시작 확장 (+{(first.start_sec - new_start):.1f}s, 총 {cur_total:.1f}s)")
@@ -810,6 +819,13 @@ def _resolve_clip_times(
         out["description"] = cand["description"]
     if "character_focus" not in out and cand.get("characters_in_scene"):
         out["character_focus"] = cand.get("characters_in_scene")
+    # visual_essential은 candidate 정본 값을 그대로 통과 (compose_story가 누락해도 보전).
+    if "visual_essential" not in out:
+        out["visual_essential"] = bool(cand.get("visual_essential", False))
+    # tts_draft는 analyze_chunk(candidate)에서 생성. compose_story가 누락하거나
+    # 임의로 채워 넣어도 candidate 정본 값으로 덮어쓴다.
+    if cand.get("tts_draft"):
+        out["tts_draft"] = cand["tts_draft"]
     return out
 
 
@@ -907,6 +923,8 @@ def _clips_from_storyline(
             use_original_audio=resolved.get("use_original_audio", True),
             chunk_index=resolved.get("chunk_index", -1),
             candidate_index=resolved.get("candidate_index", -1),
+            visual_essential=bool(resolved.get("visual_essential", False)),
+            tts_draft=str(resolved.get("tts_draft") or storyline_data.get("tts_draft") or ""),
         ))
     else:
         actual_storyline = storyline_data.get("storyline", {})
@@ -923,6 +941,8 @@ def _clips_from_storyline(
                 chunk_index=src.get("chunk_index", -1),
                 candidate_index=src.get("candidate_index", -1),
                 character_focus=tuple(src.get("character_focus") or []),
+                visual_essential=bool(src.get("visual_essential", False)),
+                tts_draft=str(src.get("tts_draft") or ""),
             )
 
         # 라운드 12: 시퀀스블록형 분기 — 같은 sequence_id의 candidate들을 시간순으로 추출
@@ -953,6 +973,8 @@ def _clips_from_storyline(
                     use_original_audio=True,
                     chunk_index=ci, candidate_index=cj,
                     character_focus=tuple(cand.get("characters_in_scene") or cand.get("character_focus") or []),
+                    visual_essential=bool(cand.get("visual_essential", False)),
+                    tts_draft=str(cand.get("tts_draft") or ""),
                 ))
             block_clips.sort(key=lambda c: c.start_sec)
             # 마지막 clip을 payoff role로 — 자막·렌더 일관성
@@ -965,6 +987,8 @@ def _clips_from_storyline(
                     pacing_note=last.pacing_note,
                     chunk_index=last.chunk_index, candidate_index=last.candidate_index,
                     character_focus=last.character_focus,
+                    visual_essential=last.visual_essential,
+                    tts_draft=last.tts_draft,
                 )
             clips.extend(block_clips)
             print(f"  - 시퀀스블록형: hook {1 if isinstance(hook, dict) else 0}개 + sequence_block {len(block_clips)}개")
@@ -1414,7 +1438,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 결과는 chunk별로 필터링되어 Gemini analyze_chunk 페이로드에 첨부된다.
     character_appearances: list[dict[str, Any]] = []
     checkpoint_char_idx = output_dir / "checkpoint_character_index.json"
-    if checkpoint_char_idx.exists() and from_step not in ("gemini",):
+    if checkpoint_char_idx.exists() and from_step != "character_index":
         try:
             character_appearances = json.loads(checkpoint_char_idx.read_text(encoding="utf-8"))
             print(f"\n[7/15] 인물 등장 인덱스 로드 ({len(character_appearances)}개 구간)")
@@ -1468,6 +1492,16 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         chunk_meta_list: list[dict[str, Any]] = []
         gemini_start = time.time()
         previous_analyses: list[dict[str, Any]] = []
+
+        # 진단용 보존: Gemini 원본 응답(상대 시간 그대로)을 별도 파일에 즉시 기록.
+        # checkpoint_gemini.json은 오프셋 적용 후 데이터만 들어가고, run_log는 종료 시점에
+        # _slim_run_log()로 응답 본문이 카운트만 남고 날아가므로, 원본 추적 불가 상태가 된다.
+        # 이 파일은 어떤 후속 단계에서도 덮어쓰지 않는다 (gemini 단계 재실행 시에만 리셋).
+        gemini_raw_log_path = output_dir / "run_log_gemini.json"
+        gemini_raw_log_path.write_text(
+            json.dumps({"job_id": job_id, "chunks": []}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
         # SRT 자막이 있으면 미리 파싱하여 Gemini에 화자명 전달
         srt_segments_for_gemini: list[SpeechSegment] = []
@@ -1532,6 +1566,53 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 moment_count = len(response.get("candidate_moments", []))
                 print(f"    → {moment_count}개 후보 모멘트 발견 (소요 시간: {chunk_elapsed:.1f}초)")
 
+                # 진단용 즉시 보존: 아래의 in-place offset 적용(+chunk.start_sec) 전에
+                # JSON round-trip 으로 deep copy 해서 원본 chunk-relative 응답을 그대로 기록.
+                # → checkpoint_gemini.json(절대시간) vs 여기(상대시간) 비교로
+                #    Gemini가 지시를 어기고 절대시간을 반환했는지 후속 진단 가능.
+                try:
+                    _gemini_raw_doc = json.loads(gemini_raw_log_path.read_text(encoding="utf-8"))
+                except Exception:
+                    _gemini_raw_doc = {"job_id": job_id, "chunks": []}
+                _gemini_raw_doc.setdefault("chunks", []).append({
+                    "chunk_index": chunk.index,
+                    "chunk_start_sec": chunk.start_sec,
+                    "chunk_end_sec": chunk.end_sec,
+                    "elapsed_sec": chunk_elapsed,
+                    "response": json.loads(json.dumps(response, ensure_ascii=False)),
+                })
+                gemini_raw_log_path.write_text(
+                    json.dumps(_gemini_raw_doc, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+
+                # ─────────────────────────────────────────────────────────────
+                # Sanity check: Gemini가 지시(0초 기준 상대시간)를 어기고
+                # 절대시간을 반환한 경우를 감지하여 offset 가산을 스킵한다.
+                #
+                # 배경: split_video_chunk가 PTS를 0초로 정규화하므로 정상 응답은
+                #   [0, chunk_duration] 범위여야 한다. 그런데 prompt에 들어가는
+                #   previous_analyses가 in-place mutation으로 절대시간이 섞여 있어,
+                #   AI가 가끔 컨텍스트를 흉내내 절대시간을 반환한다 (비결정적).
+                #   이 경우 평소처럼 chunk.start_sec를 더하면 라벨이 정확히 2배가 된다.
+                #
+                # 감지 규칙: raw 응답의 max(end_sec)가 chunk_duration을 1초 이상 초과하면
+                #   절대시간 반환으로 판정. 이때는 offset=0 으로 처리 (값이 이미 절대).
+                # ─────────────────────────────────────────────────────────────
+                _chunk_duration = chunk.end_sec - chunk.start_sec
+                _raw_ends = [float(m.get("end_sec", 0)) for m in (response.get("candidate_moments") or [])]
+                _raw_ends += [float(s.get("end_sec", 0)) for s in (response.get("segments") or [])]
+                _raw_max_end = max(_raw_ends) if _raw_ends else 0.0
+                _ai_returned_absolute = _raw_max_end > _chunk_duration + 1.0
+                if _ai_returned_absolute:
+                    actual_cut_offset = 0.0
+                    print(
+                        f"    [WARN] Gemini가 절대시간을 반환함 — "
+                        f"raw_max_end={_raw_max_end:.1f}s > chunk_duration={_chunk_duration:.1f}s. "
+                        f"chunk.start_sec({chunk.start_sec:.1f}s) 가산 스킵 (이중 가산 방지)."
+                    )
+                else:
+                    actual_cut_offset = chunk.start_sec
 
                 previous_analyses.append({
                     "chunk_index": chunk.index,
@@ -1542,11 +1623,13 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
                 # chunk-level 메타 (segments 포함) 누적 — checkpoint_gemini.json에 보존되고
                 # story 단계의 segments 요약 컨텍스트로도 활용된다.
-                # segments의 start_sec/end_sec은 chunk-relative이므로 chunk.start_sec를 더해 절대 시간으로 변환.
+                # segments의 start_sec/end_sec을 절대 시간으로 변환 — Gemini가 상대시간을
+                # 반환한 정상 케이스에선 actual_cut_offset = chunk.start_sec, 절대시간을
+                # 반환한 이상 케이스에선 actual_cut_offset = 0 (위 sanity check 참조).
                 _chunk_segments_abs: list[dict[str, Any]] = []
                 for s in (response.get("segments") or []):
-                    _ss = float(s.get("start_sec", 0)) + chunk.start_sec
-                    _ee = float(s.get("end_sec", 0)) + chunk.start_sec
+                    _ss = float(s.get("start_sec", 0)) + actual_cut_offset
+                    _ee = float(s.get("end_sec", 0)) + actual_cut_offset
                     _chunk_segments_abs.append({
                         "segment_index": s.get("segment_index"),
                         "start_sec": _ss,
@@ -1562,11 +1645,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 })
 
                 # split_video_chunk가 PTS를 0초로 정규화하므로 (output seek + -avoid_negative_ts make_zero),
-                # Gemini는 항상 0초 기준 상대 시간으로 응답한다고 신뢰할 수 있다.
-                # 따라서 chunk.start_sec을 더해 원본 영상 절대 시간으로 변환한다.
-                # (이전엔 actual_start_sec 양수 분기로 0.05초 같은 PTS 잔여값을 잘못 사용해
-                #  chunk.start_sec이 무시되는 버그가 있었음)
-                actual_cut_offset = chunk.start_sec
+                # Gemini는 0초 기준 상대 시간으로 응답하는 게 정상이고, 이 경우 actual_cut_offset
+                # 은 위 sanity check에서 chunk.start_sec으로 설정되어 있다.
+                # AI가 지시를 어기고 절대시간을 반환한 경우엔 actual_cut_offset=0으로 설정되어
+                # 이중 가산을 막는다 (라벨 2배 시프트 버그 방지).
                 for moment in response["candidate_moments"]:
                     moment["start_sec"] += actual_cut_offset
                     moment["end_sec"] += actual_cut_offset
