@@ -804,6 +804,85 @@ title_line2를 작성한 후 payoff description을 다시 읽어 결말 방향�
     - 1~2개 클립으로는 스토리 흐름이 만들어지지 않음 → 후처리에서 reject 됨
     - build를 충분히 찾기 어려우면 해당 storyline의 score를 낮추고, 다른 storyline 우선 추천
 
+## TTS cue 작성 (각 storyline 본체에 `tts_cues` 배열 출력)
+
+각 storyline 마다 `tts_cues` 배열을 함께 출력하라. cue 는 *편집 타임라인 절대 시간*
+(0초 = 쇼츠 시작점) 기준으로 작성한다. clip 들의 시간은 원본 영상 절대시간이지만,
+cue 의 시간 축은 별개 — 0초부터 storyline 의 hook→build→payoff 누적 길이까지를 *편집
+타임라인 0초 기준* 으로 잡아라. 후처리에서 silence_cut 후 재보정된다.
+
+### 작성 규칙
+
+1. **TTS 는 꼭 필요한 곳에만**. 모든 컷에 다는 것 금지. 보통 클립 1개당 0~2개, **storyline 전체 0~5개 cue**. 5개 초과 금지 (응답 토큰 제어).
+2. cue.start_sec / end_sec 는 편집 타임라인 절대 시간. cue 길이(end - start)는 보통 2~6초.
+3. cue 들끼리 시간이 겹치지 않게.
+4. cue 텍스트가 클립의 핵심 transcript 와 동시에 충돌하지 않도록 배치.
+5. **결과선공개형 타임점프 cue**: sequence_type == "결과선공개형" 이면 build[0] 시작 시점에 타임점프를 알리는 cue 를 반드시 배치하라. 의문형 유도 금지 ("대체 무슨 일이?", "어떻게 이렇게 됐을까?"). 명사형 종결 또는 단언체로 시점·맥락을 단언하라.
+6. **맥락 연속성**: 각 cue 는 그 시점 영상의 *실제 사건*을 짧게 설명하면서, 인접 cue 와 한 호흡으로 이어져야 한다. cue 들을 한 줄씩 이어 읽었을 때 시청자가 "무슨 영상인지" 한 줄로 답할 수 있어야 한다.
+
+### candidate.tts_draft 활용 + 사실성 원칙
+
+- candidate 입력에 `tts_draft` (analyze_chunk 가 영상을 직접 보면서 적은 한 컷 단독 내레이션 초안) 가 있다. *사실성*은 신뢰하되 storyline 흐름·인접 cue 와의 맥락 연결은 너의 책임 — 각 컷의 tts_draft 를 그대로 베끼지 말고 storyline 흐름에 맞춰 다듬어 cue.text 로 옮겨라. 첫 cue 가 도입을 깔면 다음 cue 는 그 도입을 받는 전개·반전이 되도록.
+- 위 [transcript 우선] (라운드 15) 과 [제목 사실성 원칙] 이 cue 텍스트에도 동일하게 적용. transcript 와 tts_draft 가 충돌하면 transcript 가 우선. event_template.mode == "phone_call" cue 에 '고백/사랑/제안/프러포즈' 금지.
+- tts_draft 가 비어 있거나 storyline 흐름에 안 맞으면 cue 를 만들지 않아도 된다.
+
+### 텍스트 톤 (가장 중요)
+
+쇼츠 내레이션이다. **뉴스 헤드라인체도, 예능·슬랭 톤도 둘 다 금지.**
+방향: "상황을 짧게 설명해 다음 장면이 궁금해지게 만든다" — 후킹·여운·인물 명사화.
+
+[금지]
+- ❌ 격식체 / 헤드라인체: "~합니다, ~됩니다, ~입니다, 마침내, 비로소, 새로운 ~의 탄생"
+- ❌ 가벼운 슬랭·예능톤·반말: "~네, ~함, ~임, ㅋㅋ, 헐, 미친 설계, 통째로 먹었네, 한 방에 다 뒤집힘"
+- ❌ 시청자 직접 호명: "봐봐, 잘 봐, 이거 진짜?"
+
+[권장 — 다음 셋 중 하나의 결로]
+1. **명사형 종결**: "결국 시장을 통째로 장악한 희로." / "이 판을 뒤집을 한 사람."
+2. **상황 설명 + 여운 (~다 / ~된다 / ~인 셈)**: "조용히 판을 다시 짠다." / "그가 노린 건 시장 그 자체였다."
+3. **궁금증 유발 (~는데? / 근데~)**: "근데 이게 진짜 끝이 아니다." / "그가 진짜 노린 건 따로 있는데?"
+
+[길이·구조]
+- 한 cue = **한 문장**, 12~25자 권장. 평서 위주, 의문은 cue 전체의 1/3 이내.
+- 어미: "~다 / ~ㄴ다 / ~인 셈 / ~의 X / ~는데? / 명사형 점." — "~네 / ~함 / ~임" 금지.
+
+[좋은 예 vs 나쁜 예]
+- ❌ "결국 시장을 통째로 먹었네." → ✅ "결국 시장을 통째로 장악한 희로."
+- ❌ "한 방에 다 뒤집힘." → ✅ "이 한 수로 판세가 뒤집힌다."
+- ❌ "근데 진짜 노림수는 이거였음." → ✅ "그가 진짜 노린 건 따로 있는데?"
+
+### voice 프리셋 (정확히 이 라벨만 사용)
+
+[자연스러운 한국어 — 우선]
+- `ko_female` : 기본 한국 여성 (차분, 자연스러운 발음)
+- `ko_female_high` : 밝은 한국 여성 (피치 높음, 트렌드·임팩트)
+- `ko_male` : 기본 한국 남성 (차분 다큐풍)
+- `ko_male_low` : 낮은 한국 남성 (피치 낮음, 묵직·진지)
+
+[트렌드 multilingual — 작품 톤이 챗봇/이국·캐주얼/시크 등에 어울릴 때만]
+- `chat_emma` / `chat_brian` / `chat_seraphina` / `chat_florian`
+
+⚠️ multilingual voice 는 한국어를 처리할 수 있지만 약간의 외국 억양이 섞일 수 있다. 한국 드라마 일반(스릴러·로맨스·예능)이면 `ko_*` 우선.
+
+### speed 라벨 (정확히 이 5개만)
+- `very_slow` / `slow` / `normal` / `fast` / `very_fast`
+
+### voice / speed 매핑
+
+**🚫 한 쇼츠 = 한 voice (절대 규칙)**: 이 storyline 의 모든 cue 는 같은 voice 라벨을 사용해야 한다. cue 마다 voice 바꾸지 마라. voice 는 작품·storyline 전체 톤 1개를 골라 모든 cue 에 일관되게. (speed 는 cue 마다 자유 — 톤 강약은 speed 로.)
+
+**voice 선택 가이드**:
+- 한국 드라마/예능 일반 → 기본 `ko_female` 또는 `ko_male`
+- 진지·묵직한 다큐·내레이션 → `ko_male_low`
+- 가벼운 후킹·바이럴·코믹 → `ko_female_high`
+- AI 챗봇/SF/이국적·시크 → `chat_emma` / `chat_seraphina` (여성), `chat_brian` / `chat_florian` (남성)
+
+**speed (cue 마다 자유)**:
+- 정적·진지 → `slow` / `very_slow`
+- 일반 → `normal`
+- 임팩트·긴박감 → `fast` / `very_fast`
+
+---
+
 ## 출력 형식 (필수)
 
 응답은 반드시 **JSON 객체 1개**여야 하며, 최상위 키 `storylines` (배열) 가 **반드시 포함**되어야 한다.
@@ -862,6 +941,15 @@ title_line2를 작성한 후 payoff description을 다시 읽어 결말 방향�
         }},
         "sequence_block": []
       }},
+      // ▼ TTS cue 는 storyline 구성 결정 후 작성. 0~5개. 한 storyline 안 모든 cue 는 같은 voice 사용 (절대 규칙).
+      "tts_cues": [
+        {{"start_sec": 0.0, "end_sec": 4.0, "text": "예: 황궁마켓의 유일한 법.",
+          "voice": "ko_male_low", "speed": "slow",
+          "voice_rationale": "디스토피아·스릴러 톤", "speed_rationale": "긴장 고조 직전이라 천천히"}},
+        {{"start_sec": 18.0, "end_sec": 21.5, "text": "근데 진짜 노림수는 따로 있는데?",
+          "voice": "ko_male_low", "speed": "fast",
+          "voice_rationale": "같은 storyline 이므로 voice 유지", "speed_rationale": "반전 임팩트라 빠르게"}}
+      ],
       // ▼ 제목은 위 내용을 모두 작성한 뒤 마지막에 작성 (제목 사실성 원칙 준수)
       "viral_titles": ["제목1", "제목2", "제목3"],
       "title_line1": "상황/배경 설명 (13자 이내, 초과 금지)",
@@ -885,6 +973,7 @@ title_line2를 작성한 후 payoff description을 다시 읽어 결말 방향�
           {{"chunk_index": 1, "candidate_index": 3}}
         ]
       }},
+      "tts_cues": [],
       // ▼ 제목은 마지막
       "title_line1": "상황 설명",
       "title_line2": "후킹 강조"
@@ -905,6 +994,11 @@ title_line2를 작성한 후 payoff description을 다시 읽어 결말 방향�
       "description": "장면 설명 (candidate.description 그대로 또는 더 상세하게 — 후처리에서 자막으로 사용됨)",
       "character_focus": ["인물명"],
       "use_original_audio": true,
+      "tts_cues": [
+        {{"start_sec": 1.0, "end_sec": 5.5, "text": "이 한 컷의 후킹.",
+          "voice": "ko_female_high", "speed": "normal",
+          "voice_rationale": "가벼운 바이럴 톤", "speed_rationale": "기본"}}
+      ],
       // ▼ 제목은 위 내용(특히 description)을 작성한 뒤 마지막에 작성
       "viral_titles": ["제목1", "제목2", "제목3"],
       "title_line1": "상황/배경 설명 (13자 이내, 초과 금지)",
@@ -1203,6 +1297,101 @@ def _format_segments_summary(chunk_meta: list[dict] | None, *, use_case: str = "
         "이 정보로 *그 사이에 무엇이 있었는지* 파악하라.)\n"
         + joined
     )
+
+
+# ─────────────────────────────────────────────
+# PR-4: storyline.tts_cues 정규화 (STORY_COMPOSITION_PROMPT 새 스키마 출력 검증)
+# ─────────────────────────────────────────────
+# 기존 plan_tts_cues 후처리 로직과 동일 패턴을 함수로 분리.
+# STORY_COMPOSITION_PROMPT 가 storyline 본체에 직접 tts_cues 를 출력하기 시작했으므로
+# 그 응답도 동일한 검증·정규화를 거쳐야 한다. PR-5 에서 plan_tts_cues 제거 시 단일화.
+
+_VALID_TTS_VOICES: frozenset[str] = frozenset({
+    "ko_female", "ko_female_high", "ko_male", "ko_male_low",
+    "chat_emma", "chat_brian", "chat_seraphina", "chat_florian",
+})
+_VALID_TTS_SPEEDS: frozenset[str] = frozenset({
+    "very_slow", "slow", "normal", "fast", "very_fast",
+})
+
+
+def _normalize_storyline_tts_cues(
+    raw_cues,
+    *,
+    total_duration: float | None = None,
+    max_cues: int | None = 5,
+) -> list[dict[str, Any]]:
+    """LLM 응답의 tts_cues 배열을 검증·정규화.
+
+    - voice/speed 라벨 유효성 (잘못된 값은 ko_female/normal fallback)
+    - end_sec > start_sec, text/start_sec/end_sec 필수
+    - total_duration 제공 시 [-0.5, total+0.5] 범위 클램프 (out-of-range cue 제거)
+    - 시간순 정렬 + 겹침 제거 (앞 cue 끝 + 0.05 후로 뒤 cue 시작 이동, 보정 후 end<=start 면 drop)
+    - max_cues 초과 시 앞쪽 max_cues 개만 유지 (max_cues=None 이면 제한 없음)
+    - 다수 voice 등장 시 majority voice 로 통일 ("한 쇼츠 = 한 voice" 절대 규칙)
+
+    Returns: 정규화된 cue dict 리스트 (입력에 있던 rationale 필드 보존)
+    """
+    if not raw_cues:
+        return []
+    cues: list[dict[str, Any]] = []
+    for c in raw_cues:
+        if not isinstance(c, dict):
+            continue
+        if "start_sec" not in c or "end_sec" not in c or "text" not in c:
+            continue
+        try:
+            s = float(c["start_sec"])
+            e = float(c["end_sec"])
+        except (TypeError, ValueError):
+            continue
+        if e <= s:
+            continue
+        if total_duration is not None:
+            if s < -0.5 or e > float(total_duration) + 0.5:
+                continue
+        voice = str(c.get("voice", "ko_female"))
+        if voice not in _VALID_TTS_VOICES:
+            voice = "ko_female"
+        speed = str(c.get("speed", "normal"))
+        if speed not in _VALID_TTS_SPEEDS:
+            speed = "normal"
+        out: dict[str, Any] = {
+            "start_sec": s,
+            "end_sec": e,
+            "text": str(c["text"]).strip(),
+            "voice": voice,
+            "speed": speed,
+        }
+        # rationale 필드 보존 (디버깅·로그 용)
+        if c.get("voice_rationale"):
+            out["voice_rationale"] = str(c["voice_rationale"])
+        if c.get("speed_rationale"):
+            out["speed_rationale"] = str(c["speed_rationale"])
+        cues.append(out)
+
+    # 시간순 정렬 + 겹침 제거
+    cues.sort(key=lambda x: x["start_sec"])
+    for i in range(1, len(cues)):
+        if cues[i]["start_sec"] < cues[i - 1]["end_sec"]:
+            cues[i]["start_sec"] = cues[i - 1]["end_sec"] + 0.05
+    cues = [c for c in cues if c["end_sec"] > c["start_sec"]]
+
+    # 한 쇼츠 = 한 voice 강제 (majority 통일)
+    if cues:
+        voice_count: dict[str, int] = {}
+        for c in cues:
+            voice_count[c["voice"]] = voice_count.get(c["voice"], 0) + 1
+        if len(voice_count) > 1:
+            majority = max(voice_count.items(), key=lambda kv: kv[1])[0]
+            for c in cues:
+                c["voice"] = majority
+
+    # max_cues 클램프 (마지막 단계 — 앞쪽 N 개 유지)
+    if max_cues is not None and len(cues) > max_cues:
+        cues = cues[:max_cues]
+
+    return cues
 
 
 @dataclass(frozen=True)

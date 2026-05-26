@@ -2052,6 +2052,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # ═══════════════════════════════════════
     # all_storyline_variants: list of (clips, title_text, score)
     all_storyline_variants: list[tuple[list[StoryClip], str, float]] = []
+    # PR-4: storyline 마다 LLM 이 미리 생성한 tts_cues. all_storyline_variants 와 인덱스 1:1.
+    # 비어 있으면 12단계 tts_plan 에서 fallback (plan_tts_cues 호출).
+    storyline_tts_cues_pool: list[list[dict[str, Any]]] = []
     max_shorts = min(payload.max_shorts, config.max_shorts_count)
     story_plan = None
 
@@ -2065,12 +2068,15 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             for v in story_data["variants"]:
                 v_clips = [StoryClip(**c) for c in v["clips"]]
                 all_storyline_variants.append((v_clips, v["title_text"], v.get("score", 0.0)))
+                # PR-4: 캐시된 storyline 에 tts_cues 가 있으면 함께 로드, 없으면 [] (fallback)
+                storyline_tts_cues_pool.append(list(v.get("tts_cues") or []))
             print(f"  - {len(all_storyline_variants)}개 스토리라인 로드")
         else:
             # 하위 호환: 이전 단일 체크포인트
             clips = [StoryClip(**clip) for clip in story_data["clips"]]
             title_text = story_data["title_text"]
             all_storyline_variants.append((clips, title_text, 1.0))
+            storyline_tts_cues_pool.append(list(story_data.get("tts_cues") or []))
             print(f"  - {len(clips)}개 클립, 제목: {title_text}")
         print("[OK] 스토리 구성 결과 로드 완료 (체크포인트에서)")
 
@@ -2266,7 +2272,23 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 print(f"  [COHERENCE] 스토리라인 {sl_idx + 1}: {w}")
 
             all_storyline_variants.append((sl_clips, sl_title, score))
-            print(f"  - 스토리라인 {sl_idx + 1}: {len(sl_clips)}개 클립, 점수 {score:.2f}, 제목: {sl_title}")
+            # PR-4: storyline 의 tts_cues 정규화 후 parallel pool 에 append.
+            # sl_data 의 직접 필드 또는 sl_data["storyline"] 안 어디든 위치 가능 (LLM 변형 대응).
+            _raw_cues = sl_data.get("tts_cues") if isinstance(sl_data.get("tts_cues"), list) else None
+            if _raw_cues is None and isinstance(sl_data.get("storyline"), dict):
+                _raw_cues = sl_data["storyline"].get("tts_cues") if isinstance(sl_data["storyline"].get("tts_cues"), list) else None
+            _sl_total_dur = sum(c.end_sec - c.start_sec for c in sl_clips) if sl_clips else 0.0
+            _normalized_cues = _normalize_storyline_tts_cues(
+                _raw_cues or [],
+                total_duration=_sl_total_dur if _sl_total_dur > 0 else None,
+                max_cues=5,
+            )
+            storyline_tts_cues_pool.append(_normalized_cues)
+            _cue_voices = sorted({c["voice"] for c in _normalized_cues})
+            print(
+                f"  - 스토리라인 {sl_idx + 1}: {len(sl_clips)}개 클립, 점수 {score:.2f}, 제목: {sl_title}"
+                + (f" [story tts_cues={len(_normalized_cues)} voice={_cue_voices}]" if _normalized_cues else " [story tts_cues=0]")
+            )
 
         # 폴백: 유효한 스토리가 없으면 selected_storyline에서 1개 생성
         if not all_storyline_variants:
@@ -2278,6 +2300,16 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     boundary_alias=boundary_alias,
                 )
                 all_storyline_variants.append((fb_clips, fb_title, sel.get("score", 0.5)))
+                # PR-4: 폴백 storyline 도 tts_cues 정규화 후 parallel pool 등록
+                _fb_raw_cues = sel.get("tts_cues") if isinstance(sel.get("tts_cues"), list) else None
+                if _fb_raw_cues is None and isinstance(sel.get("storyline"), dict):
+                    _fb_raw_cues = sel["storyline"].get("tts_cues") if isinstance(sel["storyline"].get("tts_cues"), list) else None
+                _fb_total_dur = sum(c.end_sec - c.start_sec for c in fb_clips) if fb_clips else 0.0
+                storyline_tts_cues_pool.append(_normalize_storyline_tts_cues(
+                    _fb_raw_cues or [],
+                    total_duration=_fb_total_dur if _fb_total_dur > 0 else None,
+                    max_cues=5,
+                ))
                 print(f"  - 폴백 스토리라인: {len(fb_clips)}개 클립")
 
         # 라운드 4: story_plan에 정본 시간 덮어쓰기 → checkpoint_story.json에 LLM 환각이 안 남음
@@ -2320,16 +2352,23 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         story_elapsed = time.time() - story_start
         print(f"  → 총 {len(all_storyline_variants)}개 쇼츠 생성 예정")
 
-        # 체크포인트 저장
+        # 체크포인트 저장 — PR-4: 각 variant 의 tts_cues 도 함께 저장 (재실행 시 cue 재생성 비용 절약).
+        # storyline_tts_cues_pool 와 all_storyline_variants 가 인덱스 1:1 (parallel list 보장).
         checkpoint_data = {
             "raw_response": story_plan,
             "variants": [
-                {"clips": [c.__dict__ for c in clips], "title_text": title, "score": score}
-                for clips, title, score in all_storyline_variants
+                {
+                    "clips": [c.__dict__ for c in clips],
+                    "title_text": title,
+                    "score": score,
+                    "tts_cues": (storyline_tts_cues_pool[v_idx] if v_idx < len(storyline_tts_cues_pool) else []),
+                }
+                for v_idx, (clips, title, score) in enumerate(all_storyline_variants)
             ],
             # 하위 호환
             "clips": [c.__dict__ for c in all_storyline_variants[0][0]] if all_storyline_variants else [],
             "title_text": all_storyline_variants[0][1] if all_storyline_variants else "",
+            "tts_cues": (storyline_tts_cues_pool[0] if storyline_tts_cues_pool else []),
         }
         checkpoint_story.write_text(
             json.dumps(checkpoint_data, ensure_ascii=False, indent=2),
@@ -2344,10 +2383,13 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 for v in story_data["variants"]:
                     v_clips = [StoryClip(**c) for c in v["clips"]]
                     all_storyline_variants.append((v_clips, v["title_text"], v.get("score", 0.0)))
+                    # PR-4: 캐시된 storyline tts_cues 함께 로드 (정규화는 캐시 저장 시점에 이미 완료)
+                    storyline_tts_cues_pool.append(list(v.get("tts_cues") or []))
             else:
                 clips = [StoryClip(**clip) for clip in story_data["clips"]]
                 title_text = story_data["title_text"]
                 all_storyline_variants.append((clips, title_text, 1.0))
+                storyline_tts_cues_pool.append(list(story_data.get("tts_cues") or []))
         elif edit_plan_path.exists():
             print("\n[10/15] 기존 파일에서 스토리 복원 중...")
             edit_plan = json.loads(edit_plan_path.read_text(encoding="utf-8"))
@@ -2362,6 +2404,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 ))
             title_text = edit_plan["layout"]["top_title"]
             all_storyline_variants.append((clips, title_text, 1.0))
+            # PR-4: edit_plan 폴백 — tts_cues 정보 없음, 빈 리스트 → tts_plan fallback 으로 채워짐
+            storyline_tts_cues_pool.append([])
             print(f"  - {len(clips)}개 클립, 제목: {title_text}")
             print("[OK] 스토리 복원 완료 (edit_plan.json에서)")
         else:
@@ -2616,10 +2660,28 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             tts_cues_per_variant = []
 
     if not tts_cues_per_variant and start_idx <= 12:
-        print("\n[12/15] TTS cue 계획 중 (Flash, 무음 컷 후 clips 기준)...")
+        # PR-4: story 단계가 storyline.tts_cues 를 이미 생성했으면 plan_tts_cues 호출 스킵.
+        # storyline_tts_cues_pool[sl_idx] 가 비어있는 variant 만 fallback 으로 plan_tts_cues 호출.
+        # PR-5 에서 tts_plan 분기 완전 제거 — 현재 fallback 안전망.
+        print("\n[12/15] TTS cue 계획 중 (story 출력 우선, 누락 시 Flash plan_tts_cues 폴백)...")
         tts_start = time.time()
-        gemini = load_gemini_client()
+        gemini = None  # 필요할 때만 로드
         for sl_idx, (sl_clips, _t, _s) in enumerate(all_storyline_variants):
+            # PR-4: 우선 story 단계 출력의 cues 가 있으면 그대로 사용
+            story_cues = (
+                storyline_tts_cues_pool[sl_idx]
+                if sl_idx < len(storyline_tts_cues_pool) and storyline_tts_cues_pool[sl_idx]
+                else None
+            )
+            if story_cues:
+                tts_cues_per_variant.append(list(story_cues))
+                voices = sorted({c["voice"] for c in story_cues})
+                speeds = sorted({c["speed"] for c in story_cues})
+                print(f"  - variant {sl_idx + 1}: [story] {len(story_cues)}개 cue (voice={voices}, speed={speeds})")
+                continue
+            # Fallback: 기존 plan_tts_cues 호출 (story 단계가 cue 출력 안 한 경우)
+            if gemini is None:
+                gemini = load_gemini_client()
             try:
                 cues = gemini.plan_tts_cues(
                     sl_clips,
@@ -2632,7 +2694,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 tts_cues_per_variant.append(cues)
                 voices = sorted({c["voice"] for c in cues})
                 speeds = sorted({c["speed"] for c in cues})
-                print(f"  - variant {sl_idx + 1}: {len(cues)}개 cue (voice={voices}, speed={speeds})")
+                print(f"  - variant {sl_idx + 1}: [plan_tts_cues fallback] {len(cues)}개 cue (voice={voices}, speed={speeds})")
             except Exception as e:
                 print(f"  [WARN] variant {sl_idx + 1} cue 계획 실패: {e} — TTS 없이 진행")
                 tts_cues_per_variant.append([])
