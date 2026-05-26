@@ -2470,6 +2470,83 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 첫 번째 스토리라인을 기본 clips/title_text로 설정 (하위 호환)
     clips, title_text, _ = all_storyline_variants[0]
 
+    # ═══════════════════════════════════════
+    # [silence_cut] 스토리-aware 무음 컷 (PR-5 신규)
+    # ═══════════════════════════════════════
+    # cut_silence_with_story_filter 로 각 variant clips 컷 + storyline_tts_cues_pool 의 cue
+    # 시간을 누적 감소량만큼 보정. _apply_silence_cut_to_variants 의 롤백/길이 재보정 패턴 그대로.
+    # transcribe 단계의 _apply_silence_cut_to_variants 호출은 PR-5c-1 에서 제거 (중복 컷 회피).
+    checkpoint_silence_cut = output_dir / "checkpoint_silence_cut.json"
+    _silence_cut_invalidate = from_step in ("story", "silence_cut")
+    if checkpoint_silence_cut.exists() and not _silence_cut_invalidate:
+        print("\n[silence_cut] 캐시 로드 중...")
+        _sc_data = json.loads(checkpoint_silence_cut.read_text(encoding="utf-8"))
+        _new_variants: list[tuple[list[StoryClip], str, float]] = []
+        _new_cues_pool: list[list[dict[str, Any]]] = []
+        for v in _sc_data.get("variants", []):
+            v_clips = [StoryClip(**c) for c in v["clips"]]
+            _new_variants.append((v_clips, v["title_text"], v.get("score", 0.0)))
+            _new_cues_pool.append(list(v.get("tts_cues") or []))
+        if _new_variants:
+            all_storyline_variants = _new_variants
+            storyline_tts_cues_pool = _new_cues_pool
+            clips = list(all_storyline_variants[0][0])
+        print(f"  - {len(_new_variants)}개 variant 로드 완료")
+    elif start_idx <= step_idx["silence_cut"]:
+        print("\n[silence_cut] 스토리-aware 무음 컷 진행 중...")
+        _sc_start = time.time()
+        # chunk_transcripts 의 모든 SpeechSegment 평탄화 (cut_silence_with_story_filter 가
+        # 자체적으로 각 clip 범위 안 segments 만 필터링).
+        _all_chunk_segs: list = []
+        for ct in chunk_transcripts or []:
+            _all_chunk_segs.extend(ct.get("segments") or [])
+        _candidates_lookup_sc = _build_candidates_lookup(all_candidates)
+
+        new_variants: list[tuple[list[StoryClip], str, float]] = []
+        new_cues_pool: list[list[dict[str, Any]]] = []
+        for v_idx, (v_clips, v_title, v_score) in enumerate(all_storyline_variants):
+            cut_results = cut_silence_with_story_filter(
+                v_clips, _all_chunk_segs, _candidates_lookup_sc,
+                max_gap_sec=0.4, padding_sec=0.15, min_interval_sec=0.3,
+            )
+            v_clips_new = flatten_to_clips(cut_results)
+            # 너무 짧아지면 롤백 (라운드 13-B 동일 패턴)
+            new_total = sum(c.end_sec - c.start_sec for c in v_clips_new)
+            orig_total = sum(c.end_sec - c.start_sec for c in v_clips)
+            v_cues_orig = list(storyline_tts_cues_pool[v_idx] if v_idx < len(storyline_tts_cues_pool) else [])
+            if new_total < float(config.min_duration_sec) and orig_total <= float(config.max_duration_sec):
+                print(f"  [variant {v_idx+1} rollback] {new_total:.1f}s < {config.min_duration_sec:.0f}s → 원본 ({orig_total:.1f}s) 사용")
+                v_clips_new = list(v_clips)
+                shifted_cues = v_cues_orig
+            else:
+                shifted_cues = _shift_cues_by_silence_cut(v_cues_orig, cut_results, v_clips)
+            # 길이 재보정 (40~60s)
+            v_clips_new, _fit_msg = _fit_storyline_to_duration(
+                v_clips_new, _candidates_lookup_sc,
+                target_min=float(config.min_duration_sec),
+                target_max=float(config.max_duration_sec),
+            )
+            if _fit_msg:
+                print(f"  [LengthFit-postsilence variant {v_idx+1}] {_fit_msg}")
+            new_variants.append((v_clips_new, v_title, v_score))
+            new_cues_pool.append(shifted_cues)
+            _removed = sum(r.total_removed_sec for r in cut_results)
+            _cuts = sum(max(0, len(r.keep_intervals) - 1) for r in cut_results)
+            print(f"  - variant {v_idx + 1}: {_cuts}회 컷, {_removed:.1f}초 제거")
+        all_storyline_variants = new_variants
+        storyline_tts_cues_pool = new_cues_pool
+        clips = list(all_storyline_variants[0][0]) if all_storyline_variants else clips
+        checkpoint_silence_cut.write_text(
+            json.dumps({
+                "variants": [
+                    {"clips": [c.__dict__ for c in vc], "title_text": t, "score": s, "tts_cues": new_cues_pool[i]}
+                    for i, (vc, t, s) in enumerate(all_storyline_variants)
+                ],
+            }, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"[OK] silence_cut 완료 (소요 시간: {time.time()-_sc_start:.1f}초)")
+
     # 라운드 14: transcribe는 모든 variant clips의 union 영역에 대해 수행한다.
     # 이전엔 첫 variant clips만 transcribe → variant 2/3는 candidate.transcript(LLM 추정) 폴백 사용
     # → 자막이 음성과 다르고 균등 분할로 박자 어긋남.
@@ -2503,20 +2580,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         transcript_text = [SimpleNamespace(**seg) for seg in loaded_data]
         print(f"  - {len(transcript_text)}개 세그먼트 로드 완료")
 
-        # 무음 제거 (이미 전사 데이터가 있으므로 바로 실행)
-        print("  무음 구간 제거 중...")
-        cut_results = cut_silence_from_clips(clips, transcript_text, max_gap_sec=0.4, padding_sec=0.15)
-        print_silence_cut_summary(cut_results)
-        clips = flatten_to_clips(cut_results)
-        # 라운드 6a-2: 모든 storyline variant의 sl_clips도 무음 컷 적용 후 갱신.
-        # tts_plan이 변형되지 않은 sl_clips를 받으면 cue 시간이 영상 길이 초과 가능.
-        all_storyline_variants = _apply_silence_cut_to_variants(
-            all_storyline_variants, transcript_text,
-            candidates_lookup=_build_candidates_lookup(all_candidates),
-            target_min=float(config.min_duration_sec),
-            target_max=float(config.max_duration_sec),
-        )
-        # 라운드 19C — 서사 컨텍스트: 문장 경계 스냅 → 능동 확장 → 갭 채우기
+        # PR-5c-1: 무음 컷 + variant 동기화는 silence_cut 단계가 처리. 여기선 snap/extend/fill 만.
         all_storyline_variants = _snap_clip_boundaries_to_dialogue(
             all_storyline_variants, transcript_text, snap_back_max=5.0, snap_forward_max=5.0,
         )
@@ -2529,7 +2593,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         all_storyline_variants = _fill_intra_storyline_gaps(
             all_storyline_variants, max_gap_sec=3.0,
         )
-        print(f"[OK] 전사 로드 + 무음 제거 완료 ({len(clips)}개 클립)")
+        print(f"[OK] 전사 로드 + snap/extend/fill 완료 ({len(clips)}개 클립)")
 
     elif start_idx <= step_idx["transcribe"]:
         print("\n[11/15] 선택된 클립 구간 전사 중...")
@@ -2615,24 +2679,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         transcribe_elapsed = time.time() - transcribe_start
         print(f"  - 전사 완료: {len(transcript_text)}개 세그먼트 (소요 시간: {transcribe_elapsed:.1f}초)")
 
-        # 무음 구간 제거 (Gemini 폴백 시 건너뜀 — 타이밍이 부정확하므로)
-        if used_gemini_fallback:
-            print("  무음 제거 건너뜀 (Gemini 폴백 데이터는 타이밍이 부정확)")
-        else:
-            print("  무음 구간 제거 중...")
-            cut_results = cut_silence_from_clips(clips, transcript_text, max_gap_sec=0.4, padding_sec=0.15)
-            print_silence_cut_summary(cut_results)
-            clips = flatten_to_clips(cut_results)
-            # 라운드 6a-2: 모든 storyline variant의 sl_clips도 갱신 (cue 영상 길이 초과 방지)
-            # 라운드 14-fix: candidates_lookup + target_min/max 인자 누락 fix —
-            # transcribe 직접 실행 분기에서도 라운드 12.1 무음 컷 후 fit 재호출 + 라운드 13 양방향 확장 작동.
-            all_storyline_variants = _apply_silence_cut_to_variants(
-                all_storyline_variants, transcript_text,
-                candidates_lookup=_build_candidates_lookup(all_candidates),
-                target_min=float(config.min_duration_sec),
-                target_max=float(config.max_duration_sec),
-            )
-            # 라운드 19C — 서사 컨텍스트: 문장 경계 스냅 → 능동 확장 → 갭 채우기
+        # PR-5c-1: 무음 컷 + variant 동기화 + clips-sync 는 silence_cut 단계가 처리.
+        # 여기선 snap/extend/fill 만 transcript_text 기반으로 적용 (Gemini 폴백 시 건너뜀).
+        if not used_gemini_fallback:
             all_storyline_variants = _snap_clip_boundaries_to_dialogue(
                 all_storyline_variants, transcript_text, snap_back_max=5.0, snap_forward_max=5.0,
             )
@@ -2645,17 +2694,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             all_storyline_variants = _fill_intra_storyline_gaps(
                 all_storyline_variants, max_gap_sec=3.0,
             )
-            # 라운드 17: clips ↔ all_storyline_variants[0] 동기화.
-            # 무음 컷 롤백/재보정으로 variant clips가 변경된 경우, shorts #1 렌더용 clips도 동일하게 맞춰야
-            # TTS cue 시간(variant 기준)과 video 길이(clips 기준) 불일치로 인한 마지막 프레임 freeze 방지.
-            if all_storyline_variants:
-                synced_first = list(all_storyline_variants[0][0])
-                if synced_first:
-                    old_total = sum(c.end_sec - c.start_sec for c in clips)
-                    new_total = sum(c.end_sec - c.start_sec for c in synced_first)
-                    if abs(old_total - new_total) > 0.5:
-                        print(f"  [clips-sync] shorts #1 clips 동기화: {old_total:.1f}s → {new_total:.1f}s (variant 1 기준)")
-                    clips = synced_first
+        else:
+            print("  snap/extend/fill 건너뜀 (Gemini 폴백 데이터는 타이밍이 부정확)")
         print(f"[OK] 전사 완료 ({len(clips)}개 클립)")
     else:
         # 이전 단계 데이터 로드
