@@ -1081,6 +1081,92 @@ RELATIONSHIP_EXTRACTION_PROMPT = """
 """
 
 
+# ─────────────────────────────────────────────
+# 프롬프트 입력 블록 빌더 (analyze_chunk / compose_story / plan_tts_cues 공용)
+# ─────────────────────────────────────────────
+# use_case 별로 경고문/헤더가 달라 한 함수에서 분기. PR-1(라운드 25) 정리.
+# 기존 3곳에 인라인으로 흩어져 있던 블록 빌딩 코드와 *완전히 동일한 문자열* 을 반환한다.
+
+
+def _format_work_context(work_context: str | None, *, use_case: str = "analysis") -> str:
+    """work_context 블록을 반환. use_case: analysis|story|tts."""
+    if not work_context:
+        return ""
+    if use_case == "analysis":
+        return (
+            f"\n[작품 정보 — 인물 식별·스토리 이해 참고용]\n{work_context}\n"
+            "⚠️ 위 정보는 인물명·관계·장르를 정확히 파악하기 위한 참고용입니다.\n"
+            "장면 선택 기준은 리서치가 아니라 오직 현재 영상 내 감정 강도·반응·의외성으로 판단하세요.\n"
+        )
+    if use_case == "story":
+        return (
+            f"\n[작품 정보 — 인물 식별·장르 이해 참고용]\n{work_context}\n"
+            "⚠️ 위 정보는 인물명·관계·장르를 정확히 파악하기 위한 참고용입니다.\n"
+            "스토리라인 구성 기준은 리서치가 아니라 후보 장면들의 감정 강도·반응·의외성입니다.\n"
+        )
+    # use_case == "tts" — 경고문 없는 간소화 버전
+    return f"\n[작품 정보]\n{work_context}\n"
+
+
+def _format_episodes_context(prev_episodes_context: str | None, *, use_case: str = "analysis") -> str:
+    """previous_episodes_context 블록을 반환. use_case: analysis|story|tts."""
+    if not prev_episodes_context:
+        return ""
+    if use_case == "analysis":
+        return (
+            f"\n[이전 에피소드 배경 정보 — 오해 방지 전용]\n{prev_episodes_context}\n"
+            "⚠️ 위 정보는 인물명·관계·사건을 올바르게 식별하기 위한 참고용입니다.\n"
+            "장면 선택 기준은 오직 현재 첨부 영상 안에서의 재미·흥미도·화제성입니다.\n"
+            "이전 화와의 연관성이 높다는 이유만으로 장면을 선택하거나 높게 평가하지 마세요.\n"
+            "타임스탬프는 반드시 현재 첨부 영상의 시작(0초) 기준으로 계산하세요.\n"
+        )
+    if use_case == "story":
+        return (
+            f"\n[이전 에피소드 배경 정보 — 오해 방지 전용]\n{prev_episodes_context}\n"
+            "⚠️ 위 정보는 인물명·관계·사건을 올바르게 파악하기 위한 참고용입니다.\n"
+            "스토리라인 구성 기준은 이번 화 후보 장면들의 재미·흥미도·화제성입니다.\n"
+            "이전 화와의 연관성이 높다는 이유만으로 장면을 선택하거나 높게 평가하지 마세요.\n"
+        )
+    return f"\n[이전 에피소드 요약]\n{prev_episodes_context}\n"
+
+
+def _format_segments_summary(chunk_meta: list[dict] | None, *, use_case: str = "story") -> str:
+    """chunk_meta(청크별 summary+segments) 를 시간순 텍스트 블록으로. use_case: story|tts."""
+    if not chunk_meta:
+        return ""
+    parts: list[str] = []
+    for cm in chunk_meta:
+        ci = cm.get("chunk_index", 0)
+        summary = (cm.get("summary") or "").strip().replace("\n", " ")
+        segs = cm.get("segments") or []
+        lines: list[str] = [f"\n[chunk {ci}] 요약: {summary[:120]}"]
+        for s in segs:
+            ss = float(s.get("start_sec", 0))
+            ee = float(s.get("end_sec", 0))
+            desc = (s.get("description") or "").strip().replace("\n", " ")
+            if len(desc) > 100:
+                desc = desc[:100] + "…"
+            lines.append(f"  - {ss:>6.1f}~{ee:>6.1f}s  {desc}")
+        parts.append("\n".join(lines))
+    if not parts:
+        return ""
+    joined = "\n".join(parts).replace("{", "{{").replace("}", "}}")
+    if use_case == "story":
+        return (
+            "\n\n[전체 장면 흐름 (segments) — 청크별 시간순]\n"
+            "(이 요약은 영상 전체 흐름을 빈틈없이 보여준다. candidate_moments는 그 중 가치 있는 일부만 추린 것.)\n"
+            + joined
+        )
+    # use_case == "tts"
+    return (
+        "\n\n[현재 회차 전체 흐름 (segments) — 청크별 시간순]\n"
+        "(시간은 원본 영상 절대 시간 — 위 [클립 시퀀스]의 '원본 X.X~Y.Y초'와 같은 축. "
+        "선정된 클립은 이 전체 흐름의 일부다. 클립 사이의 행간을 메우는 cue를 작성할 때 "
+        "이 정보로 *그 사이에 무엇이 있었는지* 파악하라.)\n"
+        + joined
+    )
+
+
 @dataclass(frozen=True)
 class GeminiConfig:
     api_key: str
@@ -1109,16 +1195,9 @@ class GeminiClient:
     # 청크 분석
     # ─────────────────────────────────────────
     def analyze_chunk(self, payload: dict[str, Any]) -> dict[str, Any]:
-        previous_episodes_context_block = ""
-        if payload.get("previous_episodes_context"):
-            ctx = payload["previous_episodes_context"]
-            previous_episodes_context_block = (
-                f"\n[이전 에피소드 배경 정보 — 오해 방지 전용]\n{ctx}\n"
-                "⚠️ 위 정보는 인물명·관계·사건을 올바르게 식별하기 위한 참고용입니다.\n"
-                "장면 선택 기준은 오직 현재 첨부 영상 안에서의 재미·흥미도·화제성입니다.\n"
-                "이전 화와의 연관성이 높다는 이유만으로 장면을 선택하거나 높게 평가하지 마세요.\n"
-                "타임스탬프는 반드시 현재 첨부 영상의 시작(0초) 기준으로 계산하세요.\n"
-            )
+        previous_episodes_context_block = _format_episodes_context(
+            payload.get("previous_episodes_context"), use_case="analysis",
+        )
 
         previous_context = ""
         if payload.get("previous_analyses"):
@@ -1166,13 +1245,7 @@ class GeminiClient:
             transcript_text_str = "없음"
 
         # 작품 컨텍스트 (시놉시스/장르/핵심 요소)
-        work_context_block = ""
-        if payload.get("work_context"):
-            work_context_block = (
-                f"\n[작품 정보 — 인물 식별·스토리 이해 참고용]\n{payload['work_context']}\n"
-                "⚠️ 위 정보는 인물명·관계·장르를 정확히 파악하기 위한 참고용입니다.\n"
-                "장면 선택 기준은 리서치가 아니라 오직 현재 영상 내 감정 강도·반응·의외성으로 판단하세요.\n"
-            )
+        work_context_block = _format_work_context(payload.get("work_context"), use_case="analysis")
 
         # 청크 길이에 비례한 최소 후보 수 (1분당 1개, 올림, 최소 1개)
         chunk_duration = chunk_end - chunk_start
@@ -1499,7 +1572,6 @@ class GeminiClient:
         min_duration_sec: float = 50.0,
         max_duration_sec: float = 60.0,
         work_context: str | None = None,
-        narrative_skeleton: dict | None = None,
         previous_episodes_context: str | None = None,
         relationship_edges: list[dict] | None = None,
         chunk_meta: list[dict] | None = None,
@@ -1513,51 +1585,10 @@ class GeminiClient:
         for m in all_candidates:
             candidates_str += f"- {json.dumps(m, ensure_ascii=False)}\n"
 
-        work_context_block = ""
-        if work_context:
-            work_context_block = (
-                f"\n[작품 정보 — 인물 식별·장르 이해 참고용]\n{work_context}\n"
-                "⚠️ 위 정보는 인물명·관계·장르를 정확히 파악하기 위한 참고용입니다.\n"
-                "스토리라인 구성 기준은 리서치가 아니라 후보 장면들의 감정 강도·반응·의외성입니다.\n"
-            )
-
-        episodes_context_block = ""
-        if previous_episodes_context:
-            episodes_context_block = (
-                f"\n[이전 에피소드 배경 정보 — 오해 방지 전용]\n{previous_episodes_context}\n"
-                "⚠️ 위 정보는 인물명·관계·사건을 올바르게 파악하기 위한 참고용입니다.\n"
-                "스토리라인 구성 기준은 이번 화 후보 장면들의 재미·흥미도·화제성입니다.\n"
-                "이전 화와의 연관성이 높다는 이유만으로 장면을 선택하거나 높게 평가하지 마세요.\n"
-            )
-
+        work_context_block = _format_work_context(work_context, use_case="story")
+        episodes_context_block = _format_episodes_context(previous_episodes_context, use_case="story")
         story_topic_line = f"[핵심 주제] {topic}" if topic else ""
-
-        # narrative_skeleton 블록 — 라운드 6a에서 단계 자체 제거. 인자는 호환성 유지용.
-
-        # ── segments 요약 블록 (청크별 시간순 — 영상 전체 흐름 빈틈없이 보여주기) ──
-        segments_summary_block = ""
-        if chunk_meta:
-            parts: list[str] = []
-            for cm in chunk_meta:
-                ci = cm.get("chunk_index", 0)
-                summary = (cm.get("summary") or "").strip().replace("\n", " ")
-                segs = cm.get("segments") or []
-                lines: list[str] = [f"\n[chunk {ci}] 요약: {summary[:120]}"]
-                for s in segs:
-                    ss = float(s.get("start_sec", 0))
-                    ee = float(s.get("end_sec", 0))
-                    desc = (s.get("description") or "").strip().replace("\n", " ")
-                    if len(desc) > 100:
-                        desc = desc[:100] + "…"
-                    lines.append(f"  - {ss:>6.1f}~{ee:>6.1f}s  {desc}")
-                parts.append("\n".join(lines))
-            if parts:
-                joined = "\n".join(parts).replace("{", "{{").replace("}", "}}")
-                segments_summary_block = (
-                    "\n\n[전체 장면 흐름 (segments) — 청크별 시간순]\n"
-                    "(이 요약은 영상 전체 흐름을 빈틈없이 보여준다. candidate_moments는 그 중 가치 있는 일부만 추린 것.)\n"
-                    + joined
-                )
+        segments_summary_block = _format_segments_summary(chunk_meta, use_case="story")
 
         prompt = STORY_COMPOSITION_PROMPT.format(
             work_title=work_title,
@@ -1680,7 +1711,6 @@ class GeminiClient:
         self,
         clips: list,
         work_title: str,
-        narrative_skeleton: dict | None = None,
         work_context: str | None = None,
         previous_episodes_context: str | None = None,
         transcript_segments: list | None = None,
@@ -1734,43 +1764,13 @@ class GeminiClient:
         clips_str = "\n".join(clips_lines) if clips_lines else "(없음)"
         total_duration = cum
 
-        # 컨텍스트 블록
-        work_context_block = ""
-        if work_context:
-            work_context_block = f"\n[작품 정보]\n{work_context}\n"
-        episodes_context_block = ""
-        if previous_episodes_context:
-            episodes_context_block = f"\n[이전 에피소드 요약]\n{previous_episodes_context}\n"
-        # narrative_skeleton 블록 — 라운드 6a에서 단계 자체 제거. 인자는 호환성 유지용.
-
+        # 컨텍스트 블록 (간소화 버전 — analyze/story와 달리 경고문 없음)
+        work_context_block = _format_work_context(work_context, use_case="tts")
+        episodes_context_block = _format_episodes_context(previous_episodes_context, use_case="tts")
         # ── segments 요약 블록 (회차 전체 흐름 — 클립 사이 행간 보강) ──
         # compose_story와 동일 패턴. 시간 단위는 원본 영상 절대 시간이므로
         # 위 [클립 시퀀스]의 '원본 X.X~Y.Y초'와 같은 축.
-        segments_summary_block = ""
-        if chunk_meta:
-            parts: list[str] = []
-            for cm in chunk_meta:
-                ci = cm.get("chunk_index", 0)
-                summary = (cm.get("summary") or "").strip().replace("\n", " ")
-                segs = cm.get("segments") or []
-                lines: list[str] = [f"\n[chunk {ci}] 요약: {summary[:120]}"]
-                for s in segs:
-                    ss = float(s.get("start_sec", 0))
-                    ee = float(s.get("end_sec", 0))
-                    desc = (s.get("description") or "").strip().replace("\n", " ")
-                    if len(desc) > 100:
-                        desc = desc[:100] + "…"
-                    lines.append(f"  - {ss:>6.1f}~{ee:>6.1f}s  {desc}")
-                parts.append("\n".join(lines))
-            if parts:
-                joined = "\n".join(parts).replace("{", "{{").replace("}", "}}")
-                segments_summary_block = (
-                    "\n\n[현재 회차 전체 흐름 (segments) — 청크별 시간순]\n"
-                    "(시간은 원본 영상 절대 시간 — 위 [클립 시퀀스]의 '원본 X.X~Y.Y초'와 같은 축. "
-                    "선정된 클립은 이 전체 흐름의 일부다. 클립 사이의 행간을 메우는 cue를 작성할 때 "
-                    "이 정보로 *그 사이에 무엇이 있었는지* 파악하라.)\n"
-                    + joined
-                )
+        segments_summary_block = _format_segments_summary(chunk_meta, use_case="tts")
 
         prompt = TTS_PLANNING_PROMPT.format(
             work_title=work_title,
