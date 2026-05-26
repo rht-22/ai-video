@@ -2738,67 +2738,20 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print(f"  자막 캐시 로드 완료 ({len(final_segments)} segments)")
 
     # ═══════════════════════════════════════
-    # [12/15] TTS 큐 계획 (voice/speed/위치 결정) — 라운드 6a: transcribe 뒤로 이동
+    # [tts cues] storyline_tts_cues_pool → tts_cues_per_variant (PR-5c-2)
     # ═══════════════════════════════════════
-    # 결정된 storyline의 *무음 컷 후* 클립 시퀀스를 받아 편집 타임라인 절대 시간 기준으로
-    # cue 리스트를 만든다. cue 시간/voice/speed는 다음 [13/15]에서 mp3 합성에 사용.
-    # 무음 컷이 clips 길이를 줄여놓은 *후* cue를 계산하므로 TTS·자막 밀림이 발생하지 않는다.
-    checkpoint_tts = output_dir / "checkpoint_tts_plan.json"
-    tts_cues_per_variant: list[list[dict[str, Any]]] = []
-    if checkpoint_tts.exists() and from_step not in ("graph", "story", "transcribe", "tts_plan"):
-        print("\n[12/15] TTS cue 계획 로드 중...")
-        try:
-            cached = json.loads(checkpoint_tts.read_text(encoding="utf-8"))
-            tts_cues_per_variant = cached.get("variants", [])
-            print(f"  - {len(tts_cues_per_variant)}개 variant cue 로드")
-        except Exception as e:
-            print(f"  [WARN] cue 캐시 로드 실패: {e} — 새로 계획")
-            tts_cues_per_variant = []
-
-    if not tts_cues_per_variant and start_idx <= step_idx["tts_plan"]:
-        # PR-4: story 단계가 storyline.tts_cues 를 이미 생성했으면 plan_tts_cues 호출 스킵.
-        # storyline_tts_cues_pool[sl_idx] 가 비어있는 variant 만 fallback 으로 plan_tts_cues 호출.
-        # PR-5 에서 tts_plan 분기 완전 제거 — 현재 fallback 안전망.
-        print("\n[12/15] TTS cue 계획 중 (story 출력 우선, 누락 시 Flash plan_tts_cues 폴백)...")
-        tts_start = time.time()
-        gemini = None  # 필요할 때만 로드
-        for sl_idx, (sl_clips, _t, _s) in enumerate(all_storyline_variants):
-            # PR-4: 우선 story 단계 출력의 cues 가 있으면 그대로 사용
-            story_cues = (
-                storyline_tts_cues_pool[sl_idx]
-                if sl_idx < len(storyline_tts_cues_pool) and storyline_tts_cues_pool[sl_idx]
-                else None
-            )
-            if story_cues:
-                tts_cues_per_variant.append(list(story_cues))
-                voices = sorted({c["voice"] for c in story_cues})
-                speeds = sorted({c["speed"] for c in story_cues})
-                print(f"  - variant {sl_idx + 1}: [story] {len(story_cues)}개 cue (voice={voices}, speed={speeds})")
-                continue
-            # Fallback: 기존 plan_tts_cues 호출 (story 단계가 cue 출력 안 한 경우)
-            if gemini is None:
-                gemini = load_gemini_client()
-            try:
-                cues = gemini.plan_tts_cues(
-                    sl_clips,
-                    payload.work_title,
-                    work_context=payload.work_context,
-                    previous_episodes_context=payload.previous_episodes_context,
-                    transcript_segments=transcript_text,  # 라운드 16: Whisper 전사 전달
-                    chunk_meta=chunk_meta_list or None,  # 회차 전체 흐름 (클립 사이 행간 보강용)
-                )
-                tts_cues_per_variant.append(cues)
-                voices = sorted({c["voice"] for c in cues})
-                speeds = sorted({c["speed"] for c in cues})
-                print(f"  - variant {sl_idx + 1}: [plan_tts_cues fallback] {len(cues)}개 cue (voice={voices}, speed={speeds})")
-            except Exception as e:
-                print(f"  [WARN] variant {sl_idx + 1} cue 계획 실패: {e} — TTS 없이 진행")
-                tts_cues_per_variant.append([])
-        checkpoint_tts.write_text(
-            json.dumps({"variants": tts_cues_per_variant}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        print(f"[OK] TTS cue 계획 완료 (소요 시간: {time.time() - tts_start:.1f}초)")
+    # tts_plan 단계 제거. cue 는 story 단계에서 storyline.tts_cues 로 미리 생성되고
+    # silence_cut 단계가 _shift_cues_by_silence_cut 으로 시간 보정까지 완료.
+    # 여기선 단순히 pool → per_variant 매핑 + 영상 길이 cap.
+    tts_cues_per_variant: list[list[dict[str, Any]]] = [
+        list(storyline_tts_cues_pool[i]) if i < len(storyline_tts_cues_pool) else []
+        for i in range(len(all_storyline_variants))
+    ]
+    _total_cues = sum(len(c) for c in tts_cues_per_variant)
+    if _total_cues:
+        print(f"\n[tts cues] storyline_tts_cues_pool → {len(tts_cues_per_variant)}개 variant ({_total_cues}개 cue)")
+    else:
+        print(f"\n[tts cues] cue 0개 — story 단계에서 tts_cues 미생성 / TTS 없이 진행")
 
     # 라운드 6a-2 후처리 안전판: 각 variant의 cue.end_sec가 그 variant의 영상 길이를 넘지 않도록 cap.
     tts_cues_per_variant = _clamp_cues_to_variants(tts_cues_per_variant, all_storyline_variants)

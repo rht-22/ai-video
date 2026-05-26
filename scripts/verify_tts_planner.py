@@ -5,7 +5,8 @@ Gemini API를 호출하지 않고 다음을 검증:
   1. synthesize_tts(voice, speed) — 4 voice × 5 speed 일부 조합으로 mp3 생성
   2. TTSCue dataclass JSON round-trip
   3. _build_audio_filter / _build_input_args — 가짜 cue로 ffmpeg 필터/인자 생성 검증
-  4. STORY_COMPOSITION_PROMPT / TTS_PLANNING_PROMPT format() 무결성
+  4. STORY_COMPOSITION_PROMPT format() 무결성 + tts_cues 출력 필드 노출 검증
+     (PR-5c-2 에서 TTS_PLANNING_PROMPT / plan_tts_cues 완전 제거 — cue 작성은 story 단계로 통합)
 
 사용법: .venv/bin/python scripts/verify_tts_planner.py
 """
@@ -31,7 +32,6 @@ from app.modules.story_builder import TTSCue, StoryClip  # noqa: E402
 from app.modules.gemini_client import (  # noqa: E402
     GEMINI_PROMPT_TEMPLATE,
     STORY_COMPOSITION_PROMPT,
-    TTS_PLANNING_PROMPT,
 )
 from app.modules.renderer import RenderInputs, _build_audio_filter, _build_filtergraph  # noqa: E402
 from app.config import DesignConfig  # noqa: E402
@@ -146,28 +146,30 @@ def step3_filter_graph() -> None:
 
 
 def step4_format_prompts() -> None:
-    print("\n[4/4] 3개 프롬프트 format() 무결성")
-    g = {"work_title": "X", "topic": "", "chunk_start_sec": 0, "chunk_end_sec": 10,
-         "work_context_block": "", "narrative_skeleton_block": "",
-         "previous_episodes_context_block": "", "character_appearances_block": "",
-         "transcript_text": "", "scene_boundaries": "", "transcript_hint": "",
+    print("\n[4/4] 2개 프롬프트 format() 무결성 + STORY tts_cues 노출 검증")
+    g = {"work_title": "X", "topic": "", "chunk_index": 0, "chunk_start_sec": 0, "chunk_end_sec": 10,
+         "work_context_block": "", "previous_episodes_context_block": "",
+         "character_appearances_block": "",
+         "transcript_text": "", "scene_boundaries": "",
          "previous_context": "", "min_candidates": 3}
     GEMINI_PROMPT_TEMPLATE.format(**g)
 
     s = {"work_title": "X", "topic": "", "min_duration_sec": 50, "max_duration_sec": 75,
          "work_context_block": "", "episodes_context_block": "",
-         "narrative_skeleton_json_block": "", "candidates_str": "[]", "story_topic_line": ""}
-    STORY_COMPOSITION_PROMPT.format(**s)
+         "segments_summary_block": "", "candidates_str": "[]", "story_topic_line": ""}
+    out_story = STORY_COMPOSITION_PROMPT.format(**s)
 
-    t = {"work_title": "X", "total_duration": 60.0, "clips_str": "- clip 0",
-         "work_context_block": "", "episodes_context_block": "",
-         "narrative_skeleton_json_block": ""}
-    TTS_PLANNING_PROMPT.format(**t)
+    # PR-5c-2: TTS_PLANNING_PROMPT / plan_tts_cues 제거 — cue 작성은 STORY 단계로 통합.
+    # STORY 프롬프트가 tts_cues 출력 + voice/speed 라벨 + "한 쇼츠 = 한 voice" 절대 규칙을 포함하는지 확인.
+    assert "tts_cues" in out_story, "STORY_COMPOSITION_PROMPT 에 tts_cues 출력 필드 누락"
+    assert "ko_male_low" in out_story, "STORY_COMPOSITION_PROMPT 에 voice 프리셋 누락"
+    assert "한 쇼츠 = 한 voice" in out_story, "STORY_COMPOSITION_PROMPT 에 한 voice 절대 규칙 누락"
 
-    # STORY_COMPOSITION_PROMPT에서 tts_line 표현이 사라졌는지
-    assert '"tts_line"' not in STORY_COMPOSITION_PROMPT, "tts_line 출력 필드가 STORY_COMPOSITION_PROMPT에 잔존"
-    print("  - GEMINI / STORY / TTS_PLANNING format OK")
-    print("  - STORY_COMPOSITION_PROMPT에 tts_line 잔존 없음")
+    # tts_line 잔존 검사 (legacy)
+    assert '"tts_line"' not in STORY_COMPOSITION_PROMPT, "tts_line 출력 필드가 STORY_COMPOSITION_PROMPT 에 잔존"
+    print("  - GEMINI / STORY format OK")
+    print("  - STORY 에 tts_cues / voice 프리셋 / 한 voice 절대 규칙 모두 노출 ✓")
+    print("  - tts_line 잔존 없음 ✓")
     print("  ✅ Phase 4 PASS")
 
 
