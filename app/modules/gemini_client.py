@@ -264,6 +264,37 @@ segments 중 **쇼츠 제작에 가치 있는 장면만** 선별해 candidate_mo
 - ⚠️ 대사가 있는 장면에서 인물의 행동/의도를 묘사할 때는 대사 내용을 최우선으로 반영하라.
   캐릭터 설정(질병, 성격 등 배경 지식)이 대사와 충돌하면 대사를 믿어라.
 
+[intro/credits/recap/sponsor 식별 — 청크 내 비-콘텐츠 구간]
+
+청크 안에 다음 유형이 존재하면 위치를 식별해 표시하라. 시청자에게 정보 가치가 없는 비-콘텐츠 구간이라 쇼츠에서 제외돼야 한다.
+- intro: 작품·회차 타이틀 시퀀스, 오프닝 영상, 로고·제목 카드
+- credits: 엔딩 크레딧, 스태프롤, 출연진 자막
+- recap: 지난 화 요약 (예: "지난 회에…", "previously on …")
+- sponsor: 협찬·광고 컷, 스폰서 자막
+- promo: 다음 화 예고편
+
+식별 신호 (강함→약함):
+1. 화면 중앙 정적 텍스트 카드 (제작진/배우/회차 정보)
+2. transcript 비어있고 BGM·정적 그래픽만 보임
+3. 동일 형식 자막이 화면 하단·측면을 일정 시간 채움
+4. "다음 화", "지난 화" 같은 명시 키워드
+
+[출력 표시 방법]
+- chunk-level: `chunk_intro_credits_ranges` 배열에 모든 식별 구간을 `{{start_sec, end_sec, kind, confidence}}` 형식으로 기록. 없으면 빈 배열 `[]`.
+- candidate-level: 그런데도 해당 구간이 candidate_moment 로 출력되면 (segment 분할 후 핵심 장면처럼 잘못 추출된 경우) 반드시 `is_intro_credits: true` + `intro_credits_reason` 한 줄을 함께 표시. 정상 콘텐츠 candidate 는 `is_intro_credits: false` / `intro_credits_reason: null`.
+- 후처리에서 `is_intro_credits=true` candidate 와 `chunk_intro_credits_ranges` 안의 candidate 는 모두 자동 제외된다.
+
+⚠️ 이 식별은 segments 분할에는 영향을 주지 않는다 (segments 는 청크 전체를 빈틈없이 덮어야 함). 다만 비-콘텐츠 segment 의 description 은 한두 문장으로 짧게 작성하라.
+
+---
+
+[chunk_intro_credits_ranges 필드 정의 (chunk-level)]
+- 위 [intro/credits/recap/sponsor 식별] 섹션에서 식별한 모든 비-콘텐츠 구간 배열.
+- 각 항목: `{{"start_sec": float, "end_sec": float, "kind": str, "confidence": float}}`
+    - kind: `"intro"` | `"credits"` | `"recap"` | `"sponsor"` | `"promo"`
+    - confidence: 0.0~1.0 (1.0이 가장 확실)
+- 없으면 빈 배열 `[]`. null 출력 금지.
+
 [characters_tracking 필드 정의 (chunk-level)]
 - 청크 전체에 등장하는 인물별 등장 타임스탬프 및 주요 행동을 정리한다.
 - character: 인물명 또는 레이블 (인물 식별 단계에서 확정한 이름과 일관되게). [열린 라벨 허용] 규칙에 따라 `"엑스트라"`·`"엑스트라(다수)"`·`"행인"`·`"불명"`도 사용 가능
@@ -301,6 +332,8 @@ segments 중 **쇼츠 제작에 가치 있는 장면만** 선별해 candidate_mo
 - highlight_reason: highlight_eligible이 true인 경우에만 1문장 (false면 null)
 - visual_essential: 이 candidate의 *핵심 의미가 대사가 아닌 시각 단서*(인물 표정·동작·소품·자막·시선·교차편집·문자·그래픽 등)에 있으면 true. true면 후속 무음 컷 단계에서 대사 없는 무음 구간도 그대로 유지된다(시각 비트 보호). 대사가 의미를 좌우하면 false.
   - 예: 편지·메모를 읽는 장면, 침묵 속 시선 교환, 화면 자막·그래픽 강조 등
+- is_intro_credits: 이 candidate 가 intro/credits/recap/sponsor/promo 등 비-콘텐츠 구간이면 true. 위 [intro/credits/recap/sponsor 식별] 섹션 기준 적용. 후처리에서 자동 제외됨. 정상 콘텐츠 candidate 면 false.
+- intro_credits_reason: is_intro_credits=true 일 때만 한 줄 사유 (예: "엔딩 크레딧 스태프롤", "지난 화 요약 인서트", "다음 화 예고편"). false 면 null.
 - context_extension: **모든 candidate**에 대해 다음을 판단·출력 (highlight 여부와 무관)
     - needed: 이 candidate를 단독 클립으로 보여줬을 때 시청자가 "뭐지?" 없이 흐름을 따라가려면 앞뒤 맥락이 필요한가?
     - extended_start_sec: needed=true면 인접 segment까지 확장한 시작점 (보통 핵심 직전 5~25초). false면 start_sec와 동일
@@ -334,6 +367,9 @@ segments 중 **쇼츠 제작에 가치 있는 장면만** 선별해 candidate_mo
   "chunk_start_sec": <청크 범위 시작값>,
   "chunk_end_sec": <청크 범위 종료값>,
   "summary": "해당 청크 전체의 핵심 내용 요약",
+  "chunk_intro_credits_ranges": [
+    {{"start_sec": 0.0, "end_sec": 12.5, "kind": "intro", "confidence": 0.95}}
+  ],
   "characters_tracking": [
     {{
       "character": "인물명 또는 레이블",
@@ -375,6 +411,8 @@ segments 중 **쇼츠 제작에 가치 있는 장면만** 선별해 candidate_mo
       "highlight_eligible": false,
       "highlight_reason": null,
       "visual_essential": false,
+      "is_intro_credits": false,
+      "intro_credits_reason": null,
       "context_extension": {{
         "needed": false,
         "extended_start_sec": 12.4,

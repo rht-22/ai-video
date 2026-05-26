@@ -381,6 +381,71 @@ def _dedup_overlapping_candidates(
     return keep
 
 
+def _filter_candidates_by_chunk_intro_credits(
+    candidates: list[dict],
+    chunk_meta_list: list[dict],
+    *,
+    overlap_threshold: float = 0.5,
+) -> list[dict]:
+    """PR-2: 8단계 청크 분석이 식별한 chunk_intro_credits_ranges 와 겹치는 candidate 제거.
+
+    candidate 시간의 overlap_threshold(기본 0.5 = 50%) 이상이 어떤 ranges 항목과 겹치면
+    비-콘텐츠로 간주해 drop. 시간 기준은 chunk_meta_list 의 절대시간(actual_cut_offset 가산 후).
+
+    Args:
+        candidates: all_candidates list (각 dict 에 chunk_index, start_sec, end_sec)
+        chunk_meta_list: 청크별 메타 — 각 항목의 "intro_credits_ranges" 는 절대시간 ranges 배열
+        overlap_threshold: 0.0~1.0 (기본 0.5)
+
+    Returns:
+        필터 통과 candidate list (입력 순서 보존)
+    """
+    cmap: dict[int, list[dict]] = {}
+    for cm in chunk_meta_list or []:
+        ci_raw = cm.get("chunk_index")
+        if ci_raw is None:
+            continue
+        try:
+            ci = int(ci_raw)
+        except (TypeError, ValueError):
+            continue
+        rng = cm.get("intro_credits_ranges") or []
+        if ci >= 0 and rng:
+            cmap[ci] = rng
+
+    if not cmap:
+        return list(candidates)
+
+    kept: list[dict] = []
+    dropped = 0
+    for cand in candidates or []:
+        try:
+            ci = int(cand.get("chunk_index", -1))
+        except (TypeError, ValueError):
+            ci = -1
+        cstart = float(cand.get("start_sec", 0) or 0)
+        cend = float(cand.get("end_sec", 0) or 0)
+        cdur = cend - cstart
+        if ci not in cmap or cdur <= 0:
+            kept.append(cand)
+            continue
+        drop_this = False
+        for r in cmap[ci]:
+            rs = float(r.get("start_sec", 0) or 0)
+            re = float(r.get("end_sec", 0) or 0)
+            ov = max(0.0, min(cend, re) - max(cstart, rs))
+            if ov / cdur >= overlap_threshold:
+                drop_this = True
+                break
+        if drop_this:
+            dropped += 1
+        else:
+            kept.append(cand)
+    if dropped:
+        print(f"  [intro/credits] chunk 분석 기반 {dropped}개 candidate 제거 ({len(candidates)} → {len(kept)})")
+    return kept
+
+
 def _clamp_cues_to_variants(
     tts_cues_per_variant: list[list[dict]],
     variants: list[tuple[list[StoryClip], str, float]],
@@ -1636,12 +1701,33 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                         "end_sec": _ee,
                         "description": s.get("description", ""),
                     })
+
+                # PR-2: chunk_intro_credits_ranges 절대시간 변환 후 chunk_meta 에 보존.
+                # 8단계 청크 분석이 영상을 직접 보고 식별한 intro/credits/recap 구간.
+                # 후속 포스트필터(_filter_candidates_by_chunk_intro_credits)에서 활용.
+                _intro_ranges_abs: list[dict[str, Any]] = []
+                for r in (response.get("chunk_intro_credits_ranges") or []):
+                    try:
+                        _rs = float(r.get("start_sec", 0)) + actual_cut_offset
+                        _re = float(r.get("end_sec", 0)) + actual_cut_offset
+                    except (TypeError, ValueError):
+                        continue
+                    if _re <= _rs:
+                        continue
+                    _intro_ranges_abs.append({
+                        "start_sec": _rs,
+                        "end_sec": _re,
+                        "kind": r.get("kind", "intro"),
+                        "confidence": float(r.get("confidence", 0.5) or 0.5),
+                    })
+
                 chunk_meta_list.append({
                     "chunk_index": chunk.index,
                     "summary": response.get("summary", ""),
                     "segments": _chunk_segments_abs,
                     "characters_tracking": response.get("characters_tracking", []),
                     "title_candidates": response.get("title_candidates", []),
+                    "intro_credits_ranges": _intro_ranges_abs,
                 })
 
                 # split_video_chunk가 PTS를 0초로 정규화하므로 (output seek + -avoid_negative_ts make_zero),
@@ -1649,7 +1735,15 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 # 은 위 sanity check에서 chunk.start_sec으로 설정되어 있다.
                 # AI가 지시를 어기고 절대시간을 반환한 경우엔 actual_cut_offset=0으로 설정되어
                 # 이중 가산을 막는다 (라벨 2배 시프트 버그 방지).
+                _intro_credits_dropped = 0
                 for moment in response["candidate_moments"]:
+                    # PR-2: LLM 이 직접 is_intro_credits=true 로 표시한 candidate 는
+                    # all_candidates 에 추가하지 않고 즉시 drop. chunk-level
+                    # chunk_intro_credits_ranges 기반 포스트필터(_filter_candidates_by_chunk_intro_credits)
+                    # 와 함께 이중 안전망.
+                    if moment.get("is_intro_credits") is True:
+                        _intro_credits_dropped += 1
+                        continue
                     moment["start_sec"] += actual_cut_offset
                     moment["end_sec"] += actual_cut_offset
                     moment["chunk_index"] = chunk.index
@@ -1722,6 +1816,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         all_candidates = filter_excluded_moments(all_candidates, exclusion_zones)
         if before_count != len(all_candidates):
             print(f"  인트로/크레딧 필터 적용: {before_count} → {len(all_candidates)}개 후보")
+
+    # PR-2: 8단계 청크 분석이 영상에서 직접 식별한 chunk_intro_credits_ranges 기반
+    # 두 번째 필터. exclusion_zones(SRT 키워드/사용자 인자) 가 놓친 청크 중간 인서트
+    # (recap/sponsor/promo 등) 까지 잡아낸다. ranges 비어 있으면 no-op.
+    all_candidates = _filter_candidates_by_chunk_intro_credits(all_candidates, chunk_meta_list)
 
     # ── 라운드 19B: 청크 오버랩(180s) 중복 candidate dedup (IoU 기반) ──
     all_candidates = _dedup_overlapping_candidates(all_candidates, iou_threshold=0.7)
