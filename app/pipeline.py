@@ -446,6 +446,161 @@ def _filter_candidates_by_chunk_intro_credits(
     return kept
 
 
+# ─────────────────────────────────────────────────────────────
+# PR-3: chunk_transcribe — 청크별 transcript segments 선행 생성
+# ─────────────────────────────────────────────────────────────
+# 기존 11단계 transcribe 는 storyline 결정 *후* 선택 clip만 Whisper로 돌리고,
+# 8단계 analyze_chunk 는 SRT가 있을 때만 청크별 자막을 전달받음 (Whisper 없음).
+# PR-3 은 청크 분할 직후(character_index 이후, gemini 이전) 청크별 transcript 를
+# 한 번에 만들어 캐시. 8단계는 SRT/Whisper 구분 없이 이 결과를 사용.
+
+
+def _slice_segments_for_chunk(
+    segments: list,
+    chunk_start_sec: float,
+    chunk_end_sec: float,
+) -> list:
+    """SRT/Whisper 결과 segments 중 청크 범위와 *겹치는* 항목만 반환 (input order 보존)."""
+    out = []
+    for s in segments or []:
+        try:
+            ss = float(s.start_sec)
+            se = float(s.end_sec)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        # 청크 범위와 겹침 (양 끝 정확히 닿기만 하면 0 길이 겹침 → 제외)
+        if ss < chunk_end_sec and se > chunk_start_sec:
+            out.append(s)
+    return out
+
+
+def _serialize_chunk_transcripts(chunk_transcripts: list[dict]) -> list[dict]:
+    """in-memory [{chunk_index, segments: [SpeechSegment, ...]}] → JSON-safe dict list."""
+    out: list[dict] = []
+    for ct in chunk_transcripts or []:
+        ci = ct.get("chunk_index")
+        if ci is None:
+            continue
+        segs = []
+        for s in ct.get("segments") or []:
+            try:
+                segs.append({
+                    "start_sec": float(s.start_sec),
+                    "end_sec": float(s.end_sec),
+                    "text": str(getattr(s, "text", "") or ""),
+                })
+            except (AttributeError, TypeError, ValueError):
+                continue
+        out.append({"chunk_index": int(ci), "segments": segs})
+    return out
+
+
+def _deserialize_chunk_transcripts(payload: list[dict]) -> list[dict]:
+    """JSON-loaded dict list → in-memory [{chunk_index, segments: [SpeechSegment, ...]}]."""
+    from app.modules.speech import SpeechSegment as _SS
+    out: list[dict] = []
+    for entry in payload or []:
+        if "chunk_index" not in entry:
+            continue
+        try:
+            ci = int(entry["chunk_index"])
+        except (TypeError, ValueError):
+            continue
+        segs: list = []
+        for s in entry.get("segments") or []:
+            try:
+                segs.append(_SS(
+                    start_sec=float(s.get("start_sec", 0)),
+                    end_sec=float(s.get("end_sec", 0)),
+                    text=str(s.get("text", "") or ""),
+                ))
+            except (TypeError, ValueError):
+                continue
+        out.append({"chunk_index": ci, "segments": segs})
+    return out
+
+
+def transcribe_chunks(
+    chunks: list,
+    srt_path: Path | None,
+    *,
+    work_title: str | None = None,
+    character_names: list[str] | None = None,
+    work_context: str | None = None,
+    audio_workdir: Path,
+    transcriber=None,
+) -> list[dict]:
+    """청크별 transcript segments 를 *원본 영상 절대시간* 기준으로 생성.
+
+    SRT 있으면 [parse_subtitle](app/modules/subtitle.py) 후 청크별 슬라이스.
+    SRT 없으면 각 chunk.split_path 에서 transcriber(기본: extract_transcript) 호출.
+    Whisper 결과는 chunk-relative 이므로 chunk.start_sec 만큼 시프트해 절대시간으로 변환.
+
+    Args:
+        chunks: Chunk list (각 항목에 index, start_sec, end_sec, split_path 속성)
+        srt_path: SRT/ASS/VTT/SMI 자막 경로. None이면 Whisper 분기.
+        audio_workdir: Whisper 분기에서 사용할 임시 작업 디렉토리 (현재는 직접 split_path 사용이라
+                       파라미터만 받고 미사용 — DI 호환용)
+        transcriber: SRT 없을 때 호출되는 콜러블 (Path → list[SpeechSegment]).
+                     None이면 app.modules.speech.extract_transcript 사용.
+                     테스트에서 Whisper 의존 없이 fake injection 가능.
+
+    Returns:
+        [{"chunk_index": int, "segments": list[SpeechSegment]}, ...]
+    """
+    # SRT 분기
+    if srt_path is not None and Path(srt_path).exists():
+        all_segments = parse_subtitle(srt_path)
+        return [
+            {
+                "chunk_index": int(c.index),
+                "segments": _slice_segments_for_chunk(
+                    all_segments, float(c.start_sec), float(c.end_sec)
+                ),
+            }
+            for c in chunks
+        ]
+
+    # Whisper 분기
+    if transcriber is None:
+        from app.modules.speech import extract_transcript
+
+        def transcriber(audio_path: Path):
+            return extract_transcript(
+                audio_path,
+                work_title=work_title,
+                character_names=character_names,
+                work_context=work_context,
+            )
+
+    from app.modules.speech import SpeechSegment as _SS
+    out: list[dict] = []
+    for c in chunks:
+        sp = getattr(c, "split_path", None)
+        if sp is None or not Path(sp).exists():
+            out.append({"chunk_index": int(c.index), "segments": []})
+            continue
+        try:
+            raw = transcriber(Path(sp))
+        except Exception as e:
+            print(f"  [chunk_transcribe] chunk {c.index} Whisper 실패 ({e}) — 빈 결과로 진행")
+            raw = []
+        # chunk-relative → 절대시간 (split_video_chunk 가 PTS 0 정규화 했으므로 chunk.start_sec 가산)
+        chunk_offset = float(getattr(c, "start_sec", 0.0))
+        abs_segs: list = []
+        for s in raw or []:
+            try:
+                abs_segs.append(_SS(
+                    start_sec=float(s.start_sec) + chunk_offset,
+                    end_sec=float(s.end_sec) + chunk_offset,
+                    text=str(getattr(s, "text", "") or ""),
+                ))
+            except (AttributeError, TypeError, ValueError):
+                continue
+        out.append({"chunk_index": int(c.index), "segments": abs_segs})
+    return out
+
+
 def _clamp_cues_to_variants(
     tts_cues_per_variant: list[list[dict]],
     variants: list[tuple[list[StoryClip], str, float]],
@@ -1537,6 +1692,49 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             character_appearances = []
 
     # ═══════════════════════════════════════
+    # [chunk_transcribe] 청크별 transcript 선행 생성 (PR-3 신규)
+    # ═══════════════════════════════════════
+    # 8단계 analyze_chunk 에 transcript_segments 를 SRT/Whisper 구분 없이 항상 제공.
+    # SRT 있으면 parse_subtitle 후 청크별 슬라이스, 없으면 각 chunk.split_path 에서 Whisper.
+    # PR-3 시점에서는 step_order 에 추가하지 않음 (매직 넘버 18곳 일괄 정비는 PR-5 에서).
+    # 캐시 무효화 트리거: from_step in (chunk, character_index, gemini) 또는 캐시 파일 없음.
+    checkpoint_chunk_tr = output_dir / "checkpoint_chunk_transcripts.json"
+    chunk_transcripts: list[dict] = []
+    _chunk_tr_invalidate = from_step in ("chunk", "character_index", "gemini")
+    if checkpoint_chunk_tr.exists() and not _chunk_tr_invalidate:
+        try:
+            _ctr_data = json.loads(checkpoint_chunk_tr.read_text(encoding="utf-8"))
+            chunk_transcripts = _deserialize_chunk_transcripts(_ctr_data)
+            _total_segs = sum(len(ct.get("segments", [])) for ct in chunk_transcripts)
+            print(f"\n[chunk_transcribe] 청크별 전사 로드 완료 ({len(chunk_transcripts)}개 청크, {_total_segs}개 segment)")
+        except Exception as e:
+            print(f"\n[chunk_transcribe] 캐시 로드 실패: {e} — 새로 생성")
+            chunk_transcripts = []
+
+    if not chunk_transcripts and start_idx <= 7:
+        print("\n[chunk_transcribe] 청크별 transcript 생성 중...")
+        _ctr_start = time.time()
+        _char_names = list(dict.fromkeys(
+            [ci.character_name for ci in cast_images if ci.character_name]
+            + [ci.actor_name for ci in cast_images if ci.actor_name]
+        )) if cast_images else []
+        chunk_transcripts = transcribe_chunks(
+            chunks=chunks,
+            srt_path=payload.srt_path,
+            work_title=payload.work_title,
+            character_names=_char_names,
+            work_context=payload.work_context,
+            audio_workdir=output_dir,
+        )
+        checkpoint_chunk_tr.write_text(
+            json.dumps(_serialize_chunk_transcripts(chunk_transcripts), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        _total_segs = sum(len(ct.get("segments", [])) for ct in chunk_transcripts)
+        _branch = "SRT" if payload.srt_path else "Whisper"
+        print(f"  → [{_branch}] {len(chunk_transcripts)}개 청크, 총 {_total_segs}개 segment (소요 시간: {time.time()-_ctr_start:.1f}초)")
+
+    # ═══════════════════════════════════════
     # [8/15] Gemini 분석 (바이럴 최적화)
     # ═══════════════════════════════════════
     checkpoint_gemini = output_dir / "checkpoint_gemini.json"
@@ -1568,11 +1766,16 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             encoding="utf-8",
         )
 
-        # SRT 자막이 있으면 미리 파싱하여 Gemini에 화자명 전달
-        srt_segments_for_gemini: list[SpeechSegment] = []
-        if payload.srt_path:
-            srt_segments_for_gemini = parse_subtitle(payload.srt_path)
-            print(f"  - SRT 자막 {len(srt_segments_for_gemini)}개 세그먼트 → Gemini 인물 식별용 전달")
+        # PR-3: chunk_transcripts (chunk_transcribe 단계의 출력) 을 인덱스 맵으로 변환.
+        # SRT/Whisper 구분 없이 통합. 빈 리스트면 자막 없는 케이스 (analyze_chunk 가 "없음" 처리).
+        chunk_transcripts_by_idx = {
+            int(ct.get("chunk_index", -1)): list(ct.get("segments") or [])
+            for ct in chunk_transcripts
+        }
+        _total_segs = sum(len(v) for v in chunk_transcripts_by_idx.values())
+        if _total_segs:
+            _branch = "SRT" if payload.srt_path else "Whisper"
+            print(f"  - chunk_transcripts [{_branch}] {_total_segs}개 segment → analyze_chunk 입력")
 
         for idx, chunk in enumerate(chunks, 1):
             print(f"  청크 {idx}/{len(chunks)} 분석 중... ({chunk.start_sec:.1f}초 ~ {chunk.end_sec:.1f}초)")
@@ -1582,11 +1785,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             scenes = detect_scenes(split_path, media_info.fps, chunk.end_sec - chunk.start_sec)
             scene_boundaries = [scene.start_sec for scene in scenes]
 
-            # 해당 청크 범위의 자막만 필터링하여 전달
-            chunk_transcript_segs = [
-                s for s in srt_segments_for_gemini
-                if s.start_sec < chunk.end_sec and s.end_sec > chunk.start_sec
-            ] if srt_segments_for_gemini else []
+            # PR-3: 청크별 transcript 는 chunk_transcripts 에서 직접 (이미 청크 범위 슬라이스됨)
+            chunk_transcript_segs = chunk_transcripts_by_idx.get(chunk.index, [])
 
 
             # face_id 사전 인식 결과를 chunk 범위로 필터링하고 0초 기준 상대 시간으로 변환
