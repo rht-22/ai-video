@@ -172,6 +172,196 @@ def flatten_to_clips(cut_results: list[SilenceCutResult]) -> list[StoryClip]:
     return new_clips
 
 
+# ─────────────────────────────────────────────────────────────
+# PR-5: 스토리-aware 무음 컷
+# ─────────────────────────────────────────────────────────────
+# 기존 cut_silence_from_clips 는 *모든* gap 을 일률적으로 컷한다 (visual_essential 만 제외).
+# PR-5 는 candidate 메타 (description 액션 동사 / 화자 변경 / visual_essential) 를 추가
+# 검사해 *컷해도 스토리상 안전한 gap* 만 컷한다. 컷 가능 여부는 _is_gap_safe_to_cut 로 판정.
+
+# 액션 동사 / 비주얼 비트 키워드 — description 에 이게 들어 있으면 컷 보호
+_ACTION_VERB_KEYWORDS: tuple[str, ...] = (
+    "시선", "눈빛", "마주본", "마주친",
+    "키스", "포옹", "안는다", "껴안",
+    "표정", "굳", "찡그", "씁쓸",
+    "충돌", "부딪",
+    "주먹", "휘두", "때린", "뺨",
+    "달려든", "달려가", "뛰어",
+    "쓰러", "넘어",
+    "흘리", "눈물",
+    "잡아", "끌어",
+)
+
+
+def _has_action_verb(description: str | None) -> bool:
+    """description 에 액션·비주얼 비트 키워드가 있는지."""
+    if not description:
+        return False
+    for kw in _ACTION_VERB_KEYWORDS:
+        if kw in description:
+            return True
+    return False
+
+
+def _is_narration_seg(seg: SpeechSegment | None) -> bool:
+    """segment text 가 [내레이션] 접두로 시작하는지."""
+    if seg is None or not getattr(seg, "text", None):
+        return False
+    return seg.text.lstrip().startswith("[내레이션]")
+
+
+def _is_gap_safe_to_cut(
+    candidate: dict | None,
+    before_seg: SpeechSegment | None,
+    after_seg: SpeechSegment | None,
+) -> bool:
+    """gap 양쪽 segment + candidate 메타로 컷 가능 여부 판정.
+
+    True 면 무음 컷 가능, False 면 보호.
+
+    규칙 (모두 통과해야 True):
+    - candidate 메타 있음 (없으면 보수적으로 False)
+    - candidate.visual_essential == False
+    - candidate.description 에 액션 동사 없음
+    - 화자 변경 없음 ([내레이션] 접두가 양쪽 모두 있거나 모두 없음)
+    - 양쪽 segment 둘 다 있거나 둘 다 None (한쪽만 None 이면 보수적 False)
+    """
+    if candidate is None:
+        return False
+    if candidate.get("visual_essential") is True:
+        return False
+    if _has_action_verb(candidate.get("description") or ""):
+        return False
+    # 양쪽 segment 존재 패턴 검사
+    if before_seg is None and after_seg is None:
+        # clip 안 transcript 가 없음 — visual_essential=False 이고 액션 없으면 안전 (긴 무음 컷 가능)
+        return True
+    if before_seg is None or after_seg is None:
+        # 한쪽 None 이면 clip 경계 인접 — 보수적으로 보호
+        return False
+    # 양쪽 segment 모두 있음: [내레이션] 접두 패턴이 일치해야 (둘 다 있거나 둘 다 없음)
+    if _is_narration_seg(before_seg) != _is_narration_seg(after_seg):
+        return False
+    return True
+
+
+def cut_silence_with_story_filter(
+    clips: list[StoryClip],
+    transcript_segments: list[SpeechSegment],
+    candidates_lookup: dict[tuple[int, int], dict],
+    *,
+    max_gap_sec: float = 0.4,
+    padding_sec: float = 0.15,
+    min_interval_sec: float = 0.3,
+) -> list[SilenceCutResult]:
+    """스토리-aware 무음 컷.
+
+    cut_silence_from_clips 와 동일한 keep_intervals 출력을 만들되, 각 clip 의 candidate
+    메타 (visual_essential / description / 화자 변경) 로 *gap 컷 가능 여부* 를 추가 판별.
+    하나라도 보호 조건이면 그 clip 의 모든 gap 보호 (clip 통째 유지).
+
+    더 fine-grained 한 gap-단위 판별이 필요해지면 후속 PR 에서 확장.
+    """
+    sorted_segments = sorted(transcript_segments, key=lambda s: s.start_sec)
+    results: list[SilenceCutResult] = []
+
+    for clip in clips:
+        # 기존 cut_silence_from_clips 의 visual_essential 보호 동일 — clip 통째 유지
+        if getattr(clip, "visual_essential", False):
+            results.append(SilenceCutResult(
+                original_clip=clip,
+                keep_intervals=[Interval(clip.start_sec, clip.end_sec)],
+                total_removed_sec=0.0,
+            ))
+            continue
+
+        # 이 clip 의 candidate 메타 조회 — chunk_index=0 falsy 함정 회피 (or -1 패턴 금지)
+        _ci = getattr(clip, "chunk_index", None)
+        _cd = getattr(clip, "candidate_index", None)
+        key = (int(_ci) if _ci is not None else -1,
+               int(_cd) if _cd is not None else -1)
+        cand = candidates_lookup.get(key)
+
+        # clip 안의 segments
+        clip_segments = [
+            seg for seg in sorted_segments
+            if seg.end_sec > clip.start_sec and seg.start_sec < clip.end_sec
+        ]
+
+        # gap 안전성 판정 — clip 안 segment 사이 gap 만 검사.
+        # clip 시작/끝 인접 dead air (segment 와 clip 경계 사이) 는 항상 안전 처리 (cut_silence_from_clips
+        # 가 padding 처리하는 기존 동작 보존). _is_gap_safe_to_cut 은 양쪽 segment 가 모두 있는 *내부 gap*
+        # 에 대한 화자 변경 검사용.
+        if clip_segments:
+            edges: list[tuple[SpeechSegment | None, SpeechSegment | None]] = []
+            for i in range(len(clip_segments) - 1):
+                edges.append((clip_segments[i], clip_segments[i + 1]))
+        else:
+            # clip 안 segment 가 없음 — visual_essential/액션 없으면 전체가 dead air 라 안전
+            edges = [(None, None)]
+
+        any_unsafe = False
+        for before, after in edges:
+            # gap 크기 (segment 없으면 clip 경계와 거리)
+            gap_start = before.end_sec if before is not None else clip.start_sec
+            gap_end = after.start_sec if after is not None else clip.end_sec
+            if gap_end - gap_start < max_gap_sec:
+                continue  # gap 작으면 컷 대상 아님 → 안전 판정 무관
+            if not _is_gap_safe_to_cut(cand, before, after):
+                any_unsafe = True
+                break
+
+        if any_unsafe:
+            results.append(SilenceCutResult(
+                original_clip=clip,
+                keep_intervals=[Interval(clip.start_sec, clip.end_sec)],
+                total_removed_sec=0.0,
+            ))
+            continue
+
+        # 안전 — 기존 cut_silence_from_clips 와 동일한 keep_intervals 빌딩
+        if not clip_segments:
+            results.append(SilenceCutResult(
+                original_clip=clip,
+                keep_intervals=[Interval(clip.start_sec, clip.end_sec)],
+                total_removed_sec=0.0,
+            ))
+            continue
+
+        padded: list[Interval] = []
+        for seg in clip_segments:
+            s = max(clip.start_sec, seg.start_sec - padding_sec)
+            e = min(clip.end_sec, seg.end_sec + padding_sec)
+            padded.append(Interval(s, e))
+
+        merged: list[Interval] = []
+        for interval in sorted(padded):
+            if merged and interval.start_sec <= merged[-1].end_sec:
+                merged[-1] = Interval(merged[-1].start_sec, max(merged[-1].end_sec, interval.end_sec))
+            else:
+                merged.append(interval)
+
+        filtered: list[Interval] = []
+        for interval in merged:
+            duration = interval.end_sec - interval.start_sec
+            if filtered and duration < min_interval_sec:
+                filtered[-1] = Interval(filtered[-1].start_sec, interval.end_sec)
+            else:
+                filtered.append(interval)
+
+        clip_duration = clip.end_sec - clip.start_sec
+        kept_duration = sum(i.end_sec - i.start_sec for i in filtered)
+        removed_sec = max(0.0, clip_duration - kept_duration)
+
+        results.append(SilenceCutResult(
+            original_clip=clip,
+            keep_intervals=filtered,
+            total_removed_sec=removed_sec,
+        ))
+
+    return results
+
+
 def print_silence_cut_summary(cut_results: list[SilenceCutResult]) -> None:
     """침묵 컷 결과 요약 출력"""
     total_removed = sum(r.total_removed_sec for r in cut_results)
