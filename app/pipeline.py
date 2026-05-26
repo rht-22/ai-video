@@ -447,6 +447,57 @@ def _filter_candidates_by_chunk_intro_credits(
 
 
 # ─────────────────────────────────────────────────────────────
+# PR-5: silence_cut 단계 — cue 시간 보정 헬퍼
+# ─────────────────────────────────────────────────────────────
+
+
+def _shift_cues_by_silence_cut(
+    cues: list[dict],
+    silence_cut_results: list,  # list[SilenceCutResult]
+    original_variant_clips: list,  # list[StoryClip]
+) -> list[dict]:
+    """cut_silence_with_story_filter 결과의 누적 감소량으로 cue.start_sec/end_sec 시프트.
+
+    cue 시간 (편집 타임라인 절대) 가 어떤 clip 의 끝 *이후* 라면, 그 clip 이전의 모든
+    removed_sec 누적을 차감. clip 내부에 있는 cue 는 시프트하지 않음 (clip 시작 비례 가정).
+
+    Args:
+        cues: tts cue dict 리스트 (start_sec / end_sec 필수)
+        silence_cut_results: SilenceCutResult 리스트 (variant 의 clip 순서)
+        original_variant_clips: 컷 전 원본 variant clip 리스트 (silence_cut_results 와 1:1)
+
+    Returns: 새 dict 리스트 (입력 보존, 시간만 보정)
+    """
+    if not cues or not silence_cut_results or not original_variant_clips:
+        return list(cues or [])
+
+    # 원본 clip 의 누적 편집 끝 시점 + removed 누적량 매핑
+    cum_edit_end = 0.0
+    boundaries: list[tuple[float, float]] = []  # (clip_edit_end_before_cut, cum_removed_through_this_clip)
+    cum_removed = 0.0
+    for clip, result in zip(original_variant_clips, silence_cut_results):
+        cum_edit_end += float(clip.end_sec - clip.start_sec)
+        cum_removed += float(getattr(result, "total_removed_sec", 0.0) or 0.0)
+        boundaries.append((cum_edit_end, cum_removed))
+
+    out: list[dict] = []
+    for cue in cues:
+        new_cue = dict(cue)
+        s = float(cue.get("start_sec", 0.0) or 0.0)
+        # cue 가 어떤 clip 끝 이후라면 그 clip 까지의 cum_removed 차감 (마지막으로 통과한 boundary)
+        shift = 0.0
+        for clip_end_before, cum_rm in boundaries:
+            if s >= clip_end_before:
+                shift = cum_rm
+            else:
+                break
+        new_cue["start_sec"] = s - shift
+        new_cue["end_sec"] = float(cue.get("end_sec", 0.0) or 0.0) - shift
+        out.append(new_cue)
+    return out
+
+
+# ─────────────────────────────────────────────────────────────
 # PR-3: chunk_transcribe — 청크별 transcript segments 선행 생성
 # ─────────────────────────────────────────────────────────────
 # 기존 11단계 transcribe 는 storyline 결정 *후* 선택 clip만 Whisper로 돌리고,
