@@ -1449,6 +1449,17 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         job_id = f"{safe_title}_{uuid.uuid4().hex[:2]}"
         output_dir = payload.outdir / job_id
         output_dir.mkdir(parents=True, exist_ok=True)
+        # PR-5c-3: 제거된 단계의 옛 checkpoint 자동 삭제 (마이그레이션).
+        # exclusion 단계 → chunk_intro_credits_ranges 로 대체 (PR-2).
+        # tts_plan 단계 → storyline.tts_cues 로 대체 (PR-4).
+        for _legacy in ("checkpoint_exclusion.json", "checkpoint_tts_plan.json"):
+            _legacy_path = output_dir / _legacy
+            if _legacy_path.exists():
+                try:
+                    _legacy_path.unlink()
+                    print(f"  [migrate] 옛 체크포인트 제거: {_legacy}")
+                except OSError:
+                    pass
         run_log = {
             "job_id": job_id,
             "input": {
@@ -1550,27 +1561,25 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     else:
         print("\n[2/15] 작품 리서치 건너뜀 (--no-research)")
 
-    # 단계별 실행 플래그 (PR-5b: 16단계로 확장)
-    # PR-3 chunk_transcribe + PR-5 silence_cut 명시화. exclusion / transcribe / tts_plan
-    # 은 PR-5c 에서 완전 제거 예정 (현재는 안전망으로 유지).
+    # 단계별 실행 플래그 (PR-5c-3: exclusion / tts_plan 제거 → 14단계)
+    # PR-2 chunk_intro_credits_ranges 가 exclusion 대체, PR-4 storyline.tts_cues 가 tts_plan 대체.
+    # transcribe 는 PR-5c-4 에서 제거 예정 (자막 매핑은 chunk_transcripts 슬라이스로).
     step_order = [
-        "init",             # 0  -> [1/16]
-        "research",         # 1  -> [2/16]
-        "probe",            # 2  -> [3/16]
-        "proxy",            # 3  -> [4/16]
-        "exclusion",        # 4  -> [5/16]   (PR-5c 제거)
-        "chunk",            # 5  -> [6/16]
-        "character_index",  # 6  -> [7/16]
-        "chunk_transcribe", # 7  -> [8/16]   (PR-3 implicit → 명시화)
-        "gemini",           # 8  -> [9/16]
-        "graph",            # 9  -> [10/16]
-        "story",            # 10 -> [11/16]
-        "silence_cut",      # 11 -> [12/16]  (PR-5 신규)
-        "transcribe",       # 12 -> [13/16]  (PR-5c 제거)
-        "tts_plan",         # 13 -> [14/16]  (PR-5c 제거)
-        "resources",        # 14 -> [15/16]
-        "render",           # 15 -> [16/16]
-        "validate",         # 16 -> 종료
+        "init",             # 0  -> [1/14]
+        "research",         # 1  -> [2/14]
+        "probe",            # 2  -> [3/14]
+        "proxy",            # 3  -> [4/14]
+        "chunk",            # 4  -> [5/14]
+        "character_index",  # 5  -> [6/14]
+        "chunk_transcribe", # 6  -> [7/14]
+        "gemini",           # 7  -> [8/14]
+        "graph",            # 8  -> [9/14]
+        "story",            # 9  -> [10/14]
+        "silence_cut",      # 10 -> [11/14]
+        "transcribe",       # 11 -> [12/14]  (PR-5c-4 제거 예정)
+        "resources",        # 12 -> [13/14]
+        "render",           # 13 -> [14/14]
+        "validate",         # 14 -> 종료
     ]
     # PR-5b: 매직 넘버 → step_idx 매핑. 모든 `start_idx <= N` 비교를 단계명 기반으로 전환.
     step_idx: dict[str, int] = {name: i for i, name in enumerate(step_order)}
@@ -1640,57 +1649,28 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print("\n[4/15] 프록시 영상 이미 존재 — 건너뜀")
 
     # ═══════════════════════════════════════
-    # [5/15] 인트로/크레딧 제외 구간 감지
+    # [chunk] 청크 분할 (PR-5c-3: 5단계 exclusion 제거 — 사용자 명시 skip 인자만 사용)
     # ═══════════════════════════════════════
-    from app.modules.intro_credits_detector import (
-        detect_exclusion_zones, filter_excluded_moments, print_exclusion_summary, ExclusionZones,
+    # 인트로/크레딧 자동 감지는 8단계 chunk_intro_credits_ranges 가 영상 분석으로 직접 처리 (PR-2).
+    # 사용자가 --skip-intro / --skip-credits 로 명시한 시간만 청크 분할에서 잘라낸다.
+    _content_start = float(payload.skip_intro_sec or 0)
+    _content_end = (
+        float(media_info.duration_sec) - float(payload.skip_credits_sec)
+        if payload.skip_credits_sec
+        else float(media_info.duration_sec)
     )
-
-    checkpoint_exclusion = output_dir / "checkpoint_exclusion.json"
-    if checkpoint_exclusion.exists():
-        _ez_data = json.loads(checkpoint_exclusion.read_text(encoding="utf-8"))
-        exclusion_zones = ExclusionZones.from_dict(_ez_data)
-        print(f"\n[5/15] 제외 구간 로드 완료")
-        print_exclusion_summary(exclusion_zones, media_info.duration_sec)
-    else:
-        # SRT가 있으면 자동 감지에 활용
-        _srt_segs_for_detect = None
-        if payload.srt_path and payload.srt_path.exists():
-            try:
-                _srt_segs_for_detect = parse_subtitle(payload.srt_path)
-            except Exception:
-                pass
-
-        exclusion_zones = detect_exclusion_zones(
-            media_info.duration_sec,
-            skip_intro_sec=payload.skip_intro_sec,
-            skip_credits_sec=payload.skip_credits_sec,
-            auto_detect=True,
-            srt_segments=_srt_segs_for_detect,
-        )
-        if exclusion_zones.detection_method != "none":
-            print(f"\n[5/15] 인트로/크레딧 제외 구간 감지")
-            print_exclusion_summary(exclusion_zones, media_info.duration_sec)
-            checkpoint_exclusion.write_text(
-                json.dumps(exclusion_zones.to_dict(), ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-
-    # ═══════════════════════════════════════
-    # [6/15] 청크 분할
-    # ═══════════════════════════════════════
-    print("\n[6/15] 영상 청크 분할 중...")
+    print("\n[chunk] 영상 청크 분할 중...")
     chunks = build_chunks(
         proxy_video_path,
         media_info.duration_sec,
         config.chunk_seconds,
         config.chunk_overlap,
-        content_start_sec=exclusion_zones.intro_end_sec,
-        content_end_sec=exclusion_zones.credits_start_sec,
+        content_start_sec=_content_start,
+        content_end_sec=_content_end,
     )
     print(f"  - 총 {len(chunks)}개 청크 생성")
-    if exclusion_zones.detection_method != "none":
-        print(f"  - 유효 구간: {exclusion_zones.intro_end_sec:.1f}s ~ {exclusion_zones.credits_start_sec:.1f}s")
+    if _content_start > 0 or _content_end < media_info.duration_sec:
+        print(f"  - 사용자 skip 인자 적용: {_content_start:.1f}s ~ {_content_end:.1f}s")
 
     split_chunks = []
     for i, chunk in enumerate(chunks, 1):
@@ -2066,16 +2046,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         all_candidates = gemini_data["all_candidates"]
         chunk_meta_list = gemini_data.get("chunk_meta", [])
 
-    # ── 인트로/크레딧 포스트필터 (안전망) ──
-    if exclusion_zones.detection_method != "none":
-        before_count = len(all_candidates)
-        all_candidates = filter_excluded_moments(all_candidates, exclusion_zones)
-        if before_count != len(all_candidates):
-            print(f"  인트로/크레딧 필터 적용: {before_count} → {len(all_candidates)}개 후보")
-
-    # PR-2: 8단계 청크 분석이 영상에서 직접 식별한 chunk_intro_credits_ranges 기반
-    # 두 번째 필터. exclusion_zones(SRT 키워드/사용자 인자) 가 놓친 청크 중간 인서트
-    # (recap/sponsor/promo 등) 까지 잡아낸다. ranges 비어 있으면 no-op.
+    # PR-2 + PR-5c-3: 인트로/크레딧 필터 — 8단계 청크 분석의 chunk_intro_credits_ranges 만 사용.
+    # (5단계 exclusion + filter_excluded_moments 는 PR-5c-3 에서 제거 — chunk_intro_credits_ranges
+    # 가 영상 분석으로 더 정확하게 동일 일을 한다.)
     all_candidates = _filter_candidates_by_chunk_intro_credits(all_candidates, chunk_meta_list)
 
     # ── 라운드 19B: 청크 오버랩(180s) 중복 candidate dedup (IoU 기반) ──
