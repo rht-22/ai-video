@@ -1011,17 +1011,32 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     work_label = "[with_work]"
     work_type = getattr(d, 'work_type', 'text')
     work_value = getattr(d, 'work_value', inputs.work_title)
+
+    # 비디오 영역(overlay_y ~ overlay_y+scaled_h) 과 겹치지 않도록 클램프.
+    # - 비디오 하단 + 20px 여백 아래로 자동 푸시
+    # - 사용자가 더 아래(큰 y)를 명시했으면 존중
+    # - 캔버스 하단을 벗어나면 (H - 추정 로고높이 - 여백) 으로 끌어올림
+    _gap_below_video = 20
+    _safe_work_top = overlay_y + scaled_h + _gap_below_video
+    work_y_final = max(d.work_title_y, _safe_work_top)
     if work_type == "image" and work_value:
+        logo_w = getattr(d, 'work_image_width', 350)
+        # height 는 -1 자동이라 사전 측정 불가 → 보수적 추정 = logo_w / 2
+        _estimated_logo_h = max(60, int(logo_w * 0.5))
+        if work_y_final + _estimated_logo_h > H - 20:
+            work_y_final = max(_safe_work_top, H - _estimated_logo_h - 20)
         logo_path_str = str(Path(work_value).resolve()).replace("\\", "/").replace(":", "\\:")
-        logo_w = getattr(d, 'work_image_width', 350)  # 라운드 23: fallback도 DesignConfig default와 동기화
-        filters.append(f"movie='{logo_path_str}',scale={logo_w}:-1[logo];{last_v_label}[logo]overlay=(W-w)/2:{d.work_title_y}{work_label}")
+        filters.append(f"movie='{logo_path_str}',scale={logo_w}:-1[logo];{last_v_label}[logo]overlay=(W-w)/2:{work_y_final}{work_label}")
     else:
         raw_work = work_value if work_value else inputs.work_title
         # 레터스페이싱 적용: 글자 사이에 공백 삽입
         if getattr(d, 'work_letter_spacing', False):
             raw_work = " ".join(raw_work)
+        _estimated_text_h = int(d.work_font_size * 1.4)
+        if work_y_final + _estimated_text_h > H - 20:
+            work_y_final = max(_safe_work_top, H - _estimated_text_h - 20)
         escaped_val = _escape_text_for_drawtext(raw_work)
-        filters.append(f"{last_v_label}drawtext=fontfile='{font_arg}':text='{escaped_val}':fontcolor={d.work_color}:fontsize={d.work_font_size}:x=(w-text_w)/2:y={d.work_title_y}{work_label}")
+        filters.append(f"{last_v_label}drawtext=fontfile='{font_arg}':text='{escaped_val}':fontcolor={d.work_color}:fontsize={d.work_font_size}:x=(w-text_w)/2:y={work_y_final}{work_label}")
 
   
     # [7] 자막(ASS) 적용

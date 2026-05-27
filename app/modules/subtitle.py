@@ -25,6 +25,36 @@ def _split_text_to_lines(text: str, max_chars: int = 15) -> list[str]:
     return lines if lines else [text]
 
 
+# 화자 prefix(예: "의주: ", "Soyeon: ") — ASS 출력 직전에 제거.
+# parse_srt 단계의 "(이름) → 이름:" 변환은 Gemini 발화자 인식용으로 유지하되, 화면에는 노출되지 않게 한다.
+# merge_subtitle_segments 로 여러 cue 가 합쳐지면 텍스트 중간에 다른 화자 표기가 끼어들 수 있어
+# "문장 시작" 또는 "공백 직후" 의 짧은 단어(<=5자) + 콜론 패턴은 모두 화자로 간주해 제거한다.
+# 길이를 5자로 제한해 일반 한국어 문장(8자 이상 어절 + 콜론)을 잘못 제거하지 않게 한다.
+_SPEAKER_PREFIX_RE = re.compile(
+    r"(?:^|(?<=\s))(?:[가-힣][가-힣0-9]{0,4}|[A-Za-z][A-Za-z0-9]{0,9})\s*[:：]\s*"
+)
+
+
+def _strip_speaker_prefix(text: str) -> str:
+    if not text:
+        return text
+    return _SPEAKER_PREFIX_RE.sub("", text)
+
+
+def _wrap_for_ass(text: str, max_chars: int = 15, max_lines: int = 2) -> str:
+    """텍스트를 max_chars 단위로 분할한 뒤 ASS \\N 으로 한 화면에 묶는다.
+
+    줄 수가 max_lines 를 넘으면 max_chars 한도를 늘려 균등 재분할(첫 max_lines 줄만 사용).
+    이렇게 하면 한 segment 가 시간 균등 분할로 깜빡이지 않고 통째로 한 화면에 표시된다.
+    """
+    lines = _split_text_to_lines(text, max_chars=max_chars)
+    if len(lines) > max_lines:
+        # 균등하게 max_lines 줄로 다시 자름
+        rebalanced_chars = max(max_chars, (len(text) + max_lines - 1) // max_lines + 2)
+        lines = _split_text_to_lines(text, max_chars=rebalanced_chars)[:max_lines]
+    return "\\N".join(lines)
+
+
 def parse_srt(srt_path: Path) -> list[SpeechSegment]:
     """SRT 파일을 SpeechSegment 리스트로 변환합니다.
 
@@ -326,38 +356,32 @@ def build_ass_from_segments(
     for idx, seg in enumerate(segments):
         start_str = _format_time(seg.start_sec)
         end_str = _format_time(seg.end_sec)
-        
-        # 1. 텍스트 정리 (줄바꿈 없이 1줄로 표시)
-        raw_text = seg.text.replace("\n", " ").strip()
+
+        # 1. 텍스트 정리 (화자 prefix 제거 + 줄바꿈 → 공백)
+        raw_text = _strip_speaker_prefix(seg.text.replace("\n", " ").strip())
+        if not raw_text:
+            continue
         text = raw_text
 
         # 2. 터미널 출력
         print(f"[{idx+1}] {start_str} ~ {end_str} | {text}")
 
-        # 3. 텍스트 분할 → 순차 이벤트 (1줄씩 표시)
-        lines = _split_text_to_lines(text, max_chars=15)
-        total_dur = seg.end_sec - seg.start_sec
-        line_dur = total_dur / len(lines) if lines else total_dur
-        for i, line in enumerate(lines):
-            s = seg.start_sec + i * line_dur
-            e = s + line_dur
-            clip_events_list.append(
-                f"Dialogue: 0,{_format_time(s)},{_format_time(e)},Default,,,,,, {line}\n"
-            )
+        # 3. 한 segment = 한 화면. \N 으로 묶어 시간 균등 분할 깜빡임 제거.
+        joined = _wrap_for_ass(text, max_chars=15, max_lines=2)
+        clip_events_list.append(
+            f"Dialogue: 0,{start_str},{end_str},Default,,,,,, {joined}\n"
+        )
 
     events = "".join(clip_events_list)
 
-    # TTS 자막 이벤트 (TtsLine 스타일) — 분할 적용
+    # TTS 자막 이벤트 (TtsLine 스타일) — 동시 표시 적용
     if tts_segments and tts_style:
         for seg in tts_segments:
-            text = seg.text.replace("\n", " ").strip()
-            lines = _split_text_to_lines(text, max_chars=15)
-            total_dur = seg.end_sec - seg.start_sec
-            line_dur = total_dur / len(lines) if lines else total_dur
-            for i, line in enumerate(lines):
-                s = seg.start_sec + i * line_dur
-                e = s + line_dur
-                events += f"Dialogue: 0,{_format_time(s)},{_format_time(e)},TtsLine,,,,,, {line}\n"
+            text = _strip_speaker_prefix(seg.text.replace("\n", " ").strip())
+            if not text:
+                continue
+            joined = _wrap_for_ass(text, max_chars=15, max_lines=2)
+            events += f"Dialogue: 0,{_format_time(seg.start_sec)},{_format_time(seg.end_sec)},TtsLine,,,,,, {joined}\n"
 
     # 4. 파일 저장
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -377,14 +401,11 @@ def build_tts_ass(
     header = _ass_header(style)
     events = ""
     for seg in tts_segments:
-        text = seg.text.replace("\n", " ").strip()
-        lines = _split_text_to_lines(text, max_chars=15)
-        total_dur = seg.end_sec - seg.start_sec
-        line_dur = total_dur / len(lines) if lines else total_dur
-        for i, line in enumerate(lines):
-            s = seg.start_sec + i * line_dur
-            e = s + line_dur
-            events += f"Dialogue: 0,{_format_time(s)},{_format_time(e)},Default,,,,,, {line}\n"
+        text = _strip_speaker_prefix(seg.text.replace("\n", " ").strip())
+        if not text:
+            continue
+        joined = _wrap_for_ass(text, max_chars=15, max_lines=2)
+        events += f"Dialogue: 0,{_format_time(seg.start_sec)},{_format_time(seg.end_sec)},Default,,,,,, {joined}\n"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes((header + events).encode("utf-8-sig"))
 
@@ -597,6 +618,19 @@ def merge_subtitle_segments(
         text=segs[0].text.replace("\n", " ").strip(),
     )
 
+    # 한국어 문장 종결 신호 — 이게 없으면 cur 가 문장 중간이라 다음과 더 적극 merge
+    _sentence_end_chars = set(".!?…\"」』)")
+    _sentence_end_endings = ("다", "요", "죠", "네", "까", "야", "어", "지", "군", "니", "오")
+
+    def _is_sentence_complete(t: str) -> bool:
+        s = t.rstrip()
+        if not s:
+            return True
+        if s[-1] in _sentence_end_chars:
+            return True
+        # 한국어 종결어미로 끝나면 문장 완결로 간주
+        return any(s.endswith(e) for e in _sentence_end_endings)
+
     for seg in segs[1:]:
         seg_text = seg.text.replace("\n", " ").strip()
         if not seg_text:
@@ -606,14 +640,19 @@ def merge_subtitle_segments(
         combined_text = (cur.text + " " + seg_text).strip()
         combined_dur = max(seg.end_sec, cur.end_sec) - cur.start_sec
 
+        # cur 가 문장 중간이면 max_total_chars 한도를 30% 완화해 문장 끊김 방지.
+        effective_max_chars = max_total_chars
+        if not _is_sentence_complete(cur.text):
+            effective_max_chars = int(max_total_chars * 1.3)
+
         should_merge = (
             gap <= max_gap_sec
-            and len(combined_text) <= max_total_chars
+            and len(combined_text) <= effective_max_chars
             and combined_dur <= max_duration_sec
         )
         # 너무 짧은 자막은 되도록 합치기(가독성/렌더 부담 개선)
         if (cur.end_sec - cur.start_sec) < min_duration_sec and gap <= max_gap_sec:
-            should_merge = should_merge or len(combined_text) <= max_total_chars
+            should_merge = should_merge or len(combined_text) <= effective_max_chars
 
         if should_merge:
             cur = SpeechSegment(
@@ -673,24 +712,27 @@ def _ass_header(style: SubtitleStyle, tts_style: SubtitleStyle | None = None) ->
 def _ass_line(index: int, clip: StoryClip, style: SubtitleStyle) -> str:
     start = _format_time(clip.start_sec)
     end = _format_time(clip.end_sec)
-    text = clip.subtitle.replace("\n", " ")
-    return f"Dialogue: 0,{start},{end},Default,,,,,, {text}\n"
+    text = _strip_speaker_prefix(clip.subtitle.replace("\n", " "))
+    joined = _wrap_for_ass(text, max_chars=15, max_lines=2)
+    return f"Dialogue: 0,{start},{end},Default,,,,,, {joined}\n"
 
 
 def _ass_line_original(segment: SpeechSegment, style: SubtitleStyle) -> str:
     """원본 음성 자막 라인 생성 (레이어 1 사용)"""
     start = _format_time(segment.start_sec)
     end = _format_time(segment.end_sec)
-    text = segment.text.replace("\n", " ")
+    text = _strip_speaker_prefix(segment.text.replace("\n", " "))
+    joined = _wrap_for_ass(text, max_chars=15, max_lines=2)
     # 원본 자막은 레이어 1에 배치하고 약간 다른 스타일 적용 가능
-    return f"Dialogue: 1,{start},{end},Default,,,,,, {text}\n"
+    return f"Dialogue: 1,{start},{end},Default,,,,,, {joined}\n"
 
 
 def _ass_line_segment(segment: SpeechSegment) -> str:
     start = _format_time(segment.start_sec)
     end = _format_time(segment.end_sec)
-    text = segment.text.replace("\n", " ")
-    return f"Dialogue: 0,{start},{end},Default,,,,,, {text}\n"
+    text = _strip_speaker_prefix(segment.text.replace("\n", " "))
+    joined = _wrap_for_ass(text, max_chars=15, max_lines=2)
+    return f"Dialogue: 0,{start},{end},Default,,,,,, {joined}\n"
 
 
 def _format_time(seconds: float) -> str:
