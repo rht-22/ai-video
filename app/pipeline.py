@@ -910,7 +910,10 @@ def _fit_storyline_to_duration(
 
     return out, "; ".join(msgs)
 from app.modules.chunker import build_chunks, split_video_chunk
-from app.modules.gemini_client import load_gemini_client
+from app.modules.gemini_client import (
+    _normalize_storyline_tts_cues,
+    load_gemini_client,
+)
 from app.modules.media_probe import probe_media
 from app.modules.moment_ranker import assign_sequence_ids
 from app.modules.reframe import build_crop_timeline
@@ -936,7 +939,12 @@ from app.modules.work_researcher import research_work, CharacterInfo
 from app.modules.validator import validate_output
 from app.modules.ffmpeg_utils import find_ffmpeg_command
 from types import SimpleNamespace
-from app.modules.silence_cutter import cut_silence_from_clips, flatten_to_clips, print_silence_cut_summary
+from app.modules.silence_cutter import (
+    cut_silence_from_clips,
+    cut_silence_with_story_filter,
+    flatten_to_clips,
+    print_silence_cut_summary,
+)
 
 
 def _compute_subtitle_margin_v(
@@ -2565,7 +2573,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         merged_segments = merge_subtitle_segments(
             remapped,
             max_gap_sec=0.25,
-            max_total_chars=int(config.subtitle_max_chars_per_line * config.subtitle_max_lines),
+            # 라운드 24: 15*2=30 → 40. 한국어 한 문장 평균 길이를 더 잘 묶어
+            # build_ass 의 \N 동시 표시(2줄)로 깨끗하게 한 화면 표현되도록 한다.
+            max_total_chars=40,
         )
         for seg in merged_segments:
             seg_dict = {
@@ -2659,10 +2669,15 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         # 얼굴 크롭 타임라인
         crop_map = {}
         print(f"  크롭 타임라인 생성 중... ({len(clips)}개 클립)")
+        # 라운드 24: 컷 경계 위치 점프 완화. 직전 클립의 마지막 keyframe(x,y)과 타겟 인물을 다음 호출에 sticky anchor 로 전달.
+        prev_anchor_x: float | None = None
+        prev_anchor_y: float | None = None
+        prev_focus_char: str | None = None
         for idx, clip in enumerate(clips):
             crop_path = output_dir / f"crop_{clip.role}_{idx}.json"
             # 라운드 19A: ≥2 character_focus + face_identifier/character_index 가능하면 멀티 크롭 (와이드 프레이밍)
             multi_targets = list(clip.character_focus) if (clip.character_focus and len(clip.character_focus) >= 2) else None
+            current_target_char: str | None = None
             if multi_targets and (face_identifier or character_appearances) and payload.design.enable_face_recognition:
                 from app.modules.reframe import build_multi_face_crop_timeline
                 print(f"    [multi-crop] clip {idx}: {multi_targets} 와이드 프레이밍")
@@ -2678,6 +2693,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     face_identifier=face_identifier,
                     character_index=character_appearances,
                 )
+                # multi 분기는 sticky 미적용 (MVP) — anchor 갱신만
+                current_target_char = multi_targets[0] if multi_targets else None
             else:
                 # Phase 12: character_focus 첫 번째 인물을 타겟으로
                 target_char = clip.character_focus[0] if clip.character_focus and face_identifier else None
@@ -2693,8 +2710,21 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     target_character=target_char,
                     face_identifier=face_identifier,
                     character_index=character_appearances,
+                    initial_x=prev_anchor_x,
+                    initial_y=prev_anchor_y,
+                    prev_target_character=prev_focus_char,
                 )
+                current_target_char = target_char
             crop_map[f"{clip.role}_{idx}"] = crop_path
+            # 라운드 24: 방금 생성된 keyframe 의 마지막 위치를 다음 클립에 전달
+            try:
+                _kfs = json.loads(crop_path.read_text(encoding="utf-8"))
+                if isinstance(_kfs, list) and _kfs:
+                    prev_anchor_x = float(_kfs[-1].get("x_center", prev_anchor_x or 0.0))
+                    prev_anchor_y = float(_kfs[-1].get("y_center", prev_anchor_y or 0.0))
+                    prev_focus_char = current_target_char
+            except (json.JSONDecodeError, OSError, KeyError, ValueError):
+                pass  # 다음 클립은 sticky 없이 진행
             if (idx + 1) % 5 == 0 or (idx + 1) == len(clips):
                 print(f"    진행 중... ({idx + 1}/{len(clips)})")
 

@@ -29,6 +29,9 @@ def build_crop_timeline(
     target_character: str | None = None,
     face_identifier: object | None = None,
     character_index: list[dict] | None = None,
+    initial_x: float | None = None,
+    initial_y: float | None = None,
+    prev_target_character: str | None = None,
 ) -> list[CropKeyframe]:
     if _has_cv2():
         keyframes = _detect_faces(
@@ -37,6 +40,9 @@ def build_crop_timeline(
             target_character=target_character,
             face_identifier=face_identifier,
             character_index=character_index,
+            initial_x=initial_x,
+            initial_y=initial_y,
+            prev_target_character=prev_target_character,
         )
     else:
         keyframes = _center_crop(width, height, sample_interval_sec)
@@ -308,6 +314,9 @@ def _detect_faces(
     target_character: str | None = None,
     face_identifier: object | None = None,
     character_index: list[dict] | None = None,
+    initial_x: float | None = None,
+    initial_y: float | None = None,
+    prev_target_character: str | None = None,
 ) -> list[CropKeyframe]:
     import cv2
     import numpy as np
@@ -351,11 +360,23 @@ def _detect_faces(
     detector_profile = cv2.CascadeClassifier(cascade_profile_tmp)
 
     keyframes = []
-    smooth_x, smooth_y = float(width / 2), float(height / 2)
+    # 라운드 24: 직전 클립의 마지막 위치를 초기값으로 받아 컷 경계 점프 완화.
+    smooth_x = float(initial_x) if initial_x is not None else float(width / 2)
+    smooth_y = float(initial_y) if initial_y is not None else float(height / 2)
     crop_w, crop_h = _portrait_crop_size(width, height)
 
     # EMA 스무딩 계수 (0에 가까울수록 부드럽고, 1에 가까울수록 즉각 반응)
     ema_alpha = 0.12  # 0.25→0.12: 작은 변동을 더 부드럽게 흡수해 출렁임 감소
+    # 라운드 24: 직전 클립과 동일 인물이 이어지면 초반 ~1초간 매우 sticky 하게 위치 유지.
+    same_character_continuation = (
+        target_character is not None
+        and prev_target_character is not None
+        and target_character == prev_target_character
+        and initial_x is not None
+        and initial_y is not None
+    )
+    sticky_alpha = 0.03
+    sticky_steps_remaining = 4 if same_character_continuation else 0
     # dead zone: 변화량이 화면 폭/높이의 5% 이내면 무시 (정적 장면 미세 흔들림 제거)
     dead_zone_ratio = 0.05
     prev_gray = None  # Phase 11: mouth-motion 계산용 직전 프레임
@@ -428,10 +449,14 @@ def _detect_faces(
             # EMA + dead zone: 작은 변동(±5% 이내)은 무시, 큰 변동만 부드럽게 추적
             dz_x = gray.shape[1] * dead_zone_ratio
             dz_y = gray.shape[0] * dead_zone_ratio
+            # 라운드 24: 같은 인물이 직전 클립에서 이어졌으면 초반 ~4 sample 은 sticky alpha 적용.
+            effective_alpha = sticky_alpha if sticky_steps_remaining > 0 else ema_alpha
+            if sticky_steps_remaining > 0:
+                sticky_steps_remaining -= 1
             if abs(target_x - smooth_x) > dz_x:
-                smooth_x = ema_alpha * target_x + (1 - ema_alpha) * smooth_x
+                smooth_x = effective_alpha * target_x + (1 - effective_alpha) * smooth_x
             if abs(target_y - smooth_y) > dz_y:
-                smooth_y = ema_alpha * target_y + (1 - ema_alpha) * smooth_y
+                smooth_y = effective_alpha * target_y + (1 - effective_alpha) * smooth_y
         # 얼굴 못 찾으면 smooth_x/y 유지 (자연스럽게 정체)
         prev_gray = gray
 
