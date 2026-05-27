@@ -978,16 +978,25 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         cumulative_y = d.title_y
     # 라운드 7-A: title_lines가 (orig_line_idx, text) 튜플 리스트.
     # 색상·폰트는 orig_idx로 lookup → wrap이 일어나도 line1 모든 줄은 line1 색/폰트, line2도 동일.
-    # 라운드 22: 13자까지 풀사이즈, 14~20자 sqrt 비례 축소.
-    # - sqrt(13/chars) 비례 — 선형(base*13/chars)는 너무 가파름.
-    # - 14자: ×0.964, 17자: ×0.875, 20자: ×0.806 → canvas 1080px 가로 잘림 방지.
-    # - 21자+ pipeline에서 LLM 재작성 또는 절단되므로 20자에서 cap.
+    # 13자까지 풀사이즈, 14~20자 명시적 lookup으로 더 강하게 축소.
+    # line2 base=90px 기준 캔버스(1080-120 padding=960px) 가로 잘림 방지를 위해
+    # 종전 sqrt 곡선보다 한 단계씩 낮춘 값으로 재조정.
+    # 21자+ pipeline에서 LLM 재작성 또는 절단되므로 20자에서 cap.
+    _TITLE_LENGTH_SCALE = {
+        14: 0.90,
+        15: 0.83,
+        16: 0.77,
+        17: 0.72,
+        18: 0.67,
+        19: 0.63,
+        20: 0.60,
+    }
+
     def _scale_font_for_length(base_size: int, char_count: int) -> int:
-        import math
         if char_count <= 13:
             return base_size
         cc = min(char_count, 20)
-        scale = math.sqrt(13.0 / cc)
+        scale = _TITLE_LENGTH_SCALE[cc]
         return max(1, int(round(base_size * scale)))
 
     for visual_idx, (orig_idx, raw_line) in enumerate(title_lines):
