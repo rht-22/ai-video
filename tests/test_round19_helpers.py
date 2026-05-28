@@ -253,61 +253,41 @@ def test_validate_rejects_invalid_durations():
     assert not is_valid
 
 
-# ── 라운드 21: 역할별(role-aware) trim 테스트 ──
+# ── 60초 초과 단축은 reduce 단계로 이관 → _fit_storyline_to_duration 은 더 이상 단축하지 않음 ──
 
-def test_role_aware_trim_payoff_keeps_end():
-    """payoff: 끝 보존, 시작에서 자름 (reveal/punchline 보존)."""
-    # 80s 합계 → 60s로 단축. clips: hook 30s + payoff 50s.
+def test_over_max_no_longer_trimmed_multi_clip():
+    """합계 80s(hook+payoff)여도 _fit_storyline_to_duration 은 손대지 않는다 (reduce 단계 담당)."""
     clips = [
         _mk_clip(0.0, 30.0, role="hook"),
         _mk_clip(100.0, 150.0, role="payoff"),
     ]
-    # candidates_lookup 빈 dict (build 제거 로직 안 탐 → 비례 trim 분기로 직접 들어감)
     out, msg = _fit_storyline_to_duration(clips, {}, target_min=40.0, target_max=60.0)
-    # ratio = 60/80 = 0.75, hook_new=22.5, payoff_new=37.5
-    # hook(end-trim): start=0, end=22.5
-    # payoff(start-trim): start=100+12.5=112.5, end=150
-    assert abs(out[0].start_sec - 0.0) < 0.01
-    assert abs(out[0].end_sec - 22.5) < 0.01
-    assert abs(out[1].start_sec - 112.5) < 0.01
-    assert abs(out[1].end_sec - 150.0) < 0.01
-    assert "역할별 trim" in msg
-    assert "payoff(start)" in msg
-    assert "hook(end)" in msg
+    assert len(out) == 2
+    assert out[0].start_sec == 0.0 and out[0].end_sec == 30.0
+    assert out[1].start_sec == 100.0 and out[1].end_sec == 150.0
+    assert msg == ""
 
 
-def test_role_aware_trim_with_build_in_pipeline():
-    """hook + build + payoff 시나리오: 현재 로직은 build 먼저 제거 후 비례 trim.
-
-    build branch는 build가 통째로 제거된 후 hook+payoff만 남고 그 합이 여전히 target_max를
-    초과하는 케이스에서만 hook/payoff로 적용. build branch 자체는 build가 살아 있는 채
-    role-aware 단계에 도달하는 경우의 defensive code.
-    """
+def test_over_max_no_longer_removes_build():
+    """hook+build+payoff 합계 130s 여도 build 제거/trim 없이 그대로 통과."""
     clips = [
-        _mk_clip(0.0, 50.0, role="hook"),  # 50s
-        _mk_clip(100.0, 130.0, role="build"),  # 30s
-        _mk_clip(200.0, 250.0, role="payoff"),  # 50s. 합계 130s
+        _mk_clip(0.0, 50.0, role="hook"),
+        _mk_clip(100.0, 130.0, role="build"),
+        _mk_clip(200.0, 250.0, role="payoff"),
     ]
     out, msg = _fit_storyline_to_duration(clips, {}, target_min=40.0, target_max=60.0)
-    # build 제거됨 → hook 50s + payoff 50s = 100s, 여전히 > 60
-    # ratio = 60/100 = 0.6, hook→30s (end-trim), payoff→30s (start-trim)
-    assert len(out) == 2
-    assert out[0].role == "hook"
-    assert out[1].role == "payoff"
-    assert abs(out[0].start_sec - 0.0) < 0.01
-    assert abs(out[0].end_sec - 30.0) < 0.01
-    assert abs(out[1].start_sec - 220.0) < 0.01
-    assert abs(out[1].end_sec - 250.0) < 0.01
-    assert "build" in msg or "hook(end)" in msg or "payoff(start)" in msg
+    assert len(out) == 3
+    assert [c.role for c in out] == ["hook", "build", "payoff"]
+    assert sum(c.end_sec - c.start_sec for c in out) == 130.0
+    assert msg == ""
 
 
-def test_role_aware_trim_hook_keeps_start():
-    """hook: 시작 보존, 끝에서 자름 (후킹 모먼트 보존)."""
+def test_over_max_single_clip_unchanged():
+    """단일 hook 80s 도 단축하지 않음."""
     clips = [_mk_clip(0.0, 80.0, role="hook")]
     out, msg = _fit_storyline_to_duration(clips, {}, target_min=40.0, target_max=60.0)
-    assert abs(out[0].start_sec - 0.0) < 0.01
-    assert abs(out[0].end_sec - 60.0) < 0.01
-    assert "hook(end)" in msg
+    assert out[0].start_sec == 0.0 and out[0].end_sec == 80.0
+    assert msg == ""
 
 
 def test_role_aware_trim_no_change_when_under_max():

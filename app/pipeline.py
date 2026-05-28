@@ -497,6 +497,177 @@ def _shift_cues_by_silence_cut(
     return out
 
 
+def _shift_cues_by_draft_cuts(cues: list[dict], cut_segments: list[dict]) -> list[dict]:
+    """reduce 전용 — 드래프트(편집) 타임라인에서 제거된 구간만큼 cue 시간을 보정.
+
+    cue 시간(편집 타임라인 절대)과 cut_segments(드래프트=동일 편집 타임라인)가 같은 좌표계이므로,
+    각 cue 시점 *이전*에 제거된 누적 길이를 차감한다. cue 의 중심이 제거 구간 안에 들어가면
+    (=내레이션 대상 장면 자체가 잘림) 그 cue 는 버린다.
+
+    _shift_cues_by_silence_cut 은 clip *경계* 단위라 단일 clip 내부 컷을 반영 못 해서 reduce 에는
+    부적합하다. 이 함수는 컷 구간 단위로 정확히 보정한다.
+    """
+    if not cues:
+        return list(cues or [])
+    cuts = sorted((float(c.get("start_sec", 0.0)), float(c.get("end_sec", 0.0))) for c in (cut_segments or []))
+    cuts = [(s, e) for s, e in cuts if e > s]
+    if not cuts:
+        return list(cues)
+
+    def removed_before(t: float) -> float:
+        rm = 0.0
+        for cs, ce in cuts:
+            if ce <= t:
+                rm += ce - cs
+            elif cs < t:  # t 가 이 컷 내부
+                rm += t - cs
+            else:  # cs >= t (정렬됨) → 이후 컷 영향 없음
+                break
+        return rm
+
+    out: list[dict] = []
+    for cue in cues:
+        s = float(cue.get("start_sec", 0.0) or 0.0)
+        e = float(cue.get("end_sec", 0.0) or 0.0)
+        mid = (s + e) / 2.0
+        if any(cs <= mid <= ce for cs, ce in cuts):
+            continue  # 내레이션 대상 장면이 잘림 → cue 제거
+        nc = dict(cue)
+        nc["start_sec"] = s - removed_before(s)
+        nc["end_sec"] = e - removed_before(e)
+        out.append(nc)
+    return out
+
+
+def _build_reduce_clip_summaries(clips: list) -> list[str]:
+    """reduce 단계용 — clips 를 드래프트(이어붙인) 타임라인에 매핑한 요약 라인 목록."""
+    summaries: list[str] = []
+    off = 0.0
+    for idx, c in enumerate(clips):
+        dur = float(c.end_sec - c.start_sec)
+        sub = (getattr(c, "subtitle", "") or getattr(c, "tts_draft", "") or "").strip().replace("\n", " ")
+        if len(sub) > 60:
+            sub = sub[:60] + "…"
+        focus = ",".join(getattr(c, "character_focus", ()) or ())
+        note = (getattr(c, "pacing_note", "") or "").strip()
+        line = f"[{idx}] {off:.1f}~{off + dur:.1f}s · {c.role}"
+        if sub:
+            line += f' · "{sub}"'
+        if focus:
+            line += f" · 인물:{focus}"
+        if note:
+            line += f" · {note}"
+        summaries.append(line)
+        off += dur
+    return summaries
+
+
+def _reduce_variant_under_limit(
+    variant_clips: list,
+    storyline_title: str,
+    cues: list[dict],
+    proxy_path,
+    gemini,
+    work_context: str | None,
+    target_max: float,
+    min_dur: float,
+    output_dir,
+    tag: str = "",
+    max_iters: int = 3,
+    headroom: float = 2.0,
+) -> tuple[list, list[dict]]:
+    """60초 초과 variant 를 '드래프트 렌더 → Gemini 재분석 → 우선순위 컷' 으로 단축.
+
+    내용 흐름을 유지하며 전체에서 빼도 될 구간을 Gemini 가 우선순위로 매기고, 호출부는
+    60초 이하가 되는 *최소한* 만 우선순위 순으로 적용한다 (콘텐츠 최대 보존).
+
+    Returns: (reduced_clips, shifted_cues). best-effort — 못 줄이면 가능한 만큼만.
+    """
+    clips = list(variant_clips)
+    cur_cues = list(cues or [])
+    # ≤target_max 가 되도록 약간의 헤드룸을 두고 단축 (다운스트림 gap-fill 흡수용)
+    soft_target = max(min_dur, float(target_max) - headroom)
+
+    def total(cs):
+        return sum(float(c.end_sec - c.start_sec) for c in cs)
+
+    if proxy_path is None or not Path(proxy_path).exists():
+        print(f"  [reduce {tag}] 프록시 영상 없음 — 단축 건너뜀")
+        return clips, cur_cues
+
+    for it in range(max_iters):
+        cur_total = total(clips)
+        if cur_total <= float(target_max):
+            break
+
+        draft_path = output_dir / f"_reduce_draft_{tag}_{it}.mp4"
+        try:
+            render_rough_concat(Path(proxy_path), clips, draft_path)
+        except Exception as e:
+            print(f"  [reduce {tag}] 드래프트 렌더 실패 — 단축 중단: {e}")
+            break
+
+        summaries = _build_reduce_clip_summaries(clips)
+        try:
+            cut_segments = gemini.find_cuttable_segments(
+                draft_path, cur_total, float(target_max),
+                storyline_title=storyline_title,
+                clip_summaries=summaries,
+                work_context=work_context,
+            )
+        except Exception as e:
+            print(f"  [reduce {tag}] Gemini 컷 분석 실패 — 중단: {e}")
+            cut_segments = []
+        finally:
+            try:
+                draft_path.unlink()
+            except OSError:
+                pass
+
+        if not cut_segments:
+            print(f"  [reduce {tag}] 컷 후보 없음 — best-effort 종료 ({cur_total:.1f}s)")
+            break
+
+        # 우선순위 오름차순(=먼저 제거해도 안전), 동순위는 긴 구간 먼저
+        cut_segments.sort(key=lambda x: (x.get("priority", 9999), -(x["end_sec"] - x["start_sec"])))
+        needed = cur_total - soft_target  # soft_target 까지 줄일 만큼만
+
+        selected: list[dict] = []
+        removed = 0.0
+        for seg in cut_segments:
+            if removed >= needed:
+                break
+            selected.append(seg)
+            removed += seg["end_sec"] - seg["start_sec"]
+
+        results = map_draft_cuts_to_results(clips, selected)
+        new_clips = flatten_to_clips(results)
+        new_total = total(new_clips)
+        # min_dur 안전장치: 너무 줄면 가장 보존우선(마지막) 컷부터 제외
+        while new_total < float(min_dur) and selected:
+            selected.pop()
+            results = map_draft_cuts_to_results(clips, selected)
+            new_clips = flatten_to_clips(results)
+            new_total = total(new_clips)
+
+        if not selected or not new_clips:
+            print(f"  [reduce {tag}] min_dur 보호로 컷 미적용 — 종료 ({cur_total:.1f}s)")
+            break
+
+        # cue 시간 보정: 드래프트 타임라인 컷 구간 기준 (단일 clip 내부 컷도 정확히 반영)
+        cur_cues = _shift_cues_by_draft_cuts(cur_cues, selected)
+        print(
+            f"  [reduce {tag}] iter{it + 1}: {cur_total:.1f}s → {new_total:.1f}s "
+            f"({len(selected)}개 컷, {cur_total - new_total:.1f}s 제거, cue {len(cur_cues)}개)"
+        )
+        if cur_total - new_total < 0.5:
+            clips = new_clips
+            break  # 진척 없음 → 종료
+        clips = new_clips
+
+    return clips, cur_cues
+
+
 # ─────────────────────────────────────────────────────────────
 # PR-3: chunk_transcribe — 청크별 transcript segments 선행 생성
 # ─────────────────────────────────────────────────────────────
@@ -723,14 +894,13 @@ def _fit_storyline_to_duration(
     target_min: float = 40.0,
     target_max: float = 60.0,
 ) -> tuple[list, str]:
-    """라운드 11: storyline clips 합계 길이를 target 범위로 단축/확장 자동 보정.
+    """storyline clips 합계 길이를 target 범위로 *확장만* 보정.
 
     동작:
-    - 합계 ≤ target_max 그리고 ≥ target_min → 변경 없음
-    - 합계 > target_max → 점수 낮은 build부터 제거. build 모두 제거 후에도 초과면
-      가장 긴 clip의 끝을 잘라 단축. hook/payoff는 가능한 보존.
+    - 합계 ≥ target_min → 변경 없음 (target_max 초과도 손대지 않음).
+      60초 초과 단축은 reduce 단계(드래프트 렌더 → Gemini 재분석 → 흐름 보존 컷)가 담당한다.
     - 합계 < target_min → 마지막 clip의 끝을 같은 candidate.end_sec까지 확장 (있으면).
-      그래도 부족하면 워닝 메시지 (호출부에서 reject 또는 다음 storyline 시도).
+      그래도 부족하면 첫 clip 시작을 역방향 확장. 한계 도달 시 워닝 메시지.
 
     반환: (조정된 clips, 처방 메시지) — 메시지가 비어 있으면 변경 없음.
     """
@@ -745,111 +915,9 @@ def _fit_storyline_to_duration(
     cur_total = total_dur(out)
     orig_total = cur_total
 
-    # 1) 단축: 합계 > target_max
-    if cur_total > target_max:
-        # build 클립만 추출, score 오름차순 (낮은 점수 먼저 제거 후보)
-        def build_score(c):
-            cand = candidates_lookup.get((c.chunk_index, c.candidate_index)) if candidates_lookup else None
-            if cand is None:
-                return 0.0
-            return float(cand.get("viral_score", cand.get("score", 0.0)) or 0.0)
-
-        # build 인덱스 + score 페어
-        build_indices = [(i, build_score(c)) for i, c in enumerate(out) if c.role == "build"]
-        # 점수 낮은 순으로 정렬 — 낮은 점수부터 제거 후보
-        build_indices.sort(key=lambda x: x[1])
-
-        removed_count = 0
-        # 점수 낮은 build부터 1개씩 제거하며 target_max 이하로
-        # 단, 다음 제거가 target_min 미만으로 떨어뜨리면 *부분 단축*으로 전환
-        partial_trim = False
-        while cur_total > target_max and build_indices:
-            idx, _score = build_indices[0]
-            build_clip = out[idx]
-            build_dur = build_clip.end_sec - build_clip.start_sec
-            proposed_total = cur_total - build_dur
-            if proposed_total < target_min:
-                # 통째로 제거 시 너무 짧아짐 → 이 build의 끝만 잘라 target_max에 맞춤
-                cut_amount = cur_total - target_max
-                if cut_amount < build_dur:
-                    new_end = build_clip.end_sec - cut_amount
-                    out[idx] = StoryClip(
-                        role=build_clip.role,
-                        start_sec=build_clip.start_sec,
-                        end_sec=new_end,
-                        subtitle=build_clip.subtitle,
-                        use_original_audio=build_clip.use_original_audio,
-                        pacing_note=build_clip.pacing_note,
-                        chunk_index=build_clip.chunk_index,
-                        candidate_index=build_clip.candidate_index,
-                        character_focus=build_clip.character_focus,
-                        tts_draft=build_clip.tts_draft,
-                    )
-                    cur_total = total_dur(out)
-                    partial_trim = True
-                break  # 더 이상 build 제거 안 함
-            # 통째로 제거
-            build_indices.pop(0)
-            out = [c for i, c in enumerate(out) if i != idx]
-            build_indices = [(i if i < idx else i - 1, s) for i, s in build_indices]
-            removed_count += 1
-            cur_total = total_dur(out)
-        if removed_count or partial_trim:
-            parts = []
-            if removed_count:
-                parts.append(f"build {removed_count}개 제거")
-            if partial_trim:
-                parts.append("build 부분 단축")
-            msgs.append(f"{' + '.join(parts)} ({orig_total:.1f}s→{cur_total:.1f}s)")
-
-        # build 모두 제거 후에도 target_max 초과 → 라운드 21: 역할별(role-aware) 지능형 trim.
-        # - hook: 시작 보존(후킹 모먼트), 끝 자름
-        # - build: 양 끝 균등 자름 (피크 보존)
-        # - payoff: 끝 보존(reveal/punchline), 시작 자름
-        # 각 clip 비례 단축하되 role에 따라 어느 쪽에서 잘리는지 결정.
-        # 라운드 12.1-B: 모든 clip 비례적 단축 (각 clip ≥3초 보장).
-        if cur_total > target_max and out:
-            ratio = target_max / cur_total
-            min_clip_dur = 3.0
-            cut_summary = []
-            for idx, clip in enumerate(out):
-                clip_dur = clip.end_sec - clip.start_sec
-                new_dur = max(min_clip_dur, clip_dur * ratio)
-                if new_dur >= clip_dur:
-                    continue
-                excess = clip_dur - new_dur
-                # 역할별 trim 위치 결정
-                if clip.role == "payoff":
-                    # payoff: 끝 보존(reveal), 시작에서 자름
-                    new_start = clip.start_sec + excess
-                    new_end = clip.end_sec
-                    side = "start"
-                elif clip.role == "build":
-                    # build: 양 끝 균등 (피크 중간 보존)
-                    new_start = clip.start_sec + excess / 2
-                    new_end = clip.end_sec - excess / 2
-                    side = "both"
-                else:
-                    # hook 및 기타: 시작 보존(후킹 모먼트), 끝에서 자름
-                    new_start = clip.start_sec
-                    new_end = clip.end_sec - excess
-                    side = "end"
-                out[idx] = StoryClip(
-                    role=clip.role,
-                    start_sec=new_start, end_sec=new_end,
-                    subtitle=clip.subtitle, use_original_audio=clip.use_original_audio,
-                    pacing_note=clip.pacing_note,
-                    chunk_index=clip.chunk_index, candidate_index=clip.candidate_index,
-                    character_focus=clip.character_focus,
-                    tts_draft=clip.tts_draft,
-                )
-                cut_summary.append(f"{clip.role}({side}) {clip_dur:.1f}s→{new_dur:.1f}s")
-            cur_total = total_dur(out)
-            if cut_summary:
-                msgs.append(f"역할별 trim [{', '.join(cut_summary)}] (총 {orig_total:.1f}s→{cur_total:.1f}s)")
-
-    # 2) 확장: 합계 < target_min — 라운드 13: 양방향 확장 (첫 시작 + 마지막 끝)
-    elif cur_total < target_min:
+    # 확장: 합계 < target_min — 라운드 13: 양방향 확장 (첫 시작 + 마지막 끝)
+    # (60초 초과 단축 로직은 reduce 단계로 이관되어 제거됨)
+    if cur_total < target_min:
         # 2-1) 마지막 clip 끝 확장 (기존)
         shortage = target_min - cur_total
         last_idx = len(out) - 1
@@ -917,7 +985,7 @@ from app.modules.gemini_client import (
 from app.modules.media_probe import probe_media
 from app.modules.moment_ranker import assign_sequence_ids
 from app.modules.reframe import build_crop_timeline
-from app.modules.renderer import RenderInputs, render_short
+from app.modules.renderer import RenderInputs, render_short, render_rough_concat
 from app.modules.scene_detect import detect_scenes
 from app.modules.speech import SpeechSegment  # PR-5c-4: extract_audio_segment / extract_transcript 직접 사용 제거 — chunk_transcribe 헬퍼 내부 lazy import 로 일원화
 from app.modules.story_builder import (
@@ -943,6 +1011,7 @@ from app.modules.silence_cutter import (
     cut_silence_from_clips,
     cut_silence_with_story_filter,
     flatten_to_clips,
+    map_draft_cuts_to_results,
     print_silence_cut_summary,
 )
 
@@ -1584,9 +1653,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         "graph",            # 8  -> [9/13]
         "story",            # 9  -> [10/13]
         "silence_cut",      # 10 -> [11/13]
-        "resources",        # 11 -> [12/13]
-        "render",           # 12 -> [13/13]
-        "validate",         # 13 -> 종료
+        "reduce",           # 11 -> 60초 초과 시 드래프트 렌더 → Gemini 재분석 → 흐름 보존 컷
+        "resources",        # 12 -> [12/13]
+        "render",           # 13 -> [13/13]
+        "validate",         # 14 -> 종료
     ]
     # PR-5b: 매직 넘버 → step_idx 매핑. 모든 `start_idx <= N` 비교를 단계명 기반으로 전환.
     step_idx: dict[str, int] = {name: i for i, name in enumerate(step_order)}
@@ -2562,9 +2632,82 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     print(f"  [clips-sync] shorts #1 clips: {old_total:.1f}s → {new_total:.1f}s")
                 clips = synced_first
 
+    # ═══════════════════════════════════════
+    # [reduce] 60초 초과 시 드래프트 렌더 → Gemini 재분석 → 흐름 보존 컷
+    # ═══════════════════════════════════════
+    # 기계적 축소(_fit_storyline_to_duration의 단축 분기 제거됨) 대신, 자막/TTS 넣기 전에
+    # variant clips 를 이어붙인 드래프트를 렌더해 Gemini(Pro)에게 보내고, 스토리 내용과 함께
+    # "흐름을 끊지 않고 빼도 될 구간"을 우선순위로 골라 60초 이하가 되는 최소한만 제거한다.
+    checkpoint_reduce = output_dir / "checkpoint_reduce.json"
+    _reduce_invalidate = from_step in ("story", "silence_cut", "reduce")
+    _reduce_changed = False
+    if checkpoint_reduce.exists() and not _reduce_invalidate:
+        print("\n[reduce] 캐시 로드 중...")
+        _rd = json.loads(checkpoint_reduce.read_text(encoding="utf-8"))
+        _rd_variants: list[tuple[list[StoryClip], str, float]] = []
+        _rd_cues: list[list[dict[str, Any]]] = []
+        for v in _rd.get("variants", []):
+            _rd_variants.append(([StoryClip(**c) for c in v["clips"]], v["title_text"], v.get("score", 0.0)))
+            _rd_cues.append(list(v.get("tts_cues") or []))
+        if _rd_variants:
+            all_storyline_variants = _rd_variants
+            storyline_tts_cues_pool = _rd_cues
+            clips = list(all_storyline_variants[0][0])
+        print(f"  - {len(_rd_variants)}개 variant 로드 완료")
+    elif start_idx <= step_idx["reduce"]:
+        _over = [
+            i for i, (vc, _, _) in enumerate(all_storyline_variants)
+            if sum(c.end_sec - c.start_sec for c in vc) > float(config.max_duration_sec)
+        ]
+        if _over:
+            print(f"\n[reduce] {len(_over)}개 variant 60초 초과 → 드래프트 재분석 단축 시작")
+            _reduce_gemini = locals().get("gemini") or load_gemini_client()
+            for v_idx in _over:
+                vc, vt, vs = all_storyline_variants[v_idx]
+                _cur = sum(c.end_sec - c.start_sec for c in vc)
+                _cues_in = list(storyline_tts_cues_pool[v_idx]) if v_idx < len(storyline_tts_cues_pool) else []
+                vc2, cues2 = _reduce_variant_under_limit(
+                    vc, vt, _cues_in, proxy_video_path, _reduce_gemini,
+                    payload.work_context,
+                    float(config.max_duration_sec), float(config.min_duration_sec),
+                    output_dir, tag=f"v{v_idx + 1}",
+                )
+                all_storyline_variants[v_idx] = (vc2, vt, vs)
+                if v_idx < len(storyline_tts_cues_pool):
+                    storyline_tts_cues_pool[v_idx] = cues2
+                else:
+                    storyline_tts_cues_pool.append(cues2)
+                _new = sum(c.end_sec - c.start_sec for c in vc2)
+                if abs(_new - _cur) > 0.5:
+                    _reduce_changed = True
+                print(f"  - variant {v_idx + 1}: {_cur:.1f}s → {_new:.1f}s")
+            clips = list(all_storyline_variants[0][0])
+        else:
+            print("\n[reduce] 60초 초과 variant 없음 — 건너뜀")
+        # reduce 가 clips 를 바꿨으면 하위 캐시(자막/리소스/TTS) 무효화
+        if _reduce_changed:
+            for _fname in ("subtitle_segments.json", "full_audio.json",
+                           "checkpoint_tts_plan.json", "checkpoint_resources.json"):
+                _p = output_dir / _fname
+                if _p.exists():
+                    try:
+                        _p.unlink()
+                    except OSError:
+                        pass
+        checkpoint_reduce.write_text(
+            json.dumps({
+                "variants": [
+                    {"clips": [c.__dict__ for c in vc], "title_text": t, "score": s,
+                     "tts_cues": (storyline_tts_cues_pool[i] if i < len(storyline_tts_cues_pool) else [])}
+                    for i, (vc, t, s) in enumerate(all_storyline_variants)
+                ],
+            }, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
     # 자막 데이터 생성 (transcript_text → 편집 타임라인 매핑)
     final_segments = []
-    _subtitle_invalidate = from_step in ("graph", "story", "silence_cut", "resources")
+    _subtitle_invalidate = from_step in ("graph", "story", "silence_cut", "reduce", "resources") or _reduce_changed
     if not segments_cache_path.exists() or _subtitle_invalidate:
         print("  자막 타임라인 매핑 중...")
         remapped = remap_transcript_to_edited_timeline(
@@ -2625,7 +2768,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
     # story/graph 단계부터 재실행 시 클립 구성이 달라질 수 있으므로 resources 캐시 무효화.
     # 이전 라운드의 crop_map 키(role_idx)와 새 라운드의 clip 키가 어긋나면 KeyError 발생.
-    _resources_invalidate = from_step in ("graph", "story", "tts_plan", "transcribe", "resources")
+    _resources_invalidate = from_step in ("graph", "story", "silence_cut", "reduce", "tts_plan", "transcribe", "resources") or _reduce_changed
     # 라운드 9-fix: face_identifier를 resources 단계 *밖*에서도 안전하게 사용할 수 있도록 미리 None 초기화.
     # --from-step render로 들어와 라인 1490 캐시 로드 분기를 타면 face_identifier가 정의되지 않아
     # 멀티 variant 렌더링 단계(라인 1862, 1873)에서 UnboundLocalError 발생.

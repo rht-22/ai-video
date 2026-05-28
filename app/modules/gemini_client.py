@@ -44,6 +44,40 @@ def _extract_json_from_markdown(text: str) -> str:
     return text.strip()
 
 
+def _normalize_cut_segments(raw: Any, duration_sec: float) -> list[dict[str, Any]]:
+    """find_cuttable_segments 응답의 cut_segments 를 검증·clamp 한다.
+
+    - start/end_sec 를 [0, duration_sec] 로 clamp, end <= start 인 항목 제거.
+    - priority 가 없거나 비정상이면 큰 값(=보존 우선, 가장 나중에 적용)으로 둔다.
+    - 정렬·우선순위 적용(필요한 만큼만 선택)은 호출부 책임. 여기선 유효 항목만 반환.
+    """
+    if not isinstance(raw, list):
+        return []
+    dur = max(0.0, float(duration_sec))
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            s = max(0.0, min(dur, float(item.get("start_sec"))))
+            e = max(0.0, min(dur, float(item.get("end_sec"))))
+        except (TypeError, ValueError):
+            continue
+        if e <= s:
+            continue
+        try:
+            priority = int(item.get("priority"))
+        except (TypeError, ValueError):
+            priority = 9999
+        out.append({
+            "priority": priority,
+            "start_sec": s,
+            "end_sec": e,
+            "reason": str(item.get("reason", "") or ""),
+        })
+    return out
+
+
 
 # ─────────────────────────────────────────────
 # 청크 분석 프롬프트 (멀티모달 분석 + 핵심 필드 보존)
@@ -728,31 +762,40 @@ title_line2를 작성한 후 payoff description을 다시 읽어 결말 방향�
 
 ## Duration Constraint (요즘 쇼츠 표준)
 
-총 클립 길이 합계: **{min_duration_sec}초 ~ {max_duration_sec}초** (이상적: 50초 부근).
+총 클립 길이 합계 목표: **{min_duration_sec}초 ~ {max_duration_sec}초** (이상적: 50초 부근).
+
+🔴🔴 **가장 중요 — 클립 길이는 candidate가 결정한다** 🔴🔴
+- **클립의 실제 길이 = 네가 선택한 candidate의 (end_sec - start_sec) 전체이다.**
+  네가 hook을 짧게 쓰고 싶어 start/end를 줄여 적어도, 후처리가 candidate **전체 구간**으로 덮어쓴다.
+  즉 길이를 줄이는 유일한 방법은 **더 짧은 candidate를 고르거나, 클립(특히 build) 수를 줄이는 것**뿐이다.
+- 따라서 storyline을 구성하기 전에, **선택할 candidate들의 (end_sec - start_sec)를 직접 더해 보라.**
+  그 합이 곧 쇼츠 길이다.
+- ⚠️ 선택한 candidate들의 길이 합이 **{max_duration_sec}초의 1.5배(예: {max_duration_sec}초면 90초)를
+  초과하면 그 storyline은 폐기되어 쇼츠로 만들어지지 않는다.** 반드시 합을 그 아래로 유지하라.
+- {min_duration_sec}~{max_duration_sec}초를 초과(단, 1.5배 이내)하는 정도는 허용된다 — 후처리(reduce)가
+  완성 영상을 다시 분석해 흐름을 해치지 않는 구간만 골라 {max_duration_sec}초 이하로 줄인다.
+  그러니 **서사 완결성을 우선**하되 불필요하게 길게 늘이지 말 것.
 
 ### 타입형별 구성 가이드
 
 **highlight형** (shorts_type="highlight"):
 - 1개 클립이 자체로 후킹 + 본문 + 결말을 포함하는 강한 장면
-- 길이: 40~60초 (이상적 50초)
+- 그 candidate 1개의 길이가 곧 쇼츠 길이 → 40~70초 길이의 candidate를 고르는 것이 이상적
 - candidate가 30초 미만이면 context_extended=true로 인접 영역까지 확장 요청
 
 **storytelling형** (shorts_type="storytelling"):
-- **총 3~4 클립**으로 hook → build → payoff 구성
-- 클립 길이 가이드:
-  - hook: **5~8초** (강한 후킹 한 장면)
-  - build: **1~2개** × 각 **15~20초** (서사 풀이의 핵심 1~2 장면만 — 너무 많이 넣지 말 것)
-  - payoff: **15~20초** (감정 정점 / 반전 결말)
-- 합계 40~60초 안에 들어오게 클립 수와 길이 조절
-- 5개 이상 build로 늘이지 말 것 — 1~2개 핵심 build만 선택
+- hook → (build) → payoff 구성. **클립 수는 최소화**하라 (보통 2~3개).
+- 역할별 candidate 선택 기준 (각 클립 길이 = 그 candidate 길이임을 명심):
+  - hook: 강한 후킹 장면 — **가능한 짧은 candidate**(20~30초대) 우선
+  - build: **0~1개만** — 서사 연결에 꼭 필요할 때만. 길이가 짧은 candidate 우선
+  - payoff: 감정 정점/반전 — 적당한 candidate
+- ⚠️ **긴 candidate(60초 이상)를 2개 이상 겹쳐 고르지 마라** — 합이 1.5배 한도를 넘어 폐기된다.
+  긴 candidate를 쓰려면 1개만, 나머지는 짧게.
+- 5개 이상 build로 늘이지 말 것 — 0~1개 핵심 build만.
 
-⚠️ 합계가 60초 초과 시 후처리에서 점수 낮은 build부터 자동 제거됨.
-   처음부터 핵심만 선택해 60초 이내로 출력하는 것이 가장 효과적.
-⚠️ 합계가 40초 미만 시 후처리에서 인접 candidate로 자동 확장 시도.
-   가능한 40초 이상 확보.
+⚠️ 합계가 {min_duration_sec}초 미만 시 후처리에서 인접 candidate로 자동 확장 시도. 가능한 {min_duration_sec}초 이상 확보.
 
-각 클립의 start_sec, end_sec는 원본 영상 타임라인 기준.
-각 장면의 (end_sec - start_sec)를 합산하여 범위 내인지 반드시 확인.
+각 클립의 start_sec, end_sec는 원본 영상 타임라인 기준(candidate 값 그대로 인용).
 
 # Input Data
 - 작품명: {work_title}
@@ -1464,6 +1507,130 @@ class GeminiClient:
                     print(f" [INFO] Gemini File API 서버 파일 삭제 완료: {uploaded_file.name}")
                 except Exception as del_err:
                     print(f" [WARN] Gemini File API 서버 파일 삭제 실패: {del_err}")
+
+    # ─────────────────────────────────────────
+    # 60초 초과 드래프트 단축용 컷 구간 분석 (Pro 모델, 영상 분석)
+    # ─────────────────────────────────────────
+    def find_cuttable_segments(
+        self,
+        video_path: Path,
+        current_duration_sec: float,
+        target_max_sec: float,
+        storyline_title: str | None = None,
+        clip_summaries: list[str] | None = None,
+        work_context: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """드래프트 영상 + 스토리라인 내용을 받아, 흐름을 보존하며 제거할 구간을 우선순위와 함께 반환.
+
+        영상 분석이므로 Pro 모델(config.model_name)을 사용한다 (CLAUDE.md 규칙).
+        반환: cut_segments 리스트 — 각 dict {priority:int, start_sec:float, end_sec:float, reason:str}.
+        start_sec/end_sec 는 *드래프트 영상 타임라인(0초 기준)*. 실제 적용(우선순위 순 선택)은 호출부.
+        빈 응답이면 [] 반환.
+        """
+        video_path = Path(video_path) if isinstance(video_path, str) else video_path
+        if not video_path.exists():
+            print(f" [WARN] find_cuttable_segments: 드래프트 영상 없음 — {video_path}")
+            return []
+
+        needed = max(0.0, float(current_duration_sec) - float(target_max_sec))
+        story_block = ""
+        if storyline_title:
+            story_block += f"제목: {storyline_title}\n"
+        if clip_summaries:
+            story_block += "타임라인(드래프트 기준):\n" + "\n".join(clip_summaries)
+        if not story_block:
+            story_block = "(스토리 내용 미제공 — 영상만 보고 판단)"
+        work_context_line = f"\n[작품 정보]\n{work_context}\n" if work_context else ""
+
+        prompt = (
+            "너는 숏폼 영상 편집 전문가다. 아래 첨부된 드래프트 영상과 그 '스토리라인 내용'을 함께 보고, "
+            f"영상 길이를 {target_max_sec:.0f}초 이하로 줄이기 위해 제거해도 되는 구간을 골라라.\n\n"
+            f"[현재 영상 길이] {current_duration_sec:.1f}초 (최소 {needed:.1f}초 이상 제거 필요)\n"
+            f"[목표] {target_max_sec:.0f}초 이하\n\n"
+            "[스토리라인 내용]\n"
+            f"{story_block}\n\n"
+            "[지침]\n"
+            "- 전체 내용의 흐름(서사 연결)을 절대 끊지 마라. hook(도입)·반전·payoff(결말)·핵심 대사 비트는 최대한 보존.\n"
+            "- 전체에서 '빼도 흐름에 지장이 가장 적은 구간'부터 우선순위(priority)를 매겨라.\n"
+            "  priority=1 이 '제거해도 가장 안전', 숫자가 클수록 보존 우선.\n"
+            "- 제거 후보(느린 전개, 반복/중복 장면, 불필요한 여백·정적, 잉여 reaction, 군더더기 대사 등)를 충분히 제시하라.\n"
+            f"  후보들의 누적 길이 합이 최소 {needed:.1f}초를 넉넉히 넘도록(가능하면 1.5배 이상) 제시 — "
+            "  컷은 호출부가 우선순위 순으로 필요한 만큼만 적용한다.\n"
+            "- 각 구간의 start_sec/end_sec 는 반드시 *이 드래프트 영상의 타임라인(맨 앞=0초)* 기준이다.\n"
+            "- 너무 잘게 쪼개지 말고(각 구간 ≥1초 권장), 서로 겹치지 않게 하라.\n\n"
+            "[출력] 반드시 아래 JSON만 출력. 코드블록 금지.\n"
+            "{\n"
+            '  "cut_segments": [\n'
+            '    {"priority": 1, "start_sec": 12.5, "end_sec": 16.0, "reason": "정적인 여백, 대사 없음"}\n'
+            "  ]\n"
+            "}\n"
+        )
+
+        content_parts: list[Any] = [prompt]
+        uploaded_file = None
+        safe_path, is_tmp = _safe_upload_path(video_path)
+        try:
+            for upload_attempt in range(self.config.max_retries):
+                try:
+                    uploaded_file = self.client.files.upload(file=str(safe_path))
+                    while uploaded_file.state.name == "PROCESSING":
+                        time.sleep(2)
+                        uploaded_file = self.client.files.get(name=uploaded_file.name)
+                    if uploaded_file.state.name == "FAILED":
+                        raise RuntimeError("Gemini File API 업로드 실패")
+                    content_parts.append(self.types.Part(
+                        file_data=self.types.FileData(
+                            file_uri=uploaded_file.uri,
+                            mime_type="video/mp4",
+                        ),
+                    ))
+                    break
+                except Exception as upload_err:
+                    if upload_attempt == self.config.max_retries - 1:
+                        print(f" [WARN] 드래프트 업로드 실패 — 컷 없이 진행: {upload_err}")
+                        return []
+                    wait = 2 ** upload_attempt
+                    print(f" [WARN] 드래프트 업로드 오류 (시도 {upload_attempt + 1}/{self.config.max_retries}), {wait}초 후 재시도: {upload_err}")
+                    time.sleep(wait)
+        finally:
+            if is_tmp and safe_path.exists():
+                safe_path.unlink()
+
+        try:
+            for attempt in range(self.config.max_retries):
+                try:
+                    response = self.client.models.generate_content(
+                        model=self.config.model_name,
+                        contents=content_parts,
+                        config=self.types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            thinking_config=self.types.ThinkingConfig(
+                                thinking_level=self.config.analysis_thinking_level,
+                            ),
+                        ),
+                    )
+                    if not response or not response.text or not response.text.strip():
+                        if attempt == self.config.max_retries - 1:
+                            return []
+                        continue
+                    json_text = _extract_json_from_markdown(response.text.strip())
+                    data = json.loads(json_text)
+                    if isinstance(data, list):
+                        data = {"cut_segments": data}
+                    raw = data.get("cut_segments") or []
+                    return _normalize_cut_segments(raw, current_duration_sec)
+                except Exception as e:
+                    if attempt == self.config.max_retries - 1:
+                        print(f" [WARN] 컷 구간 분석 실패 — 컷 없이 진행: {type(e).__name__}: {e}")
+                        return []
+                    time.sleep(2 ** attempt)
+            return []
+        finally:
+            if uploaded_file:
+                try:
+                    self.client.files.delete(name=uploaded_file.name)
+                except Exception:
+                    pass
 
     # ─────────────────────────────────────────
     # 영상 의도 사전 분석 (Flash 모델, 전체 프록시 1회 스캔)

@@ -686,6 +686,52 @@ def render_short(inputs: RenderInputs) -> list[str]:
     raise RuntimeError(f"렌더링 실패. 마지막 오류: {last_err}")
 
 
+def render_rough_concat(
+    video_path: Path,
+    clips: list[StoryClip],
+    output_path: Path,
+) -> None:
+    """clips를 잘라 이어붙인 *경량 드래프트* 영상을 만든다 (자막/TTS/크롭/타이틀 없음).
+
+    reduce 단계에서 Gemini 에게 "흐름을 끊지 않고 잘라낼 구간"을 묻기 위한 임시 영상.
+    render_short 와 동일하게 clip 별 -ss/-to -i + concat filter 패턴을 쓰되, 소스 해상도
+    그대로(스케일/패드 없음) 오디오를 유지한다. 출력 타임라인 = clips 합계(0초 기준 누적).
+
+    Args:
+        video_path: 잘라낼 소스 (보통 480p 프록시). 모든 clip.start/end_sec 가 이 소스 기준.
+        clips: 이어붙일 StoryClip 목록 (start_sec/end_sec 사용).
+        output_path: 출력 mp4 경로.
+    """
+    if not clips:
+        raise ValueError("render_rough_concat: clips가 비어 있습니다.")
+
+    output_dir = output_path.parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ffmpeg_cmd = find_ffmpeg_command("ffmpeg")
+
+    args: list[str] = [ffmpeg_cmd, "-y", "-dn", "-sn"]
+    for clip in clips:
+        args.extend([
+            "-ss", f"{clip.start_sec}",
+            "-to", f"{clip.end_sec}",
+            "-i", str(video_path),
+        ])
+
+    n = len(clips)
+    concat_inputs = "".join(f"[{i}:v:0][{i}:a:0]" for i in range(n))
+    filter_complex = f"{concat_inputs}concat=n={n}:v=1:a=1[vout][aout]"
+
+    args.extend([
+        "-filter_complex", filter_complex,
+        "-map", "[vout]", "-map", "[aout]",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "96k",
+        str(output_path),
+    ])
+    subprocess.check_call(args)
+
+
 def _pick_video_encoder(ffmpeg_path: str) -> str:
     """
     가능한 경우 GPU 인코더를 사용합니다.

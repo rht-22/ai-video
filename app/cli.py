@@ -41,7 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[
             "init", "research", "probe", "proxy", "exclusion", "chunk",
             "skeleton", "character_index", "gemini", "graph", "story",
-            "tts_plan", "transcribe", "resources", "render", "validate",
+            "silence_cut", "reduce", "tts_plan", "transcribe", "resources",
+            "render", "validate",
         ],
         help="Start from specific step (requires --job-id)",
     )

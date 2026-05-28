@@ -362,6 +362,84 @@ def cut_silence_with_story_filter(
     return results
 
 
+# ─────────────────────────────────────────────────────────────
+# reduce 단계: 드래프트(이어붙인) 타임라인 컷 → clip별 소스 keep_intervals
+# ─────────────────────────────────────────────────────────────
+def map_draft_cuts_to_results(
+    clips: list[StoryClip],
+    cut_segments: list[dict],
+    *,
+    min_keep_sec: float = 0.3,
+) -> list[SilenceCutResult]:
+    """드래프트(=clips를 순서대로 이어붙인) 타임라인 기준 제거 구간을 각 clip의 소스
+    keep_intervals 로 환산한다.
+
+    드래프트 타임라인: clip i 는 [off_i, off_i + dur_i) 를 차지 (off_i = 앞 clip들 길이 누적).
+    제거 구간 [cs, ce] 가 clip 범위와 겹치면, 그 부분을 소스 시간으로 환산해
+    (src = clip.start_sec + (draft_t - off_i)) clip 의 유지 구간에서 차감한다.
+
+    Args:
+        clips: variant clip 목록 (start_sec/end_sec = 소스 시간, 드래프트 순서와 동일).
+        cut_segments: {"start_sec","end_sec",...} 드래프트 타임라인 제거 구간 (이미 선택된 것).
+        min_keep_sec: 이보다 짧아진 유지 조각은 버린다 (자투리 제거).
+
+    Returns: clip 순서대로 SilenceCutResult 목록 (flatten_to_clips 로 펼칠 수 있음).
+    """
+    # 1) clip별 드래프트 오프셋 계산
+    offsets: list[float] = []
+    acc = 0.0
+    for c in clips:
+        offsets.append(acc)
+        acc += float(c.end_sec - c.start_sec)
+
+    # 2) 각 clip 의 소스 cut 구간 수집
+    src_cuts_per_clip: list[list[tuple[float, float]]] = [[] for _ in clips]
+    for seg in cut_segments or []:
+        try:
+            cs = float(seg.get("start_sec"))
+            ce = float(seg.get("end_sec"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if ce <= cs:
+            continue
+        for i, clip in enumerate(clips):
+            off = offsets[i]
+            dur = float(clip.end_sec - clip.start_sec)
+            ov_s = max(cs, off)
+            ov_e = min(ce, off + dur)
+            if ov_e <= ov_s:
+                continue  # 이 clip 과 겹치지 않음
+            src_s = clip.start_sec + (ov_s - off)
+            src_e = clip.start_sec + (ov_e - off)
+            src_cuts_per_clip[i].append((src_s, src_e))
+
+    # 3) clip별로 cut 을 빼고 keep_intervals 생성
+    results: list[SilenceCutResult] = []
+    for i, clip in enumerate(clips):
+        keeps: list[Interval] = [Interval(clip.start_sec, clip.end_sec)]
+        for (a, b) in sorted(src_cuts_per_clip[i]):
+            new_keeps: list[Interval] = []
+            for kv in keeps:
+                if b <= kv.start_sec or a >= kv.end_sec:
+                    new_keeps.append(kv)  # 겹침 없음
+                    continue
+                if a > kv.start_sec:
+                    new_keeps.append(Interval(kv.start_sec, a))  # 왼쪽 조각
+                if b < kv.end_sec:
+                    new_keeps.append(Interval(b, kv.end_sec))   # 오른쪽 조각
+            keeps = new_keeps
+        # 자투리 제거
+        keeps = [kv for kv in keeps if (kv.end_sec - kv.start_sec) >= min_keep_sec]
+        clip_dur = float(clip.end_sec - clip.start_sec)
+        kept_dur = sum(kv.end_sec - kv.start_sec for kv in keeps)
+        results.append(SilenceCutResult(
+            original_clip=clip,
+            keep_intervals=keeps,
+            total_removed_sec=max(0.0, clip_dur - kept_dur),
+        ))
+    return results
+
+
 def print_silence_cut_summary(cut_results: list[SilenceCutResult]) -> None:
     """침묵 컷 결과 요약 출력"""
     total_removed = sum(r.total_removed_sec for r in cut_results)
