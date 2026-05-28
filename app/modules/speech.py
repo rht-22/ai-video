@@ -4,7 +4,6 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 from app.modules.ffmpeg_utils import find_ffmpeg_command
 
@@ -16,9 +15,20 @@ class SpeechSegment:
     text: str
 
 
-def extract_transcript(audio_path: Path) -> list[SpeechSegment]:
-    if _has_whisper():
-        return _extract_with_whisper(audio_path)
+def extract_transcript(
+    audio_path: Path,
+    *,
+    work_title: str | None = None,
+    character_names: list[str] | None = None,
+    work_context: str | None = None,
+) -> list[SpeechSegment]:
+    if _has_faster_whisper():
+        return _extract_with_faster_whisper(
+            audio_path,
+            work_title=work_title,
+            character_names=character_names,
+            work_context=work_context,
+        )
     return []
 
 
@@ -26,110 +36,235 @@ def extract_vad_segments(audio_path: Path) -> list[SpeechSegment]:
     return []
 
 
+def extract_audio_segment(
+    video_path: Path,
+    output_path: Path,
+    start_sec: float,
+    end_sec: float,
+    padding_sec: float = 2.0,
+) -> tuple[Path, float]:
+    """영상에서 특정 구간의 오디오만 추출합니다.
+
+    Whisper 정확도를 위해 앞뒤 padding_sec만큼 여유를 두고 추출합니다.
+
+    Args:
+        video_path: 입력 영상 파일 경로
+        output_path: 출력 오디오 파일 경로
+        start_sec: 추출 시작 시간(초)
+        end_sec: 추출 종료 시간(초)
+        padding_sec: Whisper 컨텍스트 확보용 앞뒤 패딩(초)
+
+    Returns:
+        (추출된 오디오 경로, 실제 추출 시작 시간) 튜플.
+        실제 시작 시간은 패딩이 적용된 값이며 전사 결과 오프셋 보정에 사용.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    actual_start = max(0.0, start_sec - padding_sec)
+    duration = (end_sec + padding_sec) - actual_start
+
+    ffmpeg_cmd = find_ffmpeg_command("ffmpeg")
+    cmd = [
+        ffmpeg_cmd, "-y",
+        "-ss", str(actual_start),
+        "-i", str(video_path),
+        "-t", str(duration),
+        "-vn",
+        "-acodec", "pcm_s16le",
+        "-ar", "16000",
+        "-ac", "1",
+        str(output_path),
+    ]
+    subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return output_path, actual_start
+
+
 def extract_audio_from_video(video_path: Path, output_path: Path | None = None) -> Path:
     """영상에서 오디오를 추출합니다.
-    
+
     Args:
         video_path: 입력 영상 파일 경로
         output_path: 출력 오디오 파일 경로 (None이면 시스템 임시 디렉토리에 생성)
-    
+
     Returns:
         추출된 오디오 파일 경로
     """
     if output_path is None:
-        # 시스템 임시 디렉토리에 파일 생성
         temp_dir = Path(tempfile.gettempdir())
         output_path = temp_dir / f"audio_{video_path.stem}.wav"
-    
-    # 출력 디렉토리 생성
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    # ffmpeg 명령 구성
+
     ffmpeg_cmd = find_ffmpeg_command("ffmpeg")
     cmd = [
         ffmpeg_cmd,
-        "-y",  # 기존 파일 덮어쓰기
-        "-i", str(video_path),  # 입력 파일
-        "-vn",  # 비디오 스트림 제외
-        "-acodec", "pcm_s16le",  # PCM 16-bit 오디오 코덱
-        "-ar", "16000",  # 샘플 레이트 16kHz (Whisper에 적합)
-        "-ac", "1",  # 모노 채널
+        "-y",
+        "-i", str(video_path),
+        "-vn",
+        "-acodec", "pcm_s16le",
+        "-ar", "16000",  # Whisper에 적합한 샘플레이트
+        "-ac", "1",      # 모노 채널
         str(output_path),
     ]
-    
-    # ffmpeg 실행
+
     subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
+
     return output_path
 
 
-def _has_whisper() -> bool:
+def _has_faster_whisper() -> bool:
     import importlib.util
+    return importlib.util.find_spec("faster_whisper") is not None
 
-    return importlib.util.find_spec("whisper") is not None
+
+# ── Whisper 모델 캐싱 (클립마다 재로드 방지) ──
+_cached_model = None
+_cached_model_key: str | None = None
 
 
-def _extract_with_whisper(audio_path: Path) -> list[SpeechSegment]:
-    import os
-    import warnings
-    from subprocess import run
-    
-    # Whisper가 ffmpeg를 찾을 수 있도록 PATH에 추가 (import 전에 실행)
+def _detect_device_and_compute() -> tuple[str, str]:
+    """GPU 가용성을 확인하고 최적 device/compute_type을 반환."""
     try:
-        ffmpeg_path = find_ffmpeg_command("ffmpeg")
-        ffmpeg_dir = str(Path(ffmpeg_path).parent)
-        
-        # 현재 PATH에 ffmpeg 디렉토리가 없으면 추가
-        current_path = os.environ.get("PATH", "")
-        if ffmpeg_dir not in current_path:
-            os.environ["PATH"] = ffmpeg_dir + os.pathsep + current_path
-    except FileNotFoundError:
-        # ffmpeg를 찾지 못하면 에러 발생
-        raise RuntimeError(
-            "ffmpeg를 찾을 수 없습니다. Whisper가 오디오를 로드하기 위해 필요합니다."
-        )
-    
-    # PATH 설정 후 Whisper 모듈 import
-    import whisper
-    import whisper.audio as whisper_audio
-    import numpy as np
-    
-    # Whisper의 load_audio 함수를 패치하여 우리가 찾은 ffmpeg 경로 사용
-    original_load_audio = whisper_audio.load_audio
-    
-    def patched_load_audio(file: str | Path, sr: int = 16000):
-        # 원본 함수의 로직을 유지하되, ffmpeg 경로를 직접 사용
-        cmd = [
-            ffmpeg_path,
-            "-nostdin",
-            "-threads", "0",
-            "-i", str(file),
-            "-f", "s16le",
-            "-ac", "1",
-            "-acodec", "pcm_s16le",
-            "-ar", str(sr),
-            "-"
-        ]
-        out = run(cmd, capture_output=True, check=True).stdout
-        return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
-    
-    # load_audio 함수를 패치
-    whisper_audio.load_audio = patched_load_audio
-    
-    # FP16 경고 필터링 (CPU에서는 FP32를 사용하므로 경고가 불필요함)
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message="FP16 is not supported on CPU")
-        # 명시적으로 CPU를 사용하여 FP32로 실행
-        model = whisper.load_model("base", device="cpu")
-        result = model.transcribe(str(audio_path))
-    
+        import torch
+        if torch.cuda.is_available():
+            return "cuda", "float16"
+    except ImportError:
+        pass
+    return "cpu", "int8"
+
+
+def _get_whisper_model(model_name: str, device: str, compute_type: str):
+    """Whisper 모델을 캐싱하여 반환 (동일 설정이면 재사용)."""
+    global _cached_model, _cached_model_key
+    key = f"{model_name}:{device}:{compute_type}"
+    if _cached_model_key != key:
+        from faster_whisper import WhisperModel
+        print(f"  [Whisper] 모델 로드 중... ({model_name}, {device}, {compute_type})")
+        _cached_model = WhisperModel(model_name, device=device, compute_type=compute_type)
+        _cached_model_key = key
+    return _cached_model
+
+
+def _build_whisper_prompt(
+    work_title: str | None = None,
+    character_names: list[str] | None = None,
+    work_context: str | None = None,
+) -> str:
+    """리서치 결과를 반영한 Whisper initial_prompt를 생성."""
+    parts = ["한국어 드라마, 예능 프로그램입니다."]
+    if work_title:
+        parts.append(f"작품명: {work_title}.")
+    if character_names:
+        # Whisper initial_prompt ~224 토큰 제한 → 인물명 15명으로 제한
+        names_str = ", ".join(character_names[:15])
+        parts.append(f"등장인물: {names_str}.")
+    if work_context:
+        # 시놉시스는 100자만 (너무 길면 역효과)
+        parts.append(f"내용: {work_context[:100].rstrip()}")
+    parts.append("한국어와 외국어가 혼용될 수 있습니다.")
+    return " ".join(parts)
+
+
+def _extract_with_faster_whisper(
+    audio_path: Path,
+    *,
+    work_title: str | None = None,
+    character_names: list[str] | None = None,
+    work_context: str | None = None,
+) -> list[SpeechSegment]:
+    """faster-whisper large-v3-turbo로 음성을 텍스트로 변환합니다.
+
+    - large-v3-turbo: base 대비 한국어 정확도 대폭 향상
+    - 리서치 결과(인물명, 작품명)를 initial_prompt에 주입하여 고유명사 인식 강화
+    - 모델 캐싱으로 다중 클립 전사 시 재로드 방지
+    - GPU 자동 감지 (CUDA 가용 시 float16 사용)
+    """
+    device, compute_type = _detect_device_and_compute()
+    model = _get_whisper_model("large-v3-turbo", device, compute_type)
+
+    initial_prompt = _build_whisper_prompt(
+        work_title=work_title,
+        character_names=character_names,
+        work_context=work_context,
+    )
+    print(f"  [Whisper] 프롬프트: {initial_prompt[:80]}...")
+
+    print("  [Whisper] 전사 시작...")
+    # 라운드 14.1: word_timestamps=True 활성화 + segment 내 문장 단위 재분할.
+    # 이전엔 Whisper가 24초 영역을 한 덩어리 segment로 출력 → build_ass가 균등 시간 분할
+    # → 자막이 음성 박자와 어긋남. word·문장 시간 활용으로 정확 매핑.
+    segments_generator, info = model.transcribe(
+        str(audio_path),
+        language="ko",
+        initial_prompt=initial_prompt,
+        no_speech_threshold=0.6,
+        temperature=0.0,
+        condition_on_previous_text=False,
+        word_timestamps=True,
+        vad_filter=True,
+        vad_parameters=dict(
+            min_silence_duration_ms=500,
+        ),
+    )
+
+    print(f"  [Whisper] 감지된 언어: {info.language} (확률: {info.language_probability:.2f})")
+
+    import re as _re
+    _SENTENCE_END = _re.compile(r"[.!?]")
+
     segments = []
-    for seg in result.get("segments", []):
+    for seg in segments_generator:
+        text = seg.text.strip()
+        if not text:
+            continue
+        seg_start = float(seg.start)
+        seg_end = float(seg.end)
+
+        # 라운드 14.1: words 정보가 있으면 문장 끝 단어의 word.end를 시간 경계로 활용.
+        # 한 segment 안 여러 문장(마침표·물음표·느낌표)을 별도 SpeechSegment로 분할.
+        # word.start/end가 None인 케이스는 안전하게 필터링 (faster-whisper 일부 버전).
+        words_raw = getattr(seg, "words", None) or []
+        words = [w for w in words_raw
+                 if getattr(w, "start", None) is not None and getattr(w, "end", None) is not None]
+        if words and len(text) > 30:
+            # 문장 분할: 단어 단위로 누적하면서 [.!?] 만나면 chunk 마감
+            sentence_chunks: list[tuple[str, float, float]] = []
+            cur_text = ""
+            cur_start: float | None = float(words[0].start)
+            cur_end: float = cur_start
+            for w in words:
+                w_text = (w.word or "").strip()
+                if not w_text:
+                    continue
+                if cur_start is None:
+                    cur_start = float(w.start)
+                cur_text = (cur_text + " " + w_text).strip() if cur_text else w_text
+                cur_end = float(w.end)
+                # 단어 끝이 문장 종결 부호로 끝나면 chunk 마감
+                if _SENTENCE_END.search(w_text):
+                    sentence_chunks.append((cur_text, cur_start, cur_end))
+                    cur_text = ""
+                    cur_start = None
+            # 잔여 텍스트
+            if cur_text and cur_start is not None:
+                sentence_chunks.append((cur_text, cur_start, cur_end))
+
+            if len(sentence_chunks) >= 2:
+                for ch_text, ch_start, ch_end in sentence_chunks:
+                    if ch_end - ch_start < 0.05:
+                        continue
+                    segments.append(SpeechSegment(
+                        start_sec=ch_start, end_sec=ch_end, text=ch_text,
+                    ))
+                continue  # 분할 성공 → 원본 segment 추가 안 함
+
+        # 분할 안 됨: 원본 segment 그대로
         segments.append(
             SpeechSegment(
-                start_sec=float(seg["start"]),
-                end_sec=float(seg["end"]),
-                text=seg["text"].strip(),
+                start_sec=seg_start,
+                end_sec=seg_end,
+                text=text,
             )
         )
+
+    print(f"  [Whisper] 전사 완료: {len(segments)}개 세그먼트 (문장 단위 분할 적용)")
     return segments

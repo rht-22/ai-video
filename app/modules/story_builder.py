@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
-
-from app.modules.moment_ranker import RankedMoment
 
 
 @dataclass(frozen=True)
@@ -12,137 +9,185 @@ class StoryClip:
     start_sec: float
     end_sec: float
     subtitle: str
-    tts_line: str
     use_original_audio: bool
+    pacing_note: str = ""
+    chunk_index: int = -1
+    candidate_index: int = -1
+    character_focus: tuple[str, ...] = ()
+    visual_essential: bool = False
+    tts_draft: str = ""
 
 
-def build_story(
-    ranked: Iterable[RankedMoment],
-    target_duration_sec: float,
-    tolerance_sec: float,
-    min_duration_sec: float | None = None,
-    max_duration_sec: float | None = None,
-) -> list[StoryClip]:
-    hook_candidates = [m for m in ranked if m.story_role == "hook"]
-    build_candidates = [m for m in ranked if m.story_role == "build"]
-    payoff_candidates = [m for m in ranked if m.story_role == "payoff"]
+@dataclass(frozen=True)
+class TTSCue:
+    """편집 타임라인 절대 시간 기준 TTS cue.
 
-    if not hook_candidates or not build_candidates or not payoff_candidates:
-        raise ValueError("Not enough candidates for hook/build/payoff")
-
-    # 초기 선택: hook 1개, build 여러 개, payoff 1개
-    selected = [hook_candidates[0]]
-    # build 클립을 더 많이 선택하여 최소 길이 보장
-    selected.extend(build_candidates[:6])  # 4개에서 6개로 증가
-    selected.append(payoff_candidates[0])
-
-    clips = [
-        StoryClip(
-            role=m.story_role,
-            start_sec=m.start_sec,
-            end_sec=m.end_sec,
-            subtitle=m.subtitle,
-            tts_line=m.tts_line,
-            use_original_audio=True,
-        )
-        for m in selected
-    ]
-
-    return _fit_duration(clips, target_duration_sec, tolerance_sec, min_duration_sec, max_duration_sec)
+    start_sec=0이 쇼츠 시작점. 클립 경계와 무관하게 어디든 배치 가능.
+    voice/speed는 app.modules.tts의 프리셋 라벨.
+    """
+    start_sec: float
+    end_sec: float
+    text: str
+    voice: str = "ko_female"
+    speed: str = "normal"
 
 
-def _fit_duration(
+def validate_story_clips(
     clips: list[StoryClip],
-    target_duration_sec: float,
-    tolerance_sec: float,
-    min_duration_sec: float | None = None,
-    max_duration_sec: float | None = None,
-) -> list[StoryClip]:
-    # 최소/최대 길이 설정
-    min_dur = min_duration_sec if min_duration_sec is not None else target_duration_sec - tolerance_sec
-    max_dur = max_duration_sec if max_duration_sec is not None else target_duration_sec + tolerance_sec
-    
-    duration = sum(c.end_sec - c.start_sec for c in clips)
-    
-    # 목표 범위 내에 있으면 반환
-    if min_dur <= duration <= max_dur:
-        return clips
+    min_duration_sec: float,
+    max_duration_sec: float,
+    min_clip_count: int = 3,
+) -> tuple[bool, str]:
+    """스토리 클립이 유효한 쇼츠를 구성하는지 검증합니다.
 
-    # 너무 긴 경우: 클립 제거
-    if duration > max_dur:
-        trimmed = [clips[0]]  # hook 유지
-        build_clips = [c for c in clips if c.role == "build"]
-        payoff = [c for c in clips if c.role == "payoff"]
-        
-        # build 클립을 하나씩 추가하면서 최대 길이를 넘지 않도록
-        for clip in build_clips:
-            current_dur = sum(c.end_sec - c.start_sec for c in trimmed + payoff)
-            if current_dur + (clip.end_sec - clip.start_sec) > max_dur:
+    min_clip_count: highlight형은 1개로도 가능하므로 호출부에서 1로 낮춰야 함.
+    storytelling형은 hook/build/payoff 최소 3개 보장.
+    """
+    if not clips:
+        return False, "클립이 없습니다"
+
+    if len(clips) < min_clip_count:
+        return False, f"클립 수 부족: {len(clips)}개 < {min_clip_count}개"
+
+    total_dur = sum(c.end_sec - c.start_sec for c in clips)
+    if total_dur < min_duration_sec:
+        return False, f"너무 짧음: {total_dur:.1f}초 < {min_duration_sec}초"
+    if total_dur > max_duration_sec * 1.5:
+        return False, f"너무 김: {total_dur:.1f}초 > {max_duration_sec * 1.5}초"
+
+    for c in clips:
+        if c.end_sec <= c.start_sec:
+            return False, f"잘못된 시간 범위: {c.start_sec}~{c.end_sec}"
+
+    return True, "OK"
+
+
+def select_diverse_storylines(
+    storylines: list[dict],
+    *,
+    max_count: int,
+    skeleton: dict | None = None,
+) -> list[dict]:
+    """ranked_storylines에서 chunk_index/emotional_phase 다양성을 보장하며 max_count개 선택.
+
+    전략:
+    1) 우선 점수 1위는 무조건 선택
+    2) 이후 후보부터: 이미 선택된 것들과 (a) chunk_index가 다르거나 (b) emotional_phase가 다르면 선택
+    3) 다양성 후보가 부족하면 점수 순으로 채움 (폴백)
+
+    storyline의 chunk_index 추출:
+    - storytelling: storyline.hook.chunk_index (없으면 build[0].chunk_index)
+    - highlight: storyline.chunk_index
+
+    emotional_phase는 skeleton.emotional_arc[]의 time_range에 storyline의 시작 시간이
+    포함되는 phase 이름으로 결정.
+    """
+    if not storylines:
+        return []
+
+    if max_count <= 1 or len(storylines) <= 1:
+        return list(storylines[:max_count])
+
+    def _start_sec(sl: dict) -> float:
+        if sl.get("shorts_type") == "highlight":
+            return float(sl.get("start_sec", 0.0))
+        story = sl.get("storyline") or {}
+        hook = story.get("hook") or {}
+        if hook:
+            return float(hook.get("start_sec", 0.0))
+        builds = story.get("build") or []
+        if builds:
+            return float(builds[0].get("start_sec", 0.0))
+        payoff = story.get("payoff") or {}
+        return float(payoff.get("start_sec", 0.0))
+
+    def _chunk_idx(sl: dict) -> int:
+        if sl.get("shorts_type") == "highlight":
+            return int(sl.get("chunk_index", -1))
+        story = sl.get("storyline") or {}
+        hook = story.get("hook") or {}
+        if hook and "chunk_index" in hook:
+            return int(hook.get("chunk_index", -1))
+        builds = story.get("build") or []
+        if builds:
+            return int(builds[0].get("chunk_index", -1))
+        return -1
+
+    def _phase(sl: dict) -> str:
+        if not skeleton or not skeleton.get("emotional_arc"):
+            return ""
+        s = _start_sec(sl)
+        for ph in skeleton.get("emotional_arc", []):
+            tr = ph.get("time_range", "")
+            if "-" not in tr:
+                continue
+            try:
+                lo, hi = tr.split("-", 1)
+                lo_f, hi_f = float(lo), float(hi)
+                if lo_f <= s <= hi_f:
+                    return ph.get("phase", "")
+            except (ValueError, TypeError):
+                continue
+        return ""
+
+    # 점수 내림차순 정렬 가정 (호출부에서 정렬됨)
+    selected: list[dict] = []
+    used_chunks: set[int] = set()
+    used_phases: set[str] = set()
+
+    # 1순위: 1등은 무조건
+    selected.append(storylines[0])
+    used_chunks.add(_chunk_idx(storylines[0]))
+    p0 = _phase(storylines[0])
+    if p0:
+        used_phases.add(p0)
+
+    # 2순위 이후: 다양성 우선
+    for sl in storylines[1:]:
+        if len(selected) >= max_count:
+            break
+        c = _chunk_idx(sl)
+        p = _phase(sl)
+        is_diverse = (c not in used_chunks) or (p and p not in used_phases)
+        if is_diverse:
+            selected.append(sl)
+            used_chunks.add(c)
+            if p:
+                used_phases.add(p)
+
+    # 폴백: 다양성 후보가 부족하면 남은 것을 점수 순으로 채움
+    if len(selected) < max_count:
+        for sl in storylines[1:]:
+            if len(selected) >= max_count:
                 break
-            trimmed.append(clip)
-        trimmed.extend(payoff)
-        
-        # 최소 길이를 보장하기 위해 필요시 클립 길이 조정
-        final_dur = sum(c.end_sec - c.start_sec for c in trimmed)
-        if final_dur < min_dur and trimmed:
-            # 마지막 클립을 늘려서 최소 길이 보장
-            needed = min_dur - final_dur
-            last = trimmed[-1]
-            trimmed[-1] = StoryClip(
-                role=last.role,
-                start_sec=last.start_sec,
-                end_sec=last.end_sec + needed,
-                subtitle=last.subtitle,
-                tts_line=last.tts_line,
-                use_original_audio=last.use_original_audio,
-            )
-        return trimmed
+            if sl not in selected:
+                selected.append(sl)
 
-    # 너무 짧은 경우: 각 클립의 길이를 늘림 (원본 타임스탬프 유지)
-    if duration < min_dur:
-        needed = min_dur - duration
-        # 각 클립에 균등하게 분배하되, 최대 1.5배까지만 늘림
-        max_extend_per_clip = min(needed / len(clips), max(c.end_sec - c.start_sec for c in clips) * 0.5) if clips else 0
-        
-        adjusted = []
-        remaining_extend = needed
-        for i, clip in enumerate(clips):
-            clip_duration = clip.end_sec - clip.start_sec
-            # 마지막 클립이 아니면 균등 분배, 마지막 클립은 남은 분량 모두 할당
-            if i < len(clips) - 1:
-                extend_by = min(max_extend_per_clip, remaining_extend / (len(clips) - i))
-            else:
-                extend_by = remaining_extend
-            
-            # 클립 길이를 최대 1.5배까지만 늘림
-            max_extend = clip_duration * 0.5
-            extend_by = min(extend_by, max_extend)
-            
-            adjusted.append(
-                StoryClip(
-                    role=clip.role,
-                    start_sec=clip.start_sec,
-                    end_sec=clip.end_sec + extend_by,
-                    subtitle=clip.subtitle,
-                    tts_line=clip.tts_line,
-                    use_original_audio=clip.use_original_audio,
+    return selected[:max_count]
+
+
+def validate_clip_coherence(
+    clips: list[StoryClip],
+    time_jump_warning_sec: float = 300.0,
+) -> list[str]:
+    """인접 클립 간 인물/시간 연속성을 검사해 경고 문자열 목록을 반환합니다."""
+    warnings: list[str] = []
+    for i in range(1, len(clips)):
+        prev, curr = clips[i - 1], clips[i]
+        # 시간 점프
+        gap = curr.start_sec - prev.end_sec
+        if gap > time_jump_warning_sec:
+            warnings.append(
+                f"[clip {i}] 큰 시간 점프 ({gap:.0f}초)"
+            )
+        # 인물 단절
+        if prev.character_focus and curr.character_focus:
+            prev_set = set(prev.character_focus)
+            curr_set = set(curr.character_focus)
+            if not (prev_set & curr_set):
+                warnings.append(
+                    f"[clip {i}] 인물 연속성 없음 ({prev_set} → {curr_set})"
                 )
-            )
-            remaining_extend -= extend_by
-        
-        # 여전히 부족하면 마지막 클립을 더 늘림
-        final_dur = sum(c.end_sec - c.start_sec for c in adjusted)
-        if final_dur < min_dur and adjusted:
-            needed = min_dur - final_dur
-            last = adjusted[-1]
-            adjusted[-1] = StoryClip(
-                role=last.role,
-                start_sec=last.start_sec,
-                end_sec=last.end_sec + needed,
-                subtitle=last.subtitle,
-                tts_line=last.tts_line,
-                use_original_audio=last.use_original_audio,
-            )
-        return adjusted
-    
-    return clips
+    return warnings
+
+
