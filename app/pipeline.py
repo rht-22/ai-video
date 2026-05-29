@@ -783,6 +783,7 @@ def _fit_storyline_to_duration(
                         chunk_index=build_clip.chunk_index,
                         candidate_index=build_clip.candidate_index,
                         character_focus=build_clip.character_focus,
+                        visual_essential=build_clip.visual_essential,
                         tts_draft=build_clip.tts_draft,
                     )
                     cur_total = total_dur(out)
@@ -841,6 +842,7 @@ def _fit_storyline_to_duration(
                     pacing_note=clip.pacing_note,
                     chunk_index=clip.chunk_index, candidate_index=clip.candidate_index,
                     character_focus=clip.character_focus,
+                    visual_essential=clip.visual_essential,
                     tts_draft=clip.tts_draft,
                 )
                 cut_summary.append(f"{clip.role}({side}) {clip_dur:.1f}s→{new_dur:.1f}s")
@@ -871,6 +873,7 @@ def _fit_storyline_to_duration(
                     pacing_note=last.pacing_note,
                     chunk_index=last.chunk_index, candidate_index=last.candidate_index,
                     character_focus=last.character_focus,
+                    visual_essential=last.visual_essential,
                     tts_draft=last.tts_draft,
                 )
                 cur_total = total_dur(out)
@@ -899,6 +902,7 @@ def _fit_storyline_to_duration(
                         pacing_note=first.pacing_note,
                         chunk_index=first.chunk_index, candidate_index=first.candidate_index,
                         character_focus=first.character_focus,
+                        visual_essential=first.visual_essential,
                         tts_draft=first.tts_draft,
                     )
                     cur_total = total_dur(out)
@@ -945,6 +949,7 @@ from app.modules.silence_cutter import (
     flatten_to_clips,
     print_silence_cut_summary,
 )
+from app.modules.beat_trimmer import beat_trim_storyline
 
 
 def _compute_subtitle_margin_v(
@@ -1753,7 +1758,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 캐시 무효화 트리거: from_step in (chunk, character_index, gemini) 또는 캐시 파일 없음.
     checkpoint_chunk_tr = output_dir / "checkpoint_chunk_transcripts.json"
     chunk_transcripts: list[dict] = []
-    _chunk_tr_invalidate = from_step in ("chunk", "character_index", "gemini")
+    # "gemini" 제외: gemini 재개 시 청크는 동일 경계로 재분할되므로 SRT 기반 chunk_transcripts 는
+    # 그대로 유효하다. 과거엔 "gemini" 가 무효화 대상이라 캐시 로드를 막았는데, 재생성 가드
+    # (start_idx <= chunk_transcribe)는 gemini 가 뒤 단계라 False → 전사도 재실행 안 됨 → 빈 상태로
+    # 떨어져 자막이 candidate.transcript 폴백(1줄/clip)으로 깨지는 버그가 있었다.
+    _chunk_tr_invalidate = from_step in ("chunk", "character_index")
     if checkpoint_chunk_tr.exists() and not _chunk_tr_invalidate:
         try:
             _ctr_data = json.loads(checkpoint_chunk_tr.read_text(encoding="utf-8"))
@@ -2036,6 +2045,23 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                                         f"→ needed=false 강등"
                                     )
 
+                    # beats 시간도 절대값으로 변환 (내용 기반 trim·스토리 구성용).
+                    # 시간 결손/역전 beat는 drop. context_extension 변환과 동일 패턴.
+                    _beats = moment.get("beats")
+                    if isinstance(_beats, list):
+                        _valid_beats = []
+                        for _b in _beats:
+                            if not isinstance(_b, dict):
+                                continue
+                            try:
+                                _b["start_sec"] = float(_b["start_sec"]) + actual_cut_offset
+                                _b["end_sec"] = float(_b["end_sec"]) + actual_cut_offset
+                            except (KeyError, TypeError, ValueError):
+                                continue
+                            if _b["end_sec"] > _b["start_sec"]:
+                                _valid_beats.append(_b)
+                        moment["beats"] = _valid_beats
+
                     all_candidates.append(moment)
             finally:
                 if split_path and split_path.exists():
@@ -2197,6 +2223,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             skeleton=None,  # skeleton 단계 제거 (라운드 6b) — chunk_index 다양성으로만 폴백
         )
 
+        # 내용 기반 trim용: chunk_transcripts 의 모든 SpeechSegment 1회 평탄화 (문장 경계 스냅)
+        _beat_trim_segs: list = []
+        for ct in chunk_transcripts or []:
+            _beat_trim_segs.extend(ct.get("segments") or [])
+
         # 라운드 11.1-A: _fit_storyline_to_duration이 clips 변경하면 그 시점 자막 캐시는
         # 옛 storyline 영역 기준이라 무효화해야 한다. 루프 안에서 변경 감지 후 종료 시 일괄 처리.
         _storyline_fit_changed = False
@@ -2224,7 +2255,21 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 print(f"  - 스토리라인 {sl_idx + 1} 파싱 실패: {e}")
                 continue
 
-            # 라운드 11: 길이 자동 보정 — 60s 초과 시 점수 낮은 build 제거 / 40s 미만 시 인접 candidate 확장
+            # 내용 기반 trim 우선: 60s 초과 시 beats 기반으로 덜 중요한 구간 제거(흐름 보존).
+            # beats 없음/실패/무-drop이면 ([], "") 반환 → 아래 기존 _fit_storyline_to_duration 폴백.
+            bt_clips, bt_msg = beat_trim_storyline(
+                sl_clips, candidates_lookup, _beat_trim_segs,
+                target_min=float(config.min_duration_sec),
+                target_max=float(config.max_duration_sec),
+                flash_drop_fn=gemini.choose_beat_drops,
+            )
+            if bt_clips:
+                sl_clips = bt_clips
+                print(f"  [BeatTrim] 스토리라인 {sl_idx + 1}: {bt_msg}")
+                _storyline_fit_changed = True
+
+            # 라운드 11: 길이 자동 보정 — 잔여 초과 시 build 제거/비례 trim, 40s 미만 시 인접 candidate 확장.
+            # 내용 기반 trim 후에도 남는 초과·부족을 정리하는 backstop.
             sl_clips, fit_msg = _fit_storyline_to_duration(
                 sl_clips, candidates_lookup,
                 target_min=float(config.min_duration_sec),
@@ -2413,7 +2458,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 시간을 누적 감소량만큼 보정. _apply_silence_cut_to_variants 의 롤백/길이 재보정 패턴 그대로.
     # transcribe 단계의 _apply_silence_cut_to_variants 호출은 PR-5c-1 에서 제거 (중복 컷 회피).
     checkpoint_silence_cut = output_dir / "checkpoint_silence_cut.json"
-    _silence_cut_invalidate = from_step in ("story", "silence_cut")
+    _silence_cut_invalidate = from_step in ("gemini", "story", "silence_cut")
     if checkpoint_silence_cut.exists() and not _silence_cut_invalidate:
         print("\n[silence_cut] 캐시 로드 중...")
         _sc_data = json.loads(checkpoint_silence_cut.read_text(encoding="utf-8"))
@@ -2518,7 +2563,24 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     _seen_seg_keys.add(_k)
                     transcript_text.append(seg)
 
-    # Gemini 폴백 — chunk_transcripts 가 비어 있고 candidates 의 transcript 가 있을 때
+    # SRT 직접 파싱 폴백 — chunk_transcripts 가 비면(예: --from-step gemini 재개) variant 경로처럼
+    # SRT 를 직접 파싱해 라인 단위 자막을 복원한다. candidate.transcript(1줄/clip) 폴백보다 우선.
+    if not transcript_text and payload.srt_path and payload.srt_path.exists():
+        try:
+            _srt_segs = parse_subtitle(payload.srt_path)
+            for clip in union_clips:
+                for seg in _srt_segs:
+                    if seg.end_sec > clip.start_sec and seg.start_sec < clip.end_sec:
+                        _k = (round(seg.start_sec, 2), round(seg.end_sec, 2), seg.text)
+                        if _k not in _seen_seg_keys:
+                            _seen_seg_keys.add(_k)
+                            transcript_text.append(seg)
+            if transcript_text:
+                print(f"  [SRT 직접 파싱] chunk_transcripts 비어있음 — SRT에서 {len(transcript_text)}개 segment 복원")
+        except Exception as _exc:
+            print(f"  [경고] SRT 직접 파싱 실패: {_exc}")
+
+    # Gemini 폴백 — chunk_transcripts·SRT 모두 비어 있고 candidates 의 transcript 가 있을 때
     used_gemini_fallback = False
     if not transcript_text and all_candidates:
         used_gemini_fallback = True
@@ -2562,9 +2624,31 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     print(f"  [clips-sync] shorts #1 clips: {old_total:.1f}s → {new_total:.1f}s")
                 clips = synced_first
 
+    # 최종 길이 클램프(무조건 실행): snap/extend/fill 이 target_max 를 넘길 수 있고(대사 경계 스냅·
+    # 갭 메움), ffmpeg 렌더 시 컨테이너/오디오 priming 오버헤드(~0.1s)가 더해져 최종 mp4 가 60s 를
+    # 살짝 넘는 문제를 막는다. 역할별 trim 으로 hook 시작·payoff 끝을 보존하며 줄인다.
+    _RENDER_SAFETY_MARGIN = 0.3
+    _clamp_max = max(float(config.min_duration_sec), float(config.max_duration_sec) - _RENDER_SAFETY_MARGIN)
+    _clamp_lookup = _build_candidates_lookup(all_candidates)
+    _clamped_variants: list[tuple[list[StoryClip], str, float]] = []
+    for _vc, _vt, _vs in all_storyline_variants:
+        _before = sum(c.end_sec - c.start_sec for c in _vc)
+        _vc2, _ = _fit_storyline_to_duration(
+            _vc, _clamp_lookup,
+            target_min=float(config.min_duration_sec),
+            target_max=_clamp_max,
+        )
+        _after = sum(c.end_sec - c.start_sec for c in _vc2)
+        if _before - _after > 0.05:
+            print(f"  [length-clamp] {_vt[:18]}: {_before:.1f}s → {_after:.1f}s (≤{_clamp_max:.1f}s)")
+        _clamped_variants.append((_vc2, _vt, _vs))
+    all_storyline_variants = _clamped_variants
+    if all_storyline_variants:
+        clips = list(all_storyline_variants[0][0])
+
     # 자막 데이터 생성 (transcript_text → 편집 타임라인 매핑)
     final_segments = []
-    _subtitle_invalidate = from_step in ("graph", "story", "silence_cut", "resources")
+    _subtitle_invalidate = from_step in ("gemini", "graph", "story", "silence_cut", "resources")
     if not segments_cache_path.exists() or _subtitle_invalidate:
         print("  자막 타임라인 매핑 중...")
         remapped = remap_transcript_to_edited_timeline(
@@ -2625,7 +2709,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
     # story/graph 단계부터 재실행 시 클립 구성이 달라질 수 있으므로 resources 캐시 무효화.
     # 이전 라운드의 crop_map 키(role_idx)와 새 라운드의 clip 키가 어긋나면 KeyError 발생.
-    _resources_invalidate = from_step in ("graph", "story", "tts_plan", "transcribe", "resources")
+    _resources_invalidate = from_step in ("gemini", "graph", "story", "tts_plan", "transcribe", "resources")
     # 라운드 9-fix: face_identifier를 resources 단계 *밖*에서도 안전하게 사용할 수 있도록 미리 None 초기화.
     # --from-step render로 들어와 라인 1490 캐시 로드 분기를 타면 face_identifier가 정의되지 않아
     # 멀티 variant 렌더링 단계(라인 1862, 1873)에서 UnboundLocalError 발생.
