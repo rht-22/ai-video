@@ -497,6 +497,98 @@ def _shift_cues_by_silence_cut(
     return out
 
 
+def _build_silence_results_from_gemini(
+    clips: list,                 # list[StoryClip]
+    gemini_intervals: list[dict],  # [{clip_index, source_start_sec, source_end_sec, reason}]
+    candidates_lookup: dict,
+    *,
+    padding_sec: float = 0.15,
+    min_gap_sec: float = 0.4,
+    min_interval_sec: float = 0.3,
+):
+    """Gemini 가 결정한 silence cut 구간을 SilenceCutResult 로 변환.
+
+    v3.1: visual_essential / action verb 보호 가드는 코드에서 강제하지 않고 Gemini
+    프롬프트 가이드에만 의존한다. clip_meta 로 visual_essential·description 이 이미
+    Gemini 에 전달되므로 영상+텍스트 컨텍스트를 보고 직접 판단한다. 코드 후처리는
+    숫자 정책(padding/min_gap/min_interval) 의 sanity-check 만 담당.
+
+    candidates_lookup 인자는 시그니처 호환을 위해 남기되 함수 내부에서 사용 안 함.
+    """
+    from app.modules.silence_cutter import Interval, SilenceCutResult
+
+    cuts_per_clip: dict[int, list[tuple[float, float]]] = {}
+    for it in gemini_intervals or []:
+        try:
+            ci = int(it.get("clip_index"))
+            s = float(it.get("source_start_sec"))
+            e = float(it.get("source_end_sec"))
+        except (TypeError, ValueError):
+            continue
+        if e <= s or ci < 0 or ci >= len(clips):
+            continue
+        cuts_per_clip.setdefault(ci, []).append((s, e))
+
+    results: list = []
+    for idx, clip in enumerate(clips):
+        clip_start = float(clip.start_sec)
+        clip_end = float(clip.end_sec)
+
+        # clip 범위 안으로 clamp + min_gap 필터 + 정렬 후 머지
+        raw_cuts = []
+        for s, e in cuts_per_clip.get(idx, []):
+            s = max(s, clip_start)
+            e = min(e, clip_end)
+            if e - s < min_gap_sec:
+                continue
+            raw_cuts.append((s, e))
+        raw_cuts.sort(key=lambda t: t[0])
+        merged_cuts: list[list[float]] = []
+        for s, e in raw_cuts:
+            if merged_cuts and s <= merged_cuts[-1][1] + 0.01:
+                merged_cuts[-1][1] = max(merged_cuts[-1][1], e)
+            else:
+                merged_cuts.append([s, e])
+
+        # cuts → keep_intervals (clip 의 여집합)
+        keeps: list[Interval] = []
+        cursor = clip_start
+        for s, e in merged_cuts:
+            # padding: cut 의 양옆 padding_sec 만큼은 keep 으로 남긴다
+            s_padded = s + padding_sec
+            e_padded = e - padding_sec
+            if e_padded <= s_padded:
+                continue
+            if s_padded > cursor:
+                keeps.append(Interval(cursor, s_padded))
+            cursor = max(cursor, e_padded)
+        if cursor < clip_end:
+            keeps.append(Interval(cursor, clip_end))
+        if not keeps:
+            keeps = [Interval(clip_start, clip_end)]
+
+        # min_interval_sec 미만 keep 은 옆 keep 으로 합치기 (인접)
+        filtered: list[Interval] = []
+        for iv in keeps:
+            if iv.end_sec - iv.start_sec >= min_interval_sec:
+                filtered.append(iv)
+            elif filtered:
+                filtered[-1] = Interval(filtered[-1].start_sec, iv.end_sec)
+            else:
+                filtered.append(iv)
+        if not filtered:
+            filtered = [Interval(clip_start, clip_end)]
+
+        total_kept = sum(iv.end_sec - iv.start_sec for iv in filtered)
+        total_removed = max(0.0, (clip_end - clip_start) - total_kept)
+        results.append(SilenceCutResult(
+            original_clip=clip,
+            keep_intervals=filtered,
+            total_removed_sec=total_removed,
+        ))
+    return results
+
+
 # ─────────────────────────────────────────────────────────────
 # PR-3: chunk_transcribe — 청크별 transcript segments 선행 생성
 # ─────────────────────────────────────────────────────────────
@@ -584,17 +676,14 @@ def transcribe_chunks(
     """청크별 transcript segments 를 *원본 영상 절대시간* 기준으로 생성.
 
     SRT 있으면 [parse_subtitle](app/modules/subtitle.py) 후 청크별 슬라이스.
-    SRT 없으면 각 chunk.split_path 에서 transcriber(기본: extract_transcript) 호출.
-    Whisper 결과는 chunk-relative 이므로 chunk.start_sec 만큼 시프트해 절대시간으로 변환.
+    SRT 없으면 빈 segments 반환 — Whisper 폴백은 v3 에서 제거됨. 자막은 tts_place 단계의
+    Gemini 발화 전사로 대체된다.
 
     Args:
         chunks: Chunk list (각 항목에 index, start_sec, end_sec, split_path 속성)
-        srt_path: SRT/ASS/VTT/SMI 자막 경로. None이면 Whisper 분기.
-        audio_workdir: Whisper 분기에서 사용할 임시 작업 디렉토리 (현재는 직접 split_path 사용이라
-                       파라미터만 받고 미사용 — DI 호환용)
-        transcriber: SRT 없을 때 호출되는 콜러블 (Path → list[SpeechSegment]).
-                     None이면 app.modules.speech.extract_transcript 사용.
-                     테스트에서 Whisper 의존 없이 fake injection 가능.
+        srt_path: SRT/ASS/VTT/SMI 자막 경로. None이면 빈 결과.
+        audio_workdir: (미사용 — DI 호환용)
+        transcriber: (미사용 — DI 호환용)
 
     Returns:
         [{"chunk_index": int, "segments": list[SpeechSegment]}, ...]
@@ -612,44 +701,9 @@ def transcribe_chunks(
             for c in chunks
         ]
 
-    # Whisper 분기
-    if transcriber is None:
-        from app.modules.speech import extract_transcript
-
-        def transcriber(audio_path: Path):
-            return extract_transcript(
-                audio_path,
-                work_title=work_title,
-                character_names=character_names,
-                work_context=work_context,
-            )
-
-    from app.modules.speech import SpeechSegment as _SS
-    out: list[dict] = []
-    for c in chunks:
-        sp = getattr(c, "split_path", None)
-        if sp is None or not Path(sp).exists():
-            out.append({"chunk_index": int(c.index), "segments": []})
-            continue
-        try:
-            raw = transcriber(Path(sp))
-        except Exception as e:
-            print(f"  [chunk_transcribe] chunk {c.index} Whisper 실패 ({e}) — 빈 결과로 진행")
-            raw = []
-        # chunk-relative → 절대시간 (split_video_chunk 가 PTS 0 정규화 했으므로 chunk.start_sec 가산)
-        chunk_offset = float(getattr(c, "start_sec", 0.0))
-        abs_segs: list = []
-        for s in raw or []:
-            try:
-                abs_segs.append(_SS(
-                    start_sec=float(s.start_sec) + chunk_offset,
-                    end_sec=float(s.end_sec) + chunk_offset,
-                    text=str(getattr(s, "text", "") or ""),
-                ))
-            except (AttributeError, TypeError, ValueError):
-                continue
-        out.append({"chunk_index": int(c.index), "segments": abs_segs})
-    return out
+    # SRT 없음 — 빈 chunk_transcripts. 자막은 tts_place 의 Gemini 전사로 폴백.
+    print("  [chunk_transcribe] SRT 없음 — chunk_transcripts 비움 (자막은 tts_place 의 Gemini 전사로 대체)")
+    return [{"chunk_index": int(c.index), "segments": []} for c in chunks]
 
 
 def _clamp_cues_to_variants(
@@ -1015,8 +1069,19 @@ def _dedup_boundary_candidates(
     """
     by_chunk: dict[int, list[dict]] = {}
     for c in all_candidates or []:
-        ci = int(c.get("chunk_index", -1))
-        if ci < 0:
+        # _build_candidates_lookup 와 동일한 유효성 가드:
+        # chunk_index 와 candidate_index 가 모두 있어야 한다. 누락된 candidate 는
+        # dedup 후보로 못 쓰기 때문에 (1049 줄에서 int(None) 으로 터짐) 제외.
+        ci_raw = c.get("chunk_index")
+        cj_raw = c.get("candidate_index")
+        if ci_raw is None or cj_raw is None:
+            continue
+        try:
+            ci = int(ci_raw)
+            cj = int(cj_raw)
+        except (TypeError, ValueError):
+            continue
+        if ci < 0 or cj < 0:
             continue
         by_chunk.setdefault(ci, []).append(c)
 
@@ -1578,28 +1643,31 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # PR-2 chunk_intro_credits_ranges 가 exclusion 대체, PR-4 storyline.tts_cues 가 tts_plan 대체,
     # PR-3 chunk_transcribe 가 transcribe 의 전사 부분을 대체 (chunk_transcripts 슬라이스).
     step_order = [
-        "init",             # 0  -> [1/13]
-        "research",         # 1  -> [2/13]
-        "probe",            # 2  -> [3/13]
-        "proxy",            # 3  -> [4/13]
-        "chunk",            # 4  -> [5/13]
-        "character_index",  # 5  -> [6/13]
-        "chunk_transcribe", # 6  -> [7/13]
-        "gemini",           # 7  -> [8/13]
-        "graph",            # 8  -> [9/13]
-        "story",            # 9  -> [10/13]
-        "silence_cut",      # 10 -> [11/13]
-        "resources",        # 11 -> [12/13]
-        "render",           # 12 -> [13/13]
-        "validate",         # 13 -> 종료
+        "init",             # 0  -> [1/15]
+        "research",         # 1  -> [2/15]
+        "probe",            # 2  -> [3/15]
+        "proxy",            # 3  -> [4/15]
+        "chunk",            # 4  -> [5/15]
+        "character_index",  # 5  -> [6/15]
+        "chunk_transcribe", # 6  -> [7/15]
+        "gemini",           # 7  -> [8/15]
+        "graph",            # 8  -> [9/15]
+        "story",            # 9  -> [10/15]
+        "resources",        # 10 -> [11/15]
+        "rough_render",     # 11 -> [12/15]
+        "tts_place",        # 12 -> [13/15]
+        "render",           # 13 -> [14/15]
+        "validate",         # 14 -> 종료
     ]
     # PR-5b: 매직 넘버 → step_idx 매핑. 모든 `start_idx <= N` 비교를 단계명 기반으로 전환.
     step_idx: dict[str, int] = {name: i for i, name in enumerate(step_order)}
-    # PR-5c-4: 제거된 단계의 from_step 입력 하위 호환 — 가까운 단계로 redirect.
+    # 제거된 단계의 from_step 입력 하위 호환 — 가까운 단계로 redirect.
+    # v3: silence_cut 제거 → story 로 redirect (story 이후 tts_place 가 무음 컷도 처리).
     _legacy_step_alias = {
         "exclusion": "chunk",
-        "transcribe": "silence_cut",
-        "tts_plan": "silence_cut",
+        "transcribe": "story",
+        "tts_plan": "story",
+        "silence_cut": "story",
     }
     if from_step in _legacy_step_alias:
         _orig_from = from_step
@@ -1694,20 +1762,32 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     if _content_start > 0 or _content_end < media_info.duration_sec:
         print(f"  - 사용자 skip 인자 적용: {_content_start:.1f}s ~ {_content_end:.1f}s")
 
-    split_chunks = []
-    for i, chunk in enumerate(chunks, 1):
-        print(f"    청크 {i} 분할 중... ({chunk.start_sec:.1f}초 ~ {chunk.end_sec:.1f}초)")
-        split_path, actual_start_sec = split_video_chunk(
-            proxy_video_path,
-            chunk.start_sec,
-            chunk.end_sec,
-        )
-        split_chunk = replace(chunk, split_path=split_path, actual_start_sec=actual_start_sec)
-        split_chunks.append(split_chunk)
-        print(f"      → {split_path.name} 생성 완료 (실제 시작: {actual_start_sec:.2f}초)")
+    # split mp4 는 gemini 단계의 detect_scenes / analyze_chunk 만 사용. gemini 가 캐시 로드로
+    # 끝나거나 이미 지나간 경우 split 자체가 불필요하므로 ffmpeg 재인코딩을 통째로 스킵.
+    # 판정은 [8/15] gemini 캐시 분기와 정확히 대칭이어야 한다.
+    checkpoint_gemini = output_dir / "checkpoint_gemini.json"
+    _will_run_gemini = (
+        start_idx <= step_idx["gemini"]
+        and (not checkpoint_gemini.exists() or from_step == "gemini")
+    )
 
-    chunks = split_chunks
-    print("[OK] 청크 분할 완료")
+    if _will_run_gemini:
+        split_chunks = []
+        for i, chunk in enumerate(chunks, 1):
+            print(f"    청크 {i} 분할 중... ({chunk.start_sec:.1f}초 ~ {chunk.end_sec:.1f}초)")
+            split_path, actual_start_sec = split_video_chunk(
+                proxy_video_path,
+                chunk.start_sec,
+                chunk.end_sec,
+            )
+            split_chunk = replace(chunk, split_path=split_path, actual_start_sec=actual_start_sec)
+            split_chunks.append(split_chunk)
+            print(f"      → {split_path.name} 생성 완료 (실제 시작: {actual_start_sec:.2f}초)")
+
+        chunks = split_chunks
+        print("[OK] 청크 분할 완료")
+    else:
+        print("  - split 스킵 (gemini 단계가 캐시 로드로 끝나거나 이미 지나감 — split mp4 불필요)")
 
     # ═══════════════════════════════════════
     # [7/15] 인물 등장 인덱스 (face_id 사전 패스)
@@ -1799,7 +1879,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # ═══════════════════════════════════════
     # [8/15] Gemini 분석 (바이럴 최적화)
     # ═══════════════════════════════════════
-    checkpoint_gemini = output_dir / "checkpoint_gemini.json"
+    # checkpoint_gemini 는 위 chunk 단계에서 _will_run_gemini 판정용으로 이미 정의됨.
     if start_idx <= step_idx["gemini"] and checkpoint_gemini.exists() and from_step != "gemini":
         print("\n[8/15] Gemini 분析 결과 로드 중...")
         gemini_data = json.loads(checkpoint_gemini.read_text(encoding="utf-8"))
@@ -2451,82 +2531,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 첫 번째 스토리라인을 기본 clips/title_text로 설정 (하위 호환)
     clips, title_text, _ = all_storyline_variants[0]
 
-    # ═══════════════════════════════════════
-    # [silence_cut] 스토리-aware 무음 컷 (PR-5 신규)
-    # ═══════════════════════════════════════
-    # cut_silence_with_story_filter 로 각 variant clips 컷 + storyline_tts_cues_pool 의 cue
-    # 시간을 누적 감소량만큼 보정. _apply_silence_cut_to_variants 의 롤백/길이 재보정 패턴 그대로.
-    # transcribe 단계의 _apply_silence_cut_to_variants 호출은 PR-5c-1 에서 제거 (중복 컷 회피).
-    checkpoint_silence_cut = output_dir / "checkpoint_silence_cut.json"
-    _silence_cut_invalidate = from_step in ("gemini", "story", "silence_cut")
-    if checkpoint_silence_cut.exists() and not _silence_cut_invalidate:
-        print("\n[silence_cut] 캐시 로드 중...")
-        _sc_data = json.loads(checkpoint_silence_cut.read_text(encoding="utf-8"))
-        _new_variants: list[tuple[list[StoryClip], str, float]] = []
-        _new_cues_pool: list[list[dict[str, Any]]] = []
-        for v in _sc_data.get("variants", []):
-            v_clips = [StoryClip(**c) for c in v["clips"]]
-            _new_variants.append((v_clips, v["title_text"], v.get("score", 0.0)))
-            _new_cues_pool.append(list(v.get("tts_cues") or []))
-        if _new_variants:
-            all_storyline_variants = _new_variants
-            storyline_tts_cues_pool = _new_cues_pool
-            clips = list(all_storyline_variants[0][0])
-        print(f"  - {len(_new_variants)}개 variant 로드 완료")
-    elif start_idx <= step_idx["silence_cut"]:
-        print("\n[silence_cut] 스토리-aware 무음 컷 진행 중...")
-        _sc_start = time.time()
-        # chunk_transcripts 의 모든 SpeechSegment 평탄화 (cut_silence_with_story_filter 가
-        # 자체적으로 각 clip 범위 안 segments 만 필터링).
-        _all_chunk_segs: list = []
-        for ct in chunk_transcripts or []:
-            _all_chunk_segs.extend(ct.get("segments") or [])
-        _candidates_lookup_sc = _build_candidates_lookup(all_candidates)
-
-        new_variants: list[tuple[list[StoryClip], str, float]] = []
-        new_cues_pool: list[list[dict[str, Any]]] = []
-        for v_idx, (v_clips, v_title, v_score) in enumerate(all_storyline_variants):
-            cut_results = cut_silence_with_story_filter(
-                v_clips, _all_chunk_segs, _candidates_lookup_sc,
-                max_gap_sec=0.4, padding_sec=0.15, min_interval_sec=0.3,
-            )
-            v_clips_new = flatten_to_clips(cut_results)
-            # 너무 짧아지면 롤백 (라운드 13-B 동일 패턴)
-            new_total = sum(c.end_sec - c.start_sec for c in v_clips_new)
-            orig_total = sum(c.end_sec - c.start_sec for c in v_clips)
-            v_cues_orig = list(storyline_tts_cues_pool[v_idx] if v_idx < len(storyline_tts_cues_pool) else [])
-            if new_total < float(config.min_duration_sec) and orig_total <= float(config.max_duration_sec):
-                print(f"  [variant {v_idx+1} rollback] {new_total:.1f}s < {config.min_duration_sec:.0f}s → 원본 ({orig_total:.1f}s) 사용")
-                v_clips_new = list(v_clips)
-                shifted_cues = v_cues_orig
-            else:
-                shifted_cues = _shift_cues_by_silence_cut(v_cues_orig, cut_results, v_clips)
-            # 길이 재보정 (40~60s)
-            v_clips_new, _fit_msg = _fit_storyline_to_duration(
-                v_clips_new, _candidates_lookup_sc,
-                target_min=float(config.min_duration_sec),
-                target_max=float(config.max_duration_sec),
-            )
-            if _fit_msg:
-                print(f"  [LengthFit-postsilence variant {v_idx+1}] {_fit_msg}")
-            new_variants.append((v_clips_new, v_title, v_score))
-            new_cues_pool.append(shifted_cues)
-            _removed = sum(r.total_removed_sec for r in cut_results)
-            _cuts = sum(max(0, len(r.keep_intervals) - 1) for r in cut_results)
-            print(f"  - variant {v_idx + 1}: {_cuts}회 컷, {_removed:.1f}초 제거")
-        all_storyline_variants = new_variants
-        storyline_tts_cues_pool = new_cues_pool
-        clips = list(all_storyline_variants[0][0]) if all_storyline_variants else clips
-        checkpoint_silence_cut.write_text(
-            json.dumps({
-                "variants": [
-                    {"clips": [c.__dict__ for c in vc], "title_text": t, "score": s, "tts_cues": new_cues_pool[i]}
-                    for i, (vc, t, s) in enumerate(all_storyline_variants)
-                ],
-            }, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        print(f"[OK] silence_cut 완료 (소요 시간: {time.time()-_sc_start:.1f}초)")
+    # silence_cut 단계는 v3 에서 제거됨 — 무음 컷 결정이 tts_place 의 Gemini 호출로 이동.
+    # 옛 checkpoint_silence_cut.json 은 자료 보존 차원에서 삭제하지 않지만 더 이상 읽지 않는다.
 
     # 라운드 14: transcribe는 모든 variant clips의 union 영역에 대해 수행한다.
     # 이전엔 첫 variant clips만 transcribe → variant 2/3는 candidate.transcript(LLM 추정) 폴백 사용
@@ -2580,28 +2586,17 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         except Exception as _exc:
             print(f"  [경고] SRT 직접 파싱 실패: {_exc}")
 
-    # Gemini 폴백 — chunk_transcripts·SRT 모두 비어 있고 candidates 의 transcript 가 있을 때
-    used_gemini_fallback = False
-    if not transcript_text and all_candidates:
-        used_gemini_fallback = True
-        print("  [FALLBACK] chunk_transcripts 비어있음 — Gemini 대사 데이터로 자막 생성")
-        for clip in clips:
-            for m in all_candidates:
-                m_start = m.get("start_sec", 0)
-                m_end = m.get("end_sec", 0)
-                if m_end > clip.start_sec and m_start < clip.end_sec and m.get("transcript"):
-                    transcript_text.append(SpeechSegment(
-                        start_sec=clip.start_sec,
-                        end_sec=clip.end_sec,
-                        text=m["transcript"],
-                    ))
-                    break
-
-    _branch = "chunk_transcripts" if not used_gemini_fallback else "Gemini 폴백"
+    # v3: candidates.transcript 폴백 제거 — SRT 없는 작품은 tts_place 의 Gemini dialogue 가
+    # final_segments 를 채운다(자막 폴백 블록은 [11/15] resources 이후, tts_place 다음에 위치).
+    if transcript_text and payload.srt_path and payload.srt_path.exists():
+        _branch = "SRT"
+    else:
+        _branch = "chunk_transcripts"
     print(f"\n[transcript] {len(transcript_text)}개 segment ({_branch})")
 
-    # snap/extend/fill (라운드 19C — Gemini 폴백 데이터는 타이밍 부정확이라 건너뜀)
-    if transcript_text and not used_gemini_fallback:
+    # snap/extend/fill — transcript_text(SRT/chunk_transcripts) 있을 때만.
+    # v3 에서 candidates.transcript 폴백 제거됨 — used_gemini_fallback 가드 사라짐.
+    if transcript_text:
         all_storyline_variants = _snap_clip_boundaries_to_dialogue(
             all_storyline_variants, transcript_text, snap_back_max=5.0, snap_forward_max=5.0,
         )
@@ -2702,7 +2697,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     tts_cues = tts_cues_per_variant[0] if tts_cues_per_variant else []
 
     # ═══════════════════════════════════════
-    # [13/15] 리소스 생성 (크롭, TTS, 편집 계획)
+    # [11/15] 리소스 생성 (크롭, TTS, 편집 계획)
     # ═══════════════════════════════════════
     checkpoint_resources = output_dir / "checkpoint_resources.json"
     edit_plan_path = output_dir / "edit_plan.json"
@@ -2723,14 +2718,22 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     _genre_tag = research_raw_data.get("genre_tag")
     _cli_override = getattr(payload.design, "subtitle_style_preset", None)
     if start_idx <= step_idx["resources"] and checkpoint_resources.exists() and not _resources_invalidate:
-        print("\n[13/15] 리소스 로드 중...")
+        print("\n[11/15] 리소스 로드 중...")
         resources_data = json.loads(checkpoint_resources.read_text(encoding="utf-8"))
         crop_map = {k: Path(v) for k, v in resources_data["crop_map"].items()}
         tts_cue_files = resources_data.get("tts_cue_files", []) or []
-        print(f"  - 크롭 타임라인: {len(crop_map)}개, TTS cue 오디오: {len(tts_cue_files)}개")
+        tts_cue_files_pool = resources_data.get("tts_cue_files_pool")
+        if not tts_cue_files_pool:
+            tts_cue_files_pool = [list(tts_cue_files)] + [
+                [] for _ in range(max(0, len(all_storyline_variants) - 1))
+            ]
+        print(
+            f"  - 크롭 타임라인: {len(crop_map)}개, "
+            f"TTS cue 오디오: variant별 {[len(p) for p in tts_cue_files_pool]}"
+        )
         print("[OK] 리소스 로드 완료 (체크포인트에서)")
     elif start_idx <= step_idx["resources"]:
-        print("\n[13/15] 리소스 생성 중...")
+        print("\n[11/15] 리소스 생성 중...")
         resource_start = time.time()
 
         # Phase 12: 인물 인식 레퍼런스 빌드 (배우 사진이 있을 때만)
@@ -2839,21 +2842,57 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             if (ci + 1) % 3 == 0 or (ci + 1) == len(tts_cues):
                 print(f"    진행 중... ({ci + 1}/{len(tts_cues)})")
 
+        # 추가 variant들의 TTS도 같은 단계에서 합성 — rough_render/tts_place가 모든 variant를
+        # 다루기 위한 전제. 합성된 결과는 multi-variant render 루프가 재사용한다.
+        tts_cue_files_pool: list[list[dict[str, Any]]] = [list(tts_cue_files)]
+        if len(all_storyline_variants) > 1:
+            print(f"  variant 2~{len(all_storyline_variants)} TTS 오디오 생성 중...")
+        for v_idx in range(1, len(all_storyline_variants)):
+            v_num = v_idx + 1
+            v_cues = tts_cues_per_variant[v_idx] if v_idx < len(tts_cues_per_variant) else []
+            v_files: list[dict[str, Any]] = []
+            for ci, cue in enumerate(v_cues):
+                tts_path = output_dir / f"tts_v{v_num}_cue_{ci}.mp3"
+                if not tts_path.exists():
+                    target_sec = max(0.5, float(cue.get("end_sec", 0.0)) - float(cue.get("start_sec", 0.0)))
+                    final_text, actual_sec = synthesize_tts_with_fit(
+                        cue["text"], tts_path, target_sec=target_sec,
+                        voice=cue.get("voice", "narrative_female"),
+                        speed=cue.get("speed", "normal"),
+                        shorten_fn=_shorten,
+                    )
+                    cue["text"] = final_text
+                    cue["fit_actual_sec"] = actual_sec
+                v_files.append({
+                    "cue_index": ci,
+                    "path": str(tts_path),
+                    "cue": cue,
+                })
+            tts_cue_files_pool.append(v_files)
+            if v_files:
+                print(f"    variant #{v_num}: {len(v_files)}개 cue")
+
         resource_elapsed = time.time() - resource_start
         checkpoint_resources.write_text(
             json.dumps({
                 "crop_map": {k: str(v) for k, v in crop_map.items()},
                 "tts_cue_files": tts_cue_files,
+                "tts_cue_files_pool": tts_cue_files_pool,
             }, ensure_ascii=False, indent=2),
             encoding="utf-8"
         )
         print(f"[OK] 리소스 생성 완료 (소요 시간: {resource_elapsed:.1f}초)")
-        print(f"  - TTS cue 오디오: {len(tts_cue_files)}개")
+        print(f"  - TTS cue 오디오: variant별 {[len(p) for p in tts_cue_files_pool]}")
     else:
         if checkpoint_resources.exists():
             resources_data = json.loads(checkpoint_resources.read_text(encoding="utf-8"))
             crop_map = {k: Path(v) for k, v in resources_data["crop_map"].items()}
             tts_cue_files = resources_data.get("tts_cue_files", []) or []
+            tts_cue_files_pool = resources_data.get("tts_cue_files_pool")
+            if not tts_cue_files_pool:
+                tts_cue_files_pool = [list(tts_cue_files)] + [
+                    [] for _ in range(max(0, len(all_storyline_variants) - 1))
+                ]
         elif edit_plan_path.exists():
             edit_plan = json.loads(edit_plan_path.read_text(encoding="utf-8"))
             crop_map = {}
@@ -2863,6 +2902,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 if crop_path.exists():
                     crop_map[f"{clip_data['role']}_{idx}"] = crop_path
             tts_cue_files = []
+            tts_cue_files_pool = [[] for _ in range(len(all_storyline_variants) or 1)]
         else:
             raise FileNotFoundError("체크포인트 파일이나 edit_plan.json을 찾을 수 없습니다.")
 
@@ -2873,6 +2913,363 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         # 라운드 6b: skeleton 단계 제거됨. edit_plan에 임베드하던 narrative_skeleton 키도 사라짐.
         edit_plan_path.write_text(json.dumps(edit_plan, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"  - 편집 계획 저장: {edit_plan_path}")
+
+    # ═══════════════════════════════════════
+    # [12/15] 드래프트 렌더 — 자막/TTS/오버레이 없는 concat mp4 (variant별)
+    # ═══════════════════════════════════════
+    # tts_place 단계가 Gemini로 발화 timestamp를 추출할 때 사용. 크롭은 픽셀 변환이라
+    # 타임라인 길이/오디오에 영향 없음 → 결과 timestamp가 최종 렌더에 1:1로 매핑된다.
+    checkpoint_rough_render = output_dir / "checkpoint_rough_render.json"
+    _rough_invalidate = from_step in (
+        "gemini", "graph", "story", "silence_cut", "resources", "rough_render",
+    )
+    rough_variants: list[dict[str, Any]] = []
+    if checkpoint_rough_render.exists() and not _rough_invalidate:
+        print("\n[12/15] 드래프트 렌더 로드 중 (체크포인트)...")
+        _rr_data = json.loads(checkpoint_rough_render.read_text(encoding="utf-8"))
+        rough_variants = _rr_data.get("variants", []) or []
+        print(f"  - 드래프트 variants: {len(rough_variants)}개")
+    elif start_idx <= step_idx["rough_render"]:
+        print(f"\n[12/15] 드래프트 렌더 생성 중 ({len(all_storyline_variants)}개 variant)...")
+        from app.modules.renderer import render_rough_concat
+        rough_start = time.time()
+        for v_idx, (v_clips, _v_title, _v_score) in enumerate(all_storyline_variants):
+            v_num = v_idx + 1
+            rough_path = output_dir / f"rough_{v_num}.mp4"
+            if not rough_path.exists():
+                print(f"  variant #{v_num}: {len(v_clips)}개 clip → {rough_path.name}")
+                try:
+                    render_rough_concat(
+                        payload.video_path,
+                        list(v_clips),
+                        rough_path,
+                        enable_hwaccel=config.enable_hwaccel,
+                    )
+                except Exception as e:
+                    print(f"    [WARN] 드래프트 렌더 실패: {e} — 이 variant는 tts_place 건너뜀")
+                    rough_variants.append({"path": None, "duration_sec": None, "error": str(e)})
+                    continue
+            duration = sum(float(c.end_sec) - float(c.start_sec) for c in v_clips)
+            rough_variants.append({
+                "path": str(rough_path),
+                "duration_sec": duration,
+            })
+        checkpoint_rough_render.write_text(
+            json.dumps({"variants": rough_variants}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"[OK] 드래프트 렌더 완료 (소요 시간: {time.time() - rough_start:.1f}초)")
+    else:
+        print("\n[12/15] 드래프트 렌더 단계 스킵 (start_idx 위)")
+
+    # ═══════════════════════════════════════
+    # [13/15] TTS 재배치 — 드래프트 → Gemini 의미 기반 배치 (대사 추출 동시)
+    # ═══════════════════════════════════════
+    # SRT 있으면 parse_subtitle + remap_transcript_to_edited_timeline 으로 대사를 미리 추출해
+    # Gemini 에 known_dialogue 로 넘긴다 (전사 비용 절감). 없으면 같은 호출이 전사+배치 동시 수행.
+    # 겹침 허용 (사용자 정책). 호출 실패 시 STORY_COMPOSITION 의 원래 시간 유지.
+    checkpoint_tts_place = output_dir / "checkpoint_tts_place.json"
+    _tts_place_invalidate = from_step in (
+        "gemini", "graph", "story", "silence_cut", "resources",
+        "rough_render", "tts_place",
+    )
+    if checkpoint_tts_place.exists() and not _tts_place_invalidate:
+        print("\n[13/15] TTS 재배치 로드 중 (체크포인트)...")
+        _tp_data = json.loads(checkpoint_tts_place.read_text(encoding="utf-8"))
+        _tp_variants = _tp_data.get("variants", []) or []
+        for v_idx, v_entry in enumerate(_tp_variants):
+            if v_idx >= len(tts_cue_files_pool):
+                break
+            placed = v_entry.get("placed_cues") or []
+            for cf, p in zip(tts_cue_files_pool[v_idx], placed):
+                cf["cue"]["start_sec"] = float(p.get("start_sec", cf["cue"].get("start_sec", 0.0)))
+                cf["cue"]["end_sec"] = float(p.get("end_sec", cf["cue"].get("end_sec", 0.0)))
+            # 적용된 무음 컷 후 clips 복원 (v3 신규)
+            applied = v_entry.get("applied_clips")
+            if applied and v_idx < len(all_storyline_variants):
+                try:
+                    _restored = [StoryClip(**c) for c in applied]
+                    _, _t, _s = all_storyline_variants[v_idx]
+                    all_storyline_variants[v_idx] = (_restored, _t, _s)
+                except (TypeError, KeyError, ValueError) as _exc:
+                    print(f"    [WARN] variant #{v_idx+1} applied_clips 복원 실패: {_exc}")
+        if all_storyline_variants:
+            clips = list(all_storyline_variants[0][0])
+        # tts_place 의 dialogue_segments 도 캐시에서 후처리 폴백용으로 노출
+        tts_place_result = list(_tp_variants)
+        print(f"  - {len(_tp_variants)}개 variant의 cue/clip 복원")
+    elif start_idx <= step_idx["tts_place"]:
+        print(f"\n[13/15] TTS 재배치 + 무음 컷 (Gemini 의미 기반)...")
+        # parse_subtitle / remap_transcript_to_edited_timeline 은 모듈 상단(line 992-993)에서
+        # 이미 import 됨. 여기서 local import 하면 Python 이 함수 전체에서 그 이름을 local 로
+        # 취급해 더 위쪽 사용처(자막 빌드 line 2648 등) 에서 UnboundLocalError 발생.
+        from app.modules.ffmpeg_utils import probe_audio_duration
+        from app.modules.silence_cutter import flatten_to_clips
+        _tp_gemini = locals().get("gemini") or load_gemini_client()
+        _candidates_lookup_tp = _build_candidates_lookup(all_candidates)
+        if _tp_gemini is None:
+            print("  [WARN] Gemini 클라이언트 없음 — TTS 재배치 단계 건너뜀")
+            tts_place_result: list[dict[str, Any]] = []
+        else:
+            tp_start = time.time()
+            tts_place_result = []
+            _char_names = sorted({
+                str(getattr(ch, "character_name", "") or "")
+                for ch in (cast_images or [])
+                if getattr(ch, "character_name", None)
+            }) if cast_images else []
+            # 1) SRT 있으면 한 번만 파싱해서 모든 variant 에 재사용
+            srt_segs: list[Any] | None = None
+            if payload.srt_path and payload.srt_path.exists():
+                try:
+                    srt_segs = parse_subtitle(payload.srt_path)
+                    print(f"  SRT 파싱: {len(srt_segs)}개 segment → SRT-우선 모드")
+                except Exception as _srt_exc:
+                    print(f"  [WARN] SRT 파싱 실패: {_srt_exc} → Gemini 직접 전사 모드로 폴백")
+                    srt_segs = None
+            else:
+                print("  SRT 없음 → Gemini 직접 전사 모드")
+
+            for v_idx, rough in enumerate(rough_variants):
+                v_num = v_idx + 1
+                rough_path_str = rough.get("path") if isinstance(rough, dict) else None
+                duration_sec = float(rough.get("duration_sec") or 0.0) if isinstance(rough, dict) else 0.0
+                if not rough_path_str or not Path(rough_path_str).exists():
+                    print(f"  variant #{v_num}: 드래프트 mp4 없음 → cue 시간 유지")
+                    tts_place_result.append({
+                        "dialogue_segments": [],
+                        "placed_cues": [],
+                        "placement_rationales": [],
+                        "source": "skipped",
+                        "skipped": True,
+                    })
+                    continue
+                if v_idx >= len(tts_cue_files_pool) or not tts_cue_files_pool[v_idx]:
+                    print(f"  variant #{v_num}: TTS cue 0개 → 배치 건너뜀")
+                    tts_place_result.append({
+                        "dialogue_segments": [],
+                        "placed_cues": [],
+                        "placement_rationales": [],
+                        "source": "skipped",
+                        "skipped": True,
+                    })
+                    continue
+
+                cue_files = tts_cue_files_pool[v_idx]
+                v_clips = list(all_storyline_variants[v_idx][0])
+
+                # 사전 추출된 대사 (SRT → 편집 타임라인)
+                known_dialogue: list[dict[str, Any]] | None = None
+                if srt_segs is not None:
+                    try:
+                        remapped = remap_transcript_to_edited_timeline(
+                            list(v_clips), srt_segs, tts_only_when_no_orig=False,
+                        )
+                        known_dialogue = [
+                            {
+                                "start_sec": float(s.start_sec),
+                                "end_sec": float(s.end_sec),
+                                "text": str(s.text),
+                            }
+                            for s in remapped
+                        ]
+                    except Exception as _rm_exc:
+                        print(f"    [WARN] variant #{v_num} SRT remap 실패: {_rm_exc} → Gemini 전사 폴백")
+                        known_dialogue = None
+
+                planned_cues = []
+                for ci, cf in enumerate(cue_files):
+                    cue = cf.get("cue", {})
+                    fit = cue.get("fit_actual_sec")
+                    if fit is None or float(fit) <= 0:
+                        fit = probe_audio_duration(Path(cf["path"]))
+                    planned_cues.append({
+                        "cue_index": ci,
+                        "text": str(cue.get("text", "")),
+                        "voice_rationale": str(cue.get("voice_rationale", "")),
+                        "speed_rationale": str(cue.get("speed_rationale", "")),
+                        "original_start_sec": float(cue.get("start_sec", 0.0)),
+                        "fit_actual_sec": float(fit or 0.0),
+                    })
+
+                # clip_meta — rough timeline 매핑 + 보호 단서
+                clip_meta_input: list[dict[str, Any]] = []
+                _rough_cursor = 0.0
+                for c_idx, c in enumerate(v_clips):
+                    c_dur = float(c.end_sec) - float(c.start_sec)
+                    _cand = _candidates_lookup_tp.get((
+                        int(getattr(c, "chunk_index", -1) or -1),
+                        int(getattr(c, "candidate_index", -1) or -1),
+                    ))
+                    _desc = str((_cand or {}).get("description", ""))
+                    clip_meta_input.append({
+                        "clip_index": c_idx,
+                        "rough_start_sec": _rough_cursor,
+                        "rough_end_sec": _rough_cursor + c_dur,
+                        "source_start_sec": float(c.start_sec),
+                        "source_end_sec": float(c.end_sec),
+                        "visual_essential": bool(getattr(c, "visual_essential", False)),
+                        "description": _desc,
+                    })
+                    _rough_cursor += c_dur
+
+                mode_tag = "SRT" if known_dialogue is not None else "Gemini 전사"
+                print(f"  variant #{v_num}: 의미 배치 + 무음 컷 결정 중 ({Path(rough_path_str).name}, {duration_sec:.1f}s, {mode_tag})...")
+                try:
+                    result = _tp_gemini.place_tts_cues_with_video(
+                        Path(rough_path_str),
+                        planned_cues=planned_cues,
+                        total_duration_sec=duration_sec,
+                        clip_meta=clip_meta_input,
+                        known_dialogue_segments=known_dialogue,
+                        character_names=_char_names or None,
+                    )
+                    dialogue = result.get("dialogue_segments", []) or []
+                    placements = result.get("placements", []) or []
+                    silence_intervals = result.get("silence_cut_intervals", []) or []
+                    source = "srt" if known_dialogue is not None else "gemini_transcribe"
+                except Exception as e:
+                    print(f"    [WARN] variant #{v_num} 의미 배치 실패 — 원래 시간/컷 없음 유지: {e}")
+                    dialogue = known_dialogue or []
+                    placements = [
+                        {
+                            "cue_index": p["cue_index"],
+                            "start_sec": p["original_start_sec"],
+                            "end_sec": p["original_start_sec"] + p["fit_actual_sec"],
+                            "rationale": "fallback_original_time",
+                        }
+                        for p in planned_cues
+                    ]
+                    silence_intervals = []
+                    source = "fallback"
+
+                # ── 무음 컷 후처리: SilenceCutResult 변환 → flatten → 롤백 → cue 시프트 → 길이 재보정
+                silence_results = _build_silence_results_from_gemini(
+                    v_clips, silence_intervals, _candidates_lookup_tp,
+                )
+                v_clips_new = flatten_to_clips(silence_results)
+                new_total = sum(c.end_sec - c.start_sec for c in v_clips_new)
+                orig_total = sum(c.end_sec - c.start_sec for c in v_clips)
+                _rolled_back = False
+                if new_total < float(config.min_duration_sec) and orig_total <= float(config.max_duration_sec):
+                    print(f"    [rollback variant {v_num}] {new_total:.1f}s < {config.min_duration_sec:.0f}s → 원본({orig_total:.1f}s) 유지")
+                    v_clips_new = list(v_clips)
+                    silence_results = _build_silence_results_from_gemini(v_clips, [], _candidates_lookup_tp)
+                    _rolled_back = True
+                # placements 를 cue dict 로 감싸 shift
+                _shift_in = [
+                    {"start_sec": float(p["start_sec"]), "end_sec": float(p["end_sec"]), "_idx": int(p["cue_index"]),
+                     "_rationale": str(p.get("rationale", ""))}
+                    for p in placements
+                ]
+                _shifted = _shift_cues_by_silence_cut(_shift_in, silence_results, v_clips)
+                # 길이 재보정 (40~60s)
+                v_clips_new, _fit_msg = _fit_storyline_to_duration(
+                    v_clips_new, _candidates_lookup_tp,
+                    target_min=float(config.min_duration_sec),
+                    target_max=float(config.max_duration_sec),
+                )
+                if _fit_msg:
+                    print(f"    [LengthFit variant {v_num}] {_fit_msg}")
+
+                # dialogue_segments 도 동일 산식으로 시프트 (자막 폴백용 — rough timeline → final timeline)
+                _dialogue_shift = _shift_cues_by_silence_cut(
+                    [
+                        {"start_sec": float(d.get("start_sec", 0.0)),
+                         "end_sec": float(d.get("end_sec", 0.0)),
+                         "_speaker": str(d.get("speaker", "")),
+                         "_text": str(d.get("text", ""))}
+                        for d in dialogue
+                    ],
+                    silence_results, v_clips,
+                )
+                dialogue_shifted = [
+                    {"start_sec": d["start_sec"], "end_sec": d["end_sec"],
+                     "speaker": d.get("_speaker", ""), "text": d.get("_text", "")}
+                    for d in _dialogue_shift
+                ]
+
+                # cue_files 시간 갱신 (shifted)
+                placements_by_ci = {int(p.get("_idx", -1)): p for p in _shifted}
+                for ci, cf in enumerate(cue_files):
+                    p = placements_by_ci.get(ci)
+                    if p is None:
+                        continue
+                    cf["cue"]["start_sec"] = float(p["start_sec"])
+                    cf["cue"]["end_sec"] = float(p["end_sec"])
+
+                # all_storyline_variants 업데이트
+                _, _v_title, _v_score = all_storyline_variants[v_idx]
+                all_storyline_variants[v_idx] = (v_clips_new, _v_title, _v_score)
+
+                _cuts_count = sum(max(0, len(r.keep_intervals) - 1) for r in silence_results)
+                _removed_total = sum(r.total_removed_sec for r in silence_results)
+                tts_place_result.append({
+                    "dialogue_segments": dialogue_shifted,
+                    "silence_cut_intervals": silence_intervals,
+                    "placed_cues": [dict(cf["cue"]) for cf in cue_files],
+                    "placement_rationales": [str(p.get("_rationale", "")) for p in _shifted],
+                    "source": source,
+                    "applied_clips": [c.__dict__ for c in v_clips_new],
+                    "silence_summary": {
+                        "cuts": _cuts_count,
+                        "removed_sec": _removed_total,
+                        "rolled_back": _rolled_back,
+                    },
+                })
+                print(f"    발화 {len(dialogue)}개, 배치 {len(placements)}개, 무음컷 {_cuts_count}회 ({_removed_total:.1f}s 제거, source={source})")
+            checkpoint_tts_place.write_text(
+                json.dumps({"variants": tts_place_result}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            print(f"[OK] TTS 재배치 완료 (소요 시간: {time.time() - tp_start:.1f}초)")
+    else:
+        print("\n[13/15] TTS 재배치 단계 스킵 (start_idx 위)")
+
+    # 이후 단계는 갱신된 tts_cue_files_pool에서 variant #1의 cue를 사용.
+    if tts_cue_files_pool:
+        tts_cue_files = tts_cue_files_pool[0]
+    # variant #1 의 clips 도 silence cut 적용 후로 갱신
+    if all_storyline_variants:
+        clips = list(all_storyline_variants[0][0])
+
+    # ─────────────────────────────────────────
+    # 자막 소스 폴백 — chunk_transcripts/SRT 비면 tts_place 의 dialogue_segments 사용
+    # ─────────────────────────────────────────
+    # v3: Whisper 제거로 SRT 없는 작품의 chunk_transcripts 가 빈 상태. transcript_text/final_segments
+    # 도 빈 채로 흘러나가므로 여기서 tts_place 의 dialogue 를 끌어와 final_segments 를 재구성.
+    # tts_place 의 dialogue 는 이미 silence cut 시프트가 끝난 final 타임라인 기준이므로 remap 불필요.
+    _tts_place_dialogue_v0: list = []
+    try:
+        if "tts_place_result" in locals() and tts_place_result:
+            _tts_place_dialogue_v0 = list(tts_place_result[0].get("dialogue_segments") or [])
+    except (IndexError, KeyError, TypeError):
+        _tts_place_dialogue_v0 = []
+    if (not final_segments) and _tts_place_dialogue_v0:
+        print("  [자막 폴백] chunk_transcripts/SRT 비어있음 — tts_place 의 Gemini 발화로 자막 재구성")
+        _ns_segs = [
+            SimpleNamespace(
+                start_sec=float(d.get("start_sec", 0.0)),
+                end_sec=float(d.get("end_sec", 0.0)),
+                text=str(d.get("text", "")),
+            )
+            for d in _tts_place_dialogue_v0
+        ]
+        _merged = merge_subtitle_segments(_ns_segs, max_gap_sec=0.25, max_total_chars=40)
+        final_segments = [
+            SimpleNamespace(
+                start_sec=s.get("start", s.get("start_sec")) if isinstance(s, dict) else s.start_sec,
+                end_sec=s.get("end", s.get("end_sec")) if isinstance(s, dict) else s.end_sec,
+                text=s.get("text", "") if isinstance(s, dict) else s.text,
+            )
+            for s in _merged
+        ]
+        segments_cache_path.write_text(
+            json.dumps([{"start_sec": s.start_sec, "end_sec": s.end_sec, "text": s.text} for s in final_segments],
+                       ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"  - tts_place 폴백 자막 {len(final_segments)} segments")
 
     # ═══════════════════════════════════════
     # [14/15] 자막 디자인 + 최종 렌더링
@@ -3057,16 +3454,16 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             try:
                 var_start = time.time()
 
-                # 전사 — 라운드 14 우선순위:
+                # 전사 우선순위:
                 # 1. SRT (라인 단위) — remap이 clip 범위로 잘라냄
-                # 2. 통합 transcript_text (Whisper 전사 — 모든 variant union 영역 포함, 라운드 14)
-                # 3. candidate.transcript (Gemini 추정) — 위 둘 다 비어있을 때 폴백
+                # 2. 통합 transcript_text (변형 union 영역 포함)
+                # 3. tts_place 의 Gemini dialogue (이미 final 타임라인) — v3 신규 폴백
+                # 4. candidate.transcript (Gemini 추정) — 위 모두 비었을 때 폴백
                 var_transcript: list = []
+                _used_tts_place_dialogue = False
                 if srt_segments_for_variants:
                     var_transcript = list(srt_segments_for_variants)
                 else:
-                    # 라운드 14-B: 통합 transcript_text에서 var_clips 영역과 겹치는 segment 추출
-                    # 자막 텍스트·시간 모두 Whisper 전사 결과 → variant 2/3도 음성과 정확히 일치.
                     if transcript_text:
                         for seg in transcript_text:
                             seg_start = getattr(seg, "start_sec", None)
@@ -3082,21 +3479,29 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                                     ))
                                     break
 
-                    # 폴백: transcript_text에 var_clips 영역 segment가 없으면 candidate.transcript 사용
-                    if not var_transcript and all_candidates:
-                        for clip in var_clips:
-                            for m in all_candidates:
-                                m_start = float(m.get("start_sec", 0))
-                                m_end = float(m.get("end_sec", 0))
-                                if m_end > clip.start_sec and m_start < clip.end_sec and m.get("transcript"):
-                                    # 실제 candidate 구간 시간을 보존 (clip 전체 덮어쓰기 금지)
-                                    var_transcript.append(SpeechSegment(
-                                        start_sec=m_start, end_sec=m_end, text=m["transcript"],
-                                    ))
-                                    break
+                    # v3: tts_place 폴백 — variant 별 dialogue_segments 직접 사용 (이미 final 타임라인)
+                    if not var_transcript and "tts_place_result" in locals() and var_idx < len(tts_place_result):
+                        _tpv = tts_place_result[var_idx].get("dialogue_segments") or []
+                        if _tpv:
+                            var_transcript = [
+                                SpeechSegment(
+                                    start_sec=float(d.get("start_sec", 0.0)),
+                                    end_sec=float(d.get("end_sec", 0.0)),
+                                    text=str(d.get("text", "")),
+                                )
+                                for d in _tpv
+                            ]
+                            _used_tts_place_dialogue = True
+
+                    # v3: candidates.transcript 폴백 제거. tts_place 폴백 (위) 가 자막 소스 담당.
 
                 # 자막 타임라인 매핑
-                var_remapped = remap_transcript_to_edited_timeline(var_clips, var_transcript, tts_only_when_no_orig=True)
+                # tts_place dialogue 는 이미 final 타임라인 + SpeechSegment 객체라 remap 생략.
+                # merge_subtitle_segments 는 .text 속성 접근을 하므로 dict 가 아니라 객체로 넘겨야 한다.
+                if _used_tts_place_dialogue:
+                    var_remapped = list(var_transcript)
+                else:
+                    var_remapped = remap_transcript_to_edited_timeline(var_clips, var_transcript, tts_only_when_no_orig=True)
                 var_merged = merge_subtitle_segments(
                     var_remapped, max_gap_sec=0.25,
                     max_total_chars=int(config.subtitle_max_chars_per_line * config.subtitle_max_lines),
@@ -3109,29 +3514,33 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     ) for s in var_merged
                 ]
 
-                # TTS 생성 (variant별 cue 사용) — fit 적용으로 cue 시간 안에 들어가게 합성
-                from app.modules.tts import synthesize_tts_with_fit
-                _g_v = locals().get("gemini") or load_gemini_client()
-                _shorten_v = getattr(_g_v, "shorten_text", None) if _g_v else None
-                var_cues = tts_cues_per_variant[var_idx] if var_idx < len(tts_cues_per_variant) else []
+                # TTS — resources/tts_place 단계에서 합성·재배치 완료된 pool에서 읽는다.
+                # pool이 비어있으면 (구 체크포인트 호환) 여기서 합성 폴백.
                 var_tts_cue_files: list[dict[str, Any]] = []
-                for ci, cue in enumerate(var_cues):
-                    tts_out = output_dir / f"tts_{var_num}_cue_{ci}.mp3"
-                    if not tts_out.exists():
-                        target_sec = max(0.5, float(cue.get("end_sec", 0.0)) - float(cue.get("start_sec", 0.0)))
-                        final_text, actual_sec = synthesize_tts_with_fit(
-                            cue["text"], tts_out, target_sec=target_sec,
-                            voice=cue.get("voice", "narrative_female"),
-                            speed=cue.get("speed", "normal"),
-                            shorten_fn=_shorten_v,
-                        )
-                        cue["text"] = final_text
-                        cue["fit_actual_sec"] = actual_sec
-                    var_tts_cue_files.append({
-                        "cue_index": ci,
-                        "path": str(tts_out),
-                        "cue": cue,
-                    })
+                if var_idx < len(tts_cue_files_pool) and tts_cue_files_pool[var_idx]:
+                    var_tts_cue_files = list(tts_cue_files_pool[var_idx])
+                else:
+                    from app.modules.tts import synthesize_tts_with_fit
+                    _g_v = locals().get("gemini") or load_gemini_client()
+                    _shorten_v = getattr(_g_v, "shorten_text", None) if _g_v else None
+                    var_cues = tts_cues_per_variant[var_idx] if var_idx < len(tts_cues_per_variant) else []
+                    for ci, cue in enumerate(var_cues):
+                        tts_out = output_dir / f"tts_v{var_num}_cue_{ci}.mp3"
+                        if not tts_out.exists():
+                            target_sec = max(0.5, float(cue.get("end_sec", 0.0)) - float(cue.get("start_sec", 0.0)))
+                            final_text, actual_sec = synthesize_tts_with_fit(
+                                cue["text"], tts_out, target_sec=target_sec,
+                                voice=cue.get("voice", "narrative_female"),
+                                speed=cue.get("speed", "normal"),
+                                shorten_fn=_shorten_v,
+                            )
+                            cue["text"] = final_text
+                            cue["fit_actual_sec"] = actual_sec
+                        var_tts_cue_files.append({
+                            "cue_index": ci,
+                            "path": str(tts_out),
+                            "cue": cue,
+                        })
 
                 # TTS 자막 — 라운드 12.2: end_sec을 mp3 실제 길이로 갱신 (자막↔오디오 동기화)
                 var_tts_segs: list[SimpleNamespace] = []

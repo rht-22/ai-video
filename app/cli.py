@@ -40,9 +40,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--from-step",
         choices=[
             "init", "research", "probe", "proxy", "exclusion", "chunk",
-            "skeleton", "character_index", "gemini", "graph", "story",
-            "tts_plan", "transcribe", "resources", "render", "validate",
+            "skeleton", "character_index", "chunk_transcribe", "gemini",
+            "graph", "story", "silence_cut", "tts_plan", "transcribe",
+            "resources", "rough_render", "tts_place", "render", "validate",
         ],
+        # 비고: "silence_cut" / "tts_plan" / "transcribe" / "exclusion" / "skeleton" 은 v3 시점
+        # 더 이상 독립 단계가 아니지만 옛 잡 재개 호환을 위해 choices 에는 남겨둠.
+        # 파이프라인 내부 `_legacy_step_alias` 가 가까운 단계로 redirect 한다.
         help="Start from specific step (requires --job-id)",
     )
     create.add_argument("--job-id", help="Job ID to resume from (for --from-step)")

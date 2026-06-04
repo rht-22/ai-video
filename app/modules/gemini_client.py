@@ -44,6 +44,173 @@ def _extract_json_from_markdown(text: str) -> str:
     return text.strip()
 
 
+def _validate_silence_intervals(
+    data: Any,
+    clip_meta: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """place_tts_cues_with_video 응답에서 silence_cut_intervals 파싱.
+
+    - list 아니거나 키 없으면 []
+    - clip_index 가 clip_meta 범위 밖이면 드롭
+    - source_start_sec >= source_end_sec 이면 드롭
+    - clip_meta 에 source 범위가 있으면 그 범위로 clamp
+    - 같은 clip 안에서 start 정렬 + 인접/중첩한 것은 머지
+    """
+    raw = data.get("silence_cut_intervals") if isinstance(data, dict) else None
+    if not isinstance(raw, list):
+        return []
+
+    by_clip_source: dict[int, tuple[float, float]] = {}
+    for cm in clip_meta or []:
+        try:
+            ci = int(cm.get("clip_index"))
+        except (TypeError, ValueError):
+            continue
+        by_clip_source[ci] = (
+            float(cm.get("source_start_sec", 0.0)),
+            float(cm.get("source_end_sec", 0.0)),
+        )
+
+    by_clip: dict[int, list[tuple[float, float, str]]] = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            ci = int(item.get("clip_index"))
+            s = float(item.get("source_start_sec"))
+            e = float(item.get("source_end_sec"))
+        except (TypeError, ValueError):
+            continue
+        if e <= s:
+            continue
+        if ci not in by_clip_source:
+            continue
+        src_lo, src_hi = by_clip_source[ci]
+        s = max(s, src_lo)
+        e = min(e, src_hi)
+        if e <= s:
+            continue
+        reason = str(item.get("reason", ""))
+        by_clip.setdefault(ci, []).append((s, e, reason))
+
+    out: list[dict[str, Any]] = []
+    for ci in sorted(by_clip.keys()):
+        merged: list[list] = []
+        for s, e, reason in sorted(by_clip[ci], key=lambda t: t[0]):
+            if merged and s <= merged[-1][1] + 0.01:
+                merged[-1][1] = max(merged[-1][1], e)
+                if reason and reason not in merged[-1][2]:
+                    merged[-1][2] = (merged[-1][2] + "; " + reason) if merged[-1][2] else reason
+            else:
+                merged.append([s, e, reason])
+        for s, e, reason in merged:
+            out.append({
+                "clip_index": ci,
+                "source_start_sec": s,
+                "source_end_sec": e,
+                "reason": reason,
+            })
+    return out
+
+
+def _validate_place_decisions(
+    data: Any,
+    planned_cues: list[dict[str, Any]],
+    total_duration_sec: float,
+) -> list[dict[str, Any]]:
+    """place_tts_cues_with_video 응답 후처리.
+
+    각 planned cue 마다 정확히 한 placement 가 나오도록 채워서 반환.
+    - 누락된 cue_index 는 original_start_sec 으로 폴백
+    - end_sec = start_sec + fit_actual_sec 강제 (mp3 길이 변경 불가)
+    - 범위를 벗어나면 [0, total_duration_sec - fit_actual_sec] 으로 clamp
+    - cue_index 오름차순 정렬
+    """
+    raw = data.get("placements") if isinstance(data, dict) else None
+    by_index: dict[int, dict[str, Any]] = {}
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            try:
+                ci = int(item.get("cue_index"))
+            except (TypeError, ValueError):
+                continue
+            by_index[ci] = item
+
+    out: list[dict[str, Any]] = []
+    for cue in planned_cues:
+        try:
+            ci = int(cue.get("cue_index"))
+        except (TypeError, ValueError):
+            continue
+        dur = float(cue.get("fit_actual_sec", 0.0))
+        orig = float(cue.get("original_start_sec", 0.0))
+        picked = by_index.get(ci)
+        if picked is not None:
+            try:
+                start = float(picked.get("start_sec", orig))
+            except (TypeError, ValueError):
+                start = orig
+            rationale = str(picked.get("rationale", ""))
+        else:
+            start = orig
+            rationale = "missing_in_response_fallback_to_original"
+        if total_duration_sec > 0:
+            max_start = max(0.0, total_duration_sec - dur)
+            start = min(max(start, 0.0), max_start)
+        out.append({
+            "cue_index": ci,
+            "start_sec": start,
+            "end_sec": start + dur,
+            "rationale": rationale,
+        })
+    out.sort(key=lambda p: p["cue_index"])
+    return out
+
+
+def _validate_dialogue_segments(
+    data: Any,
+    total_duration_sec: float | None = None,
+) -> list[dict[str, Any]]:
+    """transcribe_rendered_dialogue 응답 후처리.
+
+    - data["segments"]가 list여야 한다.
+    - 시간 누락/역행 항목 드롭.
+    - total_duration_sec이 주어지면 [0, total]로 clamp.
+    - start 오름차순으로 정렬해 반환.
+    """
+    if not isinstance(data, dict):
+        return []
+    raw = data.get("segments")
+    if not isinstance(raw, list):
+        return []
+    cleaned: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            s = float(item.get("start_sec"))
+            e = float(item.get("end_sec"))
+        except (TypeError, ValueError):
+            continue
+        if e <= s:
+            continue
+        if total_duration_sec is not None and total_duration_sec > 0:
+            s = max(0.0, min(s, total_duration_sec))
+            e = max(0.0, min(e, total_duration_sec))
+            if e <= s:
+                continue
+        cleaned.append({
+            "start_sec": s,
+            "end_sec": e,
+            "speaker": str(item.get("speaker", "")),
+            "text": str(item.get("text", "")),
+        })
+    cleaned.sort(key=lambda d: d["start_sec"])
+    return cleaned
+
+
 
 # ─────────────────────────────────────────────
 # 청크 분석 프롬프트 (멀티모달 분석 + 핵심 필드 보존)
@@ -1102,6 +1269,86 @@ RELATIONSHIP_EXTRACTION_PROMPT = """
 
 
 # ─────────────────────────────────────────────
+# TTS 배치 프롬프트 (tts_place 단계 — 발화 전사(선택) + 의미 기반 배치 동시 수행)
+# ─────────────────────────────────────────────
+TTS_PLACE_PROMPT = """
+[ROLE]
+너는 편집된 쇼츠 드래프트 영상을 보고 (a) 발화를 정확히 전사하고, (b) 잘라낼 무음 구간을 결정하고,
+(c) TTS 내레이션을 의미상 어울리는 시점에 배치하는 편집자다.
+세 가지를 한 번에 결정한다. 반드시 JSON만 출력한다. 마크다운 코드블록 금지.
+
+[현재 모드]
+{mode_block}
+
+[입력]
+- 첨부된 영상 (편집된 쇼츠 드래프트, 자막/TTS 없음, 무음 포함 상태)
+- 영상 길이: {total_duration_sec}초
+- 등장 인물명 후보: {character_names_block}
+{known_dialogue_block}
+
+[클립 메타 — rough 영상 timeline 매핑]
+영상은 다음 클립들이 순서대로 concat 된 것이다. visual_essential=true 이거나 description 에 보호 키워드가
+있는 클립은 무음 컷 대상이 아니다.
+{clip_meta_block}
+
+[배치할 TTS cue 목록]
+각 cue 는 작가가 미리 결정한 텍스트·voice·speed 와 처음 기획한 시간(original_start_sec)이 있다.
+출력 길이는 fit_actual_sec 그대로 사용 — mp3 가 이미 합성되어 변경 불가.
+{planned_cues_block}
+
+[배치 지시 (TTS placements)]
+1. cue 의 텍스트(내레이션)가 어떤 장면/대사에 의미상 대응되는지 영상과 대사 흐름에서 직접 찾는다.
+   예: "선생님이 화난 진짜 이유" → 선생님이 화나기 직전~화내는 장면 근방.
+2. **꼬리 부분(영상 끝)으로 몰지 마라.** 의미가 영상 앞~중반에 있으면 거기 둔다.
+3. original_start_sec 는 작가의 처음 기획. 의미적으로 맞으면 그대로 두고, 어긋나면 옮긴다.
+4. 자연스러우면 대사 위에 겹쳐도 OK. 단 화자가 결정적인 대사를 막 시작하는 첫 1초는 가급적 피한다 (부드러운 가이드).
+5. **placements 의 start_sec / end_sec 는 무음 컷 적용 전 (rough 영상의 원본 timeline) 기준**으로 적어라.
+   무음 컷에 의한 시프트는 후처리에서 자동 적용된다. cue_index 는 입력과 1:1 매칭. end_sec = start_sec + fit_actual_sec.
+
+[무음 컷 결정 — 보수적 정책 (silence_cut_intervals)]
+- 0.4 초 **이상**의 발화 없는 구간만 후보로 본다. 0.4 초 미만은 무시.
+- 발화 앞뒤 0.15 초는 여유로 남긴다 — 그 0.15 초 구간은 절대 컷에 포함하지 마라.
+- 컷 후 인접한 keep 구간 길이는 0.3 초 이상이 되어야 한다.
+- visual_essential=true 인 클립의 무음은 **신중하게 판단**하라.
+  · 그 침묵이 캐릭터의 미세 표정·시선·리액션·소품 응시 등 시각으로 의미를 전달하는 순간이면 자르지 마라.
+  · 명백히 의미 없는 dead air (장면 전환 직후 정적, 카메라 이동 중 침묵 등) 라면 잘라도 좋다.
+- description 의 내용으로 그 클립의 톤·맥락을 파악하라. 행동·감정의 결정적 순간
+  (격렬한 액션 직전·직후, 감정 절정의 정적, 두 사람의 무언의 교감, 의미 있는 시선 처리 등) 의
+  침묵은 자르지 마라. 단순 정적은 컷 후보.
+- 화자가 바뀌는 발화 사이의 무음은 자르지 마라 ("[내레이션]" 접두 화자 ↔ 일반 화자 전환 포함).
+- 클립 시작/끝에 붙은 무음(클립 경계 인접 dead-air)은 보수적으로 자르지 마라.
+- 각 컷 구간은 **source 좌표** (원본 영상의 절대 시간) 로 명시한다. clip_meta 의 source[a~b] 범위 안에 들어가야 한다.
+
+[출력 스키마]
+{{
+  "dialogue_segments": [
+    {{"start_sec": 0.00, "end_sec": 0.00, "speaker": "string", "text": "string"}}
+  ],
+  "silence_cut_intervals": [
+    {{"clip_index": 0, "source_start_sec": 0.00, "source_end_sec": 0.00, "reason": "발화 없음 0.6s"}}
+  ],
+  "placements": [
+    {{"cue_index": 0, "start_sec": 0.00, "end_sec": 0.00, "rationale": "왜 그 시점인지 한 문장"}}
+  ]
+}}
+
+- dialogue_segments:
+  · "사전 전사 제공" 모드면 [입력] 의 known_dialogue 를 그대로 출력에 옮긴다.
+  · "직접 전사" 모드면 영상의 모든 발화를 시간순으로 추출 (감탄사 포함, BGM/SFX 제외).
+- silence_cut_intervals: 보호 클립의 것은 절대 포함 안 됨. 빈 배열도 허용 (자를 게 없으면).
+- placements: 입력 cue 와 1:1, cue_index 오름차순. **rough timeline 기준 (무음 컷 적용 전)**.
+"""
+
+_MODE_KNOWN_DIALOGUE = (
+    "사전 전사 제공 모드 — 발화 추출은 건너뛰고, [입력] 의 known_dialogue 를 그대로 dialogue_segments 에 옮긴다. "
+    "그 위에서 placements 만 결정하라."
+)
+_MODE_NEED_TRANSCRIBE = (
+    "직접 전사 모드 — 영상의 모든 발화를 직접 추출해 dialogue_segments 에 채운다. 그 위에서 placements 도 결정하라."
+)
+
+
+# ─────────────────────────────────────────────
 # 프롬프트 입력 블록 빌더 (analyze_chunk / compose_story / plan_tts_cues 공용)
 # ─────────────────────────────────────────────
 # use_case 별로 경고문/헤더가 달라 한 함수에서 분기. PR-1(라운드 25) 정리.
@@ -1290,12 +1537,13 @@ class GeminiConfig:
     max_retries: int = 3
     # Google 공식 가이드(Gemini 3.x): temperature/top_p/top_k 같은 샘플링 매개변수는
     # 설정하지 말고 기본값을 따르도록 권장. 카테고리별 thinking_level만 제어한다.
-    analysis_thinking_level: str = "high"         # "minimal" | "low" | "medium" | "high"
+    analysis_thinking_level: str = "medium"         # "minimal" | "low" | "medium" | "high"
     relationship_thinking_level: str = "medium"     # "minimal" | "low" | "medium" | "high"
     story_thinking_level: str = "medium"            # "minimal" | "low" | "medium" | "high"
     tts_cues_thinking_level: str = "medium"         # "minimal" | "low" | "medium" | "high"
     shorten_thinking_level: str = "medium"          # "minimal" | "low" | "medium" | "high"
     research_thinking_level: str = "medium"         # "minimal" | "low" | "medium" | "high"
+    transcribe_thinking_level: str = "low"          # "minimal" | "low" | "medium" | "high"
 
 
 class GeminiClient:
@@ -1866,6 +2114,200 @@ class GeminiClient:
                 time.sleep(1)
         return text
 
+    def place_tts_cues_with_video(
+        self,
+        video_path: Path,
+        *,
+        planned_cues: list[dict[str, Any]],
+        total_duration_sec: float,
+        clip_meta: list[dict[str, Any]] | None = None,
+        known_dialogue_segments: list[dict[str, Any]] | None = None,
+        character_names: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """편집된 드래프트 mp4 + 계획된 TTS cue 를 보고 (a) 발화 전사, (b) 무음 컷 결정,
+        (c) TTS 배치 를 한 번에 처리.
+
+        - known_dialogue_segments 가 주어지면 (예: SRT 에서 사전 추출) Gemini 는 그것을 그대로 받아
+          dialogue_segments 에 옮기고 silence/placements 만 결정한다.
+        - 없으면 Gemini 가 영상에서 발화도 직접 추출 + 무음 컷 + 배치 동시 결정.
+        - clip_meta 에는 각 클립의 [clip_index, rough_start_sec, rough_end_sec, source_start_sec,
+          source_end_sec, visual_essential, description] 가 들어간다. 무음 컷 결정 시 보호 가드의 입력.
+
+        반환:
+            {
+                "dialogue_segments":     [{start_sec, end_sec, speaker, text}, ...],
+                "silence_cut_intervals": [{clip_index, source_start_sec, source_end_sec, reason}, ...],
+                "placements":            [{cue_index, start_sec, end_sec, rationale}, ...],
+            }
+        """
+        if not video_path.exists():
+            raise FileNotFoundError(f"드래프트 영상이 없습니다: {video_path}")
+
+        names = [str(n) for n in (character_names or []) if n]
+        character_names_block = ", ".join(names) if names else "(미지정 — speaker_1/speaker_2/narrator 사용)"
+
+        if known_dialogue_segments is not None:
+            mode_block = _MODE_KNOWN_DIALOGUE
+            known_lines = [
+                f"  - {float(d.get('start_sec', 0)):.2f}~{float(d.get('end_sec', 0)):.2f} "
+                f"[{str(d.get('speaker', '?'))}] {str(d.get('text', ''))}"
+                for d in known_dialogue_segments
+            ]
+            known_dialogue_block = (
+                "\n[입력 known_dialogue]\n" + ("\n".join(known_lines) if known_lines else "(발화 없음)")
+            )
+        else:
+            mode_block = _MODE_NEED_TRANSCRIBE
+            known_dialogue_block = ""
+
+        cue_lines = []
+        for cue in planned_cues:
+            ci = cue.get("cue_index")
+            txt = str(cue.get("text", "")).replace("\n", " ")
+            orig = float(cue.get("original_start_sec", 0.0))
+            dur = float(cue.get("fit_actual_sec", 0.0))
+            vr = str(cue.get("voice_rationale", "")).replace("\n", " ")
+            sr = str(cue.get("speed_rationale", "")).replace("\n", " ")
+            cue_lines.append(
+                f"  - cue_index={ci}, original_start_sec={orig:.2f}, fit_actual_sec={dur:.2f}\n"
+                f"    text: {txt}\n"
+                f"    voice_rationale: {vr}\n"
+                f"    speed_rationale: {sr}"
+            )
+        planned_cues_block = "\n".join(cue_lines) if cue_lines else "(cue 없음)"
+
+        clip_meta_lines = []
+        for cm in (clip_meta or []):
+            ci = cm.get("clip_index", "?")
+            rs = float(cm.get("rough_start_sec", 0.0))
+            re_ = float(cm.get("rough_end_sec", 0.0))
+            ss = float(cm.get("source_start_sec", 0.0))
+            se = float(cm.get("source_end_sec", 0.0))
+            ve = "true" if cm.get("visual_essential") else "false"
+            desc = str(cm.get("description", "")).replace("\n", " ")
+            clip_meta_lines.append(
+                f"  - clip {ci}: rough[{rs:.2f}~{re_:.2f}], source[{ss:.2f}~{se:.2f}], "
+                f"visual_essential={ve}\n"
+                f"    description: {desc[:200]}"
+            )
+        clip_meta_block = "\n".join(clip_meta_lines) if clip_meta_lines else "(클립 메타 미지정)"
+
+        prompt = TTS_PLACE_PROMPT.format(
+            mode_block=mode_block,
+            total_duration_sec=f"{float(total_duration_sec):.2f}",
+            character_names_block=character_names_block,
+            known_dialogue_block=known_dialogue_block,
+            clip_meta_block=clip_meta_block,
+            planned_cues_block=planned_cues_block,
+        )
+
+        safe_path, is_tmp = _safe_upload_path(video_path)
+        uploaded_file = None
+        try:
+            for upload_attempt in range(self.config.max_retries):
+                try:
+                    uploaded_file = self.client.files.upload(file=str(safe_path))
+                    while uploaded_file.state.name == "PROCESSING":
+                        time.sleep(2)
+                        uploaded_file = self.client.files.get(name=uploaded_file.name)
+                    if uploaded_file.state.name == "FAILED":
+                        raise RuntimeError("Gemini File API 업로드 실패")
+                    break
+                except Exception as upload_err:
+                    if upload_attempt == self.config.max_retries - 1:
+                        raise RuntimeError(
+                            f"드래프트 영상 업로드 {self.config.max_retries}회 모두 실패 — TTS 배치를 중단합니다.\n"
+                            f"원인: {upload_err}"
+                        )
+                    wait = 2 ** upload_attempt
+                    print(f"    [WARN] 드래프트 업로드 오류 (시도 {upload_attempt + 1}/{self.config.max_retries}), {wait}초 후 재시도: {upload_err}")
+                    time.sleep(wait)
+
+            content_parts = [
+                prompt,
+                self.types.Part(
+                    file_data=self.types.FileData(
+                        file_uri=uploaded_file.uri,
+                        mime_type="video/mp4",
+                    ),
+                ),
+            ]
+
+            for attempt in range(self.config.max_retries):
+                try:
+                    response = self.client.models.generate_content(
+                        model=self.config.flash_model_name,
+                        contents=content_parts,
+                        config=self.types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            max_output_tokens=32768,
+                            thinking_config=self.types.ThinkingConfig(
+                                thinking_level=self.config.transcribe_thinking_level,
+                            ),
+                        ),
+                    )
+                    if not response or not response.text:
+                        if attempt == self.config.max_retries - 1:
+                            raise RuntimeError("Gemini TTS 배치가 빈 응답을 반환했습니다.")
+                        print(f"    [WARN] 빈 배치 응답, 재시도 중... ({attempt + 1}/{self.config.max_retries})")
+                        time.sleep(2 ** attempt)
+                        continue
+                    text = response.text.strip()
+                    json_text = _extract_json_from_markdown(text)
+                    if not json_text:
+                        if attempt == self.config.max_retries - 1:
+                            raise RuntimeError(f"Gemini 배치 응답에서 JSON 추출 실패: {text[:200]!r}")
+                        time.sleep(2 ** attempt)
+                        continue
+                    data = json.loads(json_text)
+                    if isinstance(data, list):
+                        data = {"placements": data}
+                    if known_dialogue_segments is not None:
+                        # SRT 모드 — Gemini 가 다른 dialogue 를 돌려줘도 입력을 신뢰
+                        dialogue = [dict(d) for d in known_dialogue_segments]
+                    else:
+                        # 응답 키 호환: 새 함수는 "dialogue_segments", validator 는 "segments" 기대
+                        _dialogue_raw = data.get("dialogue_segments")
+                        if _dialogue_raw is None:
+                            _dialogue_raw = data.get("segments")
+                        dialogue = _validate_dialogue_segments(
+                            {"segments": _dialogue_raw if isinstance(_dialogue_raw, list) else []},
+                            total_duration_sec,
+                        )
+                    placements = _validate_place_decisions(
+                        data, planned_cues, total_duration_sec,
+                    )
+                    silence_cut_intervals = _validate_silence_intervals(
+                        data, clip_meta or [],
+                    )
+                    return {
+                        "dialogue_segments": dialogue,
+                        "silence_cut_intervals": silence_cut_intervals,
+                        "placements": placements,
+                    }
+                except Exception as e:
+                    if attempt == self.config.max_retries - 1:
+                        raise
+                    wait = 2 ** attempt
+                    print(
+                        f"    [WARN] TTS 배치 실패 (시도 {attempt + 1}/{self.config.max_retries}), "
+                        f"{wait}초 후 재시도: {type(e).__name__}: {e}"
+                    )
+                    time.sleep(wait)
+
+            raise RuntimeError("Gemini TTS 배치 시도 횟수 초과")
+        finally:
+            if uploaded_file:
+                try:
+                    self.client.files.delete(name=uploaded_file.name)
+                except Exception as del_err:
+                    print(f"    [WARN] Gemini File API 서버 파일 삭제 실패: {del_err}")
+            if is_tmp and safe_path.exists():
+                try:
+                    safe_path.unlink()
+                except OSError:
+                    pass
+
     def choose_beat_drops(self, payload: dict[str, Any]) -> dict[str, Any]:
         """60초 초과 스토리라인에서 제거할 beat를 Flash가 선택. (내용 기반 trim용)
 
@@ -2174,6 +2616,43 @@ def _validate_gemini_schema(data: dict[str, Any]) -> None:
             f"    [WARN] candidate_moments 중 {len(dropped)}개 결손으로 drop: "
             + ", ".join(dropped[:6])
             + (" …" if len(dropped) > 6 else "")
+        )
+
+    # candidate_index 결손/None 보정:
+    # 토큰 한도/format drift 로 LLM 이 일부 모먼트의 candidate_index 를 빠뜨리는
+    # 경우가 있다. continues_from 참조용으로 기존 정수 값은 유지하고, 누락된 것만
+    # 남은 가장 작은 사용 안 한 정수로 채운다.
+    used: set[int] = set()
+    needs_fill: list[int] = []
+    for idx, m in enumerate(cleaned):
+        v = m.get("candidate_index")
+        if v is None:
+            needs_fill.append(idx)
+            continue
+        try:
+            iv = int(v)
+        except (TypeError, ValueError):
+            needs_fill.append(idx)
+            continue
+        if iv < 0:
+            needs_fill.append(idx)
+            continue
+        if iv in used:
+            # 중복 — 뒤에 온 쪽을 재할당 대상으로
+            needs_fill.append(idx)
+            continue
+        m["candidate_index"] = iv
+        used.add(iv)
+    if needs_fill:
+        next_free = 0
+        for idx in needs_fill:
+            while next_free in used:
+                next_free += 1
+            cleaned[idx]["candidate_index"] = next_free
+            used.add(next_free)
+        print(
+            f"    [WARN] candidate_index 결손/충돌 {len(needs_fill)}건 자동 보정 "
+            f"(positions={needs_fill[:6]}{' …' if len(needs_fill) > 6 else ''})"
         )
 
     data["candidate_moments"] = cleaned

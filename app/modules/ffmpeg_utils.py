@@ -3,8 +3,33 @@ from __future__ import annotations
 import glob
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
+
+
+def probe_audio_duration(path: Path) -> float:
+    """ffprobe로 오디오/비디오 파일의 재생 시간(초)을 읽는다. 실패 시 0.0.
+
+    tts_place 단계가 합성된 mp3 길이를 조회할 때 사용.
+    """
+    if not path.exists():
+        return 0.0
+    try:
+        ffprobe = find_ffmpeg_command("ffprobe")
+    except FileNotFoundError:
+        return 0.0
+    cmd = [
+        ffprobe, "-v", "quiet",
+        "-show_entries", "format=duration",
+        "-of", "csv=p=0",
+        str(path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        return float(result.stdout.strip())
+    except (ValueError, AttributeError):
+        return 0.0
 
 
 def _get_windows_common_paths() -> list[Path]:

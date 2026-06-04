@@ -766,6 +766,88 @@ def _to_short_path(path: str) -> str:
     return buf.value or path
 
 
+def render_rough_concat(
+    video_path: Path,
+    clips: list[StoryClip],
+    output_path: Path,
+    *,
+    enable_hwaccel: bool = True,
+    render_preset: str = "fastest",
+) -> list[str]:
+    """선택된 source 구간을 자막/오버레이/크롭 없이 concat한 mp4를 만든다.
+
+    tts_place 단계에서 Gemini가 발화 timestamp를 추출할 드래프트 영상.
+    출력 duration == sum(clip.end_sec - clip.start_sec). 해상도는 원본 유지.
+
+    크롭/리스케일은 픽셀 변환이라 타임라인 길이/오디오에 영향 없음 → Gemini가
+    돌려준 timestamp가 최종 렌더에 1:1로 매핑된다.
+    """
+    if not clips:
+        raise ValueError("렌더링할 clips가 비어 있습니다.")
+
+    output_dir = output_path.parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    ffmpeg_cmd = find_ffmpeg_command("ffmpeg")
+    output_relative = _relpath_or_abs(output_path, output_dir)
+    video_relative = _relpath_or_abs(video_path, output_dir)
+
+    def _input_args(hwaccel: str | None) -> list[str]:
+        args: list[str] = ["-dn", "-sn"]
+        for clip in clips:
+            if hwaccel:
+                args.extend(["-hwaccel", hwaccel])
+            args.extend([
+                "-thread_queue_size", "512",
+                "-ss", f"{clip.start_sec}",
+                "-to", f"{clip.end_sec}",
+                "-i", str(video_relative),
+            ])
+        return args
+
+    n = len(clips)
+    if n == 1:
+        filter_script = "[0:v]null[vout];[0:a]anull[aout]"
+    else:
+        concat_inputs = "".join(f"[{i}:v][{i}:a]" for i in range(n))
+        filter_script = f"{concat_inputs}concat=n={n}:v=1:a=1[vout][aout]"
+
+    filter_path = output_path.with_suffix(".rough.filter.txt")
+    filter_path.write_text(filter_script, encoding="utf-8")
+
+    preferred = _pick_video_encoder(ffmpeg_cmd)
+    candidates = [preferred] if preferred != "libx264" else ["libx264"]
+    if "libx264" not in candidates:
+        candidates.append("libx264")
+
+    hwaccel_candidates: list[str | None] = (
+        ["d3d11va", "cuda", None] if enable_hwaccel else [None]
+    )
+
+    last_err: Exception | None = None
+    for video_encoder in candidates:
+        encoder_args = _video_encoder_args(video_encoder, render_preset)
+        for hwaccel in hwaccel_candidates:
+            cmd_try = [
+                ffmpeg_cmd, "-y",
+                *_input_args(hwaccel),
+                "-filter_complex_script", str(filter_path),
+                "-map", "[vout]", "-map", "[aout]",
+                "-c:v", video_encoder, *encoder_args,
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "128k",
+                str(output_relative),
+            ]
+            try:
+                subprocess.check_call(cmd_try, cwd=str(output_dir))
+                return cmd_try
+            except subprocess.CalledProcessError as e:
+                last_err = e
+                continue
+
+    raise RuntimeError(f"드래프트 렌더링 실패. 마지막 오류: {last_err}")
+
+
 def _escape_text_for_drawtext(text: str) -> str:
     # drawtext에서 문제가 되는 문자 이스케이프
     text = text.replace("\\", "\\\\")

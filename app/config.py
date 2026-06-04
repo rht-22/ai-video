@@ -35,7 +35,7 @@ class DesignConfig:
     tts_line_y_margin: int = 580
 
     # 작품명 및 이미지 설정
-    work_title_y: int = 1400
+    work_title_y: int = 1500
     work_font_size: int = 40
     work_color: str = "#FF69B4"
     work_letter_spacing: bool = True

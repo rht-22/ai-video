@@ -163,41 +163,33 @@ def test_transcribe_chunks_srt_branch(tmp_path: Path):
     assert chunk1_texts == ["straddles-0-1", "in-chunk-1"]
 
 
-def test_transcribe_chunks_srt_missing_returns_whisper_branch(tmp_path: Path):
-    # SRT 없음 → transcriber DI 콜러블이 청크별로 호출되는지 검증
+def test_transcribe_chunks_srt_missing_returns_empty(tmp_path: Path):
+    # v3: Whisper 폴백 제거. SRT 없으면 항상 빈 segments 반환. transcriber 인자는 무시됨.
     calls: list[Path] = []
 
     def fake_transcriber(audio_path: Path) -> list[SpeechSegment]:
         calls.append(audio_path)
-        # 항상 chunk-relative 한 1개 세그먼트 반환
-        return [SpeechSegment(start_sec=5.0, end_sec=10.0, text=f"whisper:{audio_path.name}")]
+        return [SpeechSegment(start_sec=5.0, end_sec=10.0, text="should-not-appear")]
 
     split0 = tmp_path / "chunk_0.mp4"
     split0.write_bytes(b"fake")
-    split1 = tmp_path / "chunk_1.mp4"
-    split1.write_bytes(b"fake")
-    chunks = [
-        _chunk(0, 0.0, 100.0, split_path=split0, actual_start_sec=0.0),
-        _chunk(1, 100.0, 200.0, split_path=split1, actual_start_sec=0.0),
-    ]
+    chunks = [_chunk(0, 0.0, 100.0, split_path=split0, actual_start_sec=0.0)]
     out = transcribe_chunks(
         chunks=chunks, srt_path=None,
         audio_workdir=tmp_path,
         transcriber=fake_transcriber,
     )
-    assert len(out) == 2
-    assert len(calls) == 2
-    # chunk-relative (5~10s) 를 절대시간(+ chunk.start_sec)으로 변환했는지
-    assert out[0]["segments"][0].start_sec == 5.0   # chunk 0 시작 0s + 5s = 5s
-    assert out[1]["segments"][0].start_sec == 105.0 # chunk 1 시작 100s + 5s = 105s
+    assert out == [{"chunk_index": 0, "segments": []}]
+    # transcriber 는 호출되지 않아야 한다 (Whisper 폴백 제거 — 자막은 tts_place 가 담당)
+    assert calls == []
 
 
 def test_transcribe_chunks_srt_missing_no_split_path(tmp_path: Path):
-    # SRT 없고 split_path 도 없으면 Whisper 분기에서 빈 segments 반환 (안전)
+    # SRT 없고 split_path 도 없으면 빈 segments 반환 (안전)
     chunks = [_chunk(0, 0.0, 100.0)]
     out = transcribe_chunks(
         chunks=chunks, srt_path=None,
         audio_workdir=tmp_path,
-        transcriber=lambda p: pytest.fail("should not be called"),  # 호출되면 실패
+        transcriber=lambda p: pytest.fail("should not be called"),
     )
     assert out == [{"chunk_index": 0, "segments": []}]
