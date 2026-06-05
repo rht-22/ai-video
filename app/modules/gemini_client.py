@@ -2154,6 +2154,15 @@ def _validate_gemini_schema(data: dict[str, Any]) -> None:
     moment_required = ("start_sec", "end_sec", "description")
     moment_optional_defaults = {"reason": "", "transcript": ""}
 
+    # candidate_index 결손 보정용: 이미 사용된 정수 인덱스를 모아 두고, 빠진 곳은 next-unused 로 채운다.
+    # Gemini 가 일부 moment 에 candidate_index 를 빼먹는 케이스가 있어(EP07 chunk3 등) 다운스트림
+    # _dedup_boundary_candidates 의 int(None) 크래시를 막는다.
+    _used_ci: set[int] = {
+        int(m["candidate_index"]) for m in data["candidate_moments"]
+        if isinstance(m, dict) and isinstance(m.get("candidate_index"), int)
+    }
+    _next_ci = (max(_used_ci) + 1) if _used_ci else 0
+
     cleaned: list = []
     dropped: list[str] = []
     for idx, moment in enumerate(data["candidate_moments"]):
@@ -2167,6 +2176,13 @@ def _validate_gemini_schema(data: dict[str, Any]) -> None:
         for k, default in moment_optional_defaults.items():
             moment.setdefault(k, default)
         moment.setdefault("beats", [])  # 매 호출 fresh list (공유 방지)
+        # candidate_index 결손/None 보정: 충돌 없는 다음 정수로 채움
+        if not isinstance(moment.get("candidate_index"), int):
+            while _next_ci in _used_ci:
+                _next_ci += 1
+            moment["candidate_index"] = _next_ci
+            _used_ci.add(_next_ci)
+            _next_ci += 1
         cleaned.append(moment)
 
     if dropped:
