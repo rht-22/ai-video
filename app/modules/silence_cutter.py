@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -379,3 +380,146 @@ def print_silence_cut_summary(cut_results: list[SilenceCutResult]) -> None:
             f"{clip_dur:.1f}초 → {clip_dur - result.total_removed_sec:.1f}초 "
             f"({cuts}회 컷, {result.total_removed_sec:.1f}초 제거)"
         )
+
+
+# ─────────────────────────────────────────────────────────────
+# PR-6: 가편집 영상 기반 dead-air 컷 (av_align 단계)
+# ─────────────────────────────────────────────────────────────
+# av_align 단계에서 Gemini 가 가편집 영상을 보고 산출한 dead_air_cuts(가편집 타임라인 좌표)
+# 를 원본 clip 좌표로 역매핑해 clips 를 재분할하고, 같은 가편집 타임라인 위의 dialogue /
+# tts_cues 시간도 컷만큼 보정한다. Whisper gap 기반 cut_silence_* 를 대체.
+#
+# 좌표계:
+#   - clip.start_sec/end_sec        : 원본 영상 좌표
+#   - dead_air_cuts/dialogue/tts_cues : 가편집 타임라인 좌표(0 = 쇼츠 시작, 클립을 순서대로 이어붙임)
+
+
+def compute_clip_offsets(clips: list[StoryClip]) -> list[float]:
+    """각 clip 의 가편집 타임라인 시작초(이전 clip 길이 누적합) 목록."""
+    offsets: list[float] = []
+    acc = 0.0
+    for c in clips:
+        offsets.append(acc)
+        acc += max(0.0, float(c.end_sec) - float(c.start_sec))
+    return offsets
+
+
+def _merge_edit_cuts(dead_air_cuts: list[dict], min_cut_sec: float) -> list[tuple[float, float]]:
+    """가편집 좌표 컷 구간 정규화: min_cut_sec 미만 무시 + 겹침 병합 + 정렬."""
+    raw: list[tuple[float, float]] = []
+    for d in dead_air_cuts or []:
+        s = float(d.get("start_sec", 0.0) or 0.0)
+        e = float(d.get("end_sec", 0.0) or 0.0)
+        if e - s >= min_cut_sec:
+            raw.append((s, e))
+    raw.sort()
+    merged: list[tuple[float, float]] = []
+    for s, e in raw:
+        if merged and s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
+def apply_dead_air_cuts(
+    clips: list[StoryClip],
+    dead_air_cuts: list[dict],
+    *,
+    protect_visual_essential: bool = True,
+    min_cut_sec: float = 0.3,
+) -> tuple[list[SilenceCutResult], Callable[[float], float]]:
+    """가편집 타임라인 dead_air_cuts 를 원본 clip 좌표로 역매핑해 컷 적용.
+
+    Returns:
+        (results, remap)
+        results — flatten_to_clips 로 펼칠 SilenceCutResult 목록 (clips 와 1:1).
+        remap(edit_sec) — 컷 반영된 *새* 가편집 좌표. 컷 구간 내부 입력은 직전 유지 구간의
+        끝(= 컷 시작에 해당하는 새 좌표)으로 스냅한다.
+    """
+    offsets = compute_clip_offsets(clips)
+    cuts_edit = _merge_edit_cuts(dead_air_cuts, min_cut_sec)
+
+    # clip별 원본좌표 제거 구간 모으기 (visual_essential 은 보호 → 제거 안 함)
+    per_clip_removes: list[list[tuple[float, float]]] = [[] for _ in clips]
+    for (cs, ce) in cuts_edit:
+        for i, c in enumerate(clips):
+            dur = max(0.0, float(c.end_sec) - float(c.start_sec))
+            c_es, c_ee = offsets[i], offsets[i] + dur
+            ov_s = max(cs, c_es)
+            ov_e = min(ce, c_ee)
+            if ov_e - ov_s <= 1e-9:
+                continue
+            if protect_visual_essential and getattr(c, "visual_essential", False):
+                continue
+            src_s = float(c.start_sec) + (ov_s - c_es)
+            src_e = float(c.start_sec) + (ov_e - c_es)
+            per_clip_removes[i].append((src_s, src_e))
+
+    # clip별 keep_intervals 계산 + remap 용 segments 테이블 구성
+    results: list[SilenceCutResult] = []
+    # segments: (old_edit_start, old_edit_end, new_edit_start) — 유지 구간만, 시간순
+    segments: list[tuple[float, float, float]] = []
+    new_acc = 0.0
+    for i, c in enumerate(clips):
+        c_start, c_end = float(c.start_sec), float(c.end_sec)
+        removes = sorted(per_clip_removes[i])
+        keep: list[Interval] = []
+        cursor = c_start
+        for (rs, re) in removes:
+            rs = max(rs, c_start)
+            re = min(re, c_end)
+            if rs > cursor:
+                keep.append(Interval(cursor, rs))
+            cursor = max(cursor, re)
+        if cursor < c_end:
+            keep.append(Interval(cursor, c_end))
+        if not keep:
+            # 과도 컷 가드 — clip 전체가 제거되면 원본 통째 유지
+            keep = [Interval(c_start, c_end)]
+        for iv in keep:
+            old_es = offsets[i] + (iv.start_sec - c_start)
+            old_ee = offsets[i] + (iv.end_sec - c_start)
+            segments.append((old_es, old_ee, new_acc))
+            new_acc += (iv.end_sec - iv.start_sec)
+        kept = sum(iv.end_sec - iv.start_sec for iv in keep)
+        removed = max(0.0, (c_end - c_start) - kept)
+        results.append(SilenceCutResult(original_clip=c, keep_intervals=keep, total_removed_sec=removed))
+
+    def remap(edit_sec: float) -> float:
+        e = float(edit_sec)
+        prev_new_end = 0.0
+        for (oes, oee, nes) in segments:
+            if e <= oee + 1e-9:
+                if e >= oes - 1e-9:
+                    return nes + (e - oes)
+                # 컷 구간 내부 → 직전 유지 구간 끝으로 스냅
+                return prev_new_end
+            prev_new_end = nes + (oee - oes)
+        return prev_new_end  # 마지막 유지 구간 이후
+
+    return results, remap
+
+
+def remap_timed_items(
+    items: list[dict],
+    remap: Callable[[float], float],
+    *,
+    min_keep_sec: float = 0.05,
+) -> list[dict]:
+    """dialogue / tts_cues 의 가편집 좌표(start_sec/end_sec)를 remap 으로 보정.
+
+    컷으로 길이가 min_keep_sec 미만이 된 항목은 드롭(컷 구간에 완전히 포함됐던 것).
+    그 외 필드는 보존한다.
+    """
+    out: list[dict] = []
+    for it in items or []:
+        ns = remap(float(it.get("start_sec", 0.0) or 0.0))
+        ne = remap(float(it.get("end_sec", 0.0) or 0.0))
+        if ne - ns < min_keep_sec:
+            continue
+        new_it = dict(it)
+        new_it["start_sec"] = ns
+        new_it["end_sec"] = ne
+        out.append(new_it)
+    return out

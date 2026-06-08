@@ -1,19 +1,18 @@
-"""내용 기반(content-aware) 길이 단축 단위 테스트.
+"""beat_trimmer 단위 테스트 — 내용 기반(beats) 길이 단축.
 
-검증 대상 (app/modules/beat_trimmer.py):
-1. _kept_intervals_from_drops — clip 범위 − 제거 beat 구간, 문장 경계 스냅, sub-min 폐기.
+검증 대상:
+1. _kept_intervals_from_drops — clip 범위 − 제거 beat 구간. 컷 경계는 beat 경계를 그대로
+   사용한다(Whisper 문장경계 스냅 없음). sub-min 조각 폐기.
 2. beat_trim_storyline — 폴백 조건, 보호 규칙, target_min ceiling, 분할·메타 보존.
+
+PR-6: beats 는 analyze_chunk 가 발화/의미 단위로 나누고(프롬프트가 "발화 도중 끊지 말 것"을
+강제), 컷은 beat 경계에서만 일어나므로 별도 Whisper 스냅을 하지 않는다.
 """
 from __future__ import annotations
 
 from app.modules.beat_trimmer import _kept_intervals_from_drops, beat_trim_storyline
 from app.modules.silence_cutter import Interval
-from app.modules.speech import SpeechSegment
 from app.modules.story_builder import StoryClip
-
-
-def _seg(start, end, text="대사"):
-    return SpeechSegment(start_sec=float(start), end_sec=float(end), text=text)
 
 
 def _beat(s, e, importance="supporting", carries_payoff=False):
@@ -41,62 +40,52 @@ def _lookup(beats, chunk=0, cand=0, start=0.0, end=70.0):
 
 
 # ──────────────────────────────────────────────────────────────
-# _kept_intervals_from_drops
+# _kept_intervals_from_drops — beat 경계 그대로 사용 (Whisper 스냅 없음)
 # ──────────────────────────────────────────────────────────────
 
 
 def test_kept_no_drops_returns_whole_clip():
     beats = [_beat(0, 10), _beat(10, 20), _beat(20, 30)]
-    out = _kept_intervals_from_drops((0, 30), beats, set(), [])
-    assert out == [Interval(0.0, 30.0)]
+    assert _kept_intervals_from_drops((0, 30), beats, set()) == [Interval(0.0, 30.0)]
 
 
 def test_kept_middle_drop_splits_into_two():
     beats = [_beat(0, 10), _beat(10, 20), _beat(20, 30)]
-    out = _kept_intervals_from_drops((0, 30), beats, {1}, [])
+    out = _kept_intervals_from_drops((0, 30), beats, {1})
     assert out == [Interval(0.0, 10.0), Interval(20.0, 30.0)]
 
 
 def test_kept_edge_drop_stays_contiguous():
     beats = [_beat(0, 10), _beat(10, 20), _beat(20, 30)]
-    out = _kept_intervals_from_drops((0, 30), beats, {0}, [])
-    assert out == [Interval(10.0, 30.0)]
+    assert _kept_intervals_from_drops((0, 30), beats, {0}) == [Interval(10.0, 30.0)]
 
 
 def test_kept_preserves_uncovered_gap():
     # beats가 0~5, 20~30 구간을 안 덮음. 5~10 beat 제거 → 0~5 gap·10~30 유지.
     beats = [_beat(5, 10), _beat(15, 20)]
-    out = _kept_intervals_from_drops((0, 30), beats, {0}, [])
+    out = _kept_intervals_from_drops((0, 30), beats, {0})
     assert out == [Interval(0.0, 5.0), Interval(10.0, 30.0)]
+
+
+def test_kept_cut_boundaries_are_exact_beat_boundaries():
+    # 컷 경계는 제거된 beat 의 경계(10, 20)를 그대로 쓴다 — 스냅/보정 없음.
+    # (beats 가 이미 발화 단위라 발화 중간이 아니라는 전제)
+    beats = [_beat(0, 10), _beat(10, 20), _beat(20, 30)]
+    out = _kept_intervals_from_drops((0, 30), beats, {1})
+    assert out == [Interval(0.0, 10.0), Interval(20.0, 30.0)]
 
 
 def test_kept_discards_sub_min_fragment():
     # b1(2~20) 제거 → (0,2) 2s 폐기, (20,30) 유지
     beats = [_beat(0, 2), _beat(2, 20), _beat(20, 30)]
-    out = _kept_intervals_from_drops((0, 30), beats, {1}, [], min_clip_dur=3.0)
+    out = _kept_intervals_from_drops((0, 30), beats, {1}, min_clip_dur=3.0)
     assert out == [Interval(20.0, 30.0)]
 
 
 def test_kept_all_sub_min_keeps_longest():
     beats = [_beat(0, 2.5), _beat(2.5, 3.0), _beat(3.0, 5.0)]
-    out = _kept_intervals_from_drops((0, 5), beats, {1}, [], min_clip_dur=3.0)
+    out = _kept_intervals_from_drops((0, 5), beats, {1}, min_clip_dur=3.0)
     assert out == [Interval(0.0, 2.5)]  # 둘 다 <3 → 가장 긴 (0,2.5)
-
-
-def test_kept_snaps_interior_cuts_to_sentence_boundaries():
-    beats = [_beat(0, 10), _beat(10, 20), _beat(20, 30)]
-    segs = [_seg(8, 9), _seg(21, 22)]
-    out = _kept_intervals_from_drops((0, 30), beats, {1}, segs)
-    # (0,10) 끝 → 직전 문장 끝 9.0 / (20,30) 시작 → 다음 문장 머리 21.0
-    assert out == [Interval(0.0, 9.0), Interval(21.0, 30.0)]
-
-
-def test_kept_outer_edges_not_snapped():
-    # 외곽(0, 30)은 스냅 안 함 — 안쪽에 문장이 있어도 clip 경계 유지
-    beats = [_beat(0, 10), _beat(10, 30)]
-    segs = [_seg(1, 2), _seg(28, 29)]
-    out = _kept_intervals_from_drops((0, 30), beats, set(), segs)
-    assert out == [Interval(0.0, 30.0)]
 
 
 # ──────────────────────────────────────────────────────────────
@@ -107,7 +96,7 @@ def test_kept_outer_edges_not_snapped():
 def test_trim_under_budget_returns_empty():
     clips = [_clip(0, 30)]
     out, msg = beat_trim_storyline(
-        clips, _lookup([_beat(0, 30)], end=30), [],
+        clips, _lookup([_beat(0, 30)], end=30),
         target_min=40, target_max=60, flash_drop_fn=None,
     )
     assert out == [] and msg == ""
@@ -117,7 +106,7 @@ def test_trim_missing_beats_returns_empty():
     clips = [_clip(0, 70)]
     lookup = {(0, 0): {"chunk_index": 0, "candidate_index": 0, "start_sec": 0, "end_sec": 70}}  # no beats
     out, msg = beat_trim_storyline(
-        clips, lookup, [], target_min=40, target_max=60, flash_drop_fn=None,
+        clips, lookup, target_min=40, target_max=60, flash_drop_fn=None,
     )
     assert out == [] and msg == ""
 
@@ -131,7 +120,7 @@ def test_trim_deterministic_drops_least_important():
     ]
     clips = [_clip(0, 70, role="build", visual_essential=True)]
     out, msg = beat_trim_storyline(
-        clips, _lookup(beats, end=70), [],
+        clips, _lookup(beats, end=70),
         target_min=40, target_max=60, flash_drop_fn=None,
     )
     # must_remove=10 → 첫 droppable(10~20) 하나만 제거 → 2 클립
@@ -148,7 +137,7 @@ def test_trim_protects_carries_payoff_beat():
     beats = [_beat(0, 30, "core"), _beat(30, 40, "droppable", carries_payoff=True), _beat(40, 70, "core")]
     clips = [_clip(0, 70)]
     out, msg = beat_trim_storyline(
-        clips, _lookup(beats, end=70), [],
+        clips, _lookup(beats, end=70),
         target_min=40, target_max=60, flash_drop_fn=None,
     )
     assert out == [] and msg == ""
@@ -164,7 +153,7 @@ def test_trim_flash_guided_drops():
         return {"drops": [{"clip_idx": 0, "beat_idx": 2}], "reason": "test"}
 
     out, msg = beat_trim_storyline(
-        clips, _lookup(beats, end=70), [],
+        clips, _lookup(beats, end=70),
         target_min=40, target_max=60, flash_drop_fn=fake_flash,
     )
     # beat2(20~30) 제거 → (0,20)+(30,70)
@@ -178,7 +167,7 @@ def test_trim_ceiling_blocks_over_large_drop():
     beats = [_beat(0, 10, "core"), _beat(10, 75, "droppable"), _beat(75, 100, "core")]
     clips = [_clip(0, 100)]
     out, msg = beat_trim_storyline(
-        clips, _lookup(beats, end=100), [],
+        clips, _lookup(beats, end=100),
         target_min=40, target_max=60, flash_drop_fn=None,
     )
     assert out == [] and msg == ""
@@ -196,7 +185,7 @@ def test_trim_flash_failure_falls_back_to_deterministic():
         raise RuntimeError("flash down")
 
     out, msg = beat_trim_storyline(
-        clips, _lookup(beats, end=70), [],
+        clips, _lookup(beats, end=70),
         target_min=40, target_max=60, flash_drop_fn=boom,
     )
     # Flash 예외 → 결정적 폴백 → droppable(10~20) 제거

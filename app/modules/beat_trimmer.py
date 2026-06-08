@@ -7,7 +7,8 @@ target_max(보통 60초)를 넘으면 *덜 중요한 beat*를 골라 제거한�
 - 제거 판단: Flash(`flash_drop_fn`)가 스토리 맥락으로 어떤 beat를 뺄지 선택. 실패/없으면 importance
   기반 결정적 폴백.
 - 컷 지점: 중간 beat 제거 허용 → 한 clip이 2개 이상 contiguous StoryClip으로 분할(점프컷). 컷 경계는
-  Whisper 문장 경계로 스냅해 대사 중간을 자르지 않는다.
+  beat 경계를 그대로 쓴다 — beats 가 발화/의미 단위로 생성되어(analyze_chunk 프롬프트가 "발화 도중
+  끊지 말 것"을 강제) 발화 중간이 아니므로, 별도 Whisper 스냅 없이도 대사가 잘리지 않는다.
 - 보호: hook 첫 beat / payoff 마지막 beat / carries_payoff beat는 절대 제거 안 함.
 - 하한: 누적 제거가 (현재합 - target_min)을 넘기면 중단(과도 단축 방지).
 
@@ -20,30 +21,16 @@ from collections import defaultdict
 from typing import Callable
 
 from app.modules.silence_cutter import Interval
-from app.modules.speech import SpeechSegment
 from app.modules.story_builder import StoryClip
 
 _EPS = 1e-6
 _IMPORTANCE_ORDER = {"droppable": 0, "supporting": 1, "core": 2}
 
 
-def _nearest_sentence_end_at_or_before(t: float, segments: list[SpeechSegment]) -> float | None:
-    """t 이하인 가장 큰 seg.end_sec (완결된 문장 끝)."""
-    cands = [s.end_sec for s in segments if s.end_sec <= t + _EPS]
-    return max(cands) if cands else None
-
-
-def _nearest_sentence_start_at_or_after(t: float, segments: list[SpeechSegment]) -> float | None:
-    """t 이상인 가장 작은 seg.start_sec (문장 머리)."""
-    cands = [s.start_sec for s in segments if s.start_sec >= t - _EPS]
-    return min(cands) if cands else None
-
-
 def _kept_intervals_from_drops(
     clip_range: tuple[float, float],
     beats: list[dict],
     dropped_idxs: set[int],
-    segments: list[SpeechSegment],
     *,
     min_clip_dur: float = 3.0,
 ) -> list[Interval]:
@@ -51,8 +38,8 @@ def _kept_intervals_from_drops(
 
     - kept = clip 범위 − (제거 beat 범위). 생존 beat의 union이 아니므로 beats가 구간을 다 못 덮어도
       그 틈은 유지된다.
-    - 내부(중간) 컷 경계만 문장 경계로 스냅: interval 끝은 직전 문장 끝으로, 다음 interval 시작은
-      다음 문장 머리로. clip 외곽(첫 시작/마지막 끝)은 스냅하지 않는다.
+    - 컷 경계는 beat 경계를 그대로 쓴다. beats 가 발화/의미 단위로 생성되므로(analyze_chunk 프롬프트가
+      "발화 도중 끊지 말 것"을 강제) 발화 중간 컷이 생기지 않는다 → 별도 Whisper 스냅을 하지 않는다.
     - min_clip_dur 미만 조각은 폐기. 전부 폐기되면 가장 긴 조각 하나만 남긴다.
     """
     clip_start, clip_end = float(clip_range[0]), float(clip_range[1])
@@ -99,26 +86,8 @@ def _kept_intervals_from_drops(
         # 모든 구간이 제거됨 → 호출부 보호(생존 beat ≥1 보장)와 함께 안전망: 통째 유지
         return [Interval(clip_start, clip_end)]
 
-    # 문장 경계 스냅 (clip 안 segment만 고려)
-    local_segs = [s for s in segments if s.end_sec > clip_start and s.start_sec < clip_end]
-    candidates: list[Interval] = []
-    for a, b in kept:
-        na, nb = a, b
-        # interval 시작이 내부(제거 구간 뒤)면 → 다음 문장 머리로
-        if abs(a - clip_start) > _EPS:
-            snap = _nearest_sentence_start_at_or_after(a, local_segs)
-            if snap is not None and a - _EPS <= snap < b:
-                na = snap
-        # interval 끝이 내부(제거 구간 앞)면 → 직전 문장 끝으로
-        if abs(b - clip_end) > _EPS:
-            snap = _nearest_sentence_end_at_or_before(b, local_segs)
-            if snap is not None and na < snap <= b + _EPS:
-                nb = snap
-        if nb - na > _EPS:
-            candidates.append(Interval(na, nb))
-
-    if not candidates:
-        return [Interval(clip_start, clip_end)]
+    # 컷 경계는 beat 경계를 그대로 사용 (Whisper 스냅 없음 — beats 가 발화 단위로 생성됨)
+    candidates = [Interval(a, b) for a, b in kept]
 
     filtered = [iv for iv in candidates if (iv.end_sec - iv.start_sec) >= min_clip_dur - _EPS]
     if not filtered:
@@ -160,7 +129,6 @@ def _protected_idxs(clip: StoryClip, beats: list[dict], is_only_clip: bool) -> s
 def beat_trim_storyline(
     clips: list[StoryClip],
     candidates_lookup: dict,
-    transcript_segments: list[SpeechSegment],
     *,
     target_min: float,
     target_max: float,
@@ -197,7 +165,6 @@ def beat_trim_storyline(
     protected = [_protected_idxs(c, per_clip_beats[i], is_only_clip) for i, c in enumerate(clips)]
 
     must_remove = cur_total - target_max
-    segs = list(transcript_segments or [])
 
     # 제거 후보 순서 결정 — Flash 우선, 실패 시 importance 기반 결정적 정렬
     ordered_drops: list[tuple[int, int]] = []
@@ -284,7 +251,7 @@ def beat_trim_storyline(
             new_clips.append(c)
             continue
         intervals = _kept_intervals_from_drops(
-            (c.start_sec, c.end_sec), per_clip_beats[ci], drops, segs,
+            (c.start_sec, c.end_sec), per_clip_beats[ci], drops,
             min_clip_dur=min_clip_dur,
         )
         for idx, iv in enumerate(intervals):

@@ -364,6 +364,7 @@ segments 중 **쇼츠 제작에 가치 있는 장면만** 선별해 candidate_mo
 - beats: **이 candidate의 [start_sec, end_sec] 구간을 더 잘게 쪼갠 세부 비트 배열**. 길이가 60초를 넘는 쇼츠에서 내용 흐름을 끊지 않고 줄이기 위해, 그리고 스토리 구성 단계가 장면 내부를 더 정밀하게 이해하도록 쓰인다.
     - 타일링 규칙: beats는 candidate 구간을 **빈틈 없이, 겹침 없이** 시간순으로 채운다. 첫 beat.start_sec == candidate.start_sec, 마지막 beat.end_sec == candidate.end_sec. (segments 타일링 규칙과 동일)
     - 비트 분할 기준: 대사 전환·동작 전환·컷·장소 전환·감정 전환 등 *의미 단위*로 나눠라. 보통 candidate당 2~8개. 한 문장/한 동작이 한 beat가 되는 게 이상적.
+    - ⚠️ **beat 경계를 발화(대사) 도중에 두지 마라.** 이 경계가 그대로 편집 컷 지점이 되므로, 누군가 말하는 도중에 끊으면 대사가 잘려 어색해진다. 발화와 발화 사이의 무음·숨·컷 지점, 또는 한 발화가 완전히 끝난 직후에 경계를 둬라. (대사 없는 시각 비트는 자유롭게 나눠도 된다.)
     - start_sec / end_sec: 이 beat의 시간 범위 (chunk-relative, candidate 범위 안). [타임스탬프 정확도] 규칙 동일 적용.
     - summary: 이 beat에서 무슨 일이 일어나는지 **1~2문장으로 구체적으로** 묘사 — 행동·시각 단서·감정 흐름을 담아라. 단순 한 줄 요약("전화 받음") 금지.
     - dialogue: 이 beat 구간에 들리는 **모든 발화**를 화자별로 [{{"speaker": "인물명", "line": "대사"}}] 배열로. candidate.transcript는 '단 한 명'만 담지만 beats.dialogue는 **여러 화자 전부** 담아라. 내레이션/VO/독백은 speaker="[내레이션]". 발화가 없으면 빈 배열 []. speaker는 [열린 라벨 허용] — 불명확하면 "불명".
@@ -521,7 +522,7 @@ STORY_COMPOSITION_PROMPT = """
 ### sequence_type 선택 결정 트리 (반드시 이 순서로 검토)
 
 **1단계 — 시퀀스블록형 우선 검토**:
-- candidate 입력에 같은 `sequence_id`를 가진 candidate가 **3개 이상** 묶여 있고, 그 묶음이 자체로 hook→발전→결말을 모두 포함하면 → **시퀀스블록형 선택**
+- candidate 입력에 같은 `sequence_id`를 가진 candidate가 **2개 이상** 묶여 있고, 그 묶음이 자체로 hook→발전→결말을 모두 포함하면 → **시퀀스블록형 선택**
 - 한 sequence_id의 묶음이 자연스러운 코너/씬이므로 build·payoff 구분 없이 통째로 사용
 - 예: SNL 한 콩트의 시작~중간~끝이 한 sequence_id (같은 sequence_id 4~5개)
 - ⚠️ 이 조건이 충족되는데 다른 sequence_type을 선택하면 시퀀스 정보를 낭비하는 것이다.
@@ -1282,6 +1283,172 @@ def _normalize_storyline_tts_cues(
     return cues
 
 
+# ─────────────────────────────────────────────────────────────
+# PR-6: av_align — 가편집 영상 재분석 응답 정규화
+# ─────────────────────────────────────────────────────────────
+# 가편집 타임라인 좌표(0 = 쇼츠 시작) 기준 dialogue/tts_cues/dead_air_cuts 를 정규화한다.
+
+
+def _normalize_dialogue(
+    raw,
+    *,
+    total_duration: float | None = None,
+) -> list[dict[str, Any]]:
+    """av_align 응답의 dialogue 배열 정규화 — 화면 발화(화자+대사) 시간순 목록."""
+    out: list[dict[str, Any]] = []
+    for d in raw or []:
+        if not isinstance(d, dict) or "start_sec" not in d or "end_sec" not in d:
+            continue
+        try:
+            s = float(d["start_sec"])
+            e = float(d["end_sec"])
+        except (TypeError, ValueError):
+            continue
+        if e <= s:
+            continue
+        if total_duration is not None and (s < -0.5 or e > float(total_duration) + 0.5):
+            continue
+        text = str(d.get("text", "")).strip()
+        if not text:
+            continue
+        out.append({
+            "start_sec": s,
+            "end_sec": e,
+            "speaker": str(d.get("speaker", "")).strip(),
+            "text": text,
+        })
+    out.sort(key=lambda x: x["start_sec"])
+    return out
+
+
+def _normalize_dead_air_cuts(
+    raw,
+    *,
+    total_duration: float | None = None,
+    min_cut_sec: float = 0.4,
+) -> list[dict[str, Any]]:
+    """av_align 응답의 dead_air_cuts 정규화 — 범위 클램프 후 min_cut_sec 미만 제거 + 정렬."""
+    out: list[dict[str, Any]] = []
+    for d in raw or []:
+        if not isinstance(d, dict) or "start_sec" not in d or "end_sec" not in d:
+            continue
+        try:
+            s = float(d["start_sec"])
+            e = float(d["end_sec"])
+        except (TypeError, ValueError):
+            continue
+        if total_duration is not None:
+            s = max(0.0, s)
+            e = min(float(total_duration), e)
+        if e - s < min_cut_sec:
+            continue
+        out.append({"start_sec": s, "end_sec": e, "reason": str(d.get("reason", "")).strip()})
+    out.sort(key=lambda x: x["start_sec"])
+    return out
+
+
+def _subtract_dialogue_from_cuts(
+    cuts: list[dict[str, Any]],
+    dialogue: list[dict[str, Any]],
+    *,
+    min_cut_sec: float = 0.4,
+) -> list[dict[str, Any]]:
+    """dead_air_cut 에서 dialogue(발화) 구간과 겹치는 부분을 잘라낸다.
+
+    "사람의 대사와 대사 *사이*" 만 컷한다는 목표의 안전장치 — 발화 구간은 절대 컷되지 않는다.
+    컷이 발화를 사이에 두면 앞/뒤 두 조각으로 쪼개지고, 남은 조각이 min_cut_sec 미만이면 버린다.
+    """
+    if not dialogue:
+        return list(cuts)
+    spoken = sorted((float(d["start_sec"]), float(d["end_sec"])) for d in dialogue)
+    result: list[dict[str, Any]] = []
+    for c in cuts:
+        pieces: list[tuple[float, float]] = [(c["start_sec"], c["end_sec"])]
+        for (ds, de) in spoken:
+            next_pieces: list[tuple[float, float]] = []
+            for (cs, ce) in pieces:
+                if de <= cs or ds >= ce:
+                    next_pieces.append((cs, ce))   # 안 겹침
+                    continue
+                if ds > cs:
+                    next_pieces.append((cs, ds))    # 발화 앞 조각
+                if de < ce:
+                    next_pieces.append((de, ce))    # 발화 뒤 조각
+            pieces = next_pieces
+        for (cs, ce) in pieces:
+            if ce - cs >= min_cut_sec:
+                result.append({"start_sec": cs, "end_sec": ce, "reason": c.get("reason", "")})
+    result.sort(key=lambda x: x["start_sec"])
+    return result
+
+
+def _normalize_av_align_response(
+    data: dict[str, Any],
+    *,
+    total_duration: float | None = None,
+) -> dict[str, Any]:
+    """av_align 분석 응답을 dialogue/tts_cues/dead_air_cuts 로 정규화.
+
+    - dialogue: 화면 발화 (최종 자막 원천)
+    - tts_cues: _normalize_storyline_tts_cues 재사용 (voice 통일·범위 클램프)
+    - dead_air_cuts: 정규화 후 dialogue 구간을 빼서 발화 보호
+    """
+    dialogue = _normalize_dialogue(data.get("dialogue"), total_duration=total_duration)
+    tts_cues = _normalize_storyline_tts_cues(
+        data.get("tts_cues"), total_duration=total_duration, max_cues=None,
+    )
+    raw_cuts = _normalize_dead_air_cuts(data.get("dead_air_cuts"), total_duration=total_duration)
+    dead_air_cuts = _subtract_dialogue_from_cuts(raw_cuts, dialogue)
+    return {"dialogue": dialogue, "tts_cues": tts_cues, "dead_air_cuts": dead_air_cuts}
+
+
+AV_ALIGN_PROMPT = """당신은 숏폼(세로 쇼츠) 영상의 *가편집본* 을 검수하는 편집 감독이다.
+아래 영상은 이미 스토리 순서대로 잘라 이어붙인 가편집 결과물이다. 화면 우상단에는 현재
+재생 위치가 초 단위 타임코드로 표시되어 있다(예: 12.3s). 모든 시간 값은 *반드시 이 번인된
+타임코드(영상 시작 = 0초)* 를 기준으로 답하라.
+
+[작품 정보]
+제목: {work_title}
+등장인물(참고): {character_names}
+스토리 맥락: {context}
+
+[가편집 영상 길이] 약 {total_duration:.1f}초
+
+다음 세 가지를 JSON 으로 산출하라.
+
+1) dialogue — 영상에서 *실제로 들리는 사람의 발화* 를 시간순으로 모두.
+   - speaker: 말하는 인물 이름(위 등장인물 우선, 모르면 "화자1"/"화자2" 처럼 일관되게,
+     해설 보이스면 "내레이션").
+   - text: 들리는 그대로의 정확한 대사. 추측으로 지어내지 말 것. 안 들리면 포함하지 말 것.
+   - 배경음악·효과음·웅성거림은 제외. 사람이 명확히 말하는 것만.
+
+2) tts_cues — *발화가 없는 빈 구간* 에 넣을 해설 나레이션의 위치.
+   - 아래 "배치할 나레이션 문장" 을 영상 내용에 가장 잘 맞는 빈 구간에 배치하라.
+   - dialogue(사람 발화) 와 시간이 겹치면 안 된다. 대사 위에 나레이션을 깔지 말 것.
+   - start_sec/end_sec 는 나레이션이 재생될 구간, text 는 해당 문장.
+   - voice 는 [{voice_options}] 중 하나로 *전체 통일*(한 쇼츠 = 한 voice). speed 는 [{speed_options}] 중 하나.
+   배치할 나레이션 문장:
+{tts_drafts_block}
+
+3) dead_air_cuts — *대사와 대사 사이에 붕 뜨는(의미 없이 정적인) 구간* 만 컷 대상으로.
+   - 목적은 발화 사이의 늘어지는 공백을 제거해 템포를 높이는 것.
+   - 다음은 *절대 컷하지 말 것*:
+     · 사람이 말하는 구간(dialogue) 과 그 직전·직후.
+     · 표정·시선·눈빛·반응·감정 변화가 드러나는 장면(대사 없어도 핵심 비트).
+     · 액션·접촉·반전 등 시각적으로 중요한 순간.
+   - 잘라도 스토리/감정/시각 정보 손실이 없다고 *확신할 때만* 컷하라. 애매하면 컷하지 말 것.
+   - 0.4초 미만의 짧은 공백은 무시.
+   - reason: 왜 이 구간이 안전한 dead air 인지 한 줄.
+
+[출력 형식 — JSON only, 마크다운 코드펜스 없이]
+{{
+  "dialogue": [{{"start_sec": 0.0, "end_sec": 0.0, "speaker": "", "text": ""}}],
+  "tts_cues": [{{"start_sec": 0.0, "end_sec": 0.0, "text": "", "voice": "ko_female", "speed": "normal"}}],
+  "dead_air_cuts": [{{"start_sec": 0.0, "end_sec": 0.0, "reason": ""}}]
+}}
+"""
+
+
 @dataclass(frozen=True)
 class GeminiConfig:
     api_key: str
@@ -1494,6 +1661,123 @@ class GeminiClient:
 
             raise RuntimeError("Gemini 분석 시도 횟수 초과")
 
+        finally:
+            if uploaded_file:
+                try:
+                    self.client.files.delete(name=uploaded_file.name)
+                    print(f" [INFO] Gemini File API 서버 파일 삭제 완료: {uploaded_file.name}")
+                except Exception as del_err:
+                    print(f" [WARN] Gemini File API 서버 파일 삭제 실패: {del_err}")
+
+    # ─────────────────────────────────────────
+    # 가편집 영상 재분석 (Pro 모델, av_align 단계)
+    # ─────────────────────────────────────────
+    def analyze_rendered_cut(
+        self,
+        video_path: Path,
+        *,
+        total_duration: float,
+        work_title: str = "",
+        character_names: list[str] | None = None,
+        tts_drafts: list[str] | None = None,
+        context: str = "",
+    ) -> dict[str, Any]:
+        """가편집(rough cut) 영상을 Gemini Pro 로 재분석.
+
+        화면에 번인된 타임코드를 기준으로 dialogue(발화 화자+대사) / tts_cues(나레이션 위치) /
+        dead_air_cuts(대사 사이 정적 컷) 를 *가편집 타임라인 좌표* 로 산출한다.
+        analyze_chunk 와 동일한 업로드/재시도/정리 패턴을 따른다.
+        """
+        names_str = ", ".join(character_names) if character_names else "정보 없음"
+        if tts_drafts and any(str(t).strip() for t in tts_drafts):
+            drafts_block = "\n".join(f"  - {str(t).strip()}" for t in tts_drafts if str(t).strip())
+        else:
+            drafts_block = "  (배치할 나레이션 없음 — tts_cues 는 빈 배열로)"
+
+        prompt = AV_ALIGN_PROMPT.format(
+            work_title=(work_title or "정보 없음").replace("{", "{{").replace("}", "}}"),
+            character_names=names_str.replace("{", "{{").replace("}", "}}"),
+            context=(context or "정보 없음").replace("{", "{{").replace("}", "}}"),
+            total_duration=float(total_duration),
+            voice_options=", ".join(sorted(_VALID_TTS_VOICES)),
+            speed_options=", ".join(sorted(_VALID_TTS_SPEEDS)),
+            tts_drafts_block=drafts_block.replace("{", "{{").replace("}", "}}"),
+        )
+
+        content_parts: list[Any] = [prompt]
+        uploaded_file = None
+        video_path_obj = Path(video_path) if isinstance(video_path, str) else video_path
+        if not video_path_obj.exists():
+            raise FileNotFoundError(f"가편집 영상을 찾을 수 없습니다: {video_path_obj}")
+
+        safe_path, is_tmp = _safe_upload_path(video_path_obj)
+        for upload_attempt in range(self.config.max_retries):
+            try:
+                uploaded_file = self.client.files.upload(file=str(safe_path))
+                while uploaded_file.state.name == "PROCESSING":
+                    time.sleep(2)
+                    uploaded_file = self.client.files.get(name=uploaded_file.name)
+                if uploaded_file.state.name == "FAILED":
+                    raise RuntimeError("Gemini File API 업로드 실패")
+                content_parts.append(self.types.Part(
+                    file_data=self.types.FileData(
+                        file_uri=uploaded_file.uri,
+                        mime_type="video/mp4",
+                    ),
+                ))
+                break
+            except Exception as upload_err:
+                if upload_attempt == self.config.max_retries - 1:
+                    raise RuntimeError(
+                        f"가편집 영상 업로드 {self.config.max_retries}회 모두 실패: {upload_err}"
+                    )
+                wait = 2 ** upload_attempt
+                print(f" [WARN] av_align 업로드 오류 (시도 {upload_attempt + 1}/{self.config.max_retries}), {wait}초 후 재시도: {upload_err}")
+                time.sleep(wait)
+        if is_tmp and safe_path.exists():
+            safe_path.unlink()
+
+        try:
+            for attempt in range(self.config.max_retries):
+                try:
+                    response = self.client.models.generate_content(
+                        model=self.config.model_name,
+                        contents=content_parts,
+                        config=self.types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            max_output_tokens=65536,
+                            thinking_config=self.types.ThinkingConfig(
+                                thinking_level=self.config.analysis_thinking_level,
+                            ),
+                        ),
+                    )
+                    if not response or not response.text or not response.text.strip():
+                        if attempt == self.config.max_retries - 1:
+                            raise RuntimeError("Gemini av_align 이 빈 응답을 반환했습니다.")
+                        print(f"    [WARN] av_align 빈 응답, 재시도 중... ({attempt + 1}/{self.config.max_retries})")
+                        continue
+                    json_text = _extract_json_from_markdown(response.text.strip())
+                    if not json_text:
+                        if attempt == self.config.max_retries - 1:
+                            raise RuntimeError(f"av_align 응답에서 JSON 추출 실패 (원문: {response.text[:200]!r})")
+                        print(f"    [WARN] av_align JSON 추출 실패, 재시도 중... ({attempt + 1}/{self.config.max_retries})")
+                        continue
+                    data = json.loads(json_text)
+                    if isinstance(data, list):
+                        data = data[0] if data else {}
+                    return _normalize_av_align_response(data, total_duration=float(total_duration))
+                except Exception as e:
+                    if attempt == self.config.max_retries - 1:
+                        raise e
+                    wait = 2 ** attempt
+                    print(
+                        f"    [WARN] av_align 응답 처리 실패 "
+                        f"(시도 {attempt + 1}/{self.config.max_retries}), "
+                        f"{wait}초 후 재시도: {type(e).__name__}: {e}"
+                    )
+                    time.sleep(wait)
+                    continue
+            raise RuntimeError("av_align 분석 시도 횟수 초과")
         finally:
             if uploaded_file:
                 try:

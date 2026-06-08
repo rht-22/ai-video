@@ -1158,3 +1158,100 @@ def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, num_cue_inpu
         f"amix=inputs={len(mix_inputs)}:duration=longest:dropout_transition=2[aout]"
     )
     return f"{original_vol};{mix_filter}"
+
+
+# ─────────────────────────────────────────────────────────────
+# PR-6: av_align 가편집(rough cut) 렌더
+# ─────────────────────────────────────────────────────────────
+# 스토리 클립들을 원본에서 잘라 이어붙인 저화질 가편집본을 만든다. Gemini 가 이 영상을 보고
+# dialogue/tts_cues/dead_air_cuts 를 *가편집 타임라인 좌표* 로 산출한다(av_align 단계).
+
+
+def _build_rough_cut_filter(
+    n_clips: int,
+    *,
+    height: int,
+    fps: int,
+    timecode_font_arg: str | None,
+) -> tuple[str, str]:
+    """가편집 렌더용 filter_complex 스크립트와 video map 라벨을 만든다.
+
+    각 클립을 height/fps 로 정규화한 뒤 concat 으로 이어붙이고, timecode_font_arg 가 있으면
+    화면 우상단에 가편집 타임라인 초 단위 타임코드를 번인한다.
+    Returns: (filter_script, video_map_label)
+    """
+    if n_clips < 1:
+        raise ValueError("n_clips 는 1 이상이어야 합니다.")
+    parts: list[str] = []
+    for i in range(n_clips):
+        parts.append(f"[{i}:v]scale=-2:{height},fps={fps},setsar=1[v{i}]")
+        parts.append(f"[{i}:a]aresample=async=1:first_pts=0[a{i}]")
+    concat_inputs = "".join(f"[v{i}][a{i}]" for i in range(n_clips))
+    parts.append(f"{concat_inputs}concat=n={n_clips}:v=1:a=1[vc][aout]")
+
+    if timecode_font_arg:
+        # %{pts:flt} = 현재 재생 위치(초, 소수). filtergraph 에서 ':' 는 '\:' 로 이스케이프.
+        parts.append(
+            f"[vc]drawtext=fontfile='{timecode_font_arg}':text='%{{pts\\:flt}}s'"
+            f":x=w-tw-12:y=12:fontsize=26:fontcolor=yellow:box=1:boxcolor=black@0.6[vout]"
+        )
+        vmap = "[vout]"
+    else:
+        vmap = "[vc]"
+    return ";".join(parts), vmap
+
+
+def render_rough_cut(
+    source_video: Path,
+    clips: list[StoryClip],
+    output_path: Path,
+    *,
+    height: int = 480,
+    fps: int = 10,
+    timecode_font: Path | None = None,
+) -> float:
+    """클립들을 원본에서 잘라 이어붙인 가편집본(분석 전용)을 렌더하고 가편집 길이(초)를 반환.
+
+    - height/fps 로 저화질 인코딩(분석용이라 화질 무관, libx264 veryfast).
+    - 원본 오디오 유지(화자·대사 분석에 필요).
+    - timecode_font 가 있으면 우상단에 가편집 타임라인 타임코드 번인 → av_align 정확도 ↑.
+    """
+    output_dir = output_path.parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if not clips:
+        raise ValueError("렌더링할 clips 가 비어 있습니다.")
+
+    ffmpeg_cmd = find_ffmpeg_command("ffmpeg")
+    src = str(_relpath_or_abs(source_video, output_dir))
+
+    input_args: list[str] = ["-dn", "-sn"]
+    for clip in clips:
+        input_args.extend([
+            "-thread_queue_size", "512",
+            "-ss", f"{clip.start_sec}",
+            "-to", f"{clip.end_sec}",
+            "-i", src,
+        ])
+
+    font_arg = None
+    if timecode_font is not None and Path(timecode_font).exists():
+        font_arg = str(_relpath_or_abs(timecode_font, output_dir)).replace("\\", "/")
+    filter_script, vmap = _build_rough_cut_filter(
+        len(clips), height=height, fps=fps, timecode_font_arg=font_arg,
+    )
+    filter_path = output_path.with_suffix(".roughfilter.txt")
+    filter_path.write_text(filter_script, encoding="utf-8")
+
+    output_relative = _relpath_or_abs(output_path, output_dir)
+    cmd = [
+        ffmpeg_cmd, "-y",
+        *input_args,
+        "-filter_complex_script", str(filter_path),
+        "-map", vmap, "-map", "[aout]",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k",
+        str(output_relative),
+    ]
+    subprocess.check_call(cmd, cwd=str(output_dir))
+    return sum(max(0.0, float(c.end_sec) - float(c.start_sec)) for c in clips)
