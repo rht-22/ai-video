@@ -525,131 +525,212 @@ def _slice_segments_for_chunk(
     return out
 
 
-def _serialize_chunk_transcripts(chunk_transcripts: list[dict]) -> list[dict]:
-    """in-memory [{chunk_index, segments: [SpeechSegment, ...]}] → JSON-safe dict list."""
+def _serialize_segments(segments: list) -> list[dict]:
+    """list[SpeechSegment] → JSON-safe dict list (video_intent transcript 체크포인트용)."""
     out: list[dict] = []
-    for ct in chunk_transcripts or []:
-        ci = ct.get("chunk_index")
-        if ci is None:
+    for s in segments or []:
+        try:
+            out.append({
+                "start_sec": float(s.start_sec),
+                "end_sec": float(s.end_sec),
+                "text": str(getattr(s, "text", "") or ""),
+            })
+        except (AttributeError, TypeError, ValueError):
             continue
-        segs = []
-        for s in ct.get("segments") or []:
-            try:
-                segs.append({
-                    "start_sec": float(s.start_sec),
-                    "end_sec": float(s.end_sec),
-                    "text": str(getattr(s, "text", "") or ""),
-                })
-            except (AttributeError, TypeError, ValueError):
-                continue
-        out.append({"chunk_index": int(ci), "segments": segs})
     return out
 
 
-def _deserialize_chunk_transcripts(payload: list[dict]) -> list[dict]:
-    """JSON-loaded dict list → in-memory [{chunk_index, segments: [SpeechSegment, ...]}]."""
+def _deserialize_segments(payload: list[dict]) -> list:
+    """JSON dict list → list[SpeechSegment] (절대시간 flat)."""
     from app.modules.speech import SpeechSegment as _SS
-    out: list[dict] = []
-    for entry in payload or []:
-        if "chunk_index" not in entry:
-            continue
+    out: list = []
+    for s in payload or []:
         try:
-            ci = int(entry["chunk_index"])
-        except (TypeError, ValueError):
+            out.append(_SS(
+                start_sec=float(s.get("start_sec", 0)),
+                end_sec=float(s.get("end_sec", 0)),
+                text=str(s.get("text", "") or ""),
+            ))
+        except (TypeError, ValueError, AttributeError):
             continue
-        segs: list = []
-        for s in entry.get("segments") or []:
+    return out
+
+
+def _normalize_chunk_boundaries(
+    raw_boundaries: list,
+    content_start_sec: float,
+    content_end_sec: float,
+    min_sec: float = 300.0,
+    max_sec: float = 600.0,
+) -> list[tuple[float, float]]:
+    """video_intent 가 제안한 raw 경계를 ≥min_sec 연속 구간으로 정규화한다.
+
+    - [content_start, content_end] 로 클립 + 정렬
+    - 빈틈/겹침 제거(연속 커버리지 보장)
+    - min_sec 미만 구간은 인접과 병합
+    - max_sec 초과 구간은 균등 분할
+    유효 경계가 없으면 [] 반환(호출부가 고정 청크로 폴백).
+    """
+    cs, ce = float(content_start_sec), float(content_end_sec)
+    if ce <= cs:
+        return []
+    # 1) raw → (start,end) 추출 + 클립
+    spans: list[tuple[float, float]] = []
+    for b in raw_boundaries or []:
+        try:
+            if isinstance(b, dict):
+                s = float(b.get("start_sec")); e = float(b.get("end_sec"))
+            else:
+                s = float(b[0]); e = float(b[1])
+        except (TypeError, ValueError, KeyError, IndexError):
+            continue
+        s, e = max(s, cs), min(e, ce)
+        if e > s:
+            spans.append((s, e))
+    if not spans:
+        return []
+    spans.sort()
+    # 2) 연속 커버리지: 시작점만 취해 경계로 사용 (빈틈/겹침 무시)
+    starts = [cs]
+    for s, _e in spans:
+        if s - starts[-1] >= 1.0:  # 1초 이상 떨어진 새 시작점만
+            starts.append(s)
+    bounds: list[tuple[float, float]] = []
+    for i, st in enumerate(starts):
+        en = starts[i + 1] if i + 1 < len(starts) else ce
+        if en > st:
+            bounds.append((st, en))
+    if not bounds:
+        return []
+    # 3) min_sec 미만 병합 (뒤 구간을 앞에 흡수)
+    merged: list[list[float]] = [list(bounds[0])]
+    for st, en in bounds[1:]:
+        if (merged[-1][1] - merged[-1][0]) < min_sec:
+            merged[-1][1] = en
+        else:
+            merged.append([st, en])
+    # 마지막 구간이 너무 짧으면 직전과 병합
+    if len(merged) >= 2 and (merged[-1][1] - merged[-1][0]) < min_sec:
+        merged[-2][1] = merged[-1][1]
+        merged.pop()
+    # 4) max_sec 초과 분할 (균등)
+    out: list[tuple[float, float]] = []
+    for st, en in merged:
+        span = en - st
+        if span > max_sec:
+            n = int(span // max_sec) + 1
+            step = span / n
+            for k in range(n):
+                a = st + step * k
+                b = en if k == n - 1 else st + step * (k + 1)
+                out.append((a, b))
+        else:
+            out.append((st, en))
+    return out
+
+
+def _clamp01(v: Any, default: float = 0.5) -> float:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    return min(1.0, max(0.0, f))
+
+
+def _abs_characters_tracking(characters_tracking: list, offset: float) -> list:
+    """characters_tracking 의 시간 필드를 절대시간으로 변환(좌표 x_norm/y_norm 보존).
+
+    chunk_meta 에 절대시간으로 저장하기 위함 — 이후 _build_character_appearances 가 그대로 사용.
+    """
+    out: list = []
+    for ct in characters_tracking or []:
+        if not isinstance(ct, dict):
+            continue
+        aps: list = []
+        for ap in ct.get("appearances", []) or []:
+            if not isinstance(ap, dict):
+                continue
             try:
-                segs.append(_SS(
-                    start_sec=float(s.get("start_sec", 0)),
-                    end_sec=float(s.get("end_sec", 0)),
-                    text=str(s.get("text", "") or ""),
-                ))
+                s = float(ap.get("start_sec")) + offset
+                e = float(ap.get("end_sec")) + offset
             except (TypeError, ValueError):
                 continue
-        out.append({"chunk_index": ci, "segments": segs})
-    return out
-
-
-def transcribe_chunks(
-    chunks: list,
-    srt_path: Path | None,
-    *,
-    work_title: str | None = None,
-    character_names: list[str] | None = None,
-    work_context: str | None = None,
-    audio_workdir: Path,
-    transcriber=None,
-) -> list[dict]:
-    """청크별 transcript segments 를 *원본 영상 절대시간* 기준으로 생성.
-
-    SRT 있으면 [parse_subtitle](app/modules/subtitle.py) 후 청크별 슬라이스.
-    SRT 없으면 각 chunk.split_path 에서 transcriber(기본: extract_transcript) 호출.
-    Whisper 결과는 chunk-relative 이므로 chunk.start_sec 만큼 시프트해 절대시간으로 변환.
-
-    Args:
-        chunks: Chunk list (각 항목에 index, start_sec, end_sec, split_path 속성)
-        srt_path: SRT/ASS/VTT/SMI 자막 경로. None이면 Whisper 분기.
-        audio_workdir: Whisper 분기에서 사용할 임시 작업 디렉토리 (현재는 직접 split_path 사용이라
-                       파라미터만 받고 미사용 — DI 호환용)
-        transcriber: SRT 없을 때 호출되는 콜러블 (Path → list[SpeechSegment]).
-                     None이면 app.modules.speech.extract_transcript 사용.
-                     테스트에서 Whisper 의존 없이 fake injection 가능.
-
-    Returns:
-        [{"chunk_index": int, "segments": list[SpeechSegment]}, ...]
-    """
-    # SRT 분기
-    if srt_path is not None and Path(srt_path).exists():
-        all_segments = parse_subtitle(srt_path)
-        return [
-            {
-                "chunk_index": int(c.index),
-                "segments": _slice_segments_for_chunk(
-                    all_segments, float(c.start_sec), float(c.end_sec)
-                ),
-            }
-            for c in chunks
-        ]
-
-    # Whisper 분기
-    if transcriber is None:
-        from app.modules.speech import extract_transcript
-
-        def transcriber(audio_path: Path):
-            return extract_transcript(
-                audio_path,
-                work_title=work_title,
-                character_names=character_names,
-                work_context=work_context,
-            )
-
-    from app.modules.speech import SpeechSegment as _SS
-    out: list[dict] = []
-    for c in chunks:
-        sp = getattr(c, "split_path", None)
-        if sp is None or not Path(sp).exists():
-            out.append({"chunk_index": int(c.index), "segments": []})
-            continue
-        try:
-            raw = transcriber(Path(sp))
-        except Exception as e:
-            print(f"  [chunk_transcribe] chunk {c.index} Whisper 실패 ({e}) — 빈 결과로 진행")
-            raw = []
-        # chunk-relative → 절대시간 (split_video_chunk 가 PTS 0 정규화 했으므로 chunk.start_sec 가산)
-        chunk_offset = float(getattr(c, "start_sec", 0.0))
-        abs_segs: list = []
-        for s in raw or []:
-            try:
-                abs_segs.append(_SS(
-                    start_sec=float(s.start_sec) + chunk_offset,
-                    end_sec=float(s.end_sec) + chunk_offset,
-                    text=str(getattr(s, "text", "") or ""),
-                ))
-            except (AttributeError, TypeError, ValueError):
+            if e <= s:
                 continue
-        out.append({"chunk_index": int(c.index), "segments": abs_segs})
+            new_ap: dict[str, Any] = {"start_sec": s, "end_sec": e, "action": ap.get("action", "")}
+            if ap.get("x_norm") is not None and ap.get("y_norm") is not None:
+                new_ap["x_norm"] = ap.get("x_norm")
+                new_ap["y_norm"] = ap.get("y_norm")
+            smps: list = []
+            for smp in ap.get("samples", []) or []:
+                try:
+                    t = float(smp.get("t")) + offset
+                except (TypeError, ValueError):
+                    continue
+                smps.append({"t": t, "x_norm": smp.get("x_norm"), "y_norm": smp.get("y_norm")})
+            if smps:
+                new_ap["samples"] = smps
+            aps.append(new_ap)
+        out.append({"character": ct.get("character", "불명"), "appearances": aps})
     return out
+
+
+def _build_character_appearances(chunk_meta_list: list) -> list[dict[str, Any]]:
+    """chunk_meta 의 characters_tracking(절대시간)에서 reframe 호환 character_index 구조 생성.
+
+    PR-7: ArcFace 사전 패스를 대체 — Gemini 가 본 인물 좌표를 크롭 추적 입력으로 사용.
+    각 appearance → {character, start_sec, end_sec, samples:[{t,x_norm,y_norm,similarity}]}.
+    좌표(x_norm/y_norm)가 없으면 samples 가 비어 reframe 가 opencv 최대 얼굴/센터로 폴백한다.
+    청크 overlap 으로 인한 동일 인물 인접·겹침 구간은 병합한다.
+    """
+    raw: list[dict[str, Any]] = []
+    for cm in chunk_meta_list or []:
+        for ct in cm.get("characters_tracking", []) or []:
+            if not isinstance(ct, dict):
+                continue
+            char = str(ct.get("character") or "불명")
+            for ap in ct.get("appearances", []) or []:
+                if not isinstance(ap, dict):
+                    continue
+                try:
+                    s = float(ap.get("start_sec"))
+                    e = float(ap.get("end_sec"))
+                except (TypeError, ValueError):
+                    continue
+                if e <= s:
+                    continue
+                samples: list[dict[str, Any]] = []
+                for smp in ap.get("samples", []) or []:
+                    # 좌표 없는 sample 은 drop — 안 그러면 _clamp01(None)=0.5 로 '가짜 중앙 hit' 이
+                    # 되어 reframe 의 opencv 최대 얼굴 폴백을 억제한다.
+                    if smp.get("x_norm") is None or smp.get("y_norm") is None:
+                        continue
+                    try:
+                        t = float(smp.get("t"))
+                    except (TypeError, ValueError):
+                        continue
+                    samples.append({
+                        "t": t, "x_norm": _clamp01(smp.get("x_norm")),
+                        "y_norm": _clamp01(smp.get("y_norm")), "similarity": 1.0,
+                    })
+                if not samples and ap.get("x_norm") is not None and ap.get("y_norm") is not None:
+                    samples.append({
+                        "t": (s + e) / 2.0, "x_norm": _clamp01(ap.get("x_norm")),
+                        "y_norm": _clamp01(ap.get("y_norm")), "similarity": 1.0,
+                    })
+                raw.append({"character": char, "start_sec": s, "end_sec": e, "samples": samples})
+    raw.sort(key=lambda a: (a["character"], a["start_sec"]))
+    merged: list[dict[str, Any]] = []
+    for ap in raw:
+        if (merged and merged[-1]["character"] == ap["character"]
+                and ap["start_sec"] <= merged[-1]["end_sec"] + 1.0):
+            merged[-1]["end_sec"] = max(merged[-1]["end_sec"], ap["end_sec"])
+            merged[-1]["samples"].extend(ap["samples"])
+        else:
+            merged.append(dict(ap))
+    for ap in merged:
+        ap["samples"].sort(key=lambda s: s["t"])
+    return merged
 
 
 def _clamp_cues_to_variants(
@@ -1433,11 +1514,9 @@ _STEP_ORDER: list[str] = [
     "research",
     "probe",
     "proxy",
+    "video_intent",      # PR-7: 전체 영상 파악(overview) + 내용 기반 청크 경계 + 전사
     "chunk",
-    "character_index",
-    "chunk_transcribe",
-    "gemini",
-    "graph",
+    "gemini",            # PR-7: character_index 흡수(characters_tracking 좌표), graph 흡수(continues_from)
     "story",
     "av_align",          # PR-6: 가편집 재분석 (기존 silence_cut 대체)
     "resources",
@@ -1492,7 +1571,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         # PR-5c-3/4: 제거된 단계의 옛 checkpoint 자동 삭제 (마이그레이션).
         # exclusion → chunk_intro_credits_ranges (PR-2), tts_plan → storyline.tts_cues (PR-4),
         # transcribe → chunk_transcripts 슬라이스 (PR-5c-4, full_audio.json 사라짐).
-        for _legacy in ("checkpoint_exclusion.json", "checkpoint_tts_plan.json", "full_audio.json"):
+        # PR-7: character_index/chunk_transcribe/graph 단계 제거 → 옛 체크포인트 삭제.
+        for _legacy in ("checkpoint_exclusion.json", "checkpoint_tts_plan.json", "full_audio.json",
+                        "checkpoint_character_index.json", "checkpoint_chunk_transcripts.json",
+                        "checkpoint_graph.json"):
             _legacy_path = output_dir / _legacy
             if _legacy_path.exists():
                 try:
@@ -1613,6 +1695,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         "transcribe": "av_align",
         "tts_plan": "av_align",
         "silence_cut": "av_align",  # PR-6: silence_cut 제거 → av_align 으로 redirect
+        # PR-7: 12단계 단순화로 제거된 단계 redirect
+        "skeleton": "video_intent",      # 옛 skeleton(전체 영상 파악) → video_intent 가 계승
+        "character_index": "gemini",     # 인물 좌표는 gemini 의 characters_tracking 이 산출
+        "chunk_transcribe": "video_intent",  # 전사는 video_intent 가 담당
+        "graph": "story",                # 관계/시퀀스는 gemini continues_from → story 가 사용
     }
     if from_step in _legacy_step_alias:
         _orig_from = from_step
@@ -1684,6 +1771,85 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print(f"\n{_step_tag('proxy')} 프록시 영상 이미 존재 — 건너뜀")
 
     # ═══════════════════════════════════════
+    # [video_intent] 전체 영상 파악 + 청크 경계 + 전사 (PR-7)
+    # ═══════════════════════════════════════
+    # 사람이 에피소드를 통으로 한 번 보며 '무슨 내용인지' 감 잡는 단계.
+    # overview(의도/인물/서사) + 내용 기반 chunk_boundaries + 전체 전사(분석 컨텍스트용)를 산출.
+    # 최종 자막은 av_align dialogue 가 담당하므로 여기 전사는 컨텍스트 등급(SRT 우선 → Gemini 폴백).
+    checkpoint_video_intent = output_dir / "checkpoint_video_intent.json"
+    video_intent: dict[str, Any] = {}
+    video_intent_boundaries_raw: list = []
+    video_intent_transcript: list = []  # flat list[SpeechSegment], 원본 절대시간
+    _vi_char_names = list(dict.fromkeys(
+        [ci.character_name for ci in cast_images if getattr(ci, "character_name", None)]
+        + [ci.actor_name for ci in cast_images if getattr(ci, "actor_name", None)]
+    )) if cast_images else []
+
+    if checkpoint_video_intent.exists() and from_step != "video_intent":
+        try:
+            _vi = json.loads(checkpoint_video_intent.read_text(encoding="utf-8"))
+            video_intent = _vi.get("overview", {}) or {}
+            video_intent_boundaries_raw = _vi.get("chunk_boundaries", []) or []
+            video_intent_transcript = _deserialize_segments(_vi.get("transcript", []))
+            print(f"\n{_step_tag('video_intent')} 영상 파악 로드 "
+                  f"(경계 {len(video_intent_boundaries_raw)}개, 전사 {len(video_intent_transcript)}개 발화)")
+        except Exception as e:
+            print(f"\n{_step_tag('video_intent')} 캐시 로드 실패: {e} — 새로 생성")
+            video_intent = {}
+
+    if not video_intent and start_idx <= step_idx["video_intent"]:
+        print(f"\n{_step_tag('video_intent')} 전체 영상 파악(overview/경계/전사) 중...")
+        _vi_start = time.time()
+        gemini = locals().get("gemini") or load_gemini_client()
+        # 1) overview + chunk_boundaries (Flash, 전체 프록시 1회 스캔)
+        try:
+            video_intent = gemini.analyze_video_intent(
+                proxy_video_path,
+                payload.work_title,
+                payload.topic,
+                work_context=payload.work_context,
+                previous_episodes_context=payload.previous_episodes_context,
+            ) or {}
+        except Exception as e:
+            print(f"  [video_intent] overview 분석 실패: {e} — 빈 결과로 진행")
+            video_intent = {}
+        video_intent_boundaries_raw = video_intent.get("chunk_boundaries", []) or []
+        # 2) transcript: SRT 우선 → 없으면 Gemini 전사(경계 윈도우 단위)
+        _content_start_vi = float(payload.skip_intro_sec or 0)
+        _content_end_vi = (
+            float(media_info.duration_sec) - float(payload.skip_credits_sec)
+            if payload.skip_credits_sec else float(media_info.duration_sec)
+        )
+        if payload.srt_path and Path(payload.srt_path).exists():
+            video_intent_transcript = parse_subtitle(payload.srt_path)
+            print(f"  [video_intent] SRT 전사 사용: {len(video_intent_transcript)}개 발화")
+        else:
+            _vi_windows = _normalize_chunk_boundaries(
+                video_intent_boundaries_raw, _content_start_vi, _content_end_vi,
+                min_sec=float(config.chunk_min_sec), max_sec=float(config.chunk_max_sec),
+            )
+            try:
+                _raw_tr = gemini.transcribe_proxy(
+                    proxy_video_path,
+                    windows=_vi_windows or None,
+                    work_title=payload.work_title,
+                    character_names=_vi_char_names,
+                    work_context=payload.work_context,
+                )
+                video_intent_transcript = _deserialize_segments(_raw_tr)
+                print(f"  [video_intent] Gemini 전사: {len(video_intent_transcript)}개 발화")
+            except Exception as e:
+                print(f"  [video_intent] Gemini 전사 실패: {e} — 빈 전사로 진행")
+                video_intent_transcript = []
+        # 3) 체크포인트
+        checkpoint_video_intent.write_text(json.dumps({
+            "overview": video_intent,
+            "chunk_boundaries": video_intent_boundaries_raw,
+            "transcript": _serialize_segments(video_intent_transcript),
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[OK] video_intent 완료 (소요 시간: {time.time()-_vi_start:.1f}초)")
+
+    # ═══════════════════════════════════════
     # [chunk] 청크 분할 (PR-5c-3: 5단계 exclusion 제거 — 사용자 명시 skip 인자만 사용)
     # ═══════════════════════════════════════
     # 인트로/크레딧 자동 감지는 8단계 chunk_intro_credits_ranges 가 영상 분석으로 직접 처리 (PR-2).
@@ -1694,15 +1860,33 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         if payload.skip_credits_sec
         else float(media_info.duration_sec)
     )
-    print("\n[chunk] 영상 청크 분할 중...")
-    chunks = build_chunks(
-        proxy_video_path,
-        media_info.duration_sec,
-        config.chunk_seconds,
-        config.chunk_overlap,
-        content_start_sec=_content_start,
-        content_end_sec=_content_end,
+    # PR-7: video_intent 가 제안한 내용 기반 경계를 ≥최소길이로 정규화해 청크로 사용.
+    # 경계가 없으면(분석 실패/빈 결과) 고정 길이 분할로 폴백.
+    _norm_boundaries = _normalize_chunk_boundaries(
+        video_intent_boundaries_raw, _content_start, _content_end,
+        min_sec=float(config.chunk_min_sec), max_sec=float(config.chunk_max_sec),
     )
+    if _norm_boundaries:
+        print(f"\n[chunk] 내용 기반 경계 {len(_norm_boundaries)}개로 분할 (≥{config.chunk_min_sec}s)")
+        chunks = build_chunks(
+            proxy_video_path,
+            media_info.duration_sec,
+            config.chunk_seconds,
+            config.chunk_boundary_overlap_sec,
+            content_start_sec=_content_start,
+            content_end_sec=_content_end,
+            boundaries=_norm_boundaries,
+        )
+    else:
+        print("\n[chunk] 영상 청크 분할 중 (고정 길이 폴백)...")
+        chunks = build_chunks(
+            proxy_video_path,
+            media_info.duration_sec,
+            config.chunk_seconds,
+            config.chunk_overlap,
+            content_start_sec=_content_start,
+            content_end_sec=_content_end,
+        )
     print(f"  - 총 {len(chunks)}개 청크 생성")
     if _content_start > 0 or _content_end < media_info.duration_sec:
         print(f"  - 사용자 skip 인자 적용: {_content_start:.1f}s ~ {_content_end:.1f}s")
@@ -1723,91 +1907,17 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     print("[OK] 청크 분할 완료")
 
     # ═══════════════════════════════════════
-    # [character_index] 인물 등장 인덱스 (face_id 사전 패스)
+    # [character_index 제거 — PR-7] 인물 좌표는 gemini 의 characters_tracking 이 산출
     # ═══════════════════════════════════════
-    # 프록시 영상을 일정 간격으로 샘플링하여 등장 인물별 구간을 미리 산출.
-    # 결과는 chunk별로 필터링되어 Gemini analyze_chunk 페이로드에 첨부된다.
+    # ArcFace 사전 패스 대신, gemini 분석 후 chunk_meta 의 characters_tracking(좌표 포함)에서
+    # _build_character_appearances 로 reframe 호환 character_appearances 를 빌드한다(gemini 블록 직후).
     character_appearances: list[dict[str, Any]] = []
-    checkpoint_char_idx = output_dir / "checkpoint_character_index.json"
-    if checkpoint_char_idx.exists() and from_step != "character_index":
-        try:
-            character_appearances = json.loads(checkpoint_char_idx.read_text(encoding="utf-8"))
-            print(f"\n{_step_tag('character_index')} 인물 등장 인덱스 로드 ({len(character_appearances)}개 구간)")
-        except Exception as e:
-            print(f"\n{_step_tag('character_index')} 인물 등장 인덱스 로드 실패: {e} — 새로 생성")
-            character_appearances = []
-
-    if not character_appearances and cast_images and payload.design.enable_face_recognition:
-        try:
-            from app.modules.face_id import FaceIdentifier
-            print(f"\n{_step_tag('character_index')} 인물 등장 인덱스 생성 중 (face_id 사전 패스)...")
-            char_idx_start = time.time()
-            _fi_pre = FaceIdentifier()
-            _fi_pre.build_references(cast_images)
-            if _fi_pre.references:
-                character_appearances = _fi_pre.build_appearance_index(
-                    proxy_video_path,
-                    sample_interval_sec=2.0,
-                )
-                checkpoint_char_idx.write_text(
-                    json.dumps(character_appearances, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-                print(f"  → {len(character_appearances)}개 등장 구간 (소요 시간: {time.time() - char_idx_start:.1f}초)")
-            else:
-                print("  [WARN] 유효한 face 레퍼런스 없음 — 인물 인덱스 생략")
-        except ImportError:
-            print("  [WARN] deepface 미설치 — 인물 인덱스 생략")
-        except Exception as e:
-            print(f"  [WARN] 인물 인덱스 생성 실패: {e} — 인덱스 없이 진행")
-            character_appearances = []
 
     # ═══════════════════════════════════════
-    # [chunk_transcribe] 청크별 transcript 선행 생성 (PR-3 신규)
+    # [chunk_transcribe 제거 — PR-7] 전사는 video_intent_transcript(flat 절대시간)가 담당
     # ═══════════════════════════════════════
-    # 8단계 analyze_chunk 에 transcript_segments 를 SRT/Whisper 구분 없이 항상 제공.
-    # SRT 있으면 parse_subtitle 후 청크별 슬라이스, 없으면 각 chunk.split_path 에서 Whisper.
-    # PR-3 시점에서는 step_order 에 추가하지 않음 (매직 넘버 18곳 일괄 정비는 PR-5 에서).
-    # 캐시 무효화 트리거: from_step in (chunk, character_index, gemini) 또는 캐시 파일 없음.
-    checkpoint_chunk_tr = output_dir / "checkpoint_chunk_transcripts.json"
-    chunk_transcripts: list[dict] = []
-    # "gemini" 제외: gemini 재개 시 청크는 동일 경계로 재분할되므로 SRT 기반 chunk_transcripts 는
-    # 그대로 유효하다. 과거엔 "gemini" 가 무효화 대상이라 캐시 로드를 막았는데, 재생성 가드
-    # (start_idx <= chunk_transcribe)는 gemini 가 뒤 단계라 False → 전사도 재실행 안 됨 → 빈 상태로
-    # 떨어져 자막이 candidate.transcript 폴백(1줄/clip)으로 깨지는 버그가 있었다.
-    _chunk_tr_invalidate = from_step in ("chunk", "character_index")
-    if checkpoint_chunk_tr.exists() and not _chunk_tr_invalidate:
-        try:
-            _ctr_data = json.loads(checkpoint_chunk_tr.read_text(encoding="utf-8"))
-            chunk_transcripts = _deserialize_chunk_transcripts(_ctr_data)
-            _total_segs = sum(len(ct.get("segments", [])) for ct in chunk_transcripts)
-            print(f"\n[chunk_transcribe] 청크별 전사 로드 완료 ({len(chunk_transcripts)}개 청크, {_total_segs}개 segment)")
-        except Exception as e:
-            print(f"\n[chunk_transcribe] 캐시 로드 실패: {e} — 새로 생성")
-            chunk_transcripts = []
-
-    if not chunk_transcripts and start_idx <= step_idx["chunk_transcribe"]:
-        print("\n[chunk_transcribe] 청크별 transcript 생성 중...")
-        _ctr_start = time.time()
-        _char_names = list(dict.fromkeys(
-            [ci.character_name for ci in cast_images if ci.character_name]
-            + [ci.actor_name for ci in cast_images if ci.actor_name]
-        )) if cast_images else []
-        chunk_transcripts = transcribe_chunks(
-            chunks=chunks,
-            srt_path=payload.srt_path,
-            work_title=payload.work_title,
-            character_names=_char_names,
-            work_context=payload.work_context,
-            audio_workdir=output_dir,
-        )
-        checkpoint_chunk_tr.write_text(
-            json.dumps(_serialize_chunk_transcripts(chunk_transcripts), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        _total_segs = sum(len(ct.get("segments", [])) for ct in chunk_transcripts)
-        _branch = "SRT" if payload.srt_path else "Whisper"
-        print(f"  → [{_branch}] {len(chunk_transcripts)}개 청크, 총 {_total_segs}개 segment (소요 시간: {time.time()-_ctr_start:.1f}초)")
+    # gemini 청크 입력·자막·candidate.transcript 는 모두 video_intent_transcript 를 청크/클립
+    # 범위로 슬라이스해 사용한다(_slice_segments_for_chunk).
 
     # ═══════════════════════════════════════
     # [gemini] Gemini 분석 (바이럴 최적화)
@@ -1841,16 +1951,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             encoding="utf-8",
         )
 
-        # PR-3: chunk_transcripts (chunk_transcribe 단계의 출력) 을 인덱스 맵으로 변환.
-        # SRT/Whisper 구분 없이 통합. 빈 리스트면 자막 없는 케이스 (analyze_chunk 가 "없음" 처리).
-        chunk_transcripts_by_idx = {
-            int(ct.get("chunk_index", -1)): list(ct.get("segments") or [])
-            for ct in chunk_transcripts
-        }
-        _total_segs = sum(len(v) for v in chunk_transcripts_by_idx.values())
-        if _total_segs:
-            _branch = "SRT" if payload.srt_path else "Whisper"
-            print(f"  - chunk_transcripts [{_branch}] {_total_segs}개 segment → analyze_chunk 입력")
+        # PR-7: 전사는 video_intent_transcript(flat 절대시간)에서 청크별로 슬라이스해 주입.
+        _vi_tr_total = len(video_intent_transcript)
+        if _vi_tr_total:
+            _branch = "SRT" if payload.srt_path else "Gemini"
+            print(f"  - video_intent 전사 [{_branch}] {_vi_tr_total}개 발화 → 청크별 슬라이스로 analyze_chunk 입력")
 
         for idx, chunk in enumerate(chunks, 1):
             print(f"  청크 {idx}/{len(chunks)} 분석 중... ({chunk.start_sec:.1f}초 ~ {chunk.end_sec:.1f}초)")
@@ -1860,30 +1965,14 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             scenes = detect_scenes(split_path, media_info.fps, chunk.end_sec - chunk.start_sec)
             scene_boundaries = [scene.start_sec for scene in scenes]
 
-            # PR-3: 청크별 transcript 는 chunk_transcripts 에서 직접 (이미 청크 범위 슬라이스됨)
-            chunk_transcript_segs = chunk_transcripts_by_idx.get(chunk.index, [])
-
-
-            # face_id 사전 인식 결과를 chunk 범위로 필터링하고 0초 기준 상대 시간으로 변환
-            chunk_offset = (
-                chunk.actual_start_sec
-                if getattr(chunk, "actual_start_sec", None) is not None
-                else chunk.start_sec
+            # PR-7: 청크별 transcript 는 video_intent_transcript(절대시간)에서 청크 범위 슬라이스
+            chunk_transcript_segs = _slice_segments_for_chunk(
+                video_intent_transcript, chunk.start_sec, chunk.end_sec
             )
-            chunk_appearances: list[dict[str, Any]] = []
-            for _ap in character_appearances:
-                if _ap["end_sec"] <= chunk.start_sec or _ap["start_sec"] >= chunk.end_sec:
-                    continue
-                _s = max(_ap["start_sec"], chunk.start_sec) - chunk_offset
-                _e = min(_ap["end_sec"], chunk.end_sec) - chunk_offset
-                if _e <= _s:
-                    continue
-                chunk_appearances.append({
-                    "character": _ap["character"],
-                    "start_sec": float(_s),
-                    "end_sec": float(_e),
-                })
 
+
+            # PR-7: character_index 제거 — gemini 가 영상을 직접 보고 인물을 식별하므로
+            # appearance 힌트를 페이로드에 주입하지 않는다(좌표는 응답의 characters_tracking 으로 수집).
             prompt_payload = {
                 "work_title": payload.work_title,
                 "topic": payload.topic,
@@ -1896,7 +1985,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 "video_path": str(split_path) if split_path else None,
                 "previous_analyses": previous_analyses.copy(),
                 "transcript_segments": chunk_transcript_segs,
-                "character_appearances": chunk_appearances,
             }
 
             try:
@@ -2000,7 +2088,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     "chunk_index": chunk.index,
                     "summary": response.get("summary", ""),
                     "segments": _chunk_segments_abs,
-                    "characters_tracking": response.get("characters_tracking", []),
+                    "characters_tracking": _abs_characters_tracking(
+                        response.get("characters_tracking", []), actual_cut_offset
+                    ),
                     "title_candidates": response.get("title_candidates", []),
                     "intro_credits_ranges": _intro_ranges_abs,
                 })
@@ -2102,6 +2192,14 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         all_candidates = gemini_data["all_candidates"]
         chunk_meta_list = gemini_data.get("chunk_meta", [])
 
+    # PR-7: gemini characters_tracking(절대시간·좌표 포함)에서 크롭용 character_appearances 빌드.
+    # (ArcFace 사전 패스 대체 — reframe 가 face_identifier=None 으로 이 좌표를 소비)
+    character_appearances = _build_character_appearances(chunk_meta_list)
+    if character_appearances:
+        _coord_n = sum(1 for a in character_appearances if a.get("samples"))
+        print(f"  - character_appearances {len(character_appearances)}개 구간 "
+              f"(좌표 보유 {_coord_n}개) — gemini characters_tracking 기반")
+
     # PR-2 + PR-5c-3: 인트로/크레딧 필터 — 8단계 청크 분석의 chunk_intro_credits_ranges 만 사용.
     # (5단계 exclusion + filter_excluded_moments 는 PR-5c-3 에서 제거 — chunk_intro_credits_ranges
     # 가 영상 분석으로 더 정확하게 동일 일을 한다.)
@@ -2111,26 +2209,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     all_candidates = _dedup_overlapping_candidates(all_candidates, iou_threshold=0.7)
 
     # ═══════════════════════════════════════
-    # [graph] 관계 그래프 추출
+    # [graph 제거 — PR-7] 관계/시퀀스는 gemini 의 continues_from 으로 흡수
     # ═══════════════════════════════════════
-    checkpoint_graph = output_dir / "checkpoint_graph.json"
-    relationship_edges: list[dict[str, Any]] = []
-
-    if start_idx <= step_idx["graph"] and checkpoint_graph.exists() and from_step not in ("gemini", "graph"):
-        print(f"\n{_step_tag('graph')} 관계 그래프 로드 중...")
-        graph_data = json.loads(checkpoint_graph.read_text(encoding="utf-8"))
-        relationship_edges = graph_data.get("edges", [])
-        print(f"  - {len(relationship_edges)}개 관계 엣지 로드")
-        print("[OK] 관계 그래프 로드 완료 (체크포인트에서)")
-    elif start_idx <= step_idx["graph"]:
-        print(f"\n{_step_tag('graph')} 관계 그래프 추출 중...")
-        gemini = load_gemini_client()
-        relationship_edges = gemini.extract_relationships(all_candidates)
-        checkpoint_graph.write_text(
-            json.dumps({"edges": relationship_edges}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        print(f"[OK] 관계 그래프 추출 완료 ({len(relationship_edges)}개 엣지)")
+    # extract_relationships LLM 호출 삭제. assign_sequence_ids 는 별도 edges 없이 candidate 의
+    # continues_from(+같은 청크 내 연속성)만으로 cross-chunk 연속 장면을 같은 시퀀스로 묶는다.
 
     # ═══════════════════════════════════════
     # [story] 스토리 구성 (바이럴 최적화 — 멀티쇼츠)
@@ -2170,16 +2252,13 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         gemini = load_gemini_client()
         story_start = time.time()
 
-        # sequence_id 부여: continues_from + 관계 그래프 continuous 엣지 기반
-        all_candidates = assign_sequence_ids(all_candidates, edges=relationship_edges or None)
+        # PR-7: sequence_id 부여 — graph 제거로 candidate 의 continues_from 만으로 묶는다(edges 없음)
+        all_candidates = assign_sequence_ids(all_candidates)
 
-        # PR-5c-4: candidate.transcript 갱신 — chunk_transcripts 슬라이스로 단순화.
-        # 라운드 15 의도(LLM 시각 추정 → 실제 음성) 는 그대로. clip 단위 audio 재추출 +
-        # Whisper 호출은 제거 (chunk_transcribe 단계가 청크별로 한 번에 처리 완료).
-        print("\n[10-pre/13] candidate.transcript 갱신 (chunk_transcripts 슬라이스)")
-        _cand_segs: list = []
-        for _ct in chunk_transcripts or []:
-            _cand_segs.extend(_ct.get("segments") or [])
+        # PR-7: candidate.transcript 갱신 — video_intent_transcript(flat 절대시간) 슬라이스.
+        # 라운드 15 의도(LLM 시각 추정 → 실제 음성) 유지. 전사는 video_intent 단계가 일괄 생성.
+        print("\n[story-pre] candidate.transcript 갱신 (video_intent 전사 슬라이스)")
+        _cand_segs: list = list(video_intent_transcript or [])
         _updated = 0
         for _m in all_candidates:
             _s = float(_m.get("start_sec", 0))
@@ -2208,7 +2287,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             max_duration_sec=config.max_duration_sec,
             work_context=payload.work_context,
             previous_episodes_context=payload.previous_episodes_context,
-            relationship_edges=relationship_edges or None,
             chunk_meta=chunk_meta_list or None,
         )
 
@@ -2374,25 +2452,23 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 story_plan["selected_storyline"], candidates_lookup, boundary_alias
             )
 
-        # 라운드 11.1-A: storyline clips 변경됐으면 자막·TTS·resources 캐시 무효화 + transcribe 단계로
-        # start_idx 다운그레이드 → 새 영역 기준으로 재전사. from_step="render"로 들어왔어도 작동.
+        # 라운드 11.1-A (PR-7): storyline clips 변경됐으면 av_align/resources 캐시 무효화 +
+        # start_idx 를 av_align 으로 다운그레이드 → 새 clips 로 가편집 재분석·자막·TTS·리소스 재생성.
+        # from_step="render"로 들어왔어도 작동. (구버전의 'transcribe' 단계는 PR-7 에서 제거됨)
         if _storyline_fit_changed:
-            print("  [LengthFit] storyline clips 변경 감지 → 자막·TTS·리소스 캐시 무효화")
-            for _fname in ("subtitle_segments.json", "full_audio.json",
-                           "checkpoint_tts_plan.json", "checkpoint_resources.json"):
+            print("  [LengthFit] storyline clips 변경 감지 → av_align·자막·리소스 캐시 무효화")
+            for _fname in ("subtitle_segments.json", "checkpoint_av_align.json",
+                           "checkpoint_resources.json"):
                 _p = output_dir / _fname
                 if _p.exists():
                     try:
                         _p.unlink()
                     except OSError:
                         pass
-            try:
-                _transcribe_idx = step_order.index("transcribe")
-                if start_idx > _transcribe_idx:
-                    start_idx = _transcribe_idx
-                    print(f"  [LengthFit] start_idx → {_transcribe_idx} (transcribe부터 재실행)")
-            except ValueError:
-                pass
+            _av_idx = step_idx["av_align"]
+            if start_idx > _av_idx:
+                start_idx = _av_idx
+                print(f"  [LengthFit] start_idx → {_av_idx} (av_align부터 재실행)")
 
         story_elapsed = time.time() - story_start
         print(f"  → 총 {len(all_storyline_variants)}개 쇼츠 생성 예정")
@@ -2591,17 +2667,15 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     union_clips.sort(key=lambda c: c.start_sec)
 
     # ═══════════════════════════════════════
-    # [transcript + 자막] chunk_transcripts 슬라이스 → snap/extend/fill → 자막 매핑 (PR-5c-4)
+    # [transcript + 자막] video_intent 전사 슬라이스 → snap/extend/fill → 자막 매핑 (PR-7)
     # ═══════════════════════════════════════
-    # transcribe 단계 제거. transcript_text 는 PR-3 의 chunk_transcripts 가 청크 분할 직후
-    # 한 번에 생성한 결과를 union_clips 영역으로 슬라이스해서 사용. 자막 매핑 흐름은 그대로.
+    # transcript_text 는 video_intent_transcript(flat 절대시간)를 union_clips 영역으로
+    # 슬라이스해서 사용. 자막 매핑 흐름은 그대로. (최종 자막은 av_align dialogue 가 우선)
     transcript_text: list = []
     segments_cache_path = output_dir / "subtitle_segments.json"
 
-    # chunk_transcripts 평탄화 + union_clips 영역 슬라이스 (기존 SRT 분기와 동일 패턴)
-    _all_segs: list = []
-    for ct in chunk_transcripts or []:
-        _all_segs.extend(ct.get("segments") or [])
+    # PR-7: video_intent_transcript(flat 절대시간) → union_clips 영역 슬라이스
+    _all_segs: list = list(video_intent_transcript or [])
     _seen_seg_keys: set[tuple[float, float, str]] = set()
     for clip in union_clips:
         for seg in _all_segs:
@@ -2645,7 +2719,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     ))
                     break
 
-    _branch = "chunk_transcripts" if not used_gemini_fallback else "Gemini 폴백"
+    _branch = "video_intent 전사" if not used_gemini_fallback else "Gemini 폴백"
     print(f"\n[transcript] {len(transcript_text)}개 segment ({_branch})")
 
     # snap/extend/fill (라운드 19C — Gemini 폴백 데이터는 타이밍 부정확이라 건너뜀)
@@ -2696,7 +2770,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
     # 자막 데이터 생성 (transcript_text → 편집 타임라인 매핑)
     final_segments = []
-    _subtitle_invalidate = from_step in ("gemini", "graph", "story", "av_align", "resources")
+    _subtitle_invalidate = from_step in ("gemini", "story", "av_align", "resources")
     if not segments_cache_path.exists() or _subtitle_invalidate:
         # PR-6: 자막 원천 = av_align dialogue (영상에서 들리는 정확한 화자·대사).
         # av_align 결과가 없으면(분석 실패) 기존 Whisper transcript 로 폴백.
@@ -2770,7 +2844,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
     # story/graph 단계부터 재실행 시 클립 구성이 달라질 수 있으므로 resources 캐시 무효화.
     # 이전 라운드의 crop_map 키(role_idx)와 새 라운드의 clip 키가 어긋나면 KeyError 발생.
-    _resources_invalidate = from_step in ("gemini", "graph", "story", "av_align", "tts_plan", "transcribe", "resources")
+    _resources_invalidate = from_step in ("gemini", "story", "av_align", "resources")
     # 라운드 9-fix: face_identifier를 resources 단계 *밖*에서도 안전하게 사용할 수 있도록 미리 None 초기화.
     # --from-step render로 들어와 라인 1490 캐시 로드 분기를 타면 face_identifier가 정의되지 않아
     # 멀티 variant 렌더링 단계(라인 1862, 1873)에서 UnboundLocalError 발생.
@@ -2794,22 +2868,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print(f"\n{_step_tag('resources')} 리소스 생성 중...")
         resource_start = time.time()
 
-        # Phase 12: 인물 인식 레퍼런스 빌드 (배우 사진이 있을 때만)
+        # PR-7: ArcFace(deepface) 사전 인식 제거 — 크롭 추적 타깃은 gemini 좌표(character_appearances).
+        # reframe 는 opencv(Haar)로 얼굴을 탐지하고, character_appearances 의 정규화 좌표로
+        # '어느 얼굴이 타깃 인물인지'를 식별한다(face_identifier 없이 동작).
         face_identifier = None
-        if cast_images and payload.design.enable_face_recognition:
-            try:
-                from app.modules.face_id import FaceIdentifier
-                fi = FaceIdentifier()
-                fi.build_references(cast_images)
-                if fi.references:
-                    face_identifier = fi
-                    print(f"  [FaceID] 인물 인식 레퍼런스: {len(fi.references)}명")
-                else:
-                    print("  [FaceID] 유효한 레퍼런스 없음 — 화자 추적 폴백")
-            except ImportError:
-                print("  [FaceID] deepface 미설치 — 화자 추적 폴백")
-            except Exception as e:
-                print(f"  [FaceID] 초기화 실패: {e} — 화자 추적 폴백")
 
         # 얼굴 크롭 타임라인
         crop_map = {}
@@ -2842,7 +2904,14 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 current_target_char = multi_targets[0] if multi_targets else None
             else:
                 # Phase 12: character_focus 첫 번째 인물을 타겟으로
-                target_char = clip.character_focus[0] if clip.character_focus and face_identifier else None
+                # PR-7: gemini 좌표(character_appearances)만 있어도 타깃 추적 (face_identifier=None 허용).
+                # enable_face_recognition=False 면 추적 끄고 화자/최대얼굴 폴백(config 의미와 일치).
+                target_char = (
+                    clip.character_focus[0]
+                    if clip.character_focus and (face_identifier or character_appearances)
+                    and payload.design.enable_face_recognition
+                    else None
+                )
                 build_crop_timeline(
                     payload.video_path.resolve(),
                     crop_path,
@@ -3259,7 +3328,12 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 var_crop_map = {}
                 for cidx, cclip in enumerate(var_clips):
                     crop_file = output_dir / f"crop_{var_num}_{cclip.role}_{cidx}.json"
-                    var_target_char = cclip.character_focus[0] if cclip.character_focus and face_identifier else None
+                    var_target_char = (
+                        cclip.character_focus[0]
+                        if cclip.character_focus and (face_identifier or character_appearances)
+                        and payload.design.enable_face_recognition
+                        else None
+                    )
                     build_crop_timeline(
                         payload.video_path.resolve(),
                         crop_file,

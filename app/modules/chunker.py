@@ -25,15 +25,40 @@ def build_chunks(
     overlap_sec: int,
     content_start_sec: float = 0.0,
     content_end_sec: float | None = None,
+    boundaries: list[tuple[float, float]] | None = None,
 ) -> list[Chunk]:
     """영상을 청크로 분할합니다.
 
     Args:
         content_start_sec: 콘텐츠 시작 시간 (인트로 이후). 기본 0.0.
         content_end_sec: 콘텐츠 종료 시간 (크레딧 이전). None이면 duration_sec.
+        boundaries: PR-7. video_intent 가 제안한 내용 기반 (start,end) 구간 리스트.
+            주어지면 고정 길이 대신 이 경계를 청크로 사용한다(호출부에서 ≥최소길이 정규화됨).
+            overlap_sec 만큼 앞 청크를 prepend 해 경계 사건 손실을 막는다(첫 청크 제외).
+            전부 무효면 고정 분할로 폴백.
     """
     if content_end_sec is None:
         content_end_sec = duration_sec
+
+    # PR-7: 내용 기반 경계 우선
+    if boundaries:
+        valid: list[tuple[float, float]] = []
+        for b in boundaries:
+            try:
+                s = max(float(b[0]), content_start_sec)
+                e = min(float(b[1]), content_end_sec)
+            except (TypeError, ValueError, IndexError):
+                continue
+            if e > s:
+                valid.append((s, e))
+        if valid:
+            chunks = []
+            for index, (s, e) in enumerate(valid):
+                cs = max(s - overlap_sec, content_start_sec) if index > 0 else s
+                chunks.append(Chunk(index=index, start_sec=cs, end_sec=e, path=video_path))
+            return chunks
+        # 무효 → 아래 고정 분할 폴백
+
     effective_duration = content_end_sec - content_start_sec
 
     if effective_duration <= chunk_seconds:

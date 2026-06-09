@@ -50,13 +50,19 @@ class DesignConfig:
     # Phase 11: 화자 우선 얼굴 트래킹 (False면 "가장 큰 얼굴" 폴백)
     enable_speaker_tracking: bool = True
 
-    # Phase 12: 인물 인식 기반 얼굴 추적 (deepface + TMDb 배우 사진)
+    # PR-7: 인물 기반 얼굴 추적 토글 (이전 Phase 12 의 deepface/ArcFace 는 제거됨).
+    # True 면 reframe 가 gemini 좌표(character_appearances)로 타깃 인물을 추적 크롭하고,
+    # False 면 화자/최대 얼굴 폴백만 사용한다. (deepface 의존 없음)
     enable_face_recognition: bool = True
 
 @dataclass(frozen=True)
 class AppConfig:
-    chunk_seconds: int = 600
-    chunk_overlap: int = 180  # 라운드 19B: 30 → 180. chunks 1+에서 앞 청크 3분 prepend로 경계 사건 손실 방지.
+    chunk_seconds: int = 600       # video_intent 경계가 없을 때의 고정 청크 길이(폴백)
+    chunk_overlap: int = 180       # 고정 청크 폴백 시 앞 청크 prepend(경계 사건 손실 방지). 내용 기반 경계 경로에선 chunk_boundary_overlap 사용.
+    # PR-7: 내용 기반 청크 경계 정규화 가드 — video_intent 가 제안한 경계를 이 범위로 병합/분할.
+    chunk_min_sec: int = 300       # 최소 청크 길이(5분). 더 짧으면 인접 구간과 병합.
+    chunk_max_sec: int = 600       # 최대 청크 길이. 초과 시 균등 분할.
+    chunk_boundary_overlap_sec: int = 30  # 내용 기반 경계 분할 시 앞 청크 prepend
     target_duration_sec: int = 50
     target_duration_tolerance_sec: int = 10
     min_duration_sec: int = 40

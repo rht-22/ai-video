@@ -65,7 +65,6 @@ GEMINI_PROMPT_TEMPLATE = """
 - 청크 범위: {chunk_start_sec} ~ {chunk_end_sec} 초
 {work_context_block}
 {previous_episodes_context_block}
-{character_appearances_block}
 - ⚠️ 모든 start_sec / end_sec는 반드시 첨부된 영상 파일의 시작(0초)을 기준으로 한 상대값으로 반환할 것
 
 - 자막(있으면): {transcript_text}
@@ -301,6 +300,8 @@ segments 중 **쇼츠 제작에 가치 있는 장면만** 선별해 candidate_mo
 - appearances[]: 해당 인물이 등장하는 구간 목록
     - start_sec / end_sec: 등장 구간
     - action: 그 구간에서 인물의 핵심 행동/발화 요약 한 문장. [원칙 P1] 시각 단서 근거 없는 추정 금지
+    - x_norm / y_norm: 그 구간에서 화면 속 인물(얼굴/상반신)의 대표 위치를 정규화 좌표로 표기. x_norm=가로(0=왼쪽,1=오른쪽), y_norm=세로(0=위,1=아래). 이 좌표는 9:16 세로 크롭이 추적할 타깃이 된다. 보이는 대로 최대한 정확히. (대표 1점이라도 반드시 제공 권장)
+    - samples[] (선택): 인물이 화면을 가로질러 이동하거나 구간이 길면 [{{"t": 시각(초), "x_norm": .., "y_norm": ..}}] 형태로 2~5개 시점의 위치를 제공해 크롭 추적 품질을 높인다. 정지 인물이면 생략 가능
 
 [segment 필드 정의]
 - segment_index: 0부터 시작하는 정수 (segments 배열 인덱스)
@@ -388,7 +389,7 @@ segments 중 **쇼츠 제작에 가치 있는 장면만** 선별해 candidate_mo
     {{
       "character": "인물명 또는 레이블",
       "appearances": [
-        {{"start_sec": 0.0, "end_sec": 32.0, "action": "해당 구간 행동/발화 요약"}}
+        {{"start_sec": 0.0, "end_sec": 32.0, "action": "해당 구간 행동/발화 요약", "x_norm": 0.5, "y_norm": 0.4, "samples": [{{"t": 0.0, "x_norm": 0.4, "y_norm": 0.4}}, {{"t": 30.0, "x_norm": 0.6, "y_norm": 0.4}}]}}
       ]
     }}
   ],
@@ -1053,53 +1054,8 @@ cue 의 시간 축은 별개 — 0초부터 storyline 의 hook→build→payoff 
 
 
 
-RELATIONSHIP_EXTRACTION_PROMPT = """
-# Role
-너는 영상 편집 전문가다. 쇼츠 편집을 위해 후보 장면들 사이의 관계를 분석한다.
-
-# Task
-아래 후보 장면 목록을 읽고, 장면들 사이에 존재하는 관계(엣지)를 추출하라.
-
-각 후보에는 `continues_from` 필드가 있다. 이 값은 Pro 모델이 청크별로 개별 분석할 때 기록한 것이다.
-- **같은 chunk 내** `continues_from`은 대체로 정확하다.
-- **다른 chunk를 가리키는** `continues_from`은 틀린 경우가 많다. 반드시 재검증하라.
-
-# 관계 타입 정의
-
-| type | 의미 |
-|---|---|
-| `continuous` | 원본 영상에서 1~5초 이내로 물리적으로 이어지는 장면 |
-| `setup_payoff` | A의 맥락이 없으면 B의 의미가 반감되는 인과 관계 |
-| `consequence` | A의 결과로 B가 발생 (시간 간격이 있어도 인과 명확) |
-| `sequence` | 같은 서사 라인의 순차적 단계 (반드시 같이 쓸 필요는 없음) |
-| `duplicate` | 같은 장면이나 개그를 중복으로 포함한 경우 — 하나만 선택 |
-| `character_arc` | 같은 인물의 감정/상태 변화 흐름 (편집 순서 지켜야 함) |
-| `contrast` | 두 장면의 감정 낙차가 바이럴 포인트를 만드는 대조 관계 |
-
-# 출력 규칙
-
-- 명확한 관계만 출력하라. 추측성 관계는 제외.
-- `continuous`는 start_sec 차이가 5초 이내이고 narrative가 이어지는 경우만 표시.
-- `required` 필드: 두 클립을 반드시 함께 사용해야 하면 true, 아니면 false.
-- 같은 chunk 내 `continues_from`이 올바르다고 판단되면 별도 엣지 출력 불필요.
-- cross-chunk `continues_from`이 **오류**라고 판단되면 note에 명시하라.
-
-# 후보 목록
-{candidates_str}
-
-# 출력 JSON 형식 (다른 내용 없이 JSON만 출력)
-{{
-  "edges": [
-    {{
-      "from": {{"chunk_index": 0, "candidate_index": 0}},
-      "to": {{"chunk_index": 0, "candidate_index": 1}},
-      "type": "continuous|setup_payoff|consequence|sequence|duplicate|character_arc|contrast",
-      "required": false,
-      "note": "관계 설명 한 문장"
-    }}
-  ]
-}}
-"""
+# PR-7: RELATIONSHIP_EXTRACTION_PROMPT / extract_relationships 제거
+# (graph 단계 폐지 — 관계/시퀀스는 candidate 의 continues_from 으로 흡수)
 
 
 # ─────────────────────────────────────────────
@@ -1458,7 +1414,6 @@ class GeminiConfig:
     # Google 공식 가이드(Gemini 3.x): temperature/top_p/top_k 같은 샘플링 매개변수는
     # 설정하지 말고 기본값을 따르도록 권장. 카테고리별 thinking_level만 제어한다.
     analysis_thinking_level: str = "high"         # "minimal" | "low" | "medium" | "high"
-    relationship_thinking_level: str = "medium"     # "minimal" | "low" | "medium" | "high"
     story_thinking_level: str = "medium"            # "minimal" | "low" | "medium" | "high"
     tts_cues_thinking_level: str = "medium"         # "minimal" | "low" | "medium" | "high"
     shorten_thinking_level: str = "medium"          # "minimal" | "low" | "medium" | "high"
@@ -1535,21 +1490,8 @@ class GeminiClient:
 
         # narrative_skeleton 블록 — 라운드 6a에서 단계 자체 제거. payload의 skeleton은 무시.
 
-        # face_id 사전 인식 결과 블록 (선택적 — 인덱스가 없으면 빈 문자열)
-        character_appearances_block = ""
-        _appearances = payload.get("character_appearances") or []
-        if _appearances:
-            ap_lines = [
-                f"- {a.get('character', '?')}: {float(a.get('start_sec', 0)):.1f}~{float(a.get('end_sec', 0)):.1f}초"
-                for a in _appearances
-            ]
-            character_appearances_block = (
-                "\n[face_id 사전 인식 결과 — 참고용]\n"
-                "외부 얼굴 인식기가 추정한 캐릭터 등장 구간이다. 같은 인물명을 라벨로 일관되게 사용하되, "
-                "픽셀에서 명백히 다르게 보이는 경우 영상 분석 결과를 우선한다.\n"
-                + "\n".join(ap_lines)
-            )
-
+        # PR-7: face_id 사전 인식 블록 제거 — gemini 가 영상에서 인물을 직접 식별하므로
+        # appearance 힌트를 주입하지 않는다(좌표는 응답의 characters_tracking 으로 수집).
         prompt = GEMINI_PROMPT_TEMPLATE.format(
             work_title=payload["work_title"],
             topic=payload["topic"],
@@ -1561,7 +1503,6 @@ class GeminiClient:
             previous_context=previous_context,
             previous_episodes_context_block=previous_episodes_context_block,
             work_context_block=work_context_block,
-            character_appearances_block=character_appearances_block,
             min_candidates=min_candidates,
         )
 
@@ -1842,13 +1783,19 @@ class GeminiClient:
             '  "intro_description": "오프닝 타이틀/크레딧/로고 시퀀스가 있으면 true, 끝나는 시간(초). 없으면 false, 0",\n'
             '  "has_credits": false,\n'
             '  "credits_start_sec": 0,\n'
-            '  "credits_description": "엔딩 크레딧/스태프롤/예고편이 시작되면 true, 시작 시간(초). 없으면 false, 0"\n'
+            '  "credits_description": "엔딩 크레딧/스태프롤/예고편이 시작되면 true, 시작 시간(초). 없으면 false, 0",\n'
+            '  "chunk_boundaries": [\n'
+            '    {"start_sec": 0, "end_sec": 600, "reason": "막/장소 전환 등 구간 경계 근거"}\n'
+            "  ]\n"
             "}\n\n"
             "⚠️ 영상에 실제로 존재하는 정보만 담아라. 추측 금지.\n"
             "⚠️ story_beats: 영상 전체를 시간 순서대로 5~10개 구간으로 나눠 각 구간에서 실제로 벌어지는 일을 1문장으로 기술하라. "
             "감정 평가나 해석 없이 객관적 사실만 묘사한다 (예: 'A가 B에게 편지를 건네고 B는 읽지 않고 돌아선다'). "
             "행동의 범주를 바꾸지 마라 — 질문은 질문으로, 대화는 대화로, 침묵은 침묵으로 기술하고, 확인되지 않은 의도·결과를 덧씌우지 마라.\n"
             "⚠️ 인트로/크레딧 감지: 실제 타이틀 시퀀스, 스태프롤, 출연진 자막 등이 보이는 경우에만 true로 표기.\n"
+            "⚠️ chunk_boundaries: 본편(인트로·크레딧 제외)을 의미 단위(막·장소 전환·시간 점프)로 끊어 "
+            "연속 구간 리스트로 출력하라. start_sec/end_sec 는 영상 절대 초이며, 구간들은 빈틈·겹침 없이 본편을 덮어야 한다. "
+            "너무 잘게 쪼개지 말고 5~15분 수준의 큰 덩어리로 묶어라(후처리에서 최소 5분으로 병합·정규화됨).\n"
         )
 
         uploaded_file = None
@@ -1919,48 +1866,128 @@ class GeminiClient:
                     pass
 
     # ─────────────────────────────────────────
-    # 후보 장면 관계 그래프 추출
+    # 프록시 전사 (SRT 가 없을 때의 Gemini 폴백, video_intent 단계)
     # ─────────────────────────────────────────
-    def extract_relationships(self, all_candidates: list) -> list[dict]:
-        """후보 장면들 사이의 관계 엣지를 Pro 모델로 추출한다 (텍스트 전용, 영상 업로드 없음)."""
-        slim_fields = (
-            "chunk_index", "candidate_index", "start_sec", "end_sec",
-            "description", "characters_in_scene",
-            "requires_context", "continues_from", "transcript",
+    def transcribe_proxy(
+        self,
+        proxy_path: Path,
+        *,
+        windows: list[tuple[float, float]] | None = None,
+        work_title: str | None = None,
+        character_names: list[str] | None = None,
+        work_context: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """프록시 영상을 Flash 로 전사한다 (SRT 가 없을 때의 폴백).
+
+        windows 가 주어지면 각 (start,end) 구간을 개별 호출로 전사해 장거리 타임스탬프 드리프트를
+        줄인다(업로드는 1회 재사용). 없으면 영상 전체를 1회 호출로 전사한다. 반환은 영상 절대시간
+        기준 발화 목록 [{"start_sec","end_sec","speaker","text"}] (시간순). 실패 구간은 건너뛴다.
+        최종 자막이 아니라 분석 컨텍스트용이므로 정밀도보다 견고함을 우선한다.
+        """
+        proxy_path_obj = Path(proxy_path)
+        if not proxy_path_obj.exists():
+            return []
+        names_line = (
+            "\n[등장인물 이름 후보 — 화자 라벨에 우선 사용]\n" + ", ".join(character_names) + "\n"
+            if character_names else ""
         )
-        candidates_str = ""
-        for m in all_candidates:
-            slim = {k: m[k] for k in slim_fields if k in m}
-            candidates_str += f"- {json.dumps(slim, ensure_ascii=False)}\n"
+        ctx_line = f"\n[작품 정보]\n{work_context}\n" if work_context else ""
 
-        prompt = RELATIONSHIP_EXTRACTION_PROMPT.format(candidates_str=candidates_str)
+        uploaded_file = None
+        safe_path, is_tmp = _safe_upload_path(proxy_path_obj)
+        try:
+            for upload_attempt in range(self.config.max_retries):
+                try:
+                    uploaded_file = self.client.files.upload(file=str(safe_path))
+                    while uploaded_file.state.name == "PROCESSING":
+                        time.sleep(2)
+                        uploaded_file = self.client.files.get(name=uploaded_file.name)
+                    if uploaded_file.state.name == "FAILED":
+                        raise RuntimeError("Gemini File API 업로드 실패")
+                    break
+                except Exception as upload_err:
+                    if upload_attempt == self.config.max_retries - 1:
+                        print(f"    [WARN] transcribe_proxy 업로드 실패: {upload_err} — 전사 생략")
+                        return []
+                    time.sleep(2 ** upload_attempt)
+            file_part = self.types.Part(
+                file_data=self.types.FileData(file_uri=uploaded_file.uri, mime_type="video/mp4"),
+            )
 
-        for attempt in range(self.config.max_retries):
-            try:
-                response = self.client.models.generate_content(
-                    model=self.config.model_name,
-                    contents=[prompt],
-                    config=self.types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        thinking_config=self.types.ThinkingConfig(
-                            thinking_level=self.config.relationship_thinking_level,
-                        ),
-                    ),
+            _windows: list = list(windows) if windows else [None]
+            all_segs: list[dict[str, Any]] = []
+            for win in _windows:
+                if win is None:
+                    w_start, w_end, range_line = None, None, "영상 전체"
+                else:
+                    w_start, w_end = float(win[0]), float(win[1])
+                    range_line = f"{w_start:.1f}초 ~ {w_end:.1f}초 구간"
+                prompt = (
+                    f"너는 영상 전사 전문가다. 첨부 영상에서 {range_line}에 실제로 들리는 사람의 발화를 "
+                    "시간순으로 받아써라. 반드시 JSON만 출력, 코드블록 금지.\n"
+                    f"- 작품명: {work_title or ''}\n"
+                    f"{ctx_line}{names_line}"
+                    "[출력]\n"
+                    '{"segments": [{"start_sec": 0.0, "end_sec": 0.0, "speaker": "화자명 또는 불명", "text": "발화"}]}\n'
+                    "⚠️ start_sec/end_sec 는 영상 절대 초. ⚠️ 화면에 실제로 들리는 대사만 적고 추측·요약 금지. "
+                    "발화가 없으면 segments 는 빈 배열."
                 )
-                text = (response.text or "").strip()
-                if not text:
-                    raise RuntimeError("빈 응답")
-                data = json.loads(_extract_json_from_markdown(text))
-                edges = data.get("edges", [])
-                if not isinstance(edges, list):
-                    raise ValueError("edges 필드가 리스트가 아님")
-                return edges
-            except Exception as e:
-                if attempt == self.config.max_retries - 1:
-                    print(f"    [WARN] 관계 그래프 추출 실패: {e} — 빈 엣지 반환")
-                    return []
-                time.sleep(2 ** attempt)
-        return []
+                seg_list: list[dict[str, Any]] = []
+                for attempt in range(self.config.max_retries):
+                    try:
+                        response = self.client.models.generate_content(
+                            model=self.config.flash_model_name,
+                            contents=[prompt, file_part],
+                            config=self.types.GenerateContentConfig(
+                                response_mime_type="application/json",
+                            ),
+                        )
+                        if not response or not response.text:
+                            continue
+                        data = json.loads(_extract_json_from_markdown(response.text.strip()))
+                        raw_segs = data if isinstance(data, list) else (
+                            data.get("segments", []) if isinstance(data, dict) else []
+                        )
+                        for s in raw_segs or []:
+                            try:
+                                ss = float(s.get("start_sec"))
+                                se = float(s.get("end_sec"))
+                            except (TypeError, ValueError, AttributeError):
+                                continue
+                            if se <= ss:
+                                continue
+                            if w_start is not None:
+                                if se <= w_start or ss >= w_end:
+                                    continue
+                                ss, se = max(ss, w_start), min(se, w_end)
+                            txt = str(s.get("text", "") or "").strip()
+                            if not txt:
+                                continue
+                            seg_list.append({
+                                "start_sec": ss, "end_sec": se,
+                                "speaker": str(s.get("speaker", "") or "불명"),
+                                "text": txt,
+                            })
+                        break
+                    except Exception as e:
+                        if attempt == self.config.max_retries - 1:
+                            print(f"    [WARN] transcribe_proxy 구간 전사 실패({range_line}): {e}")
+                        else:
+                            time.sleep(2 ** attempt)
+                all_segs.extend(seg_list)
+            all_segs.sort(key=lambda s: (s["start_sec"], s["end_sec"]))
+            return all_segs
+        finally:
+            if is_tmp and safe_path.exists():
+                try:
+                    safe_path.unlink()
+                except OSError:
+                    pass
+            if uploaded_file:
+                try:
+                    self.client.files.delete(name=uploaded_file.name)
+                except Exception:
+                    pass
 
     # ─────────────────────────────────────────
     # 스토리 구성 v2 (바이럴 최적화)
@@ -1974,7 +2001,6 @@ class GeminiClient:
         max_duration_sec: float = 60.0,
         work_context: str | None = None,
         previous_episodes_context: str | None = None,
-        relationship_edges: list[dict] | None = None,
         chunk_meta: list[dict] | None = None,
     ) -> dict[str, Any]:
         """후보 장면들로 바이럴 최적화 스토리라인을 구성합니다.
@@ -2003,35 +2029,7 @@ class GeminiClient:
             story_topic_line=story_topic_line,
         )
 
-        # ── 관계 그래프 블록 (프롬프트 뒤에 추가) ──
-        if relationship_edges:
-            type_rules = {
-                "setup_payoff": "required=true이면 두 클립을 반드시 함께 사용하거나 둘 다 제외",
-                "continuous": "sequence_id에 이미 반영됨. 인접 배치 권장",
-                "duplicate": "둘 중 하나만 선택. 동일 스토리라인에 중복 사용 금지",
-                "character_arc": "from → to 순서 유지 필수",
-                "sequence": "같은 서사 라인. 같이 쓰면 효과적이나 필수는 아님",
-                "consequence": "from이 to의 감정적 원인. 인접하지 않아도 to 앞에 from이 선행돼야 함",
-                "contrast": "인접 배치 시 감정 낙차 극대화",
-            }
-            lines = ["\n[장면 관계 그래프 — 반드시 준수]"]
-            lines.append("아래 관계를 스토리라인 구성 시 반드시 참고하라.\n")
-            for edge in relationship_edges:
-                f = edge.get("from", {})
-                t = edge.get("to", {})
-                etype = edge.get("type", "")
-                req = edge.get("required", False)
-                note = edge.get("note", "")
-                rule = type_rules.get(etype, "")
-                req_str = " [REQUIRED]" if req else ""
-                lines.append(
-                    f"- [{f.get('chunk_index')},{f.get('candidate_index')}]"
-                    f" → [{t.get('chunk_index')},{t.get('candidate_index')}]"
-                    f" | {etype}{req_str} | {note}"
-                )
-                if rule:
-                    lines.append(f"  ↳ 규칙: {rule}")
-            prompt += "\n".join(lines)
+        # PR-7: 관계 그래프 블록 제거 — 시퀀스는 candidate 의 continues_from(→ sequence_id)로 반영됨.
 
         for attempt in range(self.config.max_retries):
             try:
@@ -2394,7 +2392,6 @@ def load_gemini_client() -> GeminiClient:
     flash_model_name = os.getenv("GEMINI_FLASH_MODEL_NAME", "gemini-3-flash-preview")
     max_retries = int(os.getenv("GEMINI_MAX_RETRIES", "3"))
     analysis_thinking_level = os.getenv("GEMINI_ANALYSIS_THINKING_LEVEL", "medium")
-    relationship_thinking_level = os.getenv("GEMINI_RELATIONSHIP_THINKING_LEVEL", "medium")
     story_thinking_level = os.getenv("GEMINI_STORY_THINKING_LEVEL", "medium")
     tts_cues_thinking_level = os.getenv("GEMINI_TTS_CUES_THINKING_LEVEL", "medium")
     shorten_thinking_level = os.getenv("GEMINI_SHORTEN_THINKING_LEVEL", "medium")
@@ -2405,7 +2402,6 @@ def load_gemini_client() -> GeminiClient:
         flash_model_name=flash_model_name,
         max_retries=max_retries,
         analysis_thinking_level=analysis_thinking_level,
-        relationship_thinking_level=relationship_thinking_level,
         story_thinking_level=story_thinking_level,
         tts_cues_thinking_level=tts_cues_thinking_level,
         shorten_thinking_level=shorten_thinking_level,

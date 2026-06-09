@@ -39,9 +39,13 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument(
         "--from-step",
         choices=[
-            "init", "research", "probe", "proxy", "exclusion", "chunk",
-            "skeleton", "character_index", "gemini", "graph", "story",
-            "tts_plan", "transcribe", "resources", "render", "validate",
+            # 현행 12단계 (PR-7)
+            "init", "research", "probe", "proxy", "video_intent", "chunk",
+            "gemini", "story", "av_align", "resources", "render", "validate",
+            # 레거시 단계명 — run_pipeline 의 _legacy_step_alias 로 가까운 단계에 redirect
+            # (argparse 가 alias 처리 전에 미등록 값을 거부하므로 choices 에 남겨둬야 재개 가능)
+            "exclusion", "skeleton", "character_index", "chunk_transcribe",
+            "graph", "tts_plan", "transcribe", "silence_cut",
         ],
         help="Start from specific step (requires --job-id)",
     )
