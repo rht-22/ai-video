@@ -19,6 +19,18 @@ def _resolve_outdir(outdir: Path) -> Path:
     return project_root / outdir
 
 
+def _parse_loudness(value: str | None) -> float | None:
+    """--loudness-lufs 파싱. 'off'/'none'/빈값 → None(정규화 끔, A/B 대조군),
+    숫자 → float, 잘못된 값 → 기본 -14.0(렌더 안 깨지게)."""
+    s = (value or "").strip().lower()
+    if s in ("off", "none", "null", ""):
+        return None
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return -14.0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="High-quality auto shorts generator")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -54,6 +66,9 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--no-subtitles", action="store_true", help="최종 영상에 자막 표시 안 함")
     create.add_argument("--no-tts-subtitles", action="store_true", help="TTS 내레이션 자막을 영상에 표시 안 함 (TTS 음성은 그대로 재생)")
     create.add_argument("--max-shorts", type=int, default=3, help="생성할 최대 쇼츠 수 (1-3, 기본: 3)")
+    create.add_argument("--loudness-lufs", default="-14",
+                        help="출력 라우드니스 목표 LUFS (기본 -14, 쇼츠 표준). 'off' 면 정규화 끔(A/B 대조군). "
+                             "동일 edit_plan 으로 --from-step render 재렌더 시 ON/OFF 비교 = 깨끗한 A/B.")
     create.add_argument("--no-research", action="store_true",
                         help="작품 자동 리서치를 건너뜁니다")
     create.add_argument("--episode", type=int, default=None,
@@ -217,6 +232,7 @@ def main() -> None:
                 episode=getattr(args, "episode", None),
                 skip_intro_sec=getattr(args, "skip_intro", 0.0),
                 skip_credits_sec=getattr(args, "skip_credits", 0.0),
+                loudness_target_lufs=_parse_loudness(getattr(args, "loudness_lufs", "-14")),
             ),
             from_step=args.from_step,
             job_id=args.job_id,
