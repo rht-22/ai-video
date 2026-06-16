@@ -541,6 +541,9 @@ class RenderInputs:
     tts_cue_files: list[dict] | None = None  # 각 항목: {"cue_index": int, "path": str, "cue": {start_sec, end_sec, text, voice, speed}}
     original_audio_gain_db: int = -10
     tts_audio_gain_db: int = -4
+    # 최종 출력 라우드니스 정규화 목표(LUFS). 쇼츠 표준 ≈ -14. None 이면 비활성(A/B 대조군용).
+    # ai-video 클립이 시장 클립 대비 ~9 LUFS 더 조용한 문제(벤치마크) 교정.
+    loudness_target_lufs: float | None = -14.0
     render_preset: str = "balanced"  # balanced|fastest|quality (현재는 balanced만 사용)
     enable_hwaccel: bool = True
     title_textfile: Path | None = None
@@ -1076,7 +1079,9 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         filters.append(f"{last_v_label}null[vout]")
         last_v_label = "[vout]"
 
-    filters.append(_build_audio_filter(inputs, num_clip_inputs, num_cue_inputs))
+    audio_filter = _build_audio_filter(inputs, num_clip_inputs, num_cue_inputs)
+    audio_filter = _apply_loudnorm(audio_filter, getattr(inputs, "loudness_target_lufs", None))
+    filters.append(audio_filter)
     return ";".join(filters)
 
 def _get_audio_duration(path: Path) -> float:
@@ -1096,6 +1101,19 @@ def _get_audio_duration(path: Path) -> float:
     except Exception:
         pass
     return 0.0
+
+def _apply_loudnorm(audio_filter: str, target_lufs: float | None) -> str:
+    """최종 오디오 라벨 [aout] 에 loudnorm 정규화 단계를 덧붙인다.
+
+    ai-video 출력이 시장 클립 대비 ~9 LUFS 조용한 문제(벤치마크) 교정 → 쇼츠 표준(≈-14 LUFS).
+    target_lufs None 이면 무변경(A/B 대조군). [aout] 은 _build_audio_filter 의 모든 반환 경로에서
+    마지막에 정확히 한 번만 등장하므로 단순 치환이 안전하다.
+    """
+    if target_lufs is None:
+        return audio_filter
+    return (audio_filter.replace("[aout]", "[apremix]")
+            + f";[apremix]loudnorm=I={target_lufs}:TP=-1.5:LRA=11[aout]")
+
 
 def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, num_cue_inputs: int) -> str:
     """편집 타임라인 절대 시간 기준 cue 리스트로 오디오 필터를 만든다.
