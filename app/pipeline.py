@@ -1408,6 +1408,8 @@ class PipelineInput:
     episode: int | None = None
     skip_intro_sec: float = 0.0
     skip_credits_sec: float = 0.0
+    # 출력 라우드니스 정규화 목표(LUFS). None 이면 비활성(A/B 대조군). RenderInputs 로 전달.
+    loudness_target_lufs: float | None = -14.0
 
 
 @dataclass(frozen=True)
@@ -2982,6 +2984,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             work_title=payload.work_title,
             design=updated_design,
             output_path=output_video,
+            loudness_target_lufs=payload.loudness_target_lufs,
             canvas_width=config.canvas_width,
             canvas_height=config.canvas_height,
             top_title_height=config.top_title_height,
@@ -3224,6 +3227,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     work_title=payload.work_title,
                     design=updated_design,
                     output_path=var_video,
+                    loudness_target_lufs=payload.loudness_target_lufs,
                     canvas_width=config.canvas_width,
                     canvas_height=config.canvas_height,
                     top_title_height=config.top_title_height,
