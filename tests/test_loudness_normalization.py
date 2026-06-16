@@ -3,7 +3,23 @@
 배경: ai-video 출력 클립이 시장 클립 대비 ~9 LUFS 더 조용함(−32 vs −23 LUFS, 벤치마크).
 최종 오디오 라벨 [aout] 에 loudnorm 을 덧붙여 쇼츠 표준(≈−14 LUFS)으로 정규화한다.
 target None 이면 무변경(A/B 대조군)."""
+from app.cli import _parse_loudness
 from app.modules.renderer import _apply_loudnorm
+
+
+def test_parse_loudness_number():
+    assert _parse_loudness("-14") == -14.0
+    assert _parse_loudness("-16.5") == -16.5
+
+
+def test_parse_loudness_off_variants_none():
+    for s in ("off", "OFF", "none", "null", "", "  "):
+        assert _parse_loudness(s) is None
+
+
+def test_parse_loudness_invalid_falls_back_to_default():
+    # 잘못된 값은 기본값(-14)로 — 렌더가 깨지지 않게
+    assert _parse_loudness("garbage") == -14.0
 
 
 def test_appends_loudnorm_to_final_aout():
