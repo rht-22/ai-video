@@ -69,6 +69,9 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--loudness-lufs", default="-14",
                         help="출력 라우드니스 목표 LUFS (기본 -14, 쇼츠 표준). 'off' 면 정규화 끔(A/B 대조군). "
                              "동일 edit_plan 으로 --from-step render 재렌더 시 ON/OFF 비교 = 깨끗한 A/B.")
+    create.add_argument("--silence-profile", choices=["conservative", "aggressive"], default="conservative",
+                        help="무음 컷 프로파일 (A/B). conservative(기본)=레거시 통째-보호, "
+                             "aggressive=gap-단위·무음 적극 제거(벤치마크 가설). 채널 A/B 후 채택 결정.")
     create.add_argument("--no-research", action="store_true",
                         help="작품 자동 리서치를 건너뜁니다")
     create.add_argument("--episode", type=int, default=None,
@@ -233,6 +236,7 @@ def main() -> None:
                 skip_intro_sec=getattr(args, "skip_intro", 0.0),
                 skip_credits_sec=getattr(args, "skip_credits", 0.0),
                 loudness_target_lufs=_parse_loudness(getattr(args, "loudness_lufs", "-14")),
+                silence_profile=getattr(args, "silence_profile", "conservative"),
             ),
             from_step=args.from_step,
             job_id=args.job_id,

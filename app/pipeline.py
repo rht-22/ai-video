@@ -943,6 +943,7 @@ from app.modules.silence_cutter import (
     cut_silence_from_clips,
     cut_silence_with_story_filter,
     flatten_to_clips,
+    get_silence_profile,
     print_silence_cut_summary,
 )
 
@@ -1404,6 +1405,8 @@ class PipelineInput:
     skip_credits_sec: float = 0.0
     # 출력 라우드니스 정규화 목표(LUFS). None 이면 비활성(A/B 대조군). RenderInputs 로 전달.
     loudness_target_lufs: float | None = -14.0
+    # 무음 컷 프로파일(A/B): "conservative"(레거시 통째-보호, 기본) | "aggressive"(gap-단위·무음 적극 제거).
+    silence_profile: str = "conservative"
 
 
 @dataclass(frozen=True)
@@ -2445,7 +2448,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         for v_idx, (v_clips, v_title, v_score) in enumerate(all_storyline_variants):
             cut_results = cut_silence_with_story_filter(
                 v_clips, _all_chunk_segs, _candidates_lookup_sc,
-                max_gap_sec=0.4, padding_sec=0.15, min_interval_sec=0.3,
+                profile=get_silence_profile(payload.silence_profile),
             )
             v_clips_new = flatten_to_clips(cut_results)
             # 너무 짧아지면 롤백 (라운드 13-B 동일 패턴)
