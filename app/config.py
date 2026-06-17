@@ -57,10 +57,16 @@ class DesignConfig:
 class AppConfig:
     chunk_seconds: int = 600
     chunk_overlap: int = 180  # 라운드 19B: 30 → 180. chunks 1+에서 앞 청크 3분 prepend로 경계 사건 손실 방지.
-    target_duration_sec: int = 50
+    # 길이 노브 — A/B 에서 env 로 조정 (기본값은 기존 동작 유지). 시장 승자 평균 ~46s.
+    target_duration_sec: int = field(default_factory=lambda: int(os.environ.get("TARGET_DURATION_SEC", "50")))
     target_duration_tolerance_sec: int = 10
-    min_duration_sec: int = 40
-    max_duration_sec: int = 60  # 라운드 11: 100 → 60 (요즘 쇼츠 표준 40~60s)
+    min_duration_sec: int = field(default_factory=lambda: int(os.environ.get("MIN_DURATION_SEC", "40")))
+    max_duration_sec: int = field(default_factory=lambda: int(os.environ.get("MAX_DURATION_SEC", "60")))  # 라운드 11: 100 → 60
+    # storyline 총 길이 상한 배수 (validate_story_clips). 1.5=레거시(최대 90s 허용 → 100s 클립 원인).
+    # env MAX_DURATION_TOLERANCE 로 조정. aggressive A/B 는 1.1 권장(≈66s 상한).
+    max_duration_tolerance: float = field(default_factory=lambda: float(os.environ.get("MAX_DURATION_TOLERANCE", "1.5")))
+    # 무음 컷 공격성 프로파일 — "conservative"(베이스라인) | "aggressive"(가설). env SILENCE_CUT_PROFILE.
+    silence_cut_profile: str = field(default_factory=lambda: os.environ.get("SILENCE_CUT_PROFILE", "conservative"))
     canvas_width: int = 1080
     canvas_height: int = 1920
     top_title_height: int = 250

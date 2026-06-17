@@ -943,6 +943,7 @@ from app.modules.silence_cutter import (
     cut_silence_from_clips,
     cut_silence_with_story_filter,
     flatten_to_clips,
+    get_silence_profile,
     print_silence_cut_summary,
 )
 
@@ -2257,6 +2258,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             is_valid, msg = validate_story_clips(
                 sl_clips, config.min_duration_sec, config.max_duration_sec,
                 min_clip_count=min_clip_count,
+                max_duration_tolerance=config.max_duration_tolerance,
             )
             if not is_valid:
                 print(f"  [SKIP] 스토리라인 {sl_idx + 1} 검증 실패: {msg}")
@@ -2409,16 +2411,23 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     clips, title_text, _ = all_storyline_variants[0]
 
     # ═══════════════════════════════════════
-    # [silence_cut] 스토리-aware 무음 컷 (PR-5 신규)
+    # [silence_cut] 스토리-aware 무음 컷 (PR-5 / PR-6 gap-단위)
     # ═══════════════════════════════════════
     # cut_silence_with_story_filter 로 각 variant clips 컷 + storyline_tts_cues_pool 의 cue
-    # 시간을 누적 감소량만큼 보정. _apply_silence_cut_to_variants 의 롤백/길이 재보정 패턴 그대로.
-    # transcribe 단계의 _apply_silence_cut_to_variants 호출은 PR-5c-1 에서 제거 (중복 컷 회피).
+    # 시간을 누적 감소량만큼 보정. 무음 공격성은 config.silence_cut_profile (env SILENCE_CUT_PROFILE)
+    # 로 토글 — conservative(베이스라인) vs aggressive(가설). 채널 A/B 비교용.
+    silence_profile = get_silence_profile(config.silence_cut_profile)
     checkpoint_silence_cut = output_dir / "checkpoint_silence_cut.json"
     _silence_cut_invalidate = from_step in ("story", "silence_cut")
-    if checkpoint_silence_cut.exists() and not _silence_cut_invalidate:
-        print("\n[silence_cut] 캐시 로드 중...")
+    # 프로파일이 바뀌면 캐시 무효화 — A/B 두 arm 이 같은 output_dir 를 재사용할 때 stale 결과 방지.
+    _sc_cache_ok = checkpoint_silence_cut.exists() and not _silence_cut_invalidate
+    if _sc_cache_ok:
         _sc_data = json.loads(checkpoint_silence_cut.read_text(encoding="utf-8"))
+        if _sc_data.get("profile", "conservative") != silence_profile.name:
+            print(f"\n[silence_cut] 프로파일 변경 ({_sc_data.get('profile')} → {silence_profile.name}) → 캐시 무시, 재계산")
+            _sc_cache_ok = False
+    if _sc_cache_ok:
+        print(f"\n[silence_cut] 캐시 로드 중... (프로파일: {silence_profile.name})")
         _new_variants: list[tuple[list[StoryClip], str, float]] = []
         _new_cues_pool: list[list[dict[str, Any]]] = []
         for v in _sc_data.get("variants", []):
@@ -2431,7 +2440,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             clips = list(all_storyline_variants[0][0])
         print(f"  - {len(_new_variants)}개 variant 로드 완료")
     elif start_idx <= step_idx["silence_cut"]:
-        print("\n[silence_cut] 스토리-aware 무음 컷 진행 중...")
+        print(f"\n[silence_cut] 스토리-aware 무음 컷 진행 중... (프로파일: {silence_profile.name}, gap_level={silence_profile.gap_level})")
         _sc_start = time.time()
         # chunk_transcripts 의 모든 SpeechSegment 평탄화 (cut_silence_with_story_filter 가
         # 자체적으로 각 clip 범위 안 segments 만 필터링).
@@ -2445,7 +2454,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         for v_idx, (v_clips, v_title, v_score) in enumerate(all_storyline_variants):
             cut_results = cut_silence_with_story_filter(
                 v_clips, _all_chunk_segs, _candidates_lookup_sc,
-                max_gap_sec=0.4, padding_sec=0.15, min_interval_sec=0.3,
+                profile=silence_profile,
             )
             v_clips_new = flatten_to_clips(cut_results)
             # 너무 짧아지면 롤백 (라운드 13-B 동일 패턴)
@@ -2476,6 +2485,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         clips = list(all_storyline_variants[0][0]) if all_storyline_variants else clips
         checkpoint_silence_cut.write_text(
             json.dumps({
+                "profile": silence_profile.name,
                 "variants": [
                     {"clips": [c.__dict__ for c in vc], "title_text": t, "score": s, "tts_cues": new_cues_pool[i]}
                     for i, (vc, t, s) in enumerate(all_storyline_variants)
