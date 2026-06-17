@@ -37,11 +37,14 @@ def validate_story_clips(
     min_duration_sec: float,
     max_duration_sec: float,
     min_clip_count: int = 3,
+    max_duration_tolerance: float = 1.5,
 ) -> tuple[bool, str]:
     """스토리 클립이 유효한 쇼츠를 구성하는지 검증합니다.
 
     min_clip_count: highlight형은 1개로도 가능하므로 호출부에서 1로 낮춰야 함.
     storytelling형은 hook/build/payoff 최소 3개 보장.
+    max_duration_tolerance: 총 길이 상한 배수. 1.5=레거시(최대 90s 허용 → 100s 클립 원인).
+      길이를 시장 승자(~46s)에 맞추려면 호출부에서 1.1 등으로 낮춘다 (config.max_duration_tolerance).
     """
     if not clips:
         return False, "클립이 없습니다"
@@ -50,10 +53,11 @@ def validate_story_clips(
         return False, f"클립 수 부족: {len(clips)}개 < {min_clip_count}개"
 
     total_dur = sum(c.end_sec - c.start_sec for c in clips)
+    max_allowed = max_duration_sec * max_duration_tolerance
     if total_dur < min_duration_sec:
         return False, f"너무 짧음: {total_dur:.1f}초 < {min_duration_sec}초"
-    if total_dur > max_duration_sec * 1.5:
-        return False, f"너무 김: {total_dur:.1f}초 > {max_duration_sec * 1.5}초"
+    if total_dur > max_allowed:
+        return False, f"너무 김: {total_dur:.1f}초 > {max_allowed:.1f}초"
 
     for c in clips:
         if c.end_sec <= c.start_sec:

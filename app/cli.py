@@ -31,6 +31,25 @@ def _parse_loudness(value: str | None) -> float | None:
         return -14.0
 
 
+def _apply_ab_env(args) -> dict:
+    """A/B CLI 플래그 → 환경변수 변환. (인터페이스 통일: 모든 A/B 노브를 CLI 로 노출.
+    silence/length 내부 플러밍은 config 의 env default_factory 이므로 run_pipeline 전에 env 를 set.)
+    설정한 키 dict 반환(테스트용). standard/conservative 는 강제 안 함(config 기본값 사용)."""
+    import os
+    applied: dict = {}
+    sp = getattr(args, "silence_profile", None)
+    if sp:
+        os.environ["SILENCE_CUT_PROFILE"] = sp
+        applied["SILENCE_CUT_PROFILE"] = sp
+    if getattr(args, "length_profile", None) == "tight":
+        # 시장 승자(~46s) 쪽으로: 목표 45s, 상한 50s, 톨러런스 1.5→1.1(≈55s 상한).
+        for k, v in (("TARGET_DURATION_SEC", "45"), ("MAX_DURATION_SEC", "50"),
+                     ("MAX_DURATION_TOLERANCE", "1.1")):
+            os.environ[k] = v
+            applied[k] = v
+    return applied
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="High-quality auto shorts generator")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -69,6 +88,11 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--loudness-lufs", default="-14",
                         help="출력 라우드니스 목표 LUFS (기본 -14, 쇼츠 표준). 'off' 면 정규화 끔(A/B 대조군). "
                              "동일 edit_plan 으로 --from-step render 재렌더 시 ON/OFF 비교 = 깨끗한 A/B.")
+    # A/B 노브 통일(모두 CLI). silence/length 는 env(config)로 전달됨.
+    create.add_argument("--silence-profile", choices=["conservative", "aggressive"], default=None,
+                        help="무음 컷 프로파일 (A/B). aggressive=gap-단위·무음 적극 제거(벤치마크 가설). 미지정=config 기본(conservative).")
+    create.add_argument("--length-profile", choices=["standard", "tight"], default=None,
+                        help="길이 프로파일 (A/B). tight=목표 45s·상한 톨러런스 1.1(시장 ~46s). 미지정=config 기본(standard).")
     create.add_argument("--no-research", action="store_true",
                         help="작품 자동 리서치를 건너뜁니다")
     create.add_argument("--episode", type=int, default=None,
@@ -214,6 +238,9 @@ def main() -> None:
             srt_path = Path(sub_file) if sub_file else None
 
         max_shorts = min(max(getattr(args, "max_shorts", 3), 1), 3)
+
+        # A/B 노브(silence/length) CLI 플래그 → env (config 가 env 로 읽음). run_pipeline 전에 적용.
+        _apply_ab_env(args)
 
         output = run_pipeline(
             PipelineInput(
