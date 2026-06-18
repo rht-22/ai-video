@@ -714,6 +714,7 @@ _enforce_title_line2_limit = _enforce_title_line_limit
 
 
 from app.config import AppConfig, Paths, DesignConfig, get_font_path
+from app.modules.provenance import build_provenance
 from app.modules.story_builder import StoryClip
 
 
@@ -1483,6 +1484,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         }
         print(f"  - Job ID: {job_id}")
         print(f"  - 출력 디렉토리: {output_dir}")
+    run_log.setdefault("provenance", build_provenance(config))
     print("[OK] 초기화 완료")
 
     # ═══════════════════════════════════════
