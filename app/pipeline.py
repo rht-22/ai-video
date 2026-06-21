@@ -713,6 +713,20 @@ def _enforce_title_line_limit(text: str, max_chars: int = 20) -> str:
 _enforce_title_line2_limit = _enforce_title_line_limit
 
 
+def _looks_garbled(original: str, shortened: str) -> bool:
+    """LLM 제목 단축 결과가 원문 글자를 거의 재사용하지 않으면(압축이 아니라 환각/깨짐) True.
+    제목 단축은 원문의 '압축'이어야 정상 — shorten_text(Flash)가 가끔 깨진 한국어/훼손된
+    이름을 짧게 뱉는데 수용 조건이 길이뿐이라 그대로 채택되던 버그 방지. 거부 시 호출부가
+    어절 경계 절단(_enforce_title_line_limit)으로 폴백한다. (자가개선 루프 R3: 타이틀 첫 줄 깨짐 수정.)"""
+    o = set(original.replace(" ", ""))
+    s = set(shortened.replace(" ", ""))
+    if not s:
+        return True
+    # 정상 압축은 원문 글자의 부분집합(overlap≈1.0). 0.85 미만이면 새 글자 유입(부분 깨짐/이름 훼손
+    # 또는 위험한 패러프레이즈) → 거부하고 어절 절단(원문 보존)으로 폴백.
+    return (len(s & o) / len(s)) < 0.85
+
+
 from app.config import AppConfig, Paths, DesignConfig, get_font_path
 from app.modules.provenance import build_provenance
 from app.modules.story_builder import StoryClip
@@ -1162,14 +1176,18 @@ def _clips_from_storyline(
             if callable(_shorten):
                 if len(title_line1_raw) > 20:
                     _new1 = _shorten(title_line1_raw, target_chars=20)
-                    if _new1 and len(_new1) <= 20:
+                    if _new1 and len(_new1) <= 20 and not _looks_garbled(title_line1_raw, _new1):
                         print(f"  [title-shorten] line1 {len(title_line1_raw)}자 → {len(_new1)}자: {_new1!r}")
                         title_line1_raw = _new1
+                    elif _new1:
+                        print(f"  [title-shorten] line1 LLM 결과 거부(깨짐/불일치): {_new1!r} → 어절 절단 폴백")
                 if len(title_line2_raw) > 20:
                     _new2 = _shorten(title_line2_raw, target_chars=20)
-                    if _new2 and len(_new2) <= 20:
+                    if _new2 and len(_new2) <= 20 and not _looks_garbled(title_line2_raw, _new2):
                         print(f"  [title-shorten] line2 {len(title_line2_raw)}자 → {len(_new2)}자: {_new2!r}")
                         title_line2_raw = _new2
+                    elif _new2:
+                        print(f"  [title-shorten] line2 LLM 결과 거부(깨짐/불일치): {_new2!r} → 어절 절단 폴백")
         except Exception as e:
             print(f"  [WARN] title shorten 실패: {e} — 어절 절단 폴백")
 
