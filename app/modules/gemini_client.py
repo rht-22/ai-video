@@ -361,6 +361,19 @@ segments 중 **쇼츠 제작에 가치 있는 장면만** 선별해 candidate_mo
     - location: 장면 발생 장소 (예: "극장 로비", "병원", "야외 거리")
     - ⚠️ phone_call vs in_person 구분 매우 중요. 통화 장면을 in_person으로 잘못 라벨하면 다음 단계(스토리 구성)에서 "X가 Y에게 직접 고백" 같은 잘못된 title 생성됨.
 
+- beats: **이 candidate의 [start_sec, end_sec] 구간을 더 잘게 쪼갠 세부 비트 배열**. 길이가 60초를 넘는 쇼츠에서 내용 흐름을 끊지 않고 줄이기 위해, 그리고 스토리 구성 단계가 장면 내부를 더 정밀하게 이해하도록 쓰인다.
+    - 타일링 규칙: beats는 candidate 구간을 **빈틈 없이, 겹침 없이** 시간순으로 채운다. 첫 beat.start_sec == candidate.start_sec, 마지막 beat.end_sec == candidate.end_sec. (segments 타일링 규칙과 동일)
+    - 비트 분할 기준: 대사 전환·동작 전환·컷·장소 전환·감정 전환 등 *의미 단위*로 나눠라. 보통 candidate당 2~8개. 한 문장/한 동작이 한 beat가 되는 게 이상적.
+    - start_sec / end_sec: 이 beat의 시간 범위 (chunk-relative, candidate 범위 안). [타임스탬프 정확도] 규칙 동일 적용.
+    - summary: 이 beat에서 무슨 일이 일어나는지 **1~2문장으로 구체적으로** 묘사 — 행동·시각 단서·감정 흐름을 담아라. 단순 한 줄 요약("전화 받음") 금지.
+    - dialogue: 이 beat 구간에 들리는 **모든 발화**를 화자별로 [{{"speaker": "인물명", "line": "대사"}}] 배열로. candidate.transcript는 '단 한 명'만 담지만 beats.dialogue는 **여러 화자 전부** 담아라. 내레이션/VO/독백은 speaker="[내레이션]". 발화가 없으면 빈 배열 []. speaker는 [열린 라벨 허용] — 불명확하면 "불명".
+    - mood: 이 beat의 분위기/감정 톤 한 단어~한 구 (예: "긴장", "유쾌", "슬픔", "정적", "충격"). 컷/전환으로 candidate 안에서 분위기가 바뀌면 beat마다 다르게.
+    - location: 이 beat의 장소. candidate 안에서 장소가 바뀌면(컷) beat마다 다르게. scene_location과 같으면 그대로 복사.
+    - characters: 이 beat에 등장하는 인물 배열. [열린 라벨 허용].
+    - importance: 이 beat가 candidate 핵심 의미에 기여하는 정도 — "core"(없으면 의미 붕괴) | "supporting"(보강·연결) | "droppable"(빼도 흐름 유지). **애매하면 "supporting"** (절대 "droppable" 기본값 금지).
+    - carries_payoff: 이 beat가 candidate의 *핵심 대사·반전·펀치라인*을 담으면 true, 아니면 false. (길이 단축 시 보호 대상)
+    - 위 모든 내용은 [원칙 P1 시각/음성 단서 근거]·[원칙 P2 관찰 비약 금지]를 동일하게 엄수.
+
 다음 스키마로만 응답 (※ 아래 예시의 숫자는 placeholder다. 실제 값은 [입력 정보]의 "현재 청크 번호"·"청크 범위"를 그대로 사용하라):
 {{
   "chunk_index": <현재 청크 번호와 동일하게>,
@@ -427,7 +440,22 @@ segments 중 **쇼츠 제작에 가치 있는 장면만** 선별해 candidate_mo
         "target": "대상 캐릭터명/장소/물건 또는 null",
         "mode": "in_person | phone_call | narration | observation | mixed",
         "location": "장면 발생 장소"
-      }}
+      }},
+      "beats": [
+        {{
+          "start_sec": 12.4,
+          "end_sec": 16.0,
+          "summary": "1~2문장 구체 묘사 (행동·시각 단서·감정 흐름)",
+          "dialogue": [
+            {{"speaker": "인물명 또는 [내레이션]/불명", "line": "대사"}}
+          ],
+          "mood": "긴장|유쾌|슬픔|정적|충격 등",
+          "location": "이 beat의 장소",
+          "characters": ["인물명"],
+          "importance": "core | supporting | droppable",
+          "carries_payoff": false
+        }}
+      ]
     }}
   ],
   "title_candidates": ["제목1", "제목2", "제목3"]
@@ -764,6 +792,13 @@ title_line2를 작성한 후 payoff description을 다시 읽어 결말 방향�
 
 - 후보 장면 및 분석 데이터:
 {candidates_str}
+
+## 후보의 beats 활용 (장면 내부 정밀 이해)
+각 candidate에는 구간을 더 잘게 쪼갠 `beats[]`가 있고, 각 beat는 `summary`·`dialogue`(여러 화자 전부)·`mood`·`location`을 담는다.
+- candidate.transcript는 '단 한 명'의 발화만 담지만, `beats[].dialogue`는 그 장면의 **모든 대사**를 담으니 흐름·관계 판단에 우선 활용하라.
+- `beats[].mood`/`location`으로 인접 클립 사이 분위기·장소 연결이 자연스러운지(급격한 단절이 없는지) 평가하라.
+- hook→build→payoff 배치 시 beats의 감정 흐름을 보고 감정 낙차가 큰 지점을 hook/payoff로 삼아라.
+- ⚠️ beats는 *이해용 참고 자료*다. 클립 선택 단위는 여전히 candidate(chunk_index/candidate_index)이며, beat 단위로 시간을 쪼개 출력하지 마라.
 
 # Constraints & Rules
 
@@ -1250,14 +1285,14 @@ def _normalize_storyline_tts_cues(
 @dataclass(frozen=True)
 class GeminiConfig:
     api_key: str
-    model_name: str = "gemini-3.1-pro-preview"
-    flash_model_name: str = "gemini-3-flash-preview"
+    model_name: str = "gemini-3.5-flash"
+    flash_model_name: str = "gemini-3.5-flash"
     max_retries: int = 3
     # Google 공식 가이드(Gemini 3.x): temperature/top_p/top_k 같은 샘플링 매개변수는
     # 설정하지 말고 기본값을 따르도록 권장. 카테고리별 thinking_level만 제어한다.
     analysis_thinking_level: str = "high"         # "minimal" | "low" | "medium" | "high"
     relationship_thinking_level: str = "medium"     # "minimal" | "low" | "medium" | "high"
-    story_thinking_level: str = "high"            # "minimal" | "low" | "medium" | "high"
+    story_thinking_level: str = "medium"            # "minimal" | "low" | "medium" | "high"
     tts_cues_thinking_level: str = "medium"         # "minimal" | "low" | "medium" | "high"
     shorten_thinking_level: str = "medium"          # "minimal" | "low" | "medium" | "high"
     research_thinking_level: str = "medium"         # "minimal" | "low" | "medium" | "high"
@@ -1406,6 +1441,8 @@ class GeminiClient:
                         contents=content_parts,
                         config=self.types.GenerateContentConfig(
                             response_mime_type="application/json",
+                            # beats[] 추가로 분석 출력이 커져 기본 한도에서 JSON이 잘리는 문제 방지.
+                            max_output_tokens=65536,
                             thinking_config=self.types.ThinkingConfig(
                                 thinking_level=self.config.analysis_thinking_level,
                             ),
@@ -1829,6 +1866,51 @@ class GeminiClient:
                 time.sleep(1)
         return text
 
+    def choose_beat_drops(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """60초 초과 스토리라인에서 제거할 beat를 Flash가 선택. (내용 기반 trim용)
+
+        payload: {target_max_sec, current_total_sec, must_remove_sec,
+                  clips:[{clip_idx, role, duration, beats:[{beat_idx, dur, summary, mood, importance, carries_payoff}]}]}
+        반환: {"drops": [{"clip_idx": int, "beat_idx": int}], "reason": str}
+        실패 시 {"drops": []} (호출부가 결정적 폴백으로 처리).
+        """
+        prompt = (
+            "너는 유튜브 쇼츠 편집자다. 아래 스토리라인은 길이가 target_max_sec를 초과한다.\n"
+            "must_remove_sec 만큼 줄이도록 *덜 중요한 beat*를 골라 제거 목록을 만들어라.\n\n"
+            "[규칙]\n"
+            "- 제거된 beat duration 합이 must_remove_sec에 근접하도록(약간 초과 허용).\n"
+            "- 스토리 흐름(hook→build→payoff)과 감정 연결이 끊기지 않게 하라.\n"
+            "- carries_payoff=true 인 beat는 절대 제거 금지.\n"
+            "- 각 clip의 첫 beat(도입)·마지막 beat(마무리)는 가급적 보존. hook clip 첫 beat, payoff clip 마지막 beat는 제거 금지.\n"
+            "- importance가 droppable > supporting 순으로 우선 제거. core는 제거하지 마라.\n"
+            "- 한 clip의 beat를 전부 제거하지 마라(최소 1개 생존).\n"
+            "- drops는 *우선순위 순서*(먼저 제거할 것부터)로 나열하라.\n\n"
+            "[입력]\n"
+            f"{json.dumps(payload, ensure_ascii=False)}\n\n"
+            '다음 JSON으로만 응답: {"drops": [{"clip_idx": 0, "beat_idx": 2}], "reason": "한 줄 사유"}'
+        )
+        for attempt in range(2):
+            try:
+                response = self.client.models.generate_content(
+                    model=self.config.flash_model_name,
+                    contents=[prompt],
+                    config=self.types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        thinking_config=self.types.ThinkingConfig(
+                            thinking_level=self.config.shorten_thinking_level,
+                        ),
+                    ),
+                )
+                if response and response.text:
+                    result = json.loads(_extract_json_from_markdown(response.text.strip()))
+                    if isinstance(result, dict) and isinstance(result.get("drops"), list):
+                        return result
+            except Exception as e:
+                if attempt == 1:
+                    print(f"    [WARN] choose_beat_drops 실패: {e}")
+                time.sleep(1)
+        return {"drops": []}
+
 
 def _build_fallback_story(all_candidates: list, work_title: str) -> dict[str, Any]:
     """Gemini 스토리 구성 실패 시 상위 3-4개 moment를 조합하여 서사형 폴백 생성."""
@@ -2072,6 +2154,15 @@ def _validate_gemini_schema(data: dict[str, Any]) -> None:
     moment_required = ("start_sec", "end_sec", "description")
     moment_optional_defaults = {"reason": "", "transcript": ""}
 
+    # candidate_index 결손 보정용: 이미 사용된 정수 인덱스를 모아 두고, 빠진 곳은 next-unused 로 채운다.
+    # Gemini 가 일부 moment 에 candidate_index 를 빼먹는 케이스가 있어(EP07 chunk3 등) 다운스트림
+    # _dedup_boundary_candidates 의 int(None) 크래시를 막는다.
+    _used_ci: set[int] = {
+        int(m["candidate_index"]) for m in data["candidate_moments"]
+        if isinstance(m, dict) and isinstance(m.get("candidate_index"), int)
+    }
+    _next_ci = (max(_used_ci) + 1) if _used_ci else 0
+
     cleaned: list = []
     dropped: list[str] = []
     for idx, moment in enumerate(data["candidate_moments"]):
@@ -2084,6 +2175,14 @@ def _validate_gemini_schema(data: dict[str, Any]) -> None:
             continue
         for k, default in moment_optional_defaults.items():
             moment.setdefault(k, default)
+        moment.setdefault("beats", [])  # 매 호출 fresh list (공유 방지)
+        # candidate_index 결손/None 보정: 충돌 없는 다음 정수로 채움
+        if not isinstance(moment.get("candidate_index"), int):
+            while _next_ci in _used_ci:
+                _next_ci += 1
+            moment["candidate_index"] = _next_ci
+            _used_ci.add(_next_ci)
+            _next_ci += 1
         cleaned.append(moment)
 
     if dropped:
