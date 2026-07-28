@@ -1,0 +1,18 @@
+# 이 레포는 배포용 패키지가 아니다. 이 파일의 목적은 **실행 환경 요구사항 선언** 하나다.
+#
+# 왜 필요한가 (2026-07 실측):
+#   requirements.txt 의 fastapi==0.135.1 은 사실상 Python >=3.10 을 요구하는데 그 사실이
+#   어디에도 적혀 있지 않았다. 그 결과 시스템 python3(3.9)로 venv 를 만든 머신에서 pip 이
+#   조용히 낮은 버전들을 골라 깔았고(6개 핀 불일치), yt-dlp 는 깨진 버전에 고정되고,
+#   google-genai 는 1.47 에서 상한이 걸렸다. 전부 "파이썬 버전" 하나에서 파생된 문제였다.
+#
+# 이 선언이 있으면 pip 이 3.9 환경에서 설치를 거부하므로 그 자리에서 드러난다.
+
+[project]
+name = "ai-video"
+version = "0.1.0"
+description = "High-quality auto shorts generator"
+requires-python = ">=3.10"
+
+# 참고: brain 레포(ai-improvement-edit-video)는 Python 3.9 로 동작한다.
+#       두 레포의 venv 는 서로 다른 파이썬을 써도 되고, 실제로 그렇게 운영한다.

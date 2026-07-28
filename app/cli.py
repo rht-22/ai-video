@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from app.config import DesignConfig, get_logo_path, to_ass_color
+from app.modules.ffmpeg_utils import ensure_ffmpeg_supported
 from app.pipeline import PipelineInput, run_pipeline
 
 
@@ -218,6 +219,9 @@ def main() -> None:
     if args.command == "create_shorts":
         if args.from_step and not args.job_id:
             parser.error("--from-step requires --job-id")
+
+        # 긴 생성(~68분)을 시작하기 전에 렌더 단계가 쓸 ffmpeg 를 먼저 검증한다.
+        ensure_ffmpeg_supported()
 
         # 이전 맥락 부여 테스트: --previous-context 또는 --previous-context-file 처리
         previous_episodes_context: str | None = None
