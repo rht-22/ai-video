@@ -154,9 +154,40 @@ REMOTE_FONTS = {
     "Hakgyo": "https://raw.githubusercontent.com/rht-22/font.zip/main/HakgyoansimSamulhamR.ttf"
 }
 
+# ⚠️ 이건 **파일명** 맵이다 — get_font_path 가 assets/fonts/<값>.ttf 를 찾는 데 쓴다.
+# ASS 자막의 Fontname 에는 쓰면 안 된다(아래 FONT_FAMILY_MAP 참고).
 FONT_NAME_MAP = {
     "여기어때 잘난체 2 TTF": "Jalnan",
     "물마루": "mulmaru",
     "여기어때 잘난체 고딕 TTF": "JalnanGothic",
     "그리운 경찰공평체": "Griun"
 }
+
+# ASS 의 Fontname 은 **파일명이 아니라 폰트 내부 패밀리명**이라 별도 맵이 필요하다.
+# 값은 fc-scan / PIL ImageFont.getname() 실측치다.
+#
+# 이 맵이 없던 동안 자막 폰트가 통째로 적용되지 않았다: _ass_header 가 위 FONT_NAME_MAP(파일명)을
+# 재사용해 유효한 패밀리명 '여기어때 잘난체 2 TTF' 를 무효한 'Jalnan' 으로 바꿔 썼고, libass 는
+# 그 이름을 못 찾아 시스템 기본 폰트로 조용히 대체했다. 렌더는 성공하고 글자도 보이므로 아무도
+# 눈치채지 못한다 — 없는 폰트명으로 렌더한 것과 픽셀 단위로 같았다(2026-07-29 실측).
+# mulmaru 만 우연히 동작했는데, 파일명과 패밀리명이 대소문자 차이뿐이라 libass 가 매칭했다.
+#
+# 폰트를 추가하면 여기에도 넣어야 한다 — tests/test_font_family.py 가 번들 폰트 전수를 대조한다.
+FONT_FAMILY_MAP = {
+    "Jalnan": "Jalnan 2 TTF",
+    "여기어때 잘난체 2 TTF": "Jalnan 2 TTF",
+    "JalnanGothic": "Jalnan Gothic TTF",
+    "여기어때 잘난체 고딕 TTF": "Jalnan Gothic TTF",
+    "mulmaru": "Mulmaru",
+    "물마루": "Mulmaru",
+    "Griun": "Griun PolFairness",
+    "그리운 경찰공평체": "Griun PolFairness",
+}
+
+
+def to_font_family(name: str) -> str:
+    """폰트 이름(파일명 stem·한글명·패밀리명) → ASS Fontname 용 패밀리명.
+
+    모르는 이름은 그대로 통과시킨다 — 시스템 폰트(예: Malgun Gothic)를 지정하는 경우가 있다.
+    """
+    return FONT_FAMILY_MAP.get(str(name), str(name))

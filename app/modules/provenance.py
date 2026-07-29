@@ -8,12 +8,15 @@ run_log["provenance"]에 실려 디스크 run_log.json에 남고, 격리 파이�
 인제스트된다(ai-improve-edit-video/scripts/ingest_aivideo_run.py 의 provenance 계약과 1:1 대응).
 
 목적(기획서 T0-2 완료기준): "두 run의 config diff 가능" — 어떤 프롬프트/파라미터/모델/커밋으로
-만든 산출물인지 추적 가능하게 한다.
+만든 산출물인지 추적 가능하게 한다. `host`/`machine`은 여기에 더해 **어느 머신에서** 만들었는지를
+남긴다 — 맥이 여러 대이고 그중 둘은 계정명까지 같아서(맥3·맥4 = 'lunaleuteumaeg4'), 산출물만 보고는
+출처를 가릴 수 없었다.
 """
 from __future__ import annotations
 
 import hashlib
 import os
+import socket
 import subprocess
 from dataclasses import asdict
 from pathlib import Path
@@ -53,6 +56,29 @@ def _prompt_versions() -> dict:
     return out
 
 
+def _host() -> str | None:
+    """런을 돌린 머신의 raw hostname. 여러 맥에서 생성할 때 산출물 출처를 구분한다.
+
+    ⚠️ config 스냅샷 **밖**(provenance 최상위)에 둔다 — config_hash 는 config 만 해싱하므로,
+    머신이 달라도 같은 설정이면 config_hash 가 같아야 A/B 쌍 대조가 성립한다.
+    """
+    try:
+        return socket.gethostname() or None
+    except OSError:
+        return None
+
+
+def _machine() -> str | None:
+    """배정 정본(brain `config/assignments.json`)의 머신 id — 예: 'macmini-luna3'.
+
+    운영 정본은 hostname 이 아니라 사람이 붙인 kebab-case id 다(hostname 은 .local 접미사·
+    네트워크 변동이 있고, 계정명은 맥3·맥4 가 공유한다). 다만 ai-video 는 brain 의 배정 정본을
+    읽지 않으므로, 여기서는 **환경변수로 선언된 경우만** 기록한다. 없으면 brain 인제스트가
+    `host` 로 역산한다(channel_registry.detect_machine_id).
+    """
+    return os.environ.get("SCENE_LOOP_MACHINE") or None
+
+
 def build_provenance(config: AppConfig, design=None) -> dict:
     """run_log["provenance"]에 넣을 dict. ingest_aivideo_run.py의 provenance 계약과 일치.
 
@@ -64,6 +90,8 @@ def build_provenance(config: AppConfig, design=None) -> dict:
     pv = _prompt_versions()
     return {
         "git_sha": _git_sha(_REPO_ROOT),
+        "host": _host(),
+        "machine": _machine(),
         "models": {
             "pro": os.getenv("GEMINI_MODEL_NAME", "gemini-3.1-pro-preview"),
             "flash": os.getenv("GEMINI_FLASH_MODEL_NAME", "gemini-3-flash-preview"),

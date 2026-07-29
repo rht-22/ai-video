@@ -673,10 +673,12 @@ def merge_subtitle_segments(
 
 
 def _ass_header(style: SubtitleStyle, tts_style: SubtitleStyle | None = None) -> str:
-    from app.config import FONT_NAME_MAP
+    # ⚠️ FONT_NAME_MAP(파일명 맵)이 아니라 to_font_family 를 쓴다. ASS 의 Fontname 은 폰트 내부
+    # 패밀리명이라 파일명을 넣으면 libass 가 못 찾고 시스템 폰트로 조용히 대체한다.
+    from app.config import to_font_family
 
     margin_v = style.margin_v if style.margin_v >= 0 else 480
-    font_name = FONT_NAME_MAP.get(style.font_name, style.font_name)
+    font_name = to_font_family(style.font_name)
 
     # 라운드 10 — Format에 BackColour 컬럼 추가, Style에 동적 Bold/BorderStyle/Alignment/BackColour.
     # ASS V4+ 표준: BackColour는 BorderStyle=3 (박스)일 때 박스 배경색.
@@ -687,7 +689,7 @@ def _ass_header(style: SubtitleStyle, tts_style: SubtitleStyle | None = None) ->
     )
 
     if tts_style:
-        tts_font = FONT_NAME_MAP.get(tts_style.font_name, tts_style.font_name)
+        tts_font = to_font_family(tts_style.font_name)
         tts_margin_v = tts_style.margin_v if tts_style.margin_v >= 0 else 300
         tts_bold = -1 if tts_style.bold else 0
         styles_block += (
