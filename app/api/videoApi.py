@@ -48,7 +48,8 @@ async def generate_shorts(
         
         subtitle_font=req.subtitle_config.get("font", "Jalnan"),
         subtitle_size=req.subtitle_config.get("size", 65),
-        subtitle_color=req.subtitle_config.get("color", "&H0000FFFF"),
+        # 미지정(None) 시 장르 프리셋 색상 사용
+        subtitle_color=req.subtitle_config.get("color", None),
         subtitle_y_margin=req.subtitle_config.get("margin_v", 0),
         
         # [중요] 작품명 이미지/텍스트 설정 추출

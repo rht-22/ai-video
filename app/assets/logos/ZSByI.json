@@ -1,0 +1,29 @@
+{
+  "code": "ZSByI",
+  "source_file": "유미의세포들3_로고_최종-01 (2).png",
+  "method": "alpha",
+  "original_size": [
+    1920,
+    1080
+  ],
+  "ink_bbox": [
+    558,
+    318,
+    1362,
+    762
+  ],
+  "ink_size": [
+    804,
+    444
+  ],
+  "trim_percent_w": 58.1,
+  "trim_percent_h": 58.9,
+  "trim_percent_area": 82.8,
+  "padding": {
+    "left": 558,
+    "right": 558,
+    "top": 318,
+    "bottom": 318
+  },
+  "normalized_at": "2026-07-29T17:16:53"
+}

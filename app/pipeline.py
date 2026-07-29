@@ -2936,7 +2936,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             _user_overrides = {
                 "font_name": payload.design.subtitle_font if payload.design.subtitle_font != _default_design.subtitle_font else None,
                 "font_size": payload.design.subtitle_size if payload.design.subtitle_size != _default_design.subtitle_size else None,
-                "primary_color": payload.design.subtitle_color if payload.design.subtitle_color != _default_design.subtitle_color else None,
+                "primary_color": payload.design.subtitle_color,  # None = 프리셋 색 유지
                 "margin_v": _sub_margin_v,  # 라운드 5 동적 계산은 항상 우선
             }
             sub_style, _applied_preset = select_subtitle_style(_genre_tag, _cli_override, _user_overrides)
@@ -3198,7 +3198,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 _var_user_overrides = {
                     "font_name": payload.design.subtitle_font if payload.design.subtitle_font != _default_design.subtitle_font else None,
                     "font_size": payload.design.subtitle_size if payload.design.subtitle_size != _default_design.subtitle_size else None,
-                    "primary_color": payload.design.subtitle_color if payload.design.subtitle_color != _default_design.subtitle_color else None,
+                    "primary_color": payload.design.subtitle_color,  # None = 프리셋 색 유지
                     "margin_v": _var_margin_v,
                 }
                 sub_style, _ = select_subtitle_style(_genre_tag, _cli_override, _var_user_overrides)

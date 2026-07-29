@@ -1,0 +1,29 @@
+{
+  "code": "Rf2Bi",
+  "source_file": "tvN 언니네 산지직송 in 칼라페_로고(투명백) (1).png",
+  "method": "alpha",
+  "original_size": [
+    3307,
+    2363
+  ],
+  "ink_bbox": [
+    372,
+    226,
+    3012,
+    2133
+  ],
+  "ink_size": [
+    2640,
+    1907
+  ],
+  "trim_percent_w": 20.2,
+  "trim_percent_h": 19.3,
+  "trim_percent_area": 35.6,
+  "padding": {
+    "left": 372,
+    "right": 295,
+    "top": 226,
+    "bottom": 230
+  },
+  "normalized_at": "2026-07-29T17:46:16"
+}
