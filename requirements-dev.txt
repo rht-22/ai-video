@@ -1,0 +1,5 @@
+# 개발·테스트 전용. 런타임에는 필요 없다.
+#   pip install -r requirements.txt -r requirements-dev.txt
+-r requirements.txt
+
+pytest>=8.0.0

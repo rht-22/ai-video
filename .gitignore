@@ -189,3 +189,8 @@ Thumbs.db
 alembic.ini
 memo
 outputs/**
+# A/B·테스트 산출물과 로컬 소스 마스터 — 편당 수십MB~GB 라 커밋되면 안 된다.
+# outputs/** 만 있던 시절엔 outputs_ab/ 가 무방비였다(2026-07-29 기준 2.1GB 미추적).
+outputs_ab/**
+sources_local/**
+rejected/**

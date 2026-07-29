@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from app.config import DesignConfig
+from app.config import DesignConfig, get_logo_path, to_ass_color
 from app.pipeline import PipelineInput, run_pipeline
 
 
@@ -108,16 +108,26 @@ def build_parser() -> argparse.ArgumentParser:
     design.add_argument("--design-aspect-ratio", type=str, default=None, help="비디오 영역 비율 (예: 16:9, 4:3, 1:1)")
     design.add_argument("--design-title-font", type=str, default=None, help="제목 폰트명")
     design.add_argument("--design-title-size", type=int, default=None, help="제목 폰트 크기")
-    design.add_argument("--design-title-color", type=str, default=None, help="제목 색상")
+    design.add_argument("--design-title-color", type=str, default=None, help="제목 1번째 줄 색상 (기본: white)")
+    design.add_argument("--design-title-color2", type=str, default=None, help="제목 2번째 줄 색상 (기본: #FFFF00)")
     design.add_argument("--design-subtitle-size", type=int, default=None, help="자막 폰트 크기")
+    design.add_argument("--design-subtitle-color", type=str, default=None,
+                        help="메인 자막 색상 (#RRGGBB 또는 &H00BBGGRR). 미지정 시 장르 프리셋 색상 사용.")
     design.add_argument("--design-subtitle-y-margin", type=int, default=None, help="메인 자막 MarginV (기본: 380)")
+    design.add_argument("--design-tts-color", type=str, default=None,
+                        help="TTS 자막 색상 (#RRGGBB 또는 &H00BBGGRR, 기본: 하늘색 #87CEEB)")
+    design.add_argument("--design-tts-size", type=int, default=None, help="TTS 자막 폰트 크기 (기본: 70)")
     design.add_argument("--design-tts-y-margin", type=int, default=None, help="TTS 자막 MarginV (기본: 580)")
     design.add_argument("--design-work-font-size", type=int, default=None, help="작품명 폰트 크기")
     design.add_argument("--design-work-color", type=str, default=None, help="작품명 색상")
     design.add_argument("--design-work-image", type=str, default=None,
                         help="작품명 텍스트 대신 이미지(로고) 사용. 이미지 파일 경로.")
     design.add_argument("--design-work-image-width", type=int, default=None,
-                        help="로고 이미지 가로 크기(px). 기본 300")
+                        help="로고 이미지 가로 상한(px). 기본 350")
+    design.add_argument("--design-work-image-height", type=int, default=None,
+                        help="로고 이미지 세로 상한(px). 지정 시 (가로x세로) 박스에 비율 유지로 맞춘다")
+    design.add_argument("--design-work-align", type=str, default=None, choices=["top", "center"],
+                        help="로고 세로 정렬. top=영상 하단에 붙임(기본) · center=하단 밴드 중앙")
     # 라운드 10: 자막 스타일 프리셋 (auto = 장르 기반 자동 선택)
     design.add_argument(
         "--design-subtitle-style",
@@ -135,13 +145,17 @@ _CLI_TO_DESIGN_FIELD = {
     "design_aspect_ratio": "aspect_ratio",
     "design_title_font": "title_font",
     "design_title_size": "title_size",
-    "design_title_color": "title_color",
     "design_subtitle_size": "subtitle_size",
+    "design_subtitle_color": "subtitle_color",
     "design_subtitle_y_margin": "subtitle_y_margin",
+    "design_tts_color": "tts_line_color",
+    "design_tts_size": "tts_line_font_size",
     "design_tts_y_margin": "tts_line_y_margin",
     "design_work_font_size": "work_font_size",
     "design_work_color": "work_color",
     "design_work_image_width": "work_image_width",
+    "design_work_image_height": "work_image_height",
+    "design_work_align": "work_image_align",
     "design_subtitle_style": "subtitle_style_preset",
 }
 
@@ -154,11 +168,33 @@ def _build_design_config(args: argparse.Namespace) -> DesignConfig:
         if value is not None:
             overrides[field_name] = value
 
-    # --design-work-image 지정 시 work_type="image" + work_value=경로 자동 설정
+    # 자막/TTS 색상은 ASS 형식(&HAABBGGRR) — 사용자가 #RRGGBB로 줘도 받도록 정규화.
+    # (제목·작품명 색은 ffmpeg drawtext라 hex를 그대로 쓰므로 변환하지 않는다)
+    for field_name in ("subtitle_color", "tts_line_color"):
+        if field_name in overrides:
+            overrides[field_name] = to_ass_color(overrides[field_name])
+
+    # 제목 색: 렌더러가 읽는 건 title_colors 리스트뿐이므로 여기서 조립한다.
+    # 기본값에서 시작해 지정된 줄만 치환 → 한 줄만 바꿔도 나머지 줄은 기본색 유지.
+    title_color1 = getattr(args, "design_title_color", None)
+    title_color2 = getattr(args, "design_title_color2", None)
+    if title_color1 or title_color2:
+        title_colors = list(DesignConfig().title_colors)
+        if title_color1:
+            title_colors[0] = title_color1
+            overrides["title_color"] = title_color1  # 단일 필드 하위호환
+        if title_color2:
+            title_colors[1] = title_color2
+        overrides["title_colors"] = title_colors
+
+    # --design-work-image 지정 시 work_type="image" + work_value=경로 자동 설정.
+    # 이름만 준 경우(예: RZsv4.png) assets/logos 에서 찾는다 — 루프·작품 카드가 레포 경로를
+    # 몰라도 되게 하려는 것으로, 폰트(get_font_path)와 같은 규약이다.
     work_image = getattr(args, "design_work_image", None)
     if work_image:
         overrides["work_type"] = "image"
-        overrides["work_value"] = work_image
+        overrides["work_value"] = get_logo_path(
+            work_image, Path(__file__).resolve().parent)
 
     # aspect_ratio 형식 검증
     if "aspect_ratio" in overrides:
