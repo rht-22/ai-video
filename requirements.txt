@@ -1,6 +1,8 @@
-# ⚠️ Python 3.10 이상에서 설치할 것 (pyproject.toml 의 requires-python 참고).
-#    아래 핀 중 fastapi/uvicorn/alembic/pydantic-settings/python-dotenv/python-multipart 는
-#    3.9 에서 해석되지 않아 조용히 낮은 버전으로 깔린다.
+# ⚠️ Python 3.10 이상 3.14 미만에서 설치할 것 (pyproject.toml 의 requires-python 참고).
+#    아래(3.9): 핀 중 fastapi/uvicorn/alembic/pydantic-settings/python-dotenv/python-multipart 는
+#               3.9 에서 해석되지 않아 조용히 낮은 버전으로 깔린다.
+#    위(3.14): deepface 가 끌어오는 tensorflow 가 cp313 까지만 휠을 내서 설치가 아예 실패한다.
+#    실측 통과 조합: Python 3.12 (2026-07-31, 전체 의존성 해석 성공)
 #
 # ⚠️ ffmpeg 는 pip 패키지가 아니라 시스템 바이너리다. **7.x 를 쓸 것 — 8.x 는 미지원.**
 #    8.x 는 자막 필터(`ass=…:fontsdir=…`)와 `-filter_complex_script` 문법을 거부해 렌더가 실패한다.
