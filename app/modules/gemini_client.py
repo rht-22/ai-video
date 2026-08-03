@@ -1338,7 +1338,7 @@ def _normalize_storyline_tts_cues(
 class GeminiConfig:
     api_key: str
     model_name: str = "gemini-3.5-flash"
-    flash_model_name: str = "gemini-3.5-flash"
+    flash_model_name: str = "gemini-3.6-flash"
     max_retries: int = 3
     # Google 공식 가이드(Gemini 3.x): temperature/top_p/top_k 같은 샘플링 매개변수는
     # 설정하지 말고 기본값을 따르도록 권장. 카테고리별 thinking_level만 제어한다.
@@ -2175,7 +2175,7 @@ def load_gemini_client() -> GeminiClient:
             "Please set it in .env file or as an environment variable."
         )
     model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-3.1-pro-preview")
-    flash_model_name = os.getenv("GEMINI_FLASH_MODEL_NAME", "gemini-3-flash-preview")
+    flash_model_name = os.getenv("GEMINI_FLASH_MODEL_NAME", "gemini-3.6-flash")
     max_retries = int(os.getenv("GEMINI_MAX_RETRIES", "3"))
     analysis_thinking_level = os.getenv("GEMINI_ANALYSIS_THINKING_LEVEL", "medium")
     relationship_thinking_level = os.getenv("GEMINI_RELATIONSHIP_THINKING_LEVEL", "medium")

@@ -94,7 +94,7 @@ def build_provenance(config: AppConfig, design=None) -> dict:
         "machine": _machine(),
         "models": {
             "pro": os.getenv("GEMINI_MODEL_NAME", "gemini-3.1-pro-preview"),
-            "flash": os.getenv("GEMINI_FLASH_MODEL_NAME", "gemini-3-flash-preview"),
+            "flash": os.getenv("GEMINI_FLASH_MODEL_NAME", "gemini-3.6-flash"),
         },
         "config": {"app": asdict(config), "design": (asdict(design) if design is not None else None)},
         "prompt_set_hash": _sha256("".join(sorted(pv.values()))),
