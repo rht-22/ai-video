@@ -31,6 +31,35 @@ def _safe_upload_path(file_path: Path) -> tuple[Path, bool]:
         return tmp, True
 
 
+def _max_tokens_usage(response: Any) -> str | None:
+    """응답이 출력 한도(MAX_TOKENS)에서 끊겼으면 토큰 사용량 요약, 아니면 None.
+
+    Gemini 는 thinking 토큰도 max_output_tokens 예산에서 함께 쓴다. 추론이 길어지면 JSON 을
+    끝맺지 못한 채 finish_reason=MAX_TOKENS 로 끊기는데, 그 잘린 조각을 그대로 파싱하면
+    `Expecting ',' delimiter: line N column 1` 같은 **엉뚱한 JSONDecodeError** 로 보인다.
+    2026-07-30·31 생성 실패 3건(커리어데이·B급 스튜디오·유미의 세포들 시즌3)이 전부 이것이었고,
+    원인을 찾는 데 로그를 거슬러 올라가야 했다. 파싱 전에 잘림을 잘림이라고 말한다.
+
+    ※ 사용량은 진단용이라 없으면 없는 대로 둔다 — 여기서 예외를 내면 원래 오류를 덮는다.
+    """
+    try:
+        candidates = getattr(response, "candidates", None) or []
+        finish = getattr(candidates[0], "finish_reason", None) if candidates else None
+    except Exception:  # noqa: BLE001 — 진단 경로가 본 오류를 가리지 않게
+        return None
+    name = getattr(finish, "name", None) or (str(finish) if finish is not None else "")
+    if "MAX_TOKENS" not in name.upper():
+        return None
+    usage = getattr(response, "usage_metadata", None)
+    parts = []
+    for label, attr in (("프롬프트", "prompt_token_count"), ("추론", "thoughts_token_count"),
+                        ("출력", "candidates_token_count"), ("합계", "total_token_count")):
+        value = getattr(usage, attr, None) if usage is not None else None
+        if value is not None:
+            parts.append(f"{label} {value}")
+    return "토큰 " + ", ".join(parts) if parts else "사용량 정보 없음"
+
+
 def _extract_json_from_markdown(text: str) -> str:
     """마크다운 코드 블록에서 JSON을 추출합니다."""
     text = text.strip()
@@ -1459,6 +1488,20 @@ class GeminiClient:
                     text = response.text.strip()
                     if not text:
                         error_msg = "Gemini API 응답이 빈 문자열입니다."
+                        if attempt == self.config.max_retries - 1:
+                            raise RuntimeError(error_msg)
+                        print(f"    [WARN] {error_msg} 재시도 중... ({attempt + 1}/{self.config.max_retries})")
+                        continue
+
+                    # 잘린 응답을 파싱하면 원인이 JSONDecodeError 로 둔갑한다 — 먼저 걸러낸다.
+                    truncated = _max_tokens_usage(response)
+                    if truncated is not None:
+                        error_msg = (
+                            f"Gemini 응답이 출력 한도에서 잘렸습니다(finish_reason=MAX_TOKENS) — {truncated}. "
+                            f"max_output_tokens=65536 · thinking_level={self.config.analysis_thinking_level} · "
+                            f"받은 길이 {len(text)}자. thinking 토큰이 같은 예산을 쓰므로 "
+                            f"thinking_level 을 낮추거나 출력량(segments·candidate_moments)을 줄여야 합니다."
+                        )
                         if attempt == self.config.max_retries - 1:
                             raise RuntimeError(error_msg)
                         print(f"    [WARN] {error_msg} 재시도 중... ({attempt + 1}/{self.config.max_retries})")
