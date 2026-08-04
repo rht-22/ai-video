@@ -1,16 +1,27 @@
-"""PR-4 — STORY_COMPOSITION_PROMPT 의 storyline.tts_cues 출력 검증·정규화 단위 테스트.
+"""PR-4(앵커 개정) — storyline.tts_cues 클립 앵커 스키마 검증·정규화 단위 테스트.
 
-검증 대상: _normalize_storyline_tts_cues 헬퍼 (gemini_client.py 신규).
+검증 대상: _normalize_storyline_tts_cues (gemini_client.py).
 
-기존 plan_tts_cues 안의 후처리 로직과 동일 패턴을 별도 함수로 분리해 storyline
-응답에서도 사용. PR-5 에서 plan_tts_cues 통째 삭제 시 단일화.
+2026-08-04 cue 앵커 전환: LLM 은 (clip_index, offset_sec, duration_sec) 만 출력하고
+정규화가 source_time_sec(원본 절대시간)를 계산한다. 절대시간 변환은 pipeline 의
+_resolve_cue_anchors 담당 (tests/test_cue_anchor_resolve.py).
+구 스키마(start_sec/end_sec, story 타임라인 절대시간)는 하위호환 폴백으로 역산된다.
 """
 from __future__ import annotations
 
 from app.modules.gemini_client import _normalize_storyline_tts_cues
 
 
-def _cue(start, end, text="x", voice="ko_female", speed="normal", **extra):
+def _cue(clip_index, offset, dur=3.0, text="x", voice="ko_female", speed="normal", **extra):
+    d = {
+        "clip_index": clip_index, "offset_sec": float(offset), "duration_sec": float(dur),
+        "text": text, "voice": voice, "speed": speed,
+    }
+    d.update(extra)
+    return d
+
+
+def _legacy_cue(start, end, text="x", voice="ko_female", speed="normal", **extra):
     d = {
         "start_sec": float(start), "end_sec": float(end),
         "text": text, "voice": voice, "speed": speed,
@@ -19,23 +30,36 @@ def _cue(start, end, text="x", voice="ko_female", speed="normal", **extra):
     return d
 
 
+# 표준 앵커 클립: hook 100~110 (10s), build 200~215 (15s), payoff 300~320 (20s)
+ACLIPS = [
+    {"start_sec": 100.0, "end_sec": 110.0, "chunk_index": 0, "candidate_index": 1},
+    {"start_sec": 200.0, "end_sec": 215.0, "chunk_index": 1, "candidate_index": 2},
+    {"start_sec": 300.0, "end_sec": 320.0, "chunk_index": 2, "candidate_index": 0},
+]
+
+
+def _norm(raw, **kw):
+    kw.setdefault("anchor_clips", ACLIPS)
+    return _normalize_storyline_tts_cues(raw, **kw)
+
+
 # ──────────────────────────────────────────────────────────────
 # voice / speed 라벨 검증
 # ──────────────────────────────────────────────────────────────
 
 
 def test_invalid_voice_falls_back_to_ko_female():
-    out = _normalize_storyline_tts_cues([_cue(0, 3, voice="narrator")])
+    out = _norm([_cue(0, 1, voice="narrator")])
     assert out[0]["voice"] == "ko_female"
 
 
 def test_invalid_speed_falls_back_to_normal():
-    out = _normalize_storyline_tts_cues([_cue(0, 3, speed="hyper_fast")])
+    out = _norm([_cue(0, 1, speed="hyper_fast")])
     assert out[0]["speed"] == "normal"
 
 
 def test_valid_voice_speed_preserved():
-    out = _normalize_storyline_tts_cues([_cue(0, 3, voice="ko_male_low", speed="slow")])
+    out = _norm([_cue(0, 1, voice="ko_male_low", speed="slow")])
     assert out[0]["voice"] == "ko_male_low"
     assert out[0]["speed"] == "slow"
 
@@ -43,67 +67,115 @@ def test_valid_voice_speed_preserved():
 def test_all_valid_voice_labels_accepted():
     for v in ("ko_female", "ko_female_high", "ko_male", "ko_male_low",
               "chat_emma", "chat_brian", "chat_seraphina", "chat_florian"):
-        out = _normalize_storyline_tts_cues([_cue(0, 3, voice=v)])
+        out = _norm([_cue(0, 1, voice=v)])
         assert out[0]["voice"] == v, f"voice {v} 가 fallback 됨"
 
 
 def test_all_valid_speed_labels_accepted():
     for s in ("very_slow", "slow", "normal", "fast", "very_fast"):
-        out = _normalize_storyline_tts_cues([_cue(0, 3, speed=s)])
+        out = _norm([_cue(0, 1, speed=s)])
         assert out[0]["speed"] == s, f"speed {s} 가 fallback 됨"
 
 
 # ──────────────────────────────────────────────────────────────
-# 시간 검증
+# 앵커 검증 — clip_index / offset / duration / source_time
 # ──────────────────────────────────────────────────────────────
 
 
-def test_drops_cue_with_end_lte_start():
-    out = _normalize_storyline_tts_cues([_cue(5, 5), _cue(10, 8), _cue(0, 3)])
-    # 5==5 와 10>8 둘 다 drop, 0<3 만 남음
-    assert len(out) == 1
-    assert out[0]["start_sec"] == 0
+def test_source_time_is_clip_start_plus_offset():
+    out = _norm([_cue(1, 2.5)])
+    assert out[0]["source_time_sec"] == 200.0 + 2.5
 
 
-def test_drops_cue_missing_required_fields():
-    out = _normalize_storyline_tts_cues([
-        {"start_sec": 0, "end_sec": 3},  # text 누락
-        {"start_sec": 0, "text": "x"},   # end_sec 누락
-        _cue(5, 8, text="ok"),
+def test_records_anchor_candidate_key():
+    out = _norm([_cue(2, 1.0)])
+    assert out[0]["chunk_index"] == 2
+    assert out[0]["candidate_index"] == 0
+
+
+def test_drops_clip_index_out_of_range():
+    # clip_index=5 는 환각 → 드롭
+    out = _norm([_cue(5, 1.0, text="hallucinated"), _cue(0, 1.0, text="ok")])
+    assert [c["text"] for c in out] == ["ok"]
+
+
+def test_drops_negative_clip_index():
+    out = _norm([_cue(-1, 1.0), _cue(0, 1.0, text="ok")])
+    assert [c["text"] for c in out] == ["ok"]
+
+
+def test_offset_clamped_to_clip_length():
+    # hook 은 10초 — offset 25 는 10 으로 클램프 → source_time = 110
+    out = _norm([_cue(0, 25.0)])
+    assert out[0]["offset_sec"] == 10.0
+    assert out[0]["source_time_sec"] == 110.0
+
+
+def test_negative_offset_clamped_to_zero():
+    out = _norm([_cue(1, -3.0)])
+    assert out[0]["offset_sec"] == 0.0
+    assert out[0]["source_time_sec"] == 200.0
+
+
+def test_drops_nonpositive_duration():
+    out = _norm([_cue(0, 1.0, dur=0.0), _cue(0, 2.0, dur=-2.0), _cue(0, 3.0, dur=4.0, text="ok")])
+    assert [c["text"] for c in out] == ["ok"]
+
+
+def test_drops_cue_missing_text():
+    out = _norm([
+        {"clip_index": 0, "offset_sec": 1.0, "duration_sec": 3.0},  # text 누락
+        _cue(0, 2.0, text="ok"),
     ])
+    assert [c["text"] for c in out] == ["ok"]
+
+
+def test_sorts_by_clip_index_then_offset():
+    out = _norm([_cue(2, 1.0, text="c"), _cue(0, 5.0, text="b"), _cue(0, 1.0, text="a")])
+    assert [c["text"] for c in out] == ["a", "b", "c"]
+
+
+def test_preserves_clip_role_field():
+    out = _norm([_cue(0, 1.0, clip_role="hook")])
+    assert out[0]["clip_role"] == "hook"
+
+
+# ──────────────────────────────────────────────────────────────
+# 구 스키마 하위호환 — start_sec/end_sec(story 타임라인) → 앵커 역산
+# ──────────────────────────────────────────────────────────────
+
+
+def test_legacy_cue_converted_to_anchor():
+    # story 타임라인: hook 0~10, build 10~25, payoff 25~45. start=12 → build(idx1) offset 2
+    out = _norm([_legacy_cue(12.0, 16.0)])
     assert len(out) == 1
-    assert out[0]["text"] == "ok"
+    assert out[0]["clip_index"] == 1
+    assert out[0]["offset_sec"] == 2.0
+    assert out[0]["duration_sec"] == 4.0
+    assert out[0]["source_time_sec"] == 202.0
 
 
-def test_sorts_by_start_sec():
-    out = _normalize_storyline_tts_cues([_cue(20, 23), _cue(0, 3), _cue(10, 13)])
-    assert [c["start_sec"] for c in out] == [0, 10, 20]
+def test_legacy_cue_in_first_clip():
+    out = _norm([_legacy_cue(0.5, 5.0)])
+    assert out[0]["clip_index"] == 0
+    assert out[0]["offset_sec"] == 0.5
+    assert out[0]["source_time_sec"] == 100.5
 
 
-def test_removes_overlap_by_shifting_later_cue_start():
-    # cue1: 0~5, cue2: 3~7 (겹침) → cue2 start 를 cue1.end + 0.05 = 5.05 로
-    out = _normalize_storyline_tts_cues([_cue(0, 5, text="a"), _cue(3, 7, text="b")])
-    assert len(out) == 2
-    assert out[1]["start_sec"] >= out[0]["end_sec"]
+def test_legacy_cue_beyond_total_dropped():
+    # story 합계 45초 — start=50 은 역산 불가 → 드롭
+    out = _norm([_legacy_cue(50.0, 55.0)])
+    assert out == []
 
 
-def test_drops_cue_if_overlap_fix_makes_invalid():
-    # cue1: 0~10, cue2: 5~7 → cue2 start 를 10.05 로 → end 7 < start 10.05 → drop
-    out = _normalize_storyline_tts_cues([_cue(0, 10, text="a"), _cue(5, 7, text="b")])
-    assert len(out) == 1
-    assert out[0]["text"] == "a"
+def test_legacy_cue_without_anchor_clips_dropped():
+    out = _normalize_storyline_tts_cues([_legacy_cue(0.0, 5.0)], anchor_clips=None)
+    assert out == []
 
 
-def test_clamps_to_total_duration():
-    # total_duration=20 이면 cue.end=25 는 drop (start<-0.5 또는 end>total+0.5 검증)
-    out = _normalize_storyline_tts_cues([_cue(0, 5), _cue(22, 25), _cue(10, 15)], total_duration=20.0)
-    starts = sorted(c["start_sec"] for c in out)
-    assert starts == [0, 10]
-
-
-def test_no_clamp_when_total_duration_none():
-    out = _normalize_storyline_tts_cues([_cue(0, 5), _cue(100, 105)], total_duration=None)
-    assert len(out) == 2
+def test_legacy_cue_end_lte_start_dropped():
+    out = _norm([_legacy_cue(5, 5), _legacy_cue(10, 8), _legacy_cue(0, 3, text="ok")])
+    assert [c["text"] for c in out] == ["ok"]
 
 
 # ──────────────────────────────────────────────────────────────
@@ -112,20 +184,20 @@ def test_no_clamp_when_total_duration_none():
 
 
 def test_max_cues_truncates_from_end():
-    raw = [_cue(i, i + 2, text=f"cue{i}") for i in (0, 10, 20, 30, 40, 50, 60)]
-    out = _normalize_storyline_tts_cues(raw, max_cues=5)
+    raw = [_cue(0, i, text=f"cue{i}") for i in (0, 1, 2, 3, 4, 5, 6)]
+    out = _norm(raw, max_cues=5)
     assert len(out) == 5
-    assert [c["text"] for c in out] == ["cue0", "cue10", "cue20", "cue30", "cue40"]
+    assert [c["text"] for c in out] == ["cue0", "cue1", "cue2", "cue3", "cue4"]
 
 
 def test_max_cues_zero_returns_empty():
-    out = _normalize_storyline_tts_cues([_cue(0, 3)], max_cues=0)
+    out = _norm([_cue(0, 1)], max_cues=0)
     assert out == []
 
 
 def test_max_cues_none_means_no_limit():
-    raw = [_cue(i, i + 2) for i in range(0, 100, 10)]
-    out = _normalize_storyline_tts_cues(raw, max_cues=None)
+    raw = [_cue(0, i * 0.5) for i in range(10)]
+    out = _norm(raw, max_cues=None)
     assert len(out) == 10
 
 
@@ -136,25 +208,25 @@ def test_max_cues_none_means_no_limit():
 
 def test_majority_voice_wins_when_mixed():
     raw = [
-        _cue(0, 3, voice="ko_male_low"),
-        _cue(10, 13, voice="ko_male_low"),
-        _cue(20, 23, voice="ko_female"),  # 소수 → ko_male_low 로 통일
+        _cue(0, 1, voice="ko_male_low"),
+        _cue(1, 1, voice="ko_male_low"),
+        _cue(2, 1, voice="ko_female"),  # 소수 → ko_male_low 로 통일
     ]
-    out = _normalize_storyline_tts_cues(raw)
+    out = _norm(raw)
     assert {c["voice"] for c in out} == {"ko_male_low"}
 
 
 def test_single_voice_preserved():
-    raw = [_cue(0, 3, voice="ko_female_high"), _cue(10, 13, voice="ko_female_high")]
-    out = _normalize_storyline_tts_cues(raw)
+    raw = [_cue(0, 1, voice="ko_female_high"), _cue(1, 1, voice="ko_female_high")]
+    out = _norm(raw)
     assert all(c["voice"] == "ko_female_high" for c in out)
 
 
 def test_speed_can_differ_across_cues():
     # speed 는 cue 마다 자유
-    raw = [_cue(0, 3, voice="ko_male", speed="slow"),
-           _cue(10, 13, voice="ko_male", speed="fast")]
-    out = _normalize_storyline_tts_cues(raw)
+    raw = [_cue(0, 1, voice="ko_male", speed="slow"),
+           _cue(1, 1, voice="ko_male", speed="fast")]
+    out = _norm(raw)
     speeds = [c["speed"] for c in out]
     assert speeds == ["slow", "fast"]
 
@@ -165,18 +237,28 @@ def test_speed_can_differ_across_cues():
 
 
 def test_empty_input_returns_empty():
-    assert _normalize_storyline_tts_cues([]) == []
-    assert _normalize_storyline_tts_cues(None) == []
+    assert _norm([]) == []
+    assert _norm(None) == []
 
 
 def test_skips_non_dict_entries():
-    raw = [_cue(0, 3, text="ok"), "not a dict", None, 42, _cue(10, 13, text="ok2")]
-    out = _normalize_storyline_tts_cues(raw)
+    raw = [_cue(0, 1, text="ok"), "not a dict", None, 42, _cue(1, 1, text="ok2")]
+    out = _norm(raw)
     assert [c["text"] for c in out] == ["ok", "ok2"]
 
 
 def test_preserves_rationale_fields():
-    raw = [_cue(0, 3, voice_rationale="ko_male_low 묵직", speed_rationale="긴장")]
-    out = _normalize_storyline_tts_cues(raw)
+    raw = [_cue(0, 1, voice_rationale="ko_male_low 묵직", speed_rationale="긴장")]
+    out = _norm(raw)
     assert out[0].get("voice_rationale") == "ko_male_low 묵직"
     assert out[0].get("speed_rationale") == "긴장"
+
+
+def test_anchor_clips_accepts_storyclip_objects():
+    from app.modules.story_builder import StoryClip
+    clips = [StoryClip(role="hook", start_sec=100.0, end_sec=110.0, subtitle="",
+                       use_original_audio=True, chunk_index=3, candidate_index=7)]
+    out = _normalize_storyline_tts_cues([_cue(0, 2.0)], anchor_clips=clips)
+    assert out[0]["source_time_sec"] == 102.0
+    assert out[0]["chunk_index"] == 3
+    assert out[0]["candidate_index"] == 7

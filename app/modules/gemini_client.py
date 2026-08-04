@@ -870,18 +870,17 @@ title_line2를 작성한 후 payoff description을 다시 읽어 결말 방향�
 
 ## TTS cue 작성 (각 storyline 본체에 `tts_cues` 배열 출력)
 
-각 storyline 마다 `tts_cues` 배열을 함께 출력하라. cue 는 *편집 타임라인 절대 시간*
-(0초 = 쇼츠 시작점) 기준으로 작성한다. clip 들의 시간은 원본 영상 절대시간이지만,
-cue 의 시간 축은 별개 — 0초부터 storyline 의 hook→build→payoff 누적 길이까지를 *편집
-타임라인 0초 기준* 으로 잡아라. 후처리에서 silence_cut 후 재보정된다.
+각 storyline 마다 `tts_cues` 배열을 함께 출력하라. cue 는 **클립 앵커** 기준으로 적는다 —
+"어느 클립(`clip_index`)의 시작에서 몇 초 지점(`offset_sec`)"만 말하면, 절대 시간은
+타임라인이 확정된 뒤 파이프라인이 계산한다. **절대 시간(start_sec/end_sec)은 적지 않는다.**
 
 ### 작성 규칙
 
 1. **TTS 는 꼭 필요한 곳에만**. 모든 컷에 다는 것 금지. 보통 클립 1개당 0~2개, **storyline 전체 0~5개 cue**. 5개 초과 금지 (응답 토큰 제어).
-2. cue.start_sec / end_sec 는 편집 타임라인 절대 시간. cue 길이(end - start)는 보통 2~6초.
-3. cue 들끼리 시간이 겹치지 않게.
-4. cue 텍스트가 클립의 핵심 transcript 와 동시에 충돌하지 않도록 배치.
-5. **결과선공개형 타임점프 cue**: sequence_type == "결과선공개형" 이면 build[0] 시작 시점에 타임점프를 알리는 cue 를 반드시 배치하라. 의문형 유도 금지 ("대체 무슨 일이?", "어떻게 이렇게 됐을까?"). 명사형 종결 또는 단언체로 시점·맥락을 단언하라.
+2. `clip_index` = 그 storyline 클립 배열의 0-based 인덱스. storytelling 은 hook(0) → build(순서대로) → payoff(마지막) 순, 시퀀스블록형은 sequence_block 배열 순서, highlight 는 단일 클립이므로 항상 0. `clip_role` 은 검증·가독용("hook"/"build"/"payoff"/"sequence"/"highlight") — clip_index 와 불일치 시 clip_index 우선. `offset_sec` = 그 클립 시작으로부터의 초 (≥0, 클립 길이 이내). `duration_sec` = cue 길이 (보통 2~6초).
+3. 같은 clip_index 안에서 cue 끼리 offset 구간이 겹치지 않게. (서로 다른 클립 간 겹침은 후처리가 정리한다)
+4. cue 텍스트가 클립의 핵심 transcript 와 동시에 충돌하지 않도록 배치. ★**그 클립에서 화자가 그 내용을 말하기 *전에* cue 가 먼저 말하지 않게 한다. 요약·선언 cue 는 화자의 해당 발화 *뒤*(offset 을 그 뒤로) 배치한다.**
+5. **결과선공개형 타임점프 cue**: sequence_type == "결과선공개형" 이면 build[0] 클립 시작 지점(그 clip_index, offset_sec 0 부근)에 타임점프를 알리는 cue 를 반드시 배치하라. 의문형 유도 금지 ("대체 무슨 일이?", "어떻게 이렇게 됐을까?"). 명사형 종결 또는 단언체로 시점·맥락을 단언하라.
 6. **맥락 연속성**: 각 cue 는 그 시점 영상의 *실제 사건*을 짧게 설명하면서, 인접 cue 와 한 호흡으로 이어져야 한다. cue 들을 한 줄씩 이어 읽었을 때 시청자가 "무슨 영상인지" 한 줄로 답할 수 있어야 한다.
 
 ### candidate.tts_draft 활용 + 사실성 원칙
@@ -1007,10 +1006,12 @@ cue 의 시간 축은 별개 — 0초부터 storyline 의 hook→build→payoff 
       }},
       // ▼ TTS cue 는 storyline 구성 결정 후 작성. 0~5개. 한 storyline 안 모든 cue 는 같은 voice 사용 (절대 규칙).
       "tts_cues": [
-        {{"start_sec": 0.0, "end_sec": 4.0, "text": "예: 황궁마켓의 유일한 법.",
+        {{"clip_index": 0, "clip_role": "hook", "offset_sec": 0.5, "duration_sec": 4.0,
+          "text": "예: 황궁마켓의 유일한 법.",
           "voice": "ko_male_low", "speed": "slow",
           "voice_rationale": "디스토피아·스릴러 톤", "speed_rationale": "긴장 고조 직전이라 천천히"}},
-        {{"start_sec": 18.0, "end_sec": 21.5, "text": "근데 진짜 노림수는 따로 있는데?",
+        {{"clip_index": 1, "clip_role": "build", "offset_sec": 8.0, "duration_sec": 3.5,
+          "text": "근데 진짜 노림수는 따로 있는데?",
           "voice": "ko_male_low", "speed": "fast",
           "voice_rationale": "같은 storyline 이므로 voice 유지", "speed_rationale": "반전 임팩트라 빠르게"}}
       ],
@@ -1059,7 +1060,8 @@ cue 의 시간 축은 별개 — 0초부터 storyline 의 hook→build→payoff 
       "character_focus": ["인물명"],
       "use_original_audio": true,
       "tts_cues": [
-        {{"start_sec": 1.0, "end_sec": 5.5, "text": "이 한 컷의 후킹.",
+        {{"clip_index": 0, "clip_role": "highlight", "offset_sec": 1.0, "duration_sec": 4.5,
+          "text": "이 한 컷의 후킹.",
           "voice": "ko_female_high", "speed": "normal",
           "voice_rationale": "가벼운 바이럴 톤", "speed_rationale": "기본"}}
       ],
@@ -1232,41 +1234,103 @@ _VALID_TTS_SPEEDS: frozenset[str] = frozenset({
 })
 
 
+def _anchor_clip_fields(clip) -> tuple[float, float, int, int]:
+    """anchor_clips 원소(StoryClip 또는 dict)에서 (start, end, chunk_index, candidate_index)."""
+    if isinstance(clip, dict):
+        return (float(clip.get("start_sec", 0.0)), float(clip.get("end_sec", 0.0)),
+                int(clip.get("chunk_index", -1)), int(clip.get("candidate_index", -1)))
+    return (float(getattr(clip, "start_sec", 0.0)), float(getattr(clip, "end_sec", 0.0)),
+            int(getattr(clip, "chunk_index", -1)), int(getattr(clip, "candidate_index", -1)))
+
+
 def _normalize_storyline_tts_cues(
     raw_cues,
     *,
-    total_duration: float | None = None,
+    anchor_clips=None,
     max_cues: int | None = 5,
 ) -> list[dict[str, Any]]:
-    """LLM 응답의 tts_cues 배열을 검증·정규화.
+    """LLM 응답의 tts_cues 배열(클립 앵커 스키마)을 검증·정규화.
 
-    - voice/speed 라벨 유효성 (잘못된 값은 ko_female/normal fallback)
-    - end_sec > start_sec, text/start_sec/end_sec 필수
-    - total_duration 제공 시 [-0.5, total+0.5] 범위 클램프 (out-of-range cue 제거)
-    - 시간순 정렬 + 겹침 제거 (앞 cue 끝 + 0.05 후로 뒤 cue 시작 이동, 보정 후 end<=start 면 drop)
-    - max_cues 초과 시 앞쪽 max_cues 개만 유지 (max_cues=None 이면 제한 없음)
-    - 다수 voice 등장 시 majority voice 로 통일 ("한 쇼츠 = 한 voice" 절대 규칙)
+    앵커 스키마: clip_index(int ≥0) / offset_sec(float ≥0) / duration_sec(float >0) / text 필수.
+    anchor_clips (story 단계, beat trim *이전* 클립 리스트) 기준으로:
+    - clip_index >= len(anchor_clips) 인 cue 는 드롭 (LLM 환각 방지)
+    - offset_sec 을 [0, 클립 길이] 로 클램프
+    - source_time_sec = 클립.start_sec + offset_sec (원본 영상 절대시간) 을 계산해 저장
+      → 하류 _resolve_cue_anchors 가 최종 타임라인 확정 후 편집 절대시간으로 변환한다.
+    - 클립의 (chunk_index, candidate_index) 를 함께 저장 (해석 시 스냅/동점 판별 키)
 
-    Returns: 정규화된 cue dict 리스트 (입력에 있던 rationale 필드 보존)
+    하위호환: clip_index 없이 start_sec/end_sec(구 스키마, story 타임라인 절대시간)만 있으면
+    anchor_clips 누적 길이로 역산해 앵커로 변환한다. 역산 불가(범위 밖·anchor_clips 없음)면 드롭.
+
+    공통: voice/speed 라벨 검증(fallback ko_female/normal), majority voice 통일,
+    (clip_index, offset_sec) 정렬, max_cues 절단. cue 간 겹침 제거는 해석 시점으로 이동
+    (절대시간이 없어 여기서는 판단 불가).
+
+    Returns: 정규화된 앵커 cue dict 리스트 (rationale 필드 보존)
     """
     if not raw_cues:
         return []
+    anchors = [_anchor_clip_fields(c) for c in (anchor_clips or [])]
+    # story 타임라인 누적 시작점 (구 스키마 역산용)
+    cum_starts: list[float] = []
+    _acc = 0.0
+    for a_start, a_end, _, _ in anchors:
+        cum_starts.append(_acc)
+        _acc += max(0.0, a_end - a_start)
+    _story_total = _acc
+
     cues: list[dict[str, Any]] = []
+    dropped_hallucination = 0
+    dropped_legacy = 0
     for c in raw_cues:
-        if not isinstance(c, dict):
+        if not isinstance(c, dict) or "text" not in c:
             continue
-        if "start_sec" not in c or "end_sec" not in c or "text" not in c:
-            continue
-        try:
-            s = float(c["start_sec"])
-            e = float(c["end_sec"])
-        except (TypeError, ValueError):
-            continue
-        if e <= s:
-            continue
-        if total_duration is not None:
-            if s < -0.5 or e > float(total_duration) + 0.5:
+
+        clip_index: int | None = None
+        offset: float | None = None
+        duration: float | None = None
+
+        if "clip_index" in c and "offset_sec" in c:
+            try:
+                clip_index = int(c["clip_index"])
+                offset = float(c["offset_sec"])
+                duration = float(c.get("duration_sec", 0.0))
+            except (TypeError, ValueError):
                 continue
+        elif "start_sec" in c and "end_sec" in c:
+            # 구 스키마 폴백 — story 타임라인 절대시간을 앵커로 역산
+            try:
+                s = float(c["start_sec"])
+                e = float(c["end_sec"])
+            except (TypeError, ValueError):
+                continue
+            if e <= s:
+                continue
+            if not anchors or s < -0.5 or s >= _story_total + 0.5:
+                dropped_legacy += 1
+                continue
+            s = max(0.0, s)
+            clip_index = 0
+            for i in range(len(anchors) - 1, -1, -1):
+                if s >= cum_starts[i]:
+                    clip_index = i
+                    break
+            offset = s - cum_starts[clip_index]
+            duration = e - s
+        else:
+            continue
+
+        if clip_index is None or clip_index < 0 or clip_index >= len(anchors):
+            dropped_hallucination += 1
+            continue
+        if offset is None or offset < 0.0:
+            offset = 0.0
+        if duration is None or duration <= 0.0:
+            continue
+        a_start, a_end, a_chunk, a_cand = anchors[clip_index]
+        clip_dur = max(0.0, a_end - a_start)
+        offset = min(offset, clip_dur)
+
         voice = str(c.get("voice", "ko_female"))
         if voice not in _VALID_TTS_VOICES:
             voice = "ko_female"
@@ -1274,12 +1338,18 @@ def _normalize_storyline_tts_cues(
         if speed not in _VALID_TTS_SPEEDS:
             speed = "normal"
         out: dict[str, Any] = {
-            "start_sec": s,
-            "end_sec": e,
+            "clip_index": clip_index,
+            "offset_sec": offset,
+            "duration_sec": duration,
+            "source_time_sec": a_start + offset,
+            "chunk_index": a_chunk,
+            "candidate_index": a_cand,
             "text": str(c["text"]).strip(),
             "voice": voice,
             "speed": speed,
         }
+        if c.get("clip_role"):
+            out["clip_role"] = str(c["clip_role"])
         # rationale 필드 보존 (디버깅·로그 용)
         if c.get("voice_rationale"):
             out["voice_rationale"] = str(c["voice_rationale"])
@@ -1287,12 +1357,13 @@ def _normalize_storyline_tts_cues(
             out["speed_rationale"] = str(c["speed_rationale"])
         cues.append(out)
 
-    # 시간순 정렬 + 겹침 제거
-    cues.sort(key=lambda x: x["start_sec"])
-    for i in range(1, len(cues)):
-        if cues[i]["start_sec"] < cues[i - 1]["end_sec"]:
-            cues[i]["start_sec"] = cues[i - 1]["end_sec"] + 0.05
-    cues = [c for c in cues if c["end_sec"] > c["start_sec"]]
+    if dropped_hallucination:
+        print(f"  [TTS cue] clip_index 범위 밖 cue {dropped_hallucination}개 드롭 (환각 방지)")
+    if dropped_legacy:
+        print(f"  [TTS cue] 구 스키마 cue {dropped_legacy}개 — 앵커 역산 실패, 드롭")
+
+    # (clip_index, offset) 정렬
+    cues.sort(key=lambda x: (x["clip_index"], x["offset_sec"]))
 
     # 한 쇼츠 = 한 voice 강제 (majority 통일)
     if cues:

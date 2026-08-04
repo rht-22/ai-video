@@ -5,7 +5,8 @@
    규칙: candidate.visual_essential=False AND description 에 액션 동사 없음 AND 화자 변경 없음.
 2. cut_silence_with_story_filter — clip 안 segments 의 gap 중 _is_gap_safe_to_cut 통과한
    것만 컷. visual_essential clip 은 통째 보호.
-3. _shift_cues_by_silence_cut — keep_intervals 누적 감소량으로 cue 시간 시프트.
+(구) _shift_cues_by_silence_cut 는 2026-08-04 cue 앵커 전환으로 삭제 — cue 시간 변환은
+_resolve_cue_anchors 가 담당한다 (tests/test_cue_anchor_resolve.py).
 """
 from __future__ import annotations
 
@@ -23,7 +24,6 @@ from app.modules.silence_cutter import (
 )
 from app.modules.speech import SpeechSegment
 from app.modules.story_builder import StoryClip
-from app.pipeline import _shift_cues_by_silence_cut
 
 
 def _seg(start, end, text="대사"):
@@ -174,73 +174,6 @@ def test_story_filter_no_candidate_meta_skips_cut():
     candidates_lookup = {}  # (99, 99) 없음
     out = cut_silence_with_story_filter([clip], segs, candidates_lookup)
     assert out[0].keep_intervals == [Interval(0.0, 12.0)]
-
-
-# ──────────────────────────────────────────────────────────────
-# _shift_cues_by_silence_cut — cue 시간 보정 (pipeline.py)
-# ──────────────────────────────────────────────────────────────
-
-
-def test_shift_cues_no_cuts_returns_unchanged():
-    # silence_cut 결과 keep_intervals 가 원본과 같으면 시프트 없음
-    clips = [_clip(0, 10), _clip(20, 30)]
-    results = [
-        SilenceCutResult(original_clip=clips[0], keep_intervals=[Interval(0, 10)], total_removed_sec=0.0),
-        SilenceCutResult(original_clip=clips[1], keep_intervals=[Interval(20, 30)], total_removed_sec=0.0),
-    ]
-    cues = [{"start_sec": 5.0, "end_sec": 8.0, "text": "x", "voice": "ko_female", "speed": "normal"}]
-    out = _shift_cues_by_silence_cut(cues, results, clips)
-    assert out[0]["start_sec"] == 5.0
-    assert out[0]["end_sec"] == 8.0
-
-
-def test_shift_cues_after_first_clip_cut():
-    # clip0: edit timeline 0~10 → 컷 후 0~5 (removed=5). cue at edit 12 (clip1 안) → shift -5 → 7
-    clips = [_clip(0, 10), _clip(20, 30)]  # 원본 clip0 = 10초, clip1 = 10초
-    results = [
-        SilenceCutResult(original_clip=clips[0], keep_intervals=[Interval(0, 5)], total_removed_sec=5.0),
-        SilenceCutResult(original_clip=clips[1], keep_intervals=[Interval(20, 30)], total_removed_sec=0.0),
-    ]
-    cues = [{"start_sec": 12.0, "end_sec": 15.0, "text": "x", "voice": "ko_female", "speed": "normal"}]
-    out = _shift_cues_by_silence_cut(cues, results, clips)
-    assert out[0]["start_sec"] == 7.0
-    assert out[0]["end_sec"] == 10.0
-
-
-def test_shift_cues_before_any_cut_unchanged():
-    # cue at edit 3 (clip0 안, 컷보다 앞) → shift 없음
-    clips = [_clip(0, 10), _clip(20, 30)]
-    results = [
-        SilenceCutResult(original_clip=clips[0], keep_intervals=[Interval(0, 5)], total_removed_sec=5.0),
-        SilenceCutResult(original_clip=clips[1], keep_intervals=[Interval(20, 30)], total_removed_sec=0.0),
-    ]
-    cues = [{"start_sec": 3.0, "end_sec": 4.5, "text": "x", "voice": "ko_female", "speed": "normal"}]
-    out = _shift_cues_by_silence_cut(cues, results, clips)
-    # cue 가 clip0 안에 있으므로 clip0 의 removed 영향 없음 (clip0 끝 이전)
-    assert out[0]["start_sec"] == 3.0
-    assert out[0]["end_sec"] == 4.5
-
-
-def test_shift_cues_accumulates_removed_across_clips():
-    # clip0 = 10s (-3 removed), clip1 = 10s (-2 removed), clip2 = 10s. cue at edit 25 → -5 → 20
-    clips = [_clip(0, 10), _clip(20, 30), _clip(50, 60)]
-    results = [
-        SilenceCutResult(original_clip=clips[0], keep_intervals=[Interval(0, 7)], total_removed_sec=3.0),
-        SilenceCutResult(original_clip=clips[1], keep_intervals=[Interval(20, 28)], total_removed_sec=2.0),
-        SilenceCutResult(original_clip=clips[2], keep_intervals=[Interval(50, 60)], total_removed_sec=0.0),
-    ]
-    cues = [{"start_sec": 25.0, "end_sec": 27.0, "text": "x", "voice": "ko_female", "speed": "normal"}]
-    out = _shift_cues_by_silence_cut(cues, results, clips)
-    assert out[0]["start_sec"] == 20.0
-    assert out[0]["end_sec"] == 22.0
-
-
-def test_shift_cues_handles_empty_input():
-    assert _shift_cues_by_silence_cut([], [], []) == []
-    # cues 있지만 cut 결과 없음 → 그대로 (defensive)
-    cues = [{"start_sec": 5.0, "end_sec": 7.0, "text": "x", "voice": "ko_female", "speed": "normal"}]
-    out = _shift_cues_by_silence_cut(cues, [], [])
-    assert out == cues
 
 
 # ──────────────────────────────────────────────────────────────
