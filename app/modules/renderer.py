@@ -1033,12 +1033,41 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     work_y_final = max(d.work_title_y, _safe_work_top)
     if work_type == "image" and work_value:
         logo_w = getattr(d, 'work_image_width', 350)
-        # height 는 -1 자동이라 사전 측정 불가 → 보수적 추정 = logo_w / 2
-        _estimated_logo_h = max(60, int(logo_w * 0.5))
-        if work_y_final + _estimated_logo_h > H - 20:
-            work_y_final = max(_safe_work_top, H - _estimated_logo_h - 20)
-        logo_path_str = str(Path(work_value).resolve()).replace("\\", "/").replace(":", "\\:")
-        filters.append(f"movie='{logo_path_str}',scale={logo_w}:-1[logo];{last_v_label}[logo]overlay=(W-w)/2:{work_y_final}{work_label}")
+        logo_box_h = getattr(d, 'work_image_height', None)
+        _logo_path = Path(work_value).resolve()
+        # 라운드 24: 로고 높이를 추측하지 않고 실측한다.
+        # 종전엔 scale={w}:-1 로 높이를 자동에 맡기고 클램프는 w/2 로 가정했는데, 세로형 로고
+        # (도깨비 159x308)에서 실제 높이가 가정의 3.9배라 클램프가 발동조차 안 하고 캔버스 밖으로
+        # 잘려 나갔다. 원본 비율은 작품·권리사마다 제각각이라 가정이 성립하지 않는다.
+        try:
+            _nat_w, _nat_h = _probe_video_dims(_logo_path)
+        except Exception as e:
+            print(f"  [Logo] 크기 측정 실패({e}) — 너비 {logo_w} 고정, 높이는 자동")
+            _nat_w = _nat_h = 0
+
+        if _nat_w > 0 and _nat_h > 0:
+            # 박스 안에 비율 유지로 맞춘다(contain). logo_box_h 미지정이면 종전처럼 너비만 구속.
+            _box_h = logo_box_h if logo_box_h else int(_nat_h * (logo_w / _nat_w))
+            _s = min(logo_w / _nat_w, _box_h / _nat_h)
+            logo_w_final = max(2, int(_nat_w * _s) // 2 * 2)
+            logo_h_final = max(2, int(_nat_h * _s) // 2 * 2)
+        else:
+            logo_w_final, logo_h_final = logo_w, max(60, int(logo_w * 0.5))
+
+        # 정렬: top=영상 하단에 붙임(종전) · center=영상 하단~캔버스 하단 밴드의 세로 중앙.
+        # center 는 로고 높이가 달라져도 균형이 유지돼 작품별로 y 를 다시 찾지 않아도 된다.
+        if getattr(d, 'work_image_align', 'top') == "center":
+            work_y_final = _safe_work_top + (H - 20 - _safe_work_top - logo_h_final) // 2
+        if work_y_final + logo_h_final > H - 20:
+            work_y_final = H - logo_h_final - 20
+        work_y_final = max(_safe_work_top, work_y_final)
+
+        logo_path_str = str(_logo_path).replace("\\", "/").replace(":", "\\:")
+        print(f"  [Logo] {_nat_w}x{_nat_h} → {logo_w_final}x{logo_h_final} @ y={work_y_final}")
+        filters.append(
+            f"movie='{logo_path_str}',scale={logo_w_final}:{logo_h_final}[logo];"
+            f"{last_v_label}[logo]overlay=(W-w)/2:{work_y_final}{work_label}"
+        )
     else:
         raw_work = work_value if work_value else inputs.work_title
         # 레터스페이싱 적용: 글자 사이에 공백 삽입

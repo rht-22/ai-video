@@ -24,7 +24,8 @@ class DesignConfig:
     # 자막 설정 (ASS 스타일 기준)
     subtitle_font: str = "여기어때 잘난체 2 TTF"
     subtitle_size: int = 65
-    subtitle_color: str = "&H0000FFFF"
+    # None = 라운드 10 장르 프리셋의 색을 그대로 사용. 명시하면 프리셋 위에 덮어쓴다.
+    subtitle_color: str | None = None
     subtitle_y_margin: int = 380
     # 라운드 10: 자막 스타일 프리셋 (None / "auto" → 장르 기반 자동 선택)
     subtitle_style_preset: str | None = None
@@ -42,8 +43,16 @@ class DesignConfig:
 
     work_type: str = "text"
     work_value: str | None = None
-    # 라운드 23: 200 → 350. 입력 이미지 dimension 무관 항상 W=350px로 scale, 높이는 -1(자동)로 비율 보존.
-    work_image_width: int = 350
+    # 라운드 24: 로고는 (width x height) 박스 안에 비율 유지로 맞춘다(contain).
+    # 두 축을 동시에 제한하는 것이 핵심 — 로고 비율이 작품마다 달라(세로 캘리그래피 0.5:1 ~
+    # 가로 워드마크 10:1) 한 축만 고정하면 반드시 반대 모양에서 깨진다. 세로형은 높이가,
+    # 가로형은 너비가 박스에 닿는다.
+    # 395x280 은 도깨비·유미 실물로 사람이 고른 크기에서 역산한 값(오차 0.3%).
+    work_image_width: int = 395
+    work_image_height: int | None = 280
+    # top=영상 하단에 붙임 · center=영상 하단~캔버스 하단 밴드의 세로 중앙.
+    # center 는 로고 높이가 달라져도 균형이 유지돼 작품별로 y 를 다시 찾지 않아도 된다.
+    work_image_align: str = "center"
 
     overlay_image_path: str | None = None # 필요 시 이미지 경로
 
@@ -104,6 +113,45 @@ class Paths:
         return self.app_root.parent / "outputs"
 
 
+# ASS는 이름 색상을 지원하지 않으므로 자주 쓰는 것만 hex로 매핑.
+_NAMED_COLORS = {
+    "white": "FFFFFF",
+    "black": "000000",
+    "yellow": "FFFF00",
+    "red": "FF0000",
+    "green": "00FF00",
+    "blue": "0000FF",
+    "skyblue": "87CEEB",
+    "pink": "FF69B4",
+}
+
+
+def to_ass_color(value: str) -> str:
+    """사용자 입력 색상을 ASS 형식(&HAABBGGRR)으로 정규화.
+
+    - "&H..." → 그대로 통과 (기존 사용자 호환)
+    - "#RRGGBB" / "RRGGBB" → 채널을 뒤집어 "&H00BBGGRR" (알파 00=불투명)
+    - "white" 등 이름 색상 → 위 맵으로 변환
+    """
+    s = (value or "").strip()
+    if s.lower().startswith("&h"):
+        return s
+    s = _NAMED_COLORS.get(s.lower(), s).lstrip("#")
+    if len(s) != 6:
+        raise ValueError(
+            f"잘못된 색상 형식: '{value}'. #RRGGBB, &H00BBGGRR, "
+            f"또는 {', '.join(sorted(_NAMED_COLORS))} 중 하나를 사용하세요."
+        )
+    try:
+        rr, gg, bb = s[0:2], s[2:4], s[4:6]
+        int(s, 16)
+    except ValueError:
+        raise ValueError(
+            f"잘못된 색상 형식: '{value}'. #RRGGBB는 16진수 6자리여야 합니다."
+        ) from None
+    return f"&H00{bb}{gg}{rr}".upper()
+
+
 def _ensure_ascii_font_path(file_path: Path) -> str:
     """폰트 경로에 비-ASCII 문자가 있으면 시스템 임시 디렉토리로 복사 후 반환."""
     import shutil
@@ -145,6 +193,24 @@ def get_font_path(name: str, app_root: Path) -> str:
             return "Malgun Gothic"
 
     return name
+
+def get_logo_path(name: str, app_root: Path) -> str:
+    """로고 이름 → 절대경로. get_font_path 와 같은 규약이다.
+
+    경로 구분자가 없으면 assets/logos 에서 찾는다 — 호출부(루프·작품 카드)가 이 레포의 디렉토리
+    구조를 몰라도 되게 하려는 것이다(작품 카드에는 'RZsv4.png' 한 줄만 적힌다). 확장자를 생략하면
+    .png 를 붙인다. 절대·상대 경로를 그대로 주면 그 경로를 쓴다.
+    """
+    s = str(name)
+    if "/" in s or "\\" in s:
+        return str(Path(s).expanduser().resolve())
+    p = app_root / "assets" / "logos" / (s if s.lower().endswith(".png") else f"{s}.png")
+    if not p.exists():
+        raise FileNotFoundError(
+            f"로고 파일이 없습니다: {p}\n"
+            f"  scripts/normalize_logo.py --code <식별코드> --input <권리사 원본> 으로 먼저 생성하세요.")
+    return str(p.resolve())
+
 
 REMOTE_FONTS = {
     "Jalnan": "https://raw.githubusercontent.com/rht-22/font.zip/main/Jalnan.ttf",

@@ -1,0 +1,29 @@
+{
+  "code": "RZsv4",
+  "source_file": "dokkaebi_guide.png",
+  "method": "alpha",
+  "original_size": [
+    159,
+    308
+  ],
+  "ink_bbox": [
+    0,
+    0,
+    159,
+    308
+  ],
+  "ink_size": [
+    159,
+    308
+  ],
+  "trim_percent_w": 0.0,
+  "trim_percent_h": 0.0,
+  "trim_percent_area": 0.0,
+  "padding": {
+    "left": 0,
+    "right": 0,
+    "top": 0,
+    "bottom": 0
+  },
+  "normalized_at": "2026-07-29T17:16:52"
+}

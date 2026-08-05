@@ -1,0 +1,29 @@
+{
+  "code": "lt0JP",
+  "source_file": "tvN 스트릿 레스토랑 파이터_로고(부서진 질감_화이트).png",
+  "method": "alpha",
+  "original_size": [
+    2363,
+    2363
+  ],
+  "ink_bbox": [
+    307,
+    74,
+    2242,
+    2130
+  ],
+  "ink_size": [
+    1935,
+    2056
+  ],
+  "trim_percent_w": 18.1,
+  "trim_percent_h": 13.0,
+  "trim_percent_area": 28.8,
+  "padding": {
+    "left": 307,
+    "right": 121,
+    "top": 74,
+    "bottom": 233
+  },
+  "normalized_at": "2026-07-29T17:26:11"
+}

@@ -26,8 +26,9 @@ python-multipart==0.0.22
 typing-extensions==4.15.0
 watchfiles==1.1.1
 requests>=2.31.0
-# 폰트 패밀리명 검증(tests/test_font_family.py)에 쓴다. deepface 가 전이로 끌어와서 지금까지
-# 우연히 동작했지만, 그쪽 의존성이 바뀌면 조용히 사라진다 — 직접 쓰므로 명시한다.
+# 로고 자산 처리(여백 트림·잉크 bbox 측정)와 폰트 패밀리명 검증(tests/test_font_family.py)에
+# 쓴다. deepface 가 전이로 끌어와서 지금까지 우연히 동작했지만, 그쪽 의존성이 바뀌면 조용히
+# 사라진다 — 직접 쓰므로 명시한다.
 Pillow>=10.0.0
 
 # Face Recognition (Phase 12)

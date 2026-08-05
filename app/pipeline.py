@@ -447,54 +447,116 @@ def _filter_candidates_by_chunk_intro_credits(
 
 
 # ─────────────────────────────────────────────────────────────
-# PR-5: silence_cut 단계 — cue 시간 보정 헬퍼
+# TTS cue 앵커 해석 — 원본 절대시간 → 편집 타임라인 절대시간
 # ─────────────────────────────────────────────────────────────
+# cue 는 story 단계에서 (clip_index, offset_sec) 앵커로 정규화되고 source_time_sec
+# (원본 영상 절대시간)를 갖는다. 클립 경계는 그 뒤 silence_cut(분할) → snap/extend/fill →
+# 길이 클램프로 여러 번 바뀌므로, 절대시간 변환은 **최종 클립이 확정된 뒤 여기서 한 번만** 한다.
+# 최종 클립 자체가 원본 구간(start_sec~end_sec)을 갖고 있어 "원본시간 → 편집시간" 조각별
+# 매핑만으로 충분하다 — 첫 클립이 앞으로 확장돼도 cue 는 *화면 내용*에 붙어 따라온다.
+
+_MIN_CUE_TAIL = 0.5  # 앵커 소재가 잘려나갔을 때 클립 끝에서 확보할 최소 여유
 
 
-def _shift_cues_by_silence_cut(
+def _resolve_cue_anchors(
     cues: list[dict],
-    silence_cut_results: list,  # list[SilenceCutResult]
-    original_variant_clips: list,  # list[StoryClip]
+    clips: list,  # 최종 variant StoryClip 리스트 (silence_cut·snap/extend/fill·클램프 반영 후)
 ) -> list[dict]:
-    """cut_silence_with_story_filter 결과의 누적 감소량으로 cue.start_sec/end_sec 시프트.
+    """앵커 cue 의 source_time_sec 를 최종 편집 타임라인 절대 start_sec/end_sec 로 변환.
 
-    cue 시간 (편집 타임라인 절대) 가 어떤 clip 의 끝 *이후* 라면, 그 clip 이전의 모든
-    removed_sec 누적을 차감. clip 내부에 있는 cue 는 시프트하지 않음 (clip 시작 비례 가정).
+    - source_time 을 포함하는 최종 클립 조각을 찾아 그 안의 상대 위치로 배치.
+      같은 원본 구간이 여러 조각에 걸치면 앵커의 (chunk_index, candidate_index) 일치 우선.
+    - 소재가 컷으로 빠졌으면: 같은 (chunk_index, candidate_index) 조각의 다음 kept 시작으로
+      스냅, 그마저 없으면 마지막 조각 끝 - _MIN_CUE_TAIL. 앵커 클립이 통째로 제거됐으면 드롭.
+    - end = start + duration_sec, 영상 전체 길이로 클램프.
+    - 변환 후 시간순 정렬 + cue 간 겹침 제거 (뒤 cue 시작을 앞 cue 끝 + 0.05 로 이동).
+    - source_time_sec 없는 cue (옛 체크포인트 재개 경로) 는 절대시간으로 간주하고
+      영상 길이 클램프만 적용해 통과시킨다 (구 동작 보존).
 
-    Args:
-        cues: tts cue dict 리스트 (start_sec / end_sec 필수)
-        silence_cut_results: SilenceCutResult 리스트 (variant 의 clip 순서)
-        original_variant_clips: 컷 전 원본 variant clip 리스트 (silence_cut_results 와 1:1)
-
-    Returns: 새 dict 리스트 (입력 보존, 시간만 보정)
+    Returns: start_sec/end_sec 가 채워진 cue dict 리스트 (앵커 필드는 디버깅용 보존)
     """
-    if not cues or not silence_cut_results or not original_variant_clips:
-        return list(cues or [])
+    if not cues or not clips:
+        return []
 
-    # 원본 clip 의 누적 편집 끝 시점 + removed 누적량 매핑
-    cum_edit_end = 0.0
-    boundaries: list[tuple[float, float]] = []  # (clip_edit_end_before_cut, cum_removed_through_this_clip)
-    cum_removed = 0.0
-    for clip, result in zip(original_variant_clips, silence_cut_results):
-        cum_edit_end += float(clip.end_sec - clip.start_sec)
-        cum_removed += float(getattr(result, "total_removed_sec", 0.0) or 0.0)
-        boundaries.append((cum_edit_end, cum_removed))
+    # 편집 타임라인 조각: (원본 start, 원본 end, 편집 base, chunk_index, candidate_index)
+    spans: list[tuple[float, float, float, int, int]] = []
+    base = 0.0
+    for c in clips:
+        c_start = float(c.start_sec)
+        c_end = float(c.end_sec)
+        spans.append((c_start, c_end, base,
+                      int(getattr(c, "chunk_index", -1)), int(getattr(c, "candidate_index", -1))))
+        base += max(0.0, c_end - c_start)
+    total = base
 
     out: list[dict] = []
     for cue in cues:
-        new_cue = dict(cue)
-        s = float(cue.get("start_sec", 0.0) or 0.0)
-        # cue 가 어떤 clip 끝 이후라면 그 clip 까지의 cum_removed 차감 (마지막으로 통과한 boundary)
-        shift = 0.0
-        for clip_end_before, cum_rm in boundaries:
-            if s >= clip_end_before:
-                shift = cum_rm
+        duration = float(cue.get("duration_sec", 0.0) or 0.0)
+        t_raw = cue.get("source_time_sec")
+
+        if t_raw is None:
+            # 구 스키마 (이미 절대시간) — 옛 체크포인트에서 재개된 경로. 클램프만.
+            try:
+                s = float(cue.get("start_sec"))
+                e = float(cue.get("end_sec"))
+            except (TypeError, ValueError):
+                continue
+            if e <= s or s >= total - 0.1:
+                continue
+            new_cue = dict(cue)
+            new_cue["end_sec"] = min(e, total)
+            out.append(new_cue)
+            continue
+
+        t = float(t_raw)
+        key = (int(cue.get("chunk_index", -1)), int(cue.get("candidate_index", -1)))
+        containing = [sp for sp in spans if sp[0] <= t < sp[1]]
+        pick = None
+        if containing:
+            keyed = [sp for sp in containing if (sp[3], sp[4]) == key]
+            pick = (keyed or containing)[0]
+        else:
+            # 앵커 지점의 소재가 컷/트림으로 빠짐 → 같은 앵커 클립 소재 안으로 스냅
+            keyed = [sp for sp in spans if (sp[3], sp[4]) == key]
+            after = [sp for sp in keyed if sp[0] >= t]
+            if after:
+                pick = min(after, key=lambda sp: sp[0])
+                t = pick[0]
+            elif keyed:
+                pick = max(keyed, key=lambda sp: sp[1])
+                t = max(pick[0], pick[1] - _MIN_CUE_TAIL)
             else:
-                break
-        new_cue["start_sec"] = s - shift
-        new_cue["end_sec"] = float(cue.get("end_sec", 0.0) or 0.0) - shift
+                print(f"  [cue-resolve] 앵커 클립 소재가 최종 타임라인에 없음 → cue 드롭: "
+                      f"{str(cue.get('text', ''))[:24]!r}")
+                continue
+
+        start = pick[2] + (t - pick[0])
+        end = min(start + duration, total)
+        if end - start < 0.3:
+            print(f"  [cue-resolve] 변환 후 길이 {end - start:.2f}s < 0.3s → cue 드롭: "
+                  f"{str(cue.get('text', ''))[:24]!r}")
+            continue
+        new_cue = dict(cue)
+        new_cue["start_sec"] = start
+        new_cue["end_sec"] = end
         out.append(new_cue)
-    return out
+
+    # 시간순 정렬 + 겹침 제거 (duration 유지한 채 뒤 cue 를 밀고, 영상 밖이면 드롭)
+    out.sort(key=lambda x: x["start_sec"])
+    resolved: list[dict] = []
+    for cue in out:
+        if resolved and cue["start_sec"] < resolved[-1]["end_sec"]:
+            shift_to = resolved[-1]["end_sec"] + 0.05
+            dur = cue["end_sec"] - cue["start_sec"]
+            cue = dict(cue)
+            cue["start_sec"] = shift_to
+            cue["end_sec"] = min(shift_to + dur, total)
+            if cue["end_sec"] - cue["start_sec"] < 0.3:
+                print(f"  [cue-resolve] 겹침 보정 후 영상 밖 → cue 드롭: "
+                      f"{str(cue.get('text', ''))[:24]!r}")
+                continue
+        resolved.append(cue)
+    return resolved
 
 
 # ─────────────────────────────────────────────────────────────
@@ -649,39 +711,6 @@ def transcribe_chunks(
             except (AttributeError, TypeError, ValueError):
                 continue
         out.append({"chunk_index": int(c.index), "segments": abs_segs})
-    return out
-
-
-def _clamp_cues_to_variants(
-    tts_cues_per_variant: list[list[dict]],
-    variants: list[tuple[list[StoryClip], str, float]],
-) -> list[list[dict]]:
-    """각 variant의 cue.end_sec가 그 variant의 영상 총 길이를 초과하지 않도록 강제.
-
-    라운드 6a-2 후처리 안전판: LLM 환각 또는 무음 컷 추정 오차로 cue가 영상 끝을 넘기는
-    케이스를 마지막에 cap.
-    """
-    out: list[list[dict]] = []
-    for v_idx, cues in enumerate(tts_cues_per_variant or []):
-        if v_idx >= len(variants) or not cues:
-            out.append(cues or [])
-            continue
-        sl_clips = variants[v_idx][0]
-        total = sum(float(c.end_sec - c.start_sec) for c in sl_clips)
-        clamped: list[dict] = []
-        for cue in cues:
-            new_cue = dict(cue)
-            s = float(new_cue.get("start_sec", 0.0))
-            e = float(new_cue.get("end_sec", 0.0))
-            if e > total:
-                new_cue["end_sec"] = total
-                if s >= total:
-                    # cue가 통째로 영상 밖이면 무효화 (start = end로 만들어 자막에 안 찍힘)
-                    new_cue["start_sec"] = max(0.0, total - 0.1)
-                    new_cue["end_sec"] = total
-                print(f"  [cue-clamp] variant {v_idx + 1} cue: {e:.1f}s → {new_cue['end_sec']:.1f}s (영상 {total:.1f}s 초과 방지)")
-            clamped.append(new_cue)
-        out.append(clamped)
     return out
 
 
@@ -2148,7 +2177,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # all_storyline_variants: list of (clips, title_text, score)
     all_storyline_variants: list[tuple[list[StoryClip], str, float]] = []
     # PR-4: storyline 마다 LLM 이 미리 생성한 tts_cues. all_storyline_variants 와 인덱스 1:1.
-    # 비어 있으면 12단계 tts_plan 에서 fallback (plan_tts_cues 호출).
+    # 비어 있으면 TTS 없이 진행 (내레이션 없는 쇼츠 — 정상 경로).
     storyline_tts_cues_pool: list[list[dict[str, Any]]] = []
     max_shorts = min(payload.max_shorts, config.max_shorts_count)
     story_plan = None
@@ -2278,6 +2307,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 print(f"  - 스토리라인 {sl_idx + 1} 파싱 실패: {e}")
                 continue
 
+            # TTS cue 앵커 기준 클립 — LLM 의 clip_index 는 storyline 구조(hook→build→payoff)
+            # 그대로의 배열을 가리키므로, beat trim/length fit 으로 쪼개지기 *전* 을 잡아둔다.
+            _anchor_clips = list(sl_clips)
+
             # 내용 기반 trim 우선: 60s 초과 시 beats 기반으로 덜 중요한 구간 제거(흐름 보존).
             # beats 없음/실패/무-drop이면 ([], "") 반환 → 아래 기존 _fit_storyline_to_duration 폴백.
             bt_clips, bt_msg = beat_trim_storyline(
@@ -2338,10 +2371,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             _raw_cues = sl_data.get("tts_cues") if isinstance(sl_data.get("tts_cues"), list) else None
             if _raw_cues is None and isinstance(sl_data.get("storyline"), dict):
                 _raw_cues = sl_data["storyline"].get("tts_cues") if isinstance(sl_data["storyline"].get("tts_cues"), list) else None
-            _sl_total_dur = sum(c.end_sec - c.start_sec for c in sl_clips) if sl_clips else 0.0
             _normalized_cues = _normalize_storyline_tts_cues(
                 _raw_cues or [],
-                total_duration=_sl_total_dur if _sl_total_dur > 0 else None,
+                anchor_clips=_anchor_clips,
                 max_cues=5,
             )
             storyline_tts_cues_pool.append(_normalized_cues)
@@ -2365,10 +2397,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 _fb_raw_cues = sel.get("tts_cues") if isinstance(sel.get("tts_cues"), list) else None
                 if _fb_raw_cues is None and isinstance(sel.get("storyline"), dict):
                     _fb_raw_cues = sel["storyline"].get("tts_cues") if isinstance(sel["storyline"].get("tts_cues"), list) else None
-                _fb_total_dur = sum(c.end_sec - c.start_sec for c in fb_clips) if fb_clips else 0.0
                 storyline_tts_cues_pool.append(_normalize_storyline_tts_cues(
                     _fb_raw_cues or [],
-                    total_duration=_fb_total_dur if _fb_total_dur > 0 else None,
+                    anchor_clips=fb_clips,
                     max_cues=5,
                 ))
                 print(f"  - 폴백 스토리라인: {len(fb_clips)}개 클립")
@@ -2478,8 +2509,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # ═══════════════════════════════════════
     # [silence_cut] 스토리-aware 무음 컷 (PR-5 / PR-6 gap-단위)
     # ═══════════════════════════════════════
-    # cut_silence_with_story_filter 로 각 variant clips 컷 + storyline_tts_cues_pool 의 cue
-    # 시간을 누적 감소량만큼 보정. 무음 공격성은 config.silence_cut_profile (env SILENCE_CUT_PROFILE)
+    # cut_silence_with_story_filter 로 각 variant clips 컷. cue 는 앵커 상태로 통과하며
+    # 시간 변환은 [tts cues] 블록의 _resolve_cue_anchors 가 최종 타임라인 기준으로 한다.
+    # 무음 공격성은 config.silence_cut_profile (env SILENCE_CUT_PROFILE)
     # 로 토글 — conservative(베이스라인) vs aggressive(가설). 채널 A/B 비교용.
     silence_profile = get_silence_profile(config.silence_cut_profile)
     checkpoint_silence_cut = output_dir / "checkpoint_silence_cut.json"
@@ -2525,13 +2557,13 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             # 너무 짧아지면 롤백 (라운드 13-B 동일 패턴)
             new_total = sum(c.end_sec - c.start_sec for c in v_clips_new)
             orig_total = sum(c.end_sec - c.start_sec for c in v_clips)
+            # cue 는 앵커(source_time_sec) 상태로 통과 — 시간 변환은 최종 타임라인 확정 후
+            # _resolve_cue_anchors 가 한 번에 한다 (클립 분할·경계 변경을 전부 자동 반영).
             v_cues_orig = list(storyline_tts_cues_pool[v_idx] if v_idx < len(storyline_tts_cues_pool) else [])
             if new_total < float(config.min_duration_sec) and orig_total <= float(config.max_duration_sec):
                 print(f"  [variant {v_idx+1} rollback] {new_total:.1f}s < {config.min_duration_sec:.0f}s → 원본 ({orig_total:.1f}s) 사용")
                 v_clips_new = list(v_clips)
-                shifted_cues = v_cues_orig
-            else:
-                shifted_cues = _shift_cues_by_silence_cut(v_cues_orig, cut_results, v_clips)
+            shifted_cues = v_cues_orig
             # 길이 재보정 (40~60s)
             v_clips_new, _fit_msg = _fit_storyline_to_duration(
                 v_clips_new, _candidates_lookup_sc,
@@ -2712,23 +2744,25 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print(f"  자막 캐시 로드 완료 ({len(final_segments)} segments)")
 
     # ═══════════════════════════════════════
-    # [tts cues] storyline_tts_cues_pool → tts_cues_per_variant (PR-5c-2)
+    # [tts cues] 앵커 해석 — storyline_tts_cues_pool → tts_cues_per_variant
     # ═══════════════════════════════════════
-    # tts_plan 단계 제거. cue 는 story 단계에서 storyline.tts_cues 로 미리 생성되고
-    # silence_cut 단계가 _shift_cues_by_silence_cut 으로 시간 보정까지 완료.
-    # 여기선 단순히 pool → per_variant 매핑 + 영상 길이 cap.
+    # cue 는 story 단계에서 (clip_index, offset_sec) 앵커 + source_time_sec(원본 절대시간)로
+    # 정규화돼 pool 에 있다. 여기는 silence_cut(분할) → snap/extend/fill → 길이 클램프가
+    # **모두 끝난 뒤**이므로, variant 별 최종 클립으로 편집 타임라인 절대시간을 여기서 한 번에
+    # 계산한다 (_resolve_cue_anchors). 이후 어떤 단계도 클립 경계를 바꾸지 않는다 —
+    # 바꾸는 단계를 새로 넣으면 반드시 이 블록보다 앞이어야 한다.
     tts_cues_per_variant: list[list[dict[str, Any]]] = [
-        list(storyline_tts_cues_pool[i]) if i < len(storyline_tts_cues_pool) else []
+        _resolve_cue_anchors(
+            list(storyline_tts_cues_pool[i]) if i < len(storyline_tts_cues_pool) else [],
+            all_storyline_variants[i][0],
+        )
         for i in range(len(all_storyline_variants))
     ]
     _total_cues = sum(len(c) for c in tts_cues_per_variant)
     if _total_cues:
-        print(f"\n[tts cues] storyline_tts_cues_pool → {len(tts_cues_per_variant)}개 variant ({_total_cues}개 cue)")
+        print(f"\n[tts cues] 앵커 해석 완료 → {len(tts_cues_per_variant)}개 variant ({_total_cues}개 cue)")
     else:
         print(f"\n[tts cues] cue 0개 — story 단계에서 tts_cues 미생성 / TTS 없이 진행")
-
-    # 라운드 6a-2 후처리 안전판: 각 variant의 cue.end_sec가 그 variant의 영상 길이를 넘지 않도록 cap.
-    tts_cues_per_variant = _clamp_cues_to_variants(tts_cues_per_variant, all_storyline_variants)
 
     # 첫 번째 variant의 cue를 기본으로 사용 (다중 쇼츠는 [14/15]에서 variant마다 따로)
     tts_cues = tts_cues_per_variant[0] if tts_cues_per_variant else []
@@ -2936,7 +2970,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             _user_overrides = {
                 "font_name": payload.design.subtitle_font if payload.design.subtitle_font != _default_design.subtitle_font else None,
                 "font_size": payload.design.subtitle_size if payload.design.subtitle_size != _default_design.subtitle_size else None,
-                "primary_color": payload.design.subtitle_color if payload.design.subtitle_color != _default_design.subtitle_color else None,
+                "primary_color": payload.design.subtitle_color,  # None = 프리셋 색 유지
                 "margin_v": _sub_margin_v,  # 라운드 5 동적 계산은 항상 우선
             }
             sub_style, _applied_preset = select_subtitle_style(_genre_tag, _cli_override, _user_overrides)
@@ -3225,7 +3259,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 _var_user_overrides = {
                     "font_name": payload.design.subtitle_font if payload.design.subtitle_font != _default_design.subtitle_font else None,
                     "font_size": payload.design.subtitle_size if payload.design.subtitle_size != _default_design.subtitle_size else None,
-                    "primary_color": payload.design.subtitle_color if payload.design.subtitle_color != _default_design.subtitle_color else None,
+                    "primary_color": payload.design.subtitle_color,  # None = 프리셋 색 유지
                     "margin_v": _var_margin_v,
                 }
                 sub_style, _ = select_subtitle_style(_genre_tag, _cli_override, _var_user_overrides)
