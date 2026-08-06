@@ -3321,7 +3321,19 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 render_short(var_render_inputs)
                 var_elapsed = time.time() - var_start
                 all_output_videos.append(var_video)
-                print(f"  [OK] 쇼츠 #{var_num} 렌더링 완료 ({var_elapsed:.1f}초)")
+
+                # 변이별 편집 계획 — shorts.mp4 만 edit_plan.json 이 있고 #2·#3 은 없었다.
+                # 하류가 전부 edit_plan 을 읽는다: scene_loop 은 장면 구간을, ingest 는 클립
+                # 메타를 여기서 가져온다. 없으면 렌더 비용은 3배로 쓰고 **검수·발행에 올라가는
+                # 것은 1편뿐**이다(2026-08-06 확인). 같은 스키마로 써 두면 ingest 는
+                # `--edit-plan edit_plan_<n>.json` 으로 그대로 받는다.
+                var_plan_path = output_dir / f"edit_plan_{var_num}.json"
+                var_plan_path.write_text(
+                    json.dumps(_build_edit_plan(payload, var_title, var_clips, var_crop_map, config),
+                               ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                print(f"  [OK] 쇼츠 #{var_num} 렌더링 완료 ({var_elapsed:.1f}초) · 편집 계획 {var_plan_path.name}")
 
             except Exception as e:
                 print(f"  [ERROR] 쇼츠 #{var_num} 렌더링 실패: {e}")
