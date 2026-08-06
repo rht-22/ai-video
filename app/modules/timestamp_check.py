@@ -62,12 +62,21 @@ def _timeline(segments: list[dict]) -> tuple[str, list[tuple[float, float]]]:
     인용이 실제로 연속해서 발화된 위치만 잡힌다."""
     buf, spans = [], []
     for s in segments or []:
-        text = normalize(s.get("text"))
+        # 세그먼트는 두 모양으로 들어온다 — 파이프라인 실물은 SpeechSegment(dataclass),
+        # 청크 전사 체크포인트·테스트는 dict. dict 만 가정하면 실행 경로 전체가
+        # AttributeError 로 죽는다(2026-08-06 맥1 실측 — 3채널 연속 rc=1).
+        if isinstance(s, dict):
+            text_raw, st_raw, en_raw = s.get("text"), s.get("start_sec"), s.get("end_sec")
+        else:
+            text_raw = getattr(s, "text", None)
+            st_raw = getattr(s, "start_sec", None)
+            en_raw = getattr(s, "end_sec", None)
+        text = normalize(text_raw)
         if not text:
             continue
         try:
-            st, en = float(s["start_sec"]), float(s["end_sec"])
-        except (KeyError, TypeError, ValueError):
+            st, en = float(st_raw), float(en_raw)
+        except (TypeError, ValueError):
             continue
         buf.append(text)
         spans.extend([(st, en)] * len(text))
