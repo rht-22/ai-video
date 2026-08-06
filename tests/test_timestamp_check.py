@@ -88,3 +88,12 @@ def test_timeline_accepts_speechsegment_objects():
     good, bad = _cand(515.0, 530.0), _cand(830.0, 887.0)
     keep, notes = filter_candidates([good, bad], [{"segments": obj_segments}])
     assert keep == [good] and len(notes) == 1
+
+
+def test_filter_candidates_accepts_object_chunks():
+    # 청크 묶음이 객체로 와도 죽지 않아야 한다 — 세그먼트와 같은 이유(21d2a18 의 남은 절반)
+    from types import SimpleNamespace
+    from app.modules.speech import SpeechSegment
+    chunk = SimpleNamespace(segments=[SpeechSegment(start_sec=518.9, end_sec=524.2, text=LINE)])
+    assert filter_candidates([_cand(515.0, 530.0)], [chunk])[0] != []
+    assert filter_candidates([_cand(830.0, 887.0)], [chunk])[0] == []

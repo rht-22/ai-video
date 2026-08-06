@@ -133,9 +133,12 @@ def filter_candidates(candidates: list[dict], transcripts: list[dict],
 
     전사는 청크별로 오지만 **후보와 같은 절대 시간축**이라 전부 합쳐서 본다 — 청크 경계
     근처의 대사가 옆 청크 전사에만 있는 경우를 놓치지 않기 위해서다."""
-    segments: list[dict] = []
+    segments: list = []
     for ct in transcripts or []:
-        segments.extend(ct.get("segments") or [])
+        # 청크 묶음도 dict·객체 두 모양이 가능하다 — 세그먼트와 같은 이유(체크포인트 JSON ↔
+        # 파이프라인 메모리). 여기서 막지 않으면 위에서 고친 것과 똑같은 자리에서 생성이 죽는다.
+        segs = ct.get("segments") if isinstance(ct, dict) else getattr(ct, "segments", None)
+        segments.extend(segs or [])
     if not segments:
         return list(candidates or []), []
 
