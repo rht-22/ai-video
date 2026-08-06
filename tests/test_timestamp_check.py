@@ -76,3 +76,15 @@ def test_filter_passes_through_when_no_transcript():
     # 전사가 통째로 없으면 대조 불가 — 후보를 건드리지 않는다
     cands = [_cand(830.0, 887.0)]
     assert filter_candidates(cands, [])[0] == cands
+
+
+def test_timeline_accepts_speechsegment_objects():
+    """🛑 회귀 방지 — 실행 경로의 세그먼트는 dict 가 아니라 SpeechSegment 객체다.
+    dict 전용 s.get() 가정이면 AttributeError 로 생성이 rc=1 로 죽는다
+    (2026-08-06 맥5 실측: 커리어데이 EP2 수동 생성 즉사)."""
+    from app.modules.speech import SpeechSegment
+    obj_segments = [SpeechSegment(start_sec=s["start_sec"], end_sec=s["end_sec"], text=s["text"])
+                    for s in SEGMENTS]
+    good, bad = _cand(515.0, 530.0), _cand(830.0, 887.0)
+    keep, notes = filter_candidates([good, bad], [{"segments": obj_segments}])
+    assert keep == [good] and len(notes) == 1

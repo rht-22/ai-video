@@ -62,12 +62,21 @@ def _timeline(segments: list[dict]) -> tuple[str, list[tuple[float, float]]]:
     인용이 실제로 연속해서 발화된 위치만 잡힌다."""
     buf, spans = [], []
     for s in segments or []:
-        text = normalize(s.get("text"))
+        # ⚠️ 세그먼트는 dict(체크포인트 JSON) 와 SpeechSegment 객체(파이프라인 실행 경로)
+        # 둘 다 온다 — dict 전용 s.get() 만 쓰면 실행 경로에서 AttributeError 로 생성이 통째로
+        # 죽는다 (2026-08-06 맥5 실측: 커리어데이 EP2 생성 rc=1).
+        if isinstance(s, dict):
+            raw_text, raw_st, raw_en = s.get("text"), s.get("start_sec"), s.get("end_sec")
+        else:
+            raw_text = getattr(s, "text", None)
+            raw_st = getattr(s, "start_sec", None)
+            raw_en = getattr(s, "end_sec", None)
+        text = normalize(raw_text)
         if not text:
             continue
         try:
-            st, en = float(s["start_sec"]), float(s["end_sec"])
-        except (KeyError, TypeError, ValueError):
+            st, en = float(raw_st), float(raw_en)
+        except (TypeError, ValueError):
             continue
         buf.append(text)
         spans.extend([(st, en)] * len(text))
