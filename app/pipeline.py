@@ -967,6 +967,7 @@ from app.modules.moment_ranker import assign_sequence_ids
 from app.modules.reframe import build_crop_timeline
 from app.modules.renderer import RenderInputs, render_short
 from app.modules.scene_detect import detect_scenes
+from app.modules import timestamp_check
 from app.modules.speech import SpeechSegment  # PR-5c-4: extract_audio_segment / extract_transcript 직접 사용 제거 — chunk_transcribe 헬퍼 내부 lazy import 로 일원화
 from app.modules.story_builder import (
     StoryClip,
@@ -2148,6 +2149,21 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
     # ── 라운드 19B: 청크 오버랩(180s) 중복 candidate dedup (IoU 기반) ──
     all_candidates = _dedup_overlapping_candidates(all_candidates, iou_threshold=0.7)
+
+    # ── 타임스탬프 ↔ 내용 대조 (전사 기준) ──
+    # 청크 분석이 내용은 맞게 보면서 시간축만 밀린 응답을 낼 때가 있다(2026-08-06 샤먼 2화:
+    # 인용 대사의 실제 위치가 518.9s 인데 후보는 830~887 을 주장, 같은 응답의 다른 후보는
+    # 소스 길이 875s 를 넘는 933~997). 길이·부등호 검사는 '불가능한 값'만 걸러 이걸 못 잡고,
+    # 범위 안이면 **엉뚱한 장면이 그대로 렌더돼 조용히 발행된다.** 판정은 보수적이다 —
+    # 인용 대사가 전사에서 확실히 다른 위치에 있을 때만 버린다.
+    if chunk_transcripts:
+        _before = len(all_candidates)
+        all_candidates, _ts_notes = timestamp_check.filter_candidates(all_candidates, chunk_transcripts)
+        for _n in _ts_notes:
+            print(f"  [WARN] 타임스탬프 불일치 → 후보 제외: {_n}")
+        if len(all_candidates) != _before:
+            print(f"  [WARN] 후보 {_before}개 중 {_before - len(all_candidates)}개가 "
+                  f"타임스탬프 불일치로 제외됨 (남은 {len(all_candidates)}개)")
 
     # ═══════════════════════════════════════
     # [9/15] 관계 그래프 추출
