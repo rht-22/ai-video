@@ -92,3 +92,24 @@ def test_accepts_speech_segment_objects_not_only_dicts():
     # dict 혼용도 그대로
     mixed = segs + [{"start_sec": 600.0, "end_sec": 605.0, "text": "다른 대사"}]
     assert find_quote_times(quote, mixed)
+
+
+def test_timeline_accepts_speechsegment_objects():
+    """🛑 회귀 방지 — 실행 경로의 세그먼트는 dict 가 아니라 SpeechSegment 객체다.
+    dict 전용 s.get() 가정이면 AttributeError 로 생성이 rc=1 로 죽는다
+    (2026-08-06 맥5 실측: 커리어데이 EP2 수동 생성 즉사)."""
+    from app.modules.speech import SpeechSegment
+    obj_segments = [SpeechSegment(start_sec=s["start_sec"], end_sec=s["end_sec"], text=s["text"])
+                    for s in SEGMENTS]
+    good, bad = _cand(515.0, 530.0), _cand(830.0, 887.0)
+    keep, notes = filter_candidates([good, bad], [{"segments": obj_segments}])
+    assert keep == [good] and len(notes) == 1
+
+
+def test_filter_candidates_accepts_object_chunks():
+    # 청크 묶음이 객체로 와도 죽지 않아야 한다 — 세그먼트와 같은 이유(21d2a18 의 남은 절반)
+    from types import SimpleNamespace
+    from app.modules.speech import SpeechSegment
+    chunk = SimpleNamespace(segments=[SpeechSegment(start_sec=518.9, end_sec=524.2, text=LINE)])
+    assert filter_candidates([_cand(515.0, 530.0)], [chunk])[0] != []
+    assert filter_candidates([_cand(830.0, 887.0)], [chunk])[0] == []

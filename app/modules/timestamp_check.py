@@ -62,20 +62,20 @@ def _timeline(segments: list[dict]) -> tuple[str, list[tuple[float, float]]]:
     인용이 실제로 연속해서 발화된 위치만 잡힌다."""
     buf, spans = [], []
     for s in segments or []:
-        # 세그먼트는 두 모양으로 들어온다 — 파이프라인 실물은 SpeechSegment(dataclass),
-        # 청크 전사 체크포인트·테스트는 dict. dict 만 가정하면 실행 경로 전체가
-        # AttributeError 로 죽는다(2026-08-06 맥1 실측 — 3채널 연속 rc=1).
+        # ⚠️ 세그먼트는 dict(체크포인트 JSON) 와 SpeechSegment 객체(파이프라인 실행 경로)
+        # 둘 다 온다 — dict 전용 s.get() 만 쓰면 실행 경로에서 AttributeError 로 생성이 통째로
+        # 죽는다 (2026-08-06 맥5 실측: 커리어데이 EP2 생성 rc=1).
         if isinstance(s, dict):
-            text_raw, st_raw, en_raw = s.get("text"), s.get("start_sec"), s.get("end_sec")
+            raw_text, raw_st, raw_en = s.get("text"), s.get("start_sec"), s.get("end_sec")
         else:
-            text_raw = getattr(s, "text", None)
-            st_raw = getattr(s, "start_sec", None)
-            en_raw = getattr(s, "end_sec", None)
-        text = normalize(text_raw)
+            raw_text = getattr(s, "text", None)
+            raw_st = getattr(s, "start_sec", None)
+            raw_en = getattr(s, "end_sec", None)
+        text = normalize(raw_text)
         if not text:
             continue
         try:
-            st, en = float(st_raw), float(en_raw)
+            st, en = float(raw_st), float(raw_en)
         except (TypeError, ValueError):
             continue
         buf.append(text)
@@ -133,9 +133,12 @@ def filter_candidates(candidates: list[dict], transcripts: list[dict],
 
     전사는 청크별로 오지만 **후보와 같은 절대 시간축**이라 전부 합쳐서 본다 — 청크 경계
     근처의 대사가 옆 청크 전사에만 있는 경우를 놓치지 않기 위해서다."""
-    segments: list[dict] = []
+    segments: list = []
     for ct in transcripts or []:
-        segments.extend(ct.get("segments") or [])
+        # 청크 묶음도 dict·객체 두 모양이 가능하다 — 세그먼트와 같은 이유(체크포인트 JSON ↔
+        # 파이프라인 메모리). 여기서 막지 않으면 위에서 고친 것과 똑같은 자리에서 생성이 죽는다.
+        segs = ct.get("segments") if isinstance(ct, dict) else getattr(ct, "segments", None)
+        segments.extend(segs or [])
     if not segments:
         return list(candidates or []), []
 
