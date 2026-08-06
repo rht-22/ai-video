@@ -523,6 +523,66 @@ def _build_crop_expr(keyframes: list[dict], axis: str) -> str:
     return expr
 
 
+def sanitize_clips(
+    clips: list[StoryClip],
+    source_duration_sec: float | None,
+    *,
+    min_len_sec: float = 0.2,
+    max_overshoot_sec: float = 3.0,
+) -> tuple[list[StoryClip], list[str]]:
+    """렌더 전에 **물리적으로 불가능한 컷**을 걸러낸다 → (살아남은 컷, 사유 메모). 순수.
+
+    왜 필요한가: ffmpeg 는 이런 컷을 만나면 `-ss`/`-to` 단계에서 죽거나(Invalid argument)
+    비디오 0프레임짜리 파일을 만들어 낸다. 그 실패는 **분석이 다 끝난 렌더 단계**에서야
+    드러나므로 30~90분과 Gemini 비용을 그대로 버린다. 2026-08-05 하루에 두 번 겪었다:
+      · 샤먼 2화  — 컷 [948, 997] 인데 소스는 875초 → 0프레임 → 블랙프레임 검사가 exit 234
+      · 약한영웅  — 컷 [2348.68, 2348.52] (시작>끝) → `Error opening input files: Invalid argument`
+    두 경우 다 여기서 한 번 보면 걸러진다.
+
+    고치는 방향은 **안전측 축소**뿐이다 — 범위를 넘으면 자르고, 자를 수 없으면 버린다.
+    없는 구간을 만들어내지 않는다(추측 금지).
+
+    ⚠️ **크게 넘친 컷은 자르지 않고 버린다**(max_overshoot_sec). 소수점 몇 초는 경계 반올림이지만,
+    수십 초씩 넘치는 것은 그 청크의 **시간축 자체가 밀렸다는 신호**라 잘라낸 구간의 내용도 믿을 수
+    없다(2026-08-06 샤먼 2화: 인용 대사의 실제 위치가 310초 어긋나 있었다). 잘라서 렌더하면
+    엉뚱한 장면이 조용히 발행되므로, 실패로 두는 편이 안전하다. 내용 대조는 별도로
+    modules/timestamp_check 가 렌더 전에 한다."""
+    clean: list[StoryClip] = []
+    notes: list[str] = []
+    dur = float(source_duration_sec) if source_duration_sec else None
+
+    for i, c in enumerate(clips):
+        try:
+            start, end = float(c.start_sec), float(c.end_sec)
+        except (TypeError, ValueError):
+            notes.append(f"컷{i} 버림 — 시간이 숫자가 아님({c.start_sec!r}~{c.end_sec!r})")
+            continue
+        if start != start or end != end:            # NaN
+            notes.append(f"컷{i} 버림 — 시간이 NaN")
+            continue
+
+        if start < 0:
+            notes.append(f"컷{i} 시작 {start:.2f}s → 0s 로 보정")
+            start = 0.0
+        if dur is not None and end > dur + max_overshoot_sec:
+            notes.append(f"컷{i} 버림 — 끝 {end:.2f}s 가 소스 길이 {dur:.2f}s 를 "
+                         f"{end - dur:.1f}s 초과(경계 오차가 아니라 시간축이 밀린 것)")
+            continue
+        if dur is not None and end > dur:
+            notes.append(f"컷{i} 끝 {end:.2f}s → 소스 길이 {dur:.2f}s 로 잘림(경계 오차)")
+            end = dur
+        if dur is not None and start >= dur:
+            notes.append(f"컷{i} 버림 — 시작 {start:.2f}s 가 소스 길이 {dur:.2f}s 밖")
+            continue
+        if end - start < min_len_sec:
+            notes.append(f"컷{i} 버림 — 길이 {end - start:.2f}s (시작 {start:.2f} ≥ 끝 {end:.2f} 포함)")
+            continue
+
+        clean.append(c if (start == c.start_sec and end == c.end_sec)
+                     else replace(c, start_sec=start, end_sec=end))
+    return clean, notes
+
+
 @dataclass(frozen=True)
 class RenderInputs:
     video_path: Path
@@ -562,6 +622,29 @@ def render_short(inputs: RenderInputs) -> list[str]:
 
     if not inputs.clips:
         raise ValueError("렌더링할 clips가 비어 있습니다.")
+
+    # ── 컷 시간 검증 (렌더 전) ──
+    # 소스 길이는 ffprobe 1회(≈50ms). 실패하면 길이 검사만 건너뛰고 시작>끝 검사는 그대로 한다
+    # — 프로브가 안 된다고 렌더를 막으면 종전에 되던 것까지 막힌다.
+    try:
+        from app.modules.media_probe import probe_media
+        source_duration = probe_media(inputs.video_path).duration_sec
+    except Exception as e:  # noqa: BLE001 — 프로브 실패는 치명적이지 않다
+        print(f"  [WARN] 소스 길이 확인 실패 — 길이 검사 생략: {e}")
+        source_duration = None
+
+    clean_clips, notes = sanitize_clips(list(inputs.clips), source_duration)
+    for n in notes:
+        print(f"  [WARN] 컷 검증: {n}")
+    if not clean_clips:
+        raise ValueError(
+            "렌더 가능한 컷이 없습니다 — 모든 컷이 소스 범위 밖이거나 시작≥끝입니다"
+            + (f" (소스 {source_duration:.2f}s)" if source_duration else "")
+            + f". 원본 컷: {[(c.start_sec, c.end_sec) for c in inputs.clips]}"
+        )
+    if len(clean_clips) != len(inputs.clips):
+        print(f"  [WARN] 컷 {len(inputs.clips)}개 중 {len(clean_clips)}개만 렌더합니다")
+    inputs = replace(inputs, clips=clean_clips)
 
     # 제목 자동 줄바꿈 처리 (캔버스 너비 초과 시)
     def _wrap_text(text: str, max_width_px: int, font_size: int) -> str:
