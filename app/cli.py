@@ -107,6 +107,8 @@ def build_parser() -> argparse.ArgumentParser:
     design.add_argument("--design-work-title-y", type=int, default=None, help="작품명 Y 위치 (기본: 1560)")
     design.add_argument("--design-aspect-ratio", type=str, default=None, help="비디오 영역 비율 (예: 16:9, 4:3, 1:1)")
     design.add_argument("--design-title-font", type=str, default=None, help="제목 폰트명")
+    design.add_argument("--design-subtitle-font", type=str, default=None,
+                        help="자막/TTS 자막 폰트명 (기본: 장르 프리셋 폰트). 일본어 등 프리셋 폰트에 없는 글리프가 필요할 때 지정")
     design.add_argument("--design-title-size", type=int, default=None, help="제목 폰트 크기")
     design.add_argument("--design-title-color", type=str, default=None, help="제목 1번째 줄 색상 (기본: white)")
     design.add_argument("--design-title-color2", type=str, default=None, help="제목 2번째 줄 색상 (기본: #FFFF00)")
@@ -144,6 +146,7 @@ _CLI_TO_DESIGN_FIELD = {
     "design_work_title_y": "work_title_y",
     "design_aspect_ratio": "aspect_ratio",
     "design_title_font": "title_font",
+    "design_subtitle_font": "subtitle_font",
     "design_title_size": "title_size",
     "design_subtitle_size": "subtitle_size",
     "design_subtitle_color": "subtitle_color",
