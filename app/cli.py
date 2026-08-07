@@ -112,8 +112,6 @@ def build_parser() -> argparse.ArgumentParser:
     design.add_argument("--design-title-size", type=int, default=None, help="제목 폰트 크기")
     design.add_argument("--design-title-color", type=str, default=None, help="제목 1번째 줄 색상 (기본: white)")
     design.add_argument("--design-title-color2", type=str, default=None, help="제목 2번째 줄 색상 (기본: #FFFF00)")
-    design.add_argument("--design-subtitle-font", type=str, default=None,
-                        help="자막·TTS 폰트명 (기본: 여기어때 잘난체 2 TTF)")
     design.add_argument("--design-subtitle-size", type=int, default=None, help="자막 폰트 크기")
     design.add_argument("--design-subtitle-color", type=str, default=None,
                         help="메인 자막 색상 (#RRGGBB 또는 &H00BBGGRR). 미지정 시 장르 프리셋 색상 사용.")
@@ -150,7 +148,6 @@ _CLI_TO_DESIGN_FIELD = {
     "design_title_font": "title_font",
     "design_subtitle_font": "subtitle_font",
     "design_title_size": "title_size",
-    "design_subtitle_font": "subtitle_font",
     "design_subtitle_size": "subtitle_size",
     "design_subtitle_color": "subtitle_color",
     "design_subtitle_y_margin": "subtitle_y_margin",
