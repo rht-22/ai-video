@@ -3159,7 +3159,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             print(f"\n  ── 쇼츠 #{var_num} (점수: {var_score:.2f}) ──")
             print(f"  제목: {var_title}")
 
-            if var_video.exists():
+            # exists-스킵은 변이 렌더 도중 죽은 실행을 재개할 때 완성분을 다시 그리지 않기 위한 것.
+            # ⚠️ --from-step render 는 **명시적 재렌더 요청**이라 스킵하면 안 된다 — 기존 변이가
+            # 옛 디자인 플래그로 만든 것일 수 있다(2026-08-07 실측: 채널 템플릿 재렌더에서
+            # shorts_1 만 새로 그려지고 shorts_2 는 옛 디자인으로 남아 검수함에 그대로 올라감).
+            if var_video.exists() and from_step != "render":
                 print(f"  → 이미 존재: {var_video.name}")
                 all_output_videos.append(var_video)
                 continue
