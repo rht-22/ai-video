@@ -130,6 +130,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="로고 이미지 세로 상한(px). 지정 시 (가로x세로) 박스에 비율 유지로 맞춘다")
     design.add_argument("--design-work-align", type=str, default=None, choices=["top", "center"],
                         help="로고 세로 정렬. top=영상 하단에 붙임(기본) · center=하단 밴드 중앙")
+    design.add_argument("--no-reframe", action="store_true",
+                        help="얼굴 추종 크롭(리프레이밍) 끄기 — 원본을 가운데 정렬로 넣는다. "
+                             "인물이 고정된 인터뷰 소재에 적합하고(확대하면 원본 자막이 잘린다) "
+                             "크롭 타임라인 생성을 건너뛰어 생성도 빨라진다")
     # 라운드 10: 자막 스타일 프리셋 (auto = 장르 기반 자동 선택)
     design.add_argument(
         "--design-subtitle-style",
@@ -170,6 +174,10 @@ def _build_design_config(args: argparse.Namespace) -> DesignConfig:
         value = getattr(args, cli_name, None)
         if value is not None:
             overrides[field_name] = value
+
+    # 리프레이밍 스위치 — store_true 라 None 이 아니어서 위 루프에 못 태운다(끄는 쪽만 의미 있음).
+    if getattr(args, "no_reframe", False):
+        overrides["enable_reframe"] = False
 
     # 자막/TTS 색상은 ASS 형식(&HAABBGGRR) — 사용자가 #RRGGBB로 줘도 받도록 정규화.
     # (제목·작품명 색은 ffmpeg drawtext라 hex를 그대로 쓰므로 변환하지 않는다)

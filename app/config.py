@@ -62,6 +62,14 @@ class DesignConfig:
     # Phase 12: 인물 인식 기반 얼굴 추적 (deepface + TMDb 배우 사진)
     enable_face_recognition: bool = True
 
+    # 리프레이밍(얼굴 추종 크롭) 자체를 끈다 — False 면 크롭 타임라인을 만들지도, 쓰지도 않고
+    # 원본을 가운데 정렬로 넣는다. 위 두 플래그는 '누구를 따라갈지'를 고르는 것이라 꺼도 크롭은
+    # 계속 일어난다는 점에서 다르다.
+    # 왜 필요한가(2026-08-10 커리어데이 실측): 인물이 고정된 인터뷰 소재는 얼굴로 확대할 이유가
+    # 적은데, 확대하면 **원본에 박힌 자막이 잘려나간다**. 크롭 타임라인 생성은 resources 단계에서
+    # 가장 느린 축이라 끄면 생성도 그만큼 빨라진다.
+    enable_reframe: bool = True
+
 @dataclass(frozen=True)
 class AppConfig:
     chunk_seconds: int = 600

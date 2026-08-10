@@ -2807,7 +2807,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     if start_idx <= step_idx["resources"] and checkpoint_resources.exists() and not _resources_invalidate:
         print("\n[13/15] 리소스 로드 중...")
         resources_data = json.loads(checkpoint_resources.read_text(encoding="utf-8"))
-        crop_map = {k: Path(v) for k, v in resources_data["crop_map"].items()}
+        # --no-reframe 로 재렌더할 때 캐시된 크롭을 그대로 쓰면 플래그가 무시된다
+        # (재렌더는 resources 를 다시 만들지 않으므로 여기서 걸러야 한다).
+        crop_map = ({} if not getattr(payload.design, "enable_reframe", True)
+                    else {k: Path(v) for k, v in resources_data["crop_map"].items()})
         tts_cue_files = resources_data.get("tts_cue_files", []) or []
         print(f"  - 크롭 타임라인: {len(crop_map)}개, TTS cue 오디오: {len(tts_cue_files)}개")
         print("[OK] 리소스 로드 완료 (체크포인트에서)")
@@ -2834,12 +2837,19 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
         # 얼굴 크롭 타임라인
         crop_map = {}
-        print(f"  크롭 타임라인 생성 중... ({len(clips)}개 클립)")
+        # enable_reframe=False (--no-reframe) 면 크롭 타임라인을 아예 만들지 않는다. 렌더러는
+        # crop_map 에 없는 클립을 가운데 정렬로 넣으므로 빈 dict 가 곧 '리프레이밍 없음'이다.
+        # 이 단계가 resources 에서 가장 느리므로 생성 시간도 그만큼 줄어든다.
+        _reframe_on = getattr(payload.design, "enable_reframe", True)
+        if not _reframe_on:
+            print(f"  크롭 타임라인 생략 (--no-reframe) — 원본 가운데 정렬로 렌더")
+        else:
+            print(f"  크롭 타임라인 생성 중... ({len(clips)}개 클립)")
         # 라운드 24: 컷 경계 위치 점프 완화. 직전 클립의 마지막 keyframe(x,y)과 타겟 인물을 다음 호출에 sticky anchor 로 전달.
         prev_anchor_x: float | None = None
         prev_anchor_y: float | None = None
         prev_focus_char: str | None = None
-        for idx, clip in enumerate(clips):
+        for idx, clip in enumerate(clips) if _reframe_on else []:
             crop_path = output_dir / f"crop_{clip.role}_{idx}.json"
             # 라운드 19A: ≥2 character_focus + face_identifier/character_index 가능하면 멀티 크롭 (와이드 프레이밍)
             multi_targets = list(clip.character_focus) if (clip.character_focus and len(clip.character_focus) >= 2) else None
@@ -2934,12 +2944,14 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     else:
         if checkpoint_resources.exists():
             resources_data = json.loads(checkpoint_resources.read_text(encoding="utf-8"))
-            crop_map = {k: Path(v) for k, v in resources_data["crop_map"].items()}
+            crop_map = ({} if not getattr(payload.design, "enable_reframe", True)
+                        else {k: Path(v) for k, v in resources_data["crop_map"].items()})
             tts_cue_files = resources_data.get("tts_cue_files", []) or []
         elif edit_plan_path.exists():
             edit_plan = json.loads(edit_plan_path.read_text(encoding="utf-8"))
             crop_map = {}
-            for idx, clip_data in enumerate(edit_plan["timeline"]):
+            for idx, clip_data in (enumerate(edit_plan["timeline"])
+                                   if getattr(payload.design, "enable_reframe", True) else []):
                 crop_filename = clip_data["reframe"]["crop_timeline_ref"]
                 crop_path = output_dir / crop_filename
                 if crop_path.exists():
@@ -3271,9 +3283,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     build_tts_ass(var_tts_segs, var_tts_sub_path, var_tts_line_style)
                     var_tts_sub_final = var_tts_sub_path
 
-                # 얼굴 크롭 타임라인
+                # 얼굴 크롭 타임라인 (--no-reframe 면 정본과 같이 생략 — 빈 map = 가운데 정렬)
                 var_crop_map = {}
-                for cidx, cclip in enumerate(var_clips):
+                for cidx, cclip in enumerate(var_clips) if getattr(payload.design, "enable_reframe", True) else []:
                     crop_file = output_dir / f"crop_{var_num}_{cclip.role}_{cidx}.json"
                     var_target_char = cclip.character_focus[0] if cclip.character_focus and face_identifier else None
                     build_crop_timeline(
@@ -3454,10 +3466,12 @@ def _build_edit_plan(
                 "clip_end_sec": clip.end_sec,
                 "subtitle": clip.subtitle,
                 "use_original_audio": clip.use_original_audio,
-                "reframe": {
-                    "mode": "face_track",
-                    "crop_timeline_ref": crop_map[f"{clip.role}_{idx}"].name,
-                },
+                # --no-reframe 면 crop_map 이 비어 있다 — 예전엔 여기서 KeyError 로 죽었다.
+                "reframe": (
+                    {"mode": "face_track",
+                     "crop_timeline_ref": crop_map[f"{clip.role}_{idx}"].name}
+                    if f"{clip.role}_{idx}" in crop_map else {"mode": "center"}
+                ),
             }
         )
     return {
