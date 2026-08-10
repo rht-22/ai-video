@@ -1511,9 +1511,23 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             }
     else:
         safe_title = payload.work_title.replace(" ", "_")
-        job_id = f"{safe_title}_{uuid.uuid4().hex[:2]}"
-        output_dir = payload.outdir / job_id
-        output_dir.mkdir(parents=True, exist_ok=True)
+        # run_id 충돌 방지 (2026-08 맥2·맥4 실측):
+        # 접미가 2자리(256가지)면 작품당 run 이 쌓일수록 충돌이 필연이었다
+        # (참교육 8번째 run, 산지직송 11번째 run 에서 발생). 상태 파일·DB·검수함
+        # 업로더가 모두 job_id 를 키로 쓰기 때문에, 충돌하면 신규 장면이 옛 run 의
+        # 기록에 가려져 에러 없이 조용히 누락된다. 8자리로 확대해 실질 소멸시킨다.
+        # 아래 exist_ok=False 재시도는 같은 outdir 안의 충돌만 잡는 최소 가드이며,
+        # 옛 job 폴더가 정리된 뒤의 충돌은 잡지 못한다 → 러너 쪽 확정 시점 가드가 별도로 필요.
+        for _attempt in range(8):
+            job_id = f"{safe_title}_{uuid.uuid4().hex[:8]}"
+            output_dir = payload.outdir / job_id
+            try:
+                output_dir.mkdir(parents=True, exist_ok=False)
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise RuntimeError(f"job_id 발급 실패: {safe_title} 의 고유 job_id 를 8회 시도 안에 얻지 못했습니다.")
         # PR-5c-3/4: 제거된 단계의 옛 checkpoint 자동 삭제 (마이그레이션).
         # exclusion → chunk_intro_credits_ranges (PR-2), tts_plan → storyline.tts_cues (PR-4),
         # transcribe → chunk_transcripts 슬라이스 (PR-5c-4, full_audio.json 사라짐).
