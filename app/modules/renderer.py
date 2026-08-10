@@ -854,8 +854,16 @@ def _to_short_path(path: str) -> str:
 
 def _escape_text_for_drawtext(text: str) -> str:
     # drawtext에서 문제가 되는 문자 이스케이프
+    # ※ '%'는 여기서 처리하지 않는다. drawtext가 '%'를 확장 문법으로 해석해
+    #    해당 필터를 통째로 스킵(rc=0, "Stray %" 경고만)하는 문제는 호출부의
+    #    expansion=none 으로 막는다. '%%' 치환은 동작하지 않음(실측).
+    # ※ 작은따옴표는 이스케이프가 아니라 **타이포그래피 따옴표(’)로 치환**한다. drawtext 의
+    #    text 는 작은따옴표로 감싸는데, 그 안에서는 백슬래시가 이스케이프로 동작하지 않아
+    #    "\'" 를 넣으면 필터 파싱이 깨져 그 줄이 통째로 사라진다(% 와 같은 침묵 실패).
+    #    실측한 대안 중 "\\'" 는 백슬래시가 화면에 찍히고, "'\''" 는 따옴표가 사라진다 —
+    #    글자가 그대로 보이는 방법은 ’ 치환뿐이었다(2026-08-10, ffmpeg 7.1.5/8.1.2).
     text = text.replace("\\", "\\\\")
-    text = text.replace("'", "\\'")
+    text = text.replace("'", "’")
     text = text.replace(":", "\\:")
     text = text.replace("[", "\\[")
     text = text.replace("]", "\\]")
@@ -1095,7 +1103,7 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         next_label = f"[title_{visual_idx}]"
 
         filters.append(
-            f"{last_v_label}drawtext=fontfile='{font_arg}':text='{escaped_full}':"
+            f"{last_v_label}drawtext=expansion=none:fontfile='{font_arg}':text='{escaped_full}':"
             f"fontcolor={base_color}:fontsize={font_size}:"
             f"x=(w-text_w)/2:y={y_pos}{next_label}"
         )
@@ -1160,7 +1168,7 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         if work_y_final + _estimated_text_h > H - 20:
             work_y_final = max(_safe_work_top, H - _estimated_text_h - 20)
         escaped_val = _escape_text_for_drawtext(raw_work)
-        filters.append(f"{last_v_label}drawtext=fontfile='{font_arg}':text='{escaped_val}':fontcolor={d.work_color}:fontsize={d.work_font_size}:x=(w-text_w)/2:y={work_y_final}{work_label}")
+        filters.append(f"{last_v_label}drawtext=expansion=none:fontfile='{font_arg}':text='{escaped_val}':fontcolor={d.work_color}:fontsize={d.work_font_size}:x=(w-text_w)/2:y={work_y_final}{work_label}")
 
   
     # [7] 자막(ASS) 적용
