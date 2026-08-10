@@ -3052,7 +3052,34 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             _cli_override = getattr(payload.design, "subtitle_style_preset", None)
             _empty_sub_style, _ = select_subtitle_style(_genre_tag, _cli_override, None)
             build_ass_from_segments([], subtitle_path, _empty_sub_style, tts_time_ranges=None)
-            tts_subtitle_path = None
+            # fix(subtitle): 대사 자막이 0개여도 TTS 내레이션 자막은 독립적으로 표시한다
+            #   (renderer.py:540 주석의 의도 — TTS 자막은 메인 자막과 무관). 이전엔 여기서
+            #   None으로 꺼버려 TTS 음성만 나오고 자막이 사라지는 버그가 있었다.
+            tts_line_segs = []
+            for _cf in tts_cue_files:
+                _cue = _cf.get("cue", {})
+                _cue_start = float(_cue.get("start_sec", 0.0))
+                _cue_end = float(_cue.get("end_sec", 0.0))
+                _mp3_path = _cf.get("path")
+                if _mp3_path and Path(_mp3_path).exists():
+                    _mp3_dur = _get_audio_duration(Path(_mp3_path))
+                    if _mp3_dur > 0:
+                        _cue_end = _cue_start + _mp3_dur
+                tts_line_segs.append(SimpleNamespace(
+                    start_sec=_cue_start, end_sec=_cue_end, text=str(_cue.get("text", "")),
+                ))
+            if tts_line_segs:
+                tts_line_style = SubtitleStyle(
+                    font_name=payload.design.subtitle_font,
+                    font_size=payload.design.tts_line_font_size,
+                    primary_color=payload.design.tts_line_color,
+                    margin_v=payload.design.tts_line_y_margin,
+                )
+                tts_subtitle_path = output_dir / "tts_subtitles.ass"
+                build_tts_ass(tts_line_segs, tts_subtitle_path, tts_line_style)
+                print(f"  [OK] TTS 자막 파일 생성 완료 (대사자막 0건): {tts_subtitle_path}")
+            else:
+                tts_subtitle_path = None
 
         # 최종 렌더링
         print(f"  최종 영상 렌더링 중... (출력: {output_video})")

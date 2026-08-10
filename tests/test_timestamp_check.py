@@ -78,6 +78,22 @@ def test_filter_passes_through_when_no_transcript():
     assert filter_candidates(cands, [])[0] == cands
 
 
+def test_accepts_speech_segment_objects_not_only_dicts():
+    """🛑 회귀 방지 — 파이프라인 실물 세그먼트는 SpeechSegment(dataclass)다.
+
+    dict 만 가정한 `s.get("text")` 가 실행 경로 전체를 AttributeError 로 죽여
+    2026-08-06 맥1 에서 3채널 연속 생성 실패(rc=1)를 냈다. 두 모양 다 받아야 한다."""
+    from app.modules.speech import SpeechSegment
+    segs = [SpeechSegment(start_sec=518.9, end_sec=524.2,
+                          text="언니가 지금 하는 쏘맥 비율은 코미디 빅리그 녹화 끝나고 먹는 비율이야")]
+    quote = "언니가 지금 하는 쏘맥 비율은 코미디 빅리그 녹화 끝나고 먹는 비율이야"
+    hits = find_quote_times(quote, segs)
+    assert hits and hits[0] == (518.9, 524.2)
+    # dict 혼용도 그대로
+    mixed = segs + [{"start_sec": 600.0, "end_sec": 605.0, "text": "다른 대사"}]
+    assert find_quote_times(quote, mixed)
+
+
 def test_timeline_accepts_speechsegment_objects():
     """🛑 회귀 방지 — 실행 경로의 세그먼트는 dict 가 아니라 SpeechSegment 객체다.
     dict 전용 s.get() 가정이면 AttributeError 로 생성이 rc=1 로 죽는다

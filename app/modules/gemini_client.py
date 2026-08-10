@@ -73,6 +73,58 @@ def _extract_json_from_markdown(text: str) -> str:
     return text.strip()
 
 
+def _finish_reason(response: Any) -> str:
+    """응답이 왜 끝났는지(STOP/MAX_TOKENS/SAFETY…). 안전차단·토큰한도를 파싱 잡음과 구분하는 데 쓴다."""
+    try:
+        reason = response.candidates[0].finish_reason
+        return str(getattr(reason, "name", reason))
+    except Exception:
+        return "unknown"
+
+
+def _dump_gemini_response(raw_text: str, response: Any, payload: dict[str, Any], kind: str) -> Path | None:
+    """파싱이 흔들린 응답 원문을 파일로 남긴다.
+
+    지금까지 실패 원문이 어디에도 안 남아(성공분만 run_log_gemini.json 에 기록) 'JSON이 깨졌다'는
+    사실만 알고 무엇이 왜 깨졌는지는 볼 수 없었다. 원인 추적의 전제라 실패·구제 양쪽 다 남긴다.
+    """
+    try:
+        base = Path(os.getenv("AI_VIDEO_ROOT") or ".") / "outputs" / "_gemini_failures"
+        base.mkdir(parents=True, exist_ok=True)
+        path = base / (
+            f"{time.strftime('%Y%m%d_%H%M%S')}_chunk{payload.get('chunk_index', 'na')}"
+            f"_{kind}_{os.getpid()}.txt"
+        )
+        header = [
+            f"# kind={kind}",
+            f"# chunk_index={payload.get('chunk_index')}",
+            f"# chunk={payload.get('chunk_start_sec')}~{payload.get('chunk_end_sec')}초",
+            f"# finish_reason={_finish_reason(response)}",
+            f"# usage={getattr(response, 'usage_metadata', None)}",
+            f"# raw_len={len(raw_text)}",
+            "---- raw response.text ----",
+        ]
+        path.write_text("\n".join(header) + "\n" + raw_text, encoding="utf-8")
+        return path
+    except Exception as dump_err:  # 진단용이므로 실패해도 본 흐름을 막지 않는다
+        print(f"    [WARN] 응답 원문 보존 실패: {type(dump_err).__name__}: {dump_err}")
+        return None
+
+
+def _loads_first_json(text: str) -> tuple[Any, int]:
+    """맨 앞의 완결된 JSON 값 하나만 읽고, 뒤에 붙은 것은 버린다. → (값, 버린 길이)
+
+    Gemini 응답이 한 덩어리가 아니라 두 덩어리로 이어붙어 오는 사고가 잦다(2026-08-03 실측:
+    분석 호출 22회 중 12회 파싱 실패). SDK 의 response.text 가 답변 파트를 구분자 없이 이어붙여
+    `{...}{...}` 가 되기 때문이고, json.loads 는 이걸 'Extra data' 로 거부한다. 첫 값만 취하면
+    그 유형은 그대로 살아난다. 이어붙은 자리가 컨테이너 **안쪽**이면(=Expecting ',' delimiter)
+    이 방법으로도 못 살리므로, 그때는 원문을 남기고 종전대로 재시도한다.
+    """
+    decoder = json.JSONDecoder()
+    data, end = decoder.raw_decode(text)
+    return data, len(text) - end
+
+
 
 # ─────────────────────────────────────────────
 # 청크 분석 프롬프트 (멀티모달 분석 + 핵심 필드 보존)
@@ -1386,7 +1438,7 @@ def _normalize_storyline_tts_cues(
 class GeminiConfig:
     api_key: str
     model_name: str = "gemini-3.5-flash"
-    flash_model_name: str = "gemini-3.5-flash"
+    flash_model_name: str = "gemini-3.6-flash"
     max_retries: int = 3
     # Google 공식 가이드(Gemini 3.x): temperature/top_p/top_k 같은 샘플링 매개변수는
     # 설정하지 말고 기본값을 따르도록 권장. 카테고리별 thinking_level만 제어한다.
@@ -1585,7 +1637,23 @@ class GeminiClient:
                             raise RuntimeError(error_msg)
                         print(f"    [WARN] {error_msg} 재시도 중... ({attempt + 1}/{self.config.max_retries})")
                         continue
-                    data = json.loads(json_text)
+                    try:
+                        data, dropped_tail = _loads_first_json(json_text)
+                    except json.JSONDecodeError:
+                        # 원문을 남기고 종전대로 재시도한다(3회 소진 시 상위로 전파).
+                        dump_path = _dump_gemini_response(text, response, payload, kind="failed")
+                        print(
+                            f"    [WARN] 응답 파싱 실패 — finish_reason={_finish_reason(response)}"
+                            f"{f', 원문 보존: {dump_path}' if dump_path else ''}"
+                        )
+                        raise
+                    if dropped_tail:
+                        dump_path = _dump_gemini_response(text, response, payload, kind="salvaged")
+                        print(
+                            f"    [WARN] 응답 뒤에 {dropped_tail}자가 더 붙어 있어 버리고 첫 JSON만 사용 "
+                            f"(finish_reason={_finish_reason(response)})"
+                            f"{f', 원문 보존: {dump_path}' if dump_path else ''}"
+                        )
                     # Gemini가 JSON 배열로 응답하는 경우 첫 번째 요소 사용
                     if isinstance(data, list):
                         data = data[0] if data else {}
@@ -2221,7 +2289,7 @@ def load_gemini_client() -> GeminiClient:
             "Please set it in .env file or as an environment variable."
         )
     model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-3.1-pro-preview")
-    flash_model_name = os.getenv("GEMINI_FLASH_MODEL_NAME", "gemini-3-flash-preview")
+    flash_model_name = os.getenv("GEMINI_FLASH_MODEL_NAME", "gemini-3.6-flash")
     max_retries = int(os.getenv("GEMINI_MAX_RETRIES", "3"))
     analysis_thinking_level = os.getenv("GEMINI_ANALYSIS_THINKING_LEVEL", "medium")
     relationship_thinking_level = os.getenv("GEMINI_RELATIONSHIP_THINKING_LEVEL", "medium")
