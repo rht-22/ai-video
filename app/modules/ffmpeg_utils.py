@@ -2,9 +2,20 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
+
+# 지원하는 ffmpeg 메이저 버전.
+# 8.x 는 자막 필터(`ass=…:fontsdir=…`)와 `-filter_complex_script` 문법을 거부해
+# 렌더 단계(15단계 중 14번째)에서 실패한다. 생성 1편이 ~68분이라, 다 돌린 뒤
+# 마지막에 죽으면 손실이 크다 → 시작 시점에 막는다.
+SUPPORTED_FFMPEG_MAJORS = (6, 7)
+
+# 검사를 건너뛰는 탈출구. 새 ffmpeg 를 시험할 때만 쓴다.
+ALLOW_UNSUPPORTED_FFMPEG_ENV = "AI_VIDEO_ALLOW_UNSUPPORTED_FFMPEG"
 
 
 def _get_windows_common_paths() -> list[Path]:
@@ -98,4 +109,64 @@ def find_ffmpeg_command(cmd_name: str) -> str:
         f"{'='*60}\n"
     )
     raise FileNotFoundError(error_msg)
+
+
+def get_ffmpeg_major_version(ffmpeg_path: str) -> int | None:
+    """`ffmpeg -version` 첫 줄에서 메이저 버전을 뽑는다.
+
+    Returns:
+        메이저 버전 정수. 실행에 실패하거나 형식을 못 읽으면 None
+        (git 빌드처럼 `ffmpeg version N-xxxxx` 형태면 버전을 알 수 없다).
+    """
+    try:
+        result = subprocess.run(
+            [ffmpeg_path, "-version"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    match = re.search(r"ffmpeg version\s+n?(\d+)\.", result.stdout or "")
+    return int(match.group(1)) if match else None
+
+
+def ensure_ffmpeg_supported() -> None:
+    """지원하지 않는 ffmpeg 면 즉시 중단한다. 긴 생성 전에 호출할 것.
+
+    버전을 읽지 못하면(예: git 빌드) 경고만 남기고 통과시킨다 —
+    확인 불가를 실패로 취급하면 정상 환경까지 막힌다.
+
+    Raises:
+        RuntimeError: 지원 목록 밖의 메이저 버전일 때.
+    """
+    if os.getenv(ALLOW_UNSUPPORTED_FFMPEG_ENV):
+        return
+
+    ffmpeg_path = find_ffmpeg_command("ffmpeg")
+    major = get_ffmpeg_major_version(ffmpeg_path)
+
+    if major is None:
+        print(f"  [WARN] ffmpeg 버전을 확인하지 못했습니다 ({ffmpeg_path}) — 검사를 건너뜁니다.")
+        return
+
+    if major in SUPPORTED_FFMPEG_MAJORS:
+        return
+
+    supported = "/".join(str(v) for v in SUPPORTED_FFMPEG_MAJORS)
+    raise RuntimeError(
+        f"\n{'='*60}\n"
+        f"오류: 지원하지 않는 ffmpeg 버전입니다 — {major}.x\n"
+        f"{'='*60}\n"
+        f"경로: {ffmpeg_path}\n"
+        f"필요: ffmpeg {supported}.x\n\n"
+        f"8.x 는 자막 필터(ass=…:fontsdir=…)와 -filter_complex_script 문법을 거부해\n"
+        f"렌더 단계에서 실패합니다. 생성을 다 돌린 뒤 마지막에 죽는 것을 막기 위해\n"
+        f"시작 시점에 중단했습니다.\n\n"
+        f"macOS 해결:\n"
+        f"  brew install ffmpeg@7\n"
+        f"  brew unlink ffmpeg && brew link --force --overwrite ffmpeg@7\n"
+        f"  ffmpeg -version   # 7.x 확인\n\n"
+        f"검사를 건너뛰려면(권장하지 않음): {ALLOW_UNSUPPORTED_FFMPEG_ENV}=1\n"
+        f"{'='*60}\n"
+    )
 
