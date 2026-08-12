@@ -32,6 +32,11 @@ def _strip_emoji(text: str) -> str:
     return _EMOJI_RE.sub("", text).strip()
 
 
+# 짧은 소재 완화의 바닥값(초). 후보 커버리지가 이보다도 짧으면 완화하지 않는다 —
+# 쇼츠로 성립하지 않는 길이까지 내려서 억지로 뽑느니 검증에서 걸리는 편이 낫다.
+_ABS_MIN_DURATION_SEC = 15
+
+
 def _snap_clip_boundaries_to_dialogue(
     variants: list[tuple[list[StoryClip], str, float]],
     transcript_segments: list,
@@ -98,6 +103,141 @@ def _snap_clip_boundaries_to_dialogue(
             print(f"  [snap] 마지막 clip end: {last.end_sec:.2f}s → {new_last_end:.2f}s (대사 여운 포함)")
         new_variants.append((new_clips, sl_title, sl_score))
     return new_variants
+
+
+def _candidate_coverage_sec(candidates: list[dict]) -> float:
+    """후보들이 덮는 원본 구간의 *합집합* 길이(초). context_extension 범위까지 포함.
+
+    소재가 짧아 후보가 몇 개 안 나오면(예: 66s 소스 → 후보 2개) 어떤 조합으로도
+    min_duration_sec 을 못 채운다. 그 상황을 호출부가 미리 알아야 LLM·length fit 이
+    같은 구간을 두 번 넣어 길이를 맞추는 일을 막을 수 있다.
+    """
+    spans: list[tuple[float, float]] = []
+    for cand in candidates or []:
+        if not isinstance(cand, dict):
+            continue
+        try:
+            start = float(cand.get("start_sec"))
+            end = float(cand.get("end_sec"))
+        except (TypeError, ValueError):
+            continue
+        ext = cand.get("context_extension") or {}
+        if ext.get("needed"):
+            try:
+                start = min(start, float(ext.get("extended_start_sec", start)))
+                end = max(end, float(ext.get("extended_end_sec", end)))
+            except (TypeError, ValueError):
+                pass
+        if end > start:
+            spans.append((start, end))
+    if not spans:
+        return 0.0
+    spans.sort()
+    total = 0.0
+    cur_start, cur_end = spans[0]
+    for start, end in spans[1:]:
+        if start <= cur_end:
+            cur_end = max(cur_end, end)
+        else:
+            total += cur_end - cur_start
+            cur_start, cur_end = start, end
+    return total + (cur_end - cur_start)
+
+
+def _dedup_storyline_clips(
+    clips: list[StoryClip],
+    min_keep_sec: float = 1.5,
+) -> tuple[list[StoryClip], dict[int, int], str]:
+    """한 storyline 안에서 원본 구간이 겹치는 clip 을 잘라내거나 제거한다.
+
+    후보가 부족하면 compose_story 가 같은 candidate 를 hook 과 build 에 그대로 두 번
+    배치한다(2026-08-12 스트릿 레스토랑 파이터: hook·build 모두 32~50s). 그러면 완성본에서
+    같은 화면이 두 번 재생된다. _validate_storyline_timeline 은 hook↔payoff 만 보므로
+    여기서 시간축 기준으로 직접 복구한다.
+
+    - 앞선 clip 이 이미 쓴 구간은 뒤 clip 에서 뺀다 (payoff 는 앞이 잘려 reveal 이 남는다)
+    - 남은 조각이 없거나 min_keep_sec 미만이면 그 clip 을 통째로 버린다
+
+    Returns: (복구된 clips, {원래 index: 새 index}, 사람용 요약 메시지)
+    """
+    kept: list[StoryClip] = []
+    index_map: dict[int, int] = {}
+    covered: list[tuple[float, float]] = []
+    msgs: list[str] = []
+
+    for orig_idx, clip in enumerate(clips):
+        pieces: list[tuple[float, float]] = []
+        cursor = clip.start_sec
+        for cov_start, cov_end in covered:
+            if cov_end <= cursor:
+                continue
+            if cov_start >= clip.end_sec:
+                break
+            if cov_start > cursor:
+                pieces.append((cursor, min(cov_start, clip.end_sec)))
+            cursor = max(cursor, cov_end)
+            if cursor >= clip.end_sec:
+                break
+        if cursor < clip.end_sec:
+            pieces.append((cursor, clip.end_sec))
+
+        pieces = [(s, e) for s, e in pieces if e > s]
+        if not pieces:
+            msgs.append(f"{clip.role}({clip.start_sec:.1f}~{clip.end_sec:.1f}s) 전체 중복 → 제거")
+            continue
+        new_start, new_end = max(pieces, key=lambda p: p[1] - p[0])
+        if new_end - new_start < min_keep_sec:
+            msgs.append(
+                f"{clip.role}({clip.start_sec:.1f}~{clip.end_sec:.1f}s) 잔여 "
+                f"{new_end - new_start:.1f}s < {min_keep_sec}s → 제거"
+            )
+            continue
+        if (new_start, new_end) != (clip.start_sec, clip.end_sec):
+            msgs.append(
+                f"{clip.role} {clip.start_sec:.1f}~{clip.end_sec:.1f}s → "
+                f"{new_start:.1f}~{new_end:.1f}s (겹침 제거)"
+            )
+            clip = replace(clip, start_sec=new_start, end_sec=new_end)
+
+        index_map[orig_idx] = len(kept)
+        kept.append(clip)
+
+        # covered 갱신 (정렬 + 인접/중첩 병합)
+        covered.append((new_start, new_end))
+        covered.sort()
+        merged: list[tuple[float, float]] = []
+        for span in covered:
+            if merged and span[0] <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], span[1]))
+            else:
+                merged.append(span)
+        covered = merged
+
+    return kept, index_map, "; ".join(msgs)
+
+
+def _remap_cue_clip_indexes(raw_cues, index_map: dict[int, int]):
+    """_dedup_storyline_clips 로 clip 이 빠지면 LLM cue 의 clip_index 도 밀린다.
+
+    사라진 clip 을 가리키던 cue 는 드롭 (하류 정규화가 어차피 범위 밖으로 버린다).
+    """
+    if not raw_cues or not index_map:
+        return raw_cues
+    out = []
+    for cue in raw_cues:
+        if not isinstance(cue, dict) or "clip_index" not in cue:
+            out.append(cue)
+            continue
+        try:
+            old_idx = int(cue["clip_index"])
+        except (TypeError, ValueError):
+            continue
+        if old_idx not in index_map:
+            continue
+        new_cue = dict(cue)
+        new_cue["clip_index"] = index_map[old_idx]
+        out.append(new_cue)
+    return out
 
 
 def _extend_storyline_for_narrative(
@@ -2222,19 +2362,33 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         story_data = json.loads(checkpoint_story.read_text(encoding="utf-8"))
 
         # 멀티쇼츠 체크포인트 로드
+        # 중복 복구는 여기서도 돈다 — 중복이 든 채 저장된 옛 체크포인트로 재렌더하면
+        # 같은 결과물이 다시 나오기 때문(2026-08-12 스트릿 레스토랑 파이터 EP1).
         if "variants" in story_data:
             for v in story_data["variants"]:
                 v_clips = [StoryClip(**c) for c in v["clips"]]
+                v_clips, v_cue_map, v_dedup_msg = _dedup_storyline_clips(v_clips)
+                if v_dedup_msg:
+                    print(f"  [clip-dedup] 체크포인트 스토리라인: {v_dedup_msg}")
+                if not v_clips:
+                    continue
                 all_storyline_variants.append((v_clips, v["title_text"], v.get("score", 0.0)))
                 # PR-4: 캐시된 storyline 에 tts_cues 가 있으면 함께 로드, 없으면 [] (fallback)
-                storyline_tts_cues_pool.append(list(v.get("tts_cues") or []))
+                storyline_tts_cues_pool.append(
+                    list(_remap_cue_clip_indexes(list(v.get("tts_cues") or []), v_cue_map))
+                )
             print(f"  - {len(all_storyline_variants)}개 스토리라인 로드")
         else:
             # 하위 호환: 이전 단일 체크포인트
             clips = [StoryClip(**clip) for clip in story_data["clips"]]
+            clips, _ckpt_cue_map, _ckpt_dedup_msg = _dedup_storyline_clips(clips)
+            if _ckpt_dedup_msg:
+                print(f"  [clip-dedup] 체크포인트 스토리라인: {_ckpt_dedup_msg}")
             title_text = story_data["title_text"]
             all_storyline_variants.append((clips, title_text, 1.0))
-            storyline_tts_cues_pool.append(list(story_data.get("tts_cues") or []))
+            storyline_tts_cues_pool.append(
+                list(_remap_cue_clip_indexes(list(story_data.get("tts_cues") or []), _ckpt_cue_map))
+            )
             print(f"  - {len(clips)}개 클립, 제목: {title_text}")
         print("[OK] 스토리 구성 결과 로드 완료 (체크포인트에서)")
 
@@ -2271,6 +2425,21 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     _m["transcript"] = _combined
                     _updated += 1
         print(f"  candidate.transcript 갱신: {_updated}/{len(all_candidates)}건")
+
+        # 짧은 소재 완화 — 후보 커버리지가 min_duration_sec 에 못 미치면 이번 런의 최소 길이를
+        # 커버리지까지 내린다. 안 내리면 LLM(프롬프트의 최소 길이)과 _fit_storyline_to_duration 이
+        # 40s 를 맞추려고 같은 구간을 두 번 넣는다 — 2026-08-12 스트릿 레스토랑 파이터 EP1
+        # (66s 소스 · 후보 2개 · 커버리지 28s)에서 hook·build 가 똑같이 32~50s 로 나왔다.
+        # 정상 소재의 40~60s 정책은 그대로 — 후보를 다 써도 못 채우는 경우에만 적용된다.
+        _coverage_sec = _candidate_coverage_sec(all_candidates)
+        _short_source = _coverage_sec + 0.5 < float(config.min_duration_sec)
+        if _short_source:
+            _eff_min = max(_ABS_MIN_DURATION_SEC, int(_coverage_sec))
+            print(
+                f"  [short-source] 후보 커버리지 {_coverage_sec:.1f}s < 최소 {config.min_duration_sec}s "
+                f"→ 이번 런 최소 길이 {_eff_min}s 로 완화 (같은 구간 중복 사용 방지)"
+            )
+            config = replace(config, min_duration_sec=_eff_min)
 
         # Gemini 바이럴 스토리 구성 (Flash + skeleton). 점수 산정은 Gemini가 description/highlight_eligible 등으로 직접 판단
         story_plan = gemini.compose_story_with_context(
@@ -2342,6 +2511,15 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 print(f"  - 스토리라인 {sl_idx + 1} 파싱 실패: {e}")
                 continue
 
+            # 같은 원본 구간이 두 번 들어간 storyline 복구 (후보 부족 시 LLM 이 hook·build 에
+            # 같은 candidate 를 배치한다). _validate_storyline_timeline 은 hook↔payoff 만 본다.
+            sl_clips, _cue_index_map, _dedup_msg = _dedup_storyline_clips(sl_clips)
+            if _dedup_msg:
+                print(f"  [clip-dedup] 스토리라인 {sl_idx + 1}: {_dedup_msg}")
+            if not sl_clips:
+                print(f"  [SKIP] 스토리라인 {sl_idx + 1}: 중복 제거 후 남는 클립 없음")
+                continue
+
             # TTS cue 앵커 기준 클립 — LLM 의 clip_index 는 storyline 구조(hook→build→payoff)
             # 그대로의 배열을 가리키므로, beat trim/length fit 으로 쪼개지기 *전* 을 잡아둔다.
             _anchor_clips = list(sl_clips)
@@ -2386,6 +2564,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 min_clip_count = 1
             elif _seq_type == "시퀀스블록형":
                 min_clip_count = 1
+            elif _short_source:
+                # 짧은 소재: 중복 제거 후 클립이 1개만 남을 수 있다. 같은 장면을 한 번 더
+                # 붙여 2개를 만드는 것보다 1클립으로 내보내는 편이 낫다.
+                min_clip_count = 1
             else:
                 min_clip_count = 2
             is_valid, msg = validate_story_clips(
@@ -2406,6 +2588,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             _raw_cues = sl_data.get("tts_cues") if isinstance(sl_data.get("tts_cues"), list) else None
             if _raw_cues is None and isinstance(sl_data.get("storyline"), dict):
                 _raw_cues = sl_data["storyline"].get("tts_cues") if isinstance(sl_data["storyline"].get("tts_cues"), list) else None
+            # 중복 제거로 clip 이 빠졌으면 cue 의 clip_index 도 새 배열 기준으로 옮긴다.
+            _raw_cues = _remap_cue_clip_indexes(_raw_cues, _cue_index_map)
             _normalized_cues = _normalize_storyline_tts_cues(
                 _raw_cues or [],
                 anchor_clips=_anchor_clips,
@@ -2427,13 +2611,18 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     candidates_lookup=candidates_lookup,
                     boundary_alias=boundary_alias,
                 )
+                # 폴백은 검증을 안 거치는 경로다 — 중복 복구만은 반드시 통과시킨다.
+                # (이 경로가 열려 있으면 위에서 걸러도 같은 화면이 두 번 든 결과물이 그대로 나간다)
+                fb_clips, _fb_cue_map, _fb_dedup_msg = _dedup_storyline_clips(fb_clips)
+                if _fb_dedup_msg:
+                    print(f"  [clip-dedup] 폴백 스토리라인: {_fb_dedup_msg}")
                 all_storyline_variants.append((fb_clips, fb_title, sel.get("score", 0.5)))
                 # PR-4: 폴백 storyline 도 tts_cues 정규화 후 parallel pool 등록
                 _fb_raw_cues = sel.get("tts_cues") if isinstance(sel.get("tts_cues"), list) else None
                 if _fb_raw_cues is None and isinstance(sel.get("storyline"), dict):
                     _fb_raw_cues = sel["storyline"].get("tts_cues") if isinstance(sel["storyline"].get("tts_cues"), list) else None
                 storyline_tts_cues_pool.append(_normalize_storyline_tts_cues(
-                    _fb_raw_cues or [],
+                    _remap_cue_clip_indexes(_fb_raw_cues, _fb_cue_map) or [],
                     anchor_clips=fb_clips,
                     max_cues=5,
                 ))
@@ -2742,6 +2931,21 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             print(f"  [length-clamp] {_vt[:18]}: {_before:.1f}s → {_after:.1f}s (≤{_clamp_max:.1f}s)")
         _clamped_variants.append((_vc2, _vt, _vs))
     all_storyline_variants = _clamped_variants
+
+    # 렌더 직전 backstop: snap/extend/fill·clamp 가 clip 을 옮기면서 겹침이 다시 생겼을 수 있다.
+    # 여기까지 통과한 시간이 곧 concat 될 구간이라, 중복은 이 지점에서 마지막으로 끊는다.
+    _deduped_variants: list[tuple[list[StoryClip], str, float]] = []
+    for _vi, (_vc, _vt, _vs) in enumerate(all_storyline_variants):
+        _vc2, _vmap, _vmsg = _dedup_storyline_clips(_vc)
+        if _vmsg:
+            print(f"  [clip-dedup/final] {_vt[:18]}: {_vmsg}")
+            if _vi < len(storyline_tts_cues_pool):
+                storyline_tts_cues_pool[_vi] = list(
+                    _remap_cue_clip_indexes(storyline_tts_cues_pool[_vi], _vmap)
+                )
+        _deduped_variants.append((_vc2 or _vc, _vt, _vs))
+    all_storyline_variants = _deduped_variants
+
     if all_storyline_variants:
         clips = list(all_storyline_variants[0][0])
 
