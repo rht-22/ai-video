@@ -103,3 +103,67 @@ def test_coverage_unions_disjoint_and_ignores_broken_rows():
     ]
     assert _candidate_coverage_sec(candidates) == 60.0
     assert _candidate_coverage_sec([]) == 0.0
+
+
+# ── 선공개형 훅(케이스 3) — 의도된 반복은 보존 ──────────────────────────────
+# hook_preview 로 페이오프의 핵심 몇 초를 앞에 보여주고, 뒤에서 같은 장면을
+# 온전히 다시 재생하는 편집 문법. gemini_client 스토리 프롬프트가 명시적으로
+# 지시하는 정식 기능이므로 dedup 이 이 반복을 잘라내면 안 된다.
+
+def test_preview_hook_pattern_is_preserved():
+    # 훅: 페이오프의 제일 웃긴 2초 맛보기 (100~102) / 빌드: 상황 설명 (50~70)
+    # 페이오프: 그 장면 전체 (90~110) — 100~102 는 의도적으로 두 번 나온다
+    clips = [
+        _clip("hook", 100.0, 102.0, cand=1),
+        _clip("build", 50.0, 70.0, cand=0),
+        _clip("payoff", 90.0, 110.0, cand=1),
+    ]
+    out, index_map, msg = _dedup_storyline_clips(clips)
+    # 세 clip 모두 원형 그대로 — payoff 가 쪼개지거나 잘리면 안 된다
+    assert [(c.role, c.start_sec, c.end_sec) for c in out] == [
+        ("hook", 100.0, 102.0),
+        ("build", 50.0, 70.0),
+        ("payoff", 90.0, 110.0),
+    ]
+    assert index_map == {0: 0, 1: 1, 2: 2}
+    assert "선공개" in msg
+
+
+def test_preview_absorbed_payoff_case3_overlap_branch():
+    # 케이스 3 overlap 분기: hook 본체가 payoff 에 흡수된 형태.
+    # preview 구간 == hook 전체 구간(라운드 8c same_cand 케이스)이라도
+    # 흡수된 payoff 가 더 길면(진부분집합) 반복이 유지된다.
+    clips = [
+        _clip("hook", 1194.0, 1215.0, cand=0),     # preview (resolve 로 본체 시간 복원됨)
+        _clip("build", 900.0, 930.0, cand=2),
+        _clip("payoff", 1180.0, 1240.0, cand=0),   # hook 본체 흡수 → preview ⊂ payoff
+    ]
+    out, _, msg = _dedup_storyline_clips(clips)
+    assert [(c.start_sec, c.end_sec) for c in out] == [
+        (1194.0, 1215.0), (900.0, 930.0), (1180.0, 1240.0)]
+    assert "선공개" in msg
+
+
+def test_identical_spans_are_not_treated_as_preview():
+    # 사고 케이스 회귀: 완전 동일 구간(진부분집합 아님)은 선공개가 아니라 중복이다
+    out, _, msg = _dedup_storyline_clips(_INCIDENT_CLIPS)
+    assert [(c.role, c.start_sec, c.end_sec) for c in out] == [
+        ("hook", 32.0, 50.0),
+        ("payoff", 50.0, 60.0),
+    ]
+    assert "선공개" not in msg
+
+
+def test_preview_does_not_shield_a_third_duplicate():
+    # preview(2s) + 본편(20s) 반복은 허용하되, 본편이 *또* 반복되면 그건 중복이다
+    clips = [
+        _clip("hook", 100.0, 102.0, cand=1),
+        _clip("payoff", 90.0, 110.0, cand=1),
+        _clip("build", 90.0, 110.0, cand=1),   # 세 번째 등장 — 제거 대상
+    ]
+    out, index_map, _ = _dedup_storyline_clips(clips)
+    assert [(c.role, c.start_sec, c.end_sec) for c in out] == [
+        ("hook", 100.0, 102.0),
+        ("payoff", 90.0, 110.0),
+    ]
+    assert index_map == {0: 0, 1: 1}

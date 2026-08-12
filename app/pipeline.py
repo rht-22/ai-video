@@ -158,6 +158,14 @@ def _dedup_storyline_clips(
     - 앞선 clip 이 이미 쓴 구간은 뒤 clip 에서 뺀다 (payoff 는 앞이 잘려 reveal 이 남는다)
     - 남은 조각이 없거나 min_keep_sec 미만이면 그 clip 을 통째로 버린다
 
+    ⚠ 선공개형 훅(케이스 3, _clips_from_storyline)은 예외 — hook_preview 로 페이오프의
+    핵심 몇 초를 앞에 보여주고 뒤에서 같은 장면을 온전히 다시 재생하는 *의도된* 반복이다
+    (gemini_client.py 스토리 프롬프트: "같은 장면이 두 번 등장하므로 hook_preview 는
+    임팩트 핵심만 짧게"). 시그니처는 "앞선 clip 구간이 뒤 clip 구간의 진부분집합" —
+    맛보기(수 초)가 본편(더 긺) 안에 통째로 들어 있다. 이런 clip 은 잘라내지도,
+    사용 구간으로 등록하지도 않는다. 사고 케이스(hook==build 완전 동일 / payoff 부분
+    겹침)는 진부분집합이 아니라 이 예외에 걸리지 않는다.
+
     Returns: (복구된 clips, {원래 index: 새 index}, 사람용 요약 메시지)
     """
     kept: list[StoryClip] = []
@@ -165,7 +173,26 @@ def _dedup_storyline_clips(
     covered: list[tuple[float, float]] = []
     msgs: list[str] = []
 
+    def _is_intended_preview(idx: int) -> bool:
+        """뒤에 오는 clip 이 이 clip 의 구간을 진부분집합으로 품으면 선공개 맛보기."""
+        me = clips[idx]
+        for later in clips[idx + 1:]:
+            contains = later.start_sec <= me.start_sec and me.end_sec <= later.end_sec
+            strictly_longer = (later.end_sec - later.start_sec) > (me.end_sec - me.start_sec)
+            if contains and strictly_longer:
+                return True
+        return False
+
     for orig_idx, clip in enumerate(clips):
+        if _is_intended_preview(orig_idx):
+            # 선공개형: 그대로 통과 + covered 미등록 → 뒤의 온전한 재생이 잘리지 않는다
+            msgs.append(
+                f"{clip.role}({clip.start_sec:.1f}~{clip.end_sec:.1f}s) 선공개 맛보기 — 반복 유지"
+            )
+            index_map[orig_idx] = len(kept)
+            kept.append(clip)
+            continue
+
         pieces: list[tuple[float, float]] = []
         cursor = clip.start_sec
         for cov_start, cov_end in covered:
