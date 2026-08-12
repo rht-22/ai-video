@@ -343,3 +343,53 @@ def test_aggressive_removes_more_silence_than_conservative():
     cons_removed = sum(r.total_removed_sec for r in cons)
     aggr_removed = sum(r.total_removed_sec for r in aggr)
     assert aggr_removed > cons_removed
+
+
+def test_gap_level_overlapping_transcript_segments_never_overlap_output():
+    """🛑 회귀 방지 — 청크 오버랩(180s) 이중 전사가 겹치는 keep-interval 을 만들면 안 된다.
+
+    실측 사고(2026-08-06 킥킥극장 SNL_2a/shorts_3): 두 청크가 같은 대사를 각각 전사해
+    세그먼트가 겹치는데, gap 판정이 직전 세그먼트 하나만 봐서 이미 덮인 구간 한가운데서
+    새 섬을 열었다 → keep-interval [918.00~930.16] 과 [928.15~933.55] 가 2.01초 겹쳐
+    완성본에서 같은 대사가 두 번 재생됐다. 아래 세그먼트 값은 그 산출물의
+    checkpoint_chunk_transcripts.json 실측값 그대로다.
+    """
+    clip = _clip(918.0, 933.55)
+    segs = [
+        _seg(918.5, 926.5, "앞부분 대사"),
+        _seg(926.96, 930.04, "아니 그게 무슨 소리 하는 거예요"),        # chunk1 전사
+        _seg(927.39, 927.91, "해봐."),                                  # chunk2 이중 전사
+        _seg(928.27, 930.03, "아니 그게 무슨 소리 하는 거예요, 진짜"),  # chunk2 이중 전사
+        _seg(930.5, 933.4, "뒷부분 대사"),
+    ]
+    lookup = {(0, 0): _candidate(description="평범한 장면")}
+    res = cut_silence_with_story_filter([clip], segs, lookup, profile=AGGRESSIVE_PROFILE)
+    ivs = res[0].keep_intervals
+    # ① 출력 섬들이 시간순이며 서로 겹치지 않는다 — 핵심 불변식
+    for a, b in zip(ivs, ivs[1:]):
+        assert a.end_sec <= b.start_sec, f"겹침: {a} ↔ {b}"
+    # ② 이중 전사 지점(926.96~930.04)이 하나의 섬으로 병합된다 —
+    #    사고 당시엔 928.27 앞 0.36s 가 '안전 gap' 으로 오판돼 섬이 갈라졌다
+    covering = [iv for iv in ivs if iv.start_sec <= 927.0 and iv.end_sec >= 930.0]
+    assert len(covering) == 1
+
+
+def test_gap_level_contained_duplicate_segment_dropped():
+    """뒤 세그먼트가 앞 섬에 완전히 포함되면(완전 포함 이중 전사) 별도 섬을 만들지 않는다.
+
+    실측: 락커룸 payoff 1705.77~1720.50 안에 1712.11~1715.96 이 통째로 들어간 채
+    별도 keep-interval 로 살아남아 8.39초가 중복 재생됐다(2026-08-06)."""
+    clip = _clip(1700.0, 1745.0)
+    segs = [
+        _seg(1705.8, 1720.4, "긴 대사 한 덩어리"),
+        _seg(1712.11, 1715.96, "긴 대사 한 덩"),   # 앞 세그먼트 안의 이중 전사
+        _seg(1721.0, 1740.0, "다음 대사"),
+    ]
+    lookup = {(0, 0): _candidate(description="평범한 장면")}
+    res = cut_silence_with_story_filter([clip], segs, lookup, profile=AGGRESSIVE_PROFILE)
+    ivs = res[0].keep_intervals
+    for a, b in zip(ivs, ivs[1:]):
+        assert a.end_sec <= b.start_sec, f"겹침: {a} ↔ {b}"
+    # 1712~1716 중복이 1705~1720 섬 안에 흡수돼 사라졌는지
+    inside = [iv for iv in ivs if 1706.0 <= iv.start_sec <= 1716.0]
+    assert inside == []
