@@ -1459,6 +1459,9 @@ class PipelineInput:
     skip_credits_sec: float = 0.0
     # 출력 라우드니스 정규화 목표(LUFS). None 이면 비활성(A/B 대조군). RenderInputs 로 전달.
     loudness_target_lufs: float | None = -14.0
+    # 사람이 직전 결과를 반려한 사유. 영상 분석(analyze_chunk)과 스토리 구성 프롬프트에
+    # '재작업 지시'로 주입된다. None 이면 프롬프트가 종전과 완전히 동일하다.
+    reject_note: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1941,6 +1944,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             prompt_payload = {
                 "work_title": payload.work_title,
                 "topic": payload.topic,
+                "reject_note": payload.reject_note,
                 "previous_episodes_context": payload.previous_episodes_context,
                 "work_context": payload.work_context,
                 "chunk_index": chunk.index,
@@ -2277,6 +2281,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             max_duration_sec=config.max_duration_sec,
             work_context=payload.work_context,
             previous_episodes_context=payload.previous_episodes_context,
+            reject_note=payload.reject_note,
             relationship_edges=relationship_edges or None,
             chunk_meta=chunk_meta_list or None,
         )

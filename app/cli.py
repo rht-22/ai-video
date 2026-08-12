@@ -78,6 +78,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Start from specific step (requires --job-id)",
     )
     create.add_argument("--job-id", help="Job ID to resume from (for --from-step)")
+    create.add_argument(
+        "--reject-note", dest="reject_note", default=None,
+        help="(선택) 직전 결과가 사람에게 반려된 사유. 영상 분석·스토리 구성 프롬프트에 "
+             "'이번엔 이것을 고쳐라'로 주입된다 — VES 검수함의 반려 사유가 여기로 들어온다.",
+    )
     create.add_argument("--previous-context", help="이전 에피소드 요약 텍스트 (직접 입력)")  # 이전 맥락 부여 테스트
     create.add_argument("--previous-context-file", help="이전 에피소드 요약이 담긴 텍스트 파일 경로")  # 이전 맥락 부여 테스트
     create.add_argument("--work-context", help="작품 설명/시놉시스 텍스트 (직접 입력)")
@@ -311,6 +316,7 @@ def main() -> None:
                 skip_intro_sec=getattr(args, "skip_intro", 0.0),
                 skip_credits_sec=getattr(args, "skip_credits", 0.0),
                 loudness_target_lufs=_parse_loudness(getattr(args, "loudness_lufs", "-14")),
+                reject_note=getattr(args, "reject_note", None),
             ),
             from_step=args.from_step,
             job_id=args.job_id,

@@ -1450,6 +1450,23 @@ class GeminiConfig:
     research_thinking_level: str = "medium"         # "minimal" | "low" | "medium" | "high"
 
 
+
+def _format_reject_note(reject_note, use_case: str = "analysis") -> str:
+    """사람이 직전 결과를 반려한 사유 → 프롬프트 뒤에 붙일 '재작업 지시' 블록.
+
+    빈 값이면 빈 문자열을 돌려준다 — 반려가 없던 실행은 프롬프트가 종전과 한 글자도 다르지 않다.
+    (VES 검수함에서 '영상 분석'·'스토리 구성' 유형으로 반려하면 그 사유가 여기로 들어온다.)
+    """
+    note = (reject_note or "").strip()
+    if not note:
+        return ""
+    what = ("이번 분석에서" if use_case == "analysis" else "이번 스토리 구성에서")
+    return (
+        "\n\n[재작업 지시 — 사람이 직전 결과를 반려했다]\n"
+        f"반려 사유: {note}\n"
+        f"{what} 위 지적을 반드시 반영하라. 같은 실수를 되풀이한 결과는 다시 반려된다.\n"
+    )
+
 class GeminiClient:
     def __init__(self, config: GeminiConfig) -> None:
         self.config = config
@@ -1549,6 +1566,7 @@ class GeminiClient:
             character_appearances_block=character_appearances_block,
             min_candidates=min_candidates,
         )
+        prompt += _format_reject_note(payload.get("reject_note"), use_case="analysis")
 
         video_path = payload.get("video_path")
         content_parts = [prompt]
@@ -1872,6 +1890,7 @@ class GeminiClient:
         max_duration_sec: float = 60.0,
         work_context: str | None = None,
         previous_episodes_context: str | None = None,
+        reject_note: str | None = None,
         relationship_edges: list[dict] | None = None,
         chunk_meta: list[dict] | None = None,
     ) -> dict[str, Any]:
@@ -1930,6 +1949,8 @@ class GeminiClient:
                 if rule:
                     lines.append(f"  ↳ 규칙: {rule}")
             prompt += "\n".join(lines)
+
+        prompt += _format_reject_note(reject_note, use_case="story")
 
         for attempt in range(self.config.max_retries):
             try:
