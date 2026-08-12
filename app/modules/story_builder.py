@@ -184,6 +184,13 @@ def validate_clip_coherence(
             warnings.append(
                 f"[clip {i}] 큰 시간 점프 ({gap:.0f}초)"
             )
+        # 같은 role 인접 컷의 원본 구간 겹침 — 그대로 렌더되면 같은 대사가 두 번 재생된다
+        # (2026-08-06 실측). 다른 role 간 겹침은 선공개형 훅(의도된 반복)일 수 있어 경고하지 않는다.
+        if gap < 0 and prev.role == curr.role:
+            warnings.append(
+                f"[clip {i}] 같은 role({curr.role}) 인접 컷 겹침 {-gap:.2f}초 "
+                f"({prev.start_sec:.2f}~{prev.end_sec:.2f} ↔ {curr.start_sec:.2f}~{curr.end_sec:.2f})"
+            )
         # 인물 단절
         if prev.character_focus and curr.character_focus:
             prev_set = set(prev.character_focus)

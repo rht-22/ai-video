@@ -406,28 +406,42 @@ def _cut_clip_gap_level(
 
     out: list[Interval] = []
     cur = padded[0]
+    # 🛑 gap 판정은 '지금까지 소비한 최대 종료점(cover_end)' 기준이어야 한다. 직전 세그먼트
+    # 하나만 보면(구현이 그랬다) 청크 오버랩(180s)으로 이중 전사된 세그먼트가 이미 덮인
+    # 구간 한가운데서 양수 gap 으로 읽혀 새 섬을 열고, keep-interval 끼리 겹쳐 **같은 대사가
+    # 두 번 재생**된다(2026-08-06 실측: 918.00~930.16 / 928.15~933.55, 2.01s 중복).
+    # _cut_clip_whole(위)·cut_silence_from_clips 의 merge 규약을 이 함수에도 적용한 것.
+    cover_end = clip_segments[0].end_sec
     for i in range(1, len(clip_segments)):
         prev_seg, this_seg = clip_segments[i - 1], clip_segments[i]
-        raw_gap = this_seg.start_sec - prev_seg.end_sec
+        raw_gap = this_seg.start_sec - cover_end
         should_cut = (
             raw_gap >= profile.max_gap_sec
             and _is_gap_safe_to_cut(cand, prev_seg, this_seg, profile)
         )
         if should_cut:
-            # 안전한 gap — 현재 섬을 닫고 다음 섬 시작 (사이 무음 제거)
+            # 안전한 gap — 현재 섬을 닫고 다음 섬 시작 (사이 무음 제거).
+            # 새 섬은 직전 섬 끝 이전으로 되감지 않는다(겹침 차단).
             out.append(cur)
-            cur = padded[i]
+            cur = Interval(max(padded[i].start_sec, cur.end_sec), padded[i].end_sec)
         elif cap is not None and raw_gap > cap:
             # 보호하지만 cap 초과 무음 — 가운데를 잘라 cap(양쪽 cap/2)만 유지
             half = cap / 2.0
-            left_end = min(clip.end_sec, prev_seg.end_sec + half)
+            left_end = min(clip.end_sec, cover_end + half)
             right_start = max(clip.start_sec, this_seg.start_sec - half)
-            out.append(Interval(cur.start_sec, max(cur.end_sec, left_end)))
-            cur = Interval(min(padded[i].start_sec, right_start), padded[i].end_sec)
+            closed = Interval(cur.start_sec, max(cur.end_sec, left_end))
+            out.append(closed)
+            cur = Interval(max(min(padded[i].start_sec, right_start), closed.end_sec),
+                           padded[i].end_sec)
         else:
             # 보호(또는 작은 gap) — 두 섬을 잇는다 (무음 유지)
             cur = Interval(cur.start_sec, max(cur.end_sec, padded[i].end_sec))
+        cover_end = max(cover_end, this_seg.end_sec)
     out.append(cur)
+
+    # 완전 포함 방어: 클램프로 길이가 0 이하가 된 섬(뒤 조각이 앞 섬에 통째로 덮임)은
+    # 내용이 이미 앞 섬에 있으므로 버린다(실측 4건이 이 유형).
+    out = [iv for iv in out if iv.end_sec > iv.start_sec]
 
     return _finalize(clip, _absorb_short_intervals(out, profile.min_interval_sec))
 
