@@ -1619,6 +1619,10 @@ class PipelineInput:
     srt_path: Path | None = None
     show_subtitles: bool = True
     show_tts_subtitles: bool = True
+    # JP 파이프라인(2026-08-13): ai-video 는 '내용까지만' — 텍스트·TTS 는 현지화가 일본어로.
+    show_title_overlay: bool = True     # False = 상단 제목·하단 작품명 오버레이 생략
+    include_tts_audio: bool = True      # False = TTS 오디오 믹스 생략(원본 오디오만).
+                                        #   tts_subtitles.ass 는 계속 생성 — 현지화 타이밍 원료
     max_shorts: int = 3
     skip_research: bool = False
     episode: int | None = None
@@ -3347,8 +3351,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             clips=clips,
             subtitle_path=subtitle_path if (payload.show_subtitles and subtitle_path.exists()) else None,
             crop_timeline_map=crop_map,
-            title_text=title_text,
-            work_title=payload.work_title,
+            title_text=title_text if payload.show_title_overlay else "",
+            work_title=payload.work_title if payload.show_title_overlay else "",
             design=updated_design,
             output_path=output_video,
             loudness_target_lufs=payload.loudness_target_lufs,
@@ -3357,7 +3361,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             top_title_height=config.top_title_height,
             bottom_label_height=config.bottom_label_height,
             tts_subtitle_path=tts_subtitle_path if payload.show_tts_subtitles else None,
-            tts_cue_files=tts_cue_files if tts_cue_files else None,
+            tts_cue_files=(tts_cue_files
+                           if (tts_cue_files and payload.include_tts_audio) else None),
             original_audio_gain_db=config.original_gain_db,
             tts_audio_gain_db=config.tts_gain_db,
             render_preset=config.render_preset,
@@ -3594,8 +3599,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     clips=var_clips,
                     subtitle_path=var_sub_path if (payload.show_subtitles and var_sub_path.exists()) else None,
                     crop_timeline_map=var_crop_map,
-                    title_text=var_title,
-                    work_title=payload.work_title,
+                    title_text=var_title if payload.show_title_overlay else "",
+                    work_title=payload.work_title if payload.show_title_overlay else "",
                     design=updated_design,
                     output_path=var_video,
                     loudness_target_lufs=payload.loudness_target_lufs,
@@ -3604,7 +3609,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     top_title_height=config.top_title_height,
                     bottom_label_height=config.bottom_label_height,
                     tts_subtitle_path=var_tts_sub_final if payload.show_tts_subtitles else None,
-                    tts_cue_files=var_tts_cue_files if var_tts_cue_files else None,
+                    tts_cue_files=(var_tts_cue_files
+                                   if (var_tts_cue_files and payload.include_tts_audio)
+                                   else None),
                     original_audio_gain_db=config.original_gain_db,
                     tts_audio_gain_db=config.tts_gain_db,
                     render_preset=config.render_preset,
