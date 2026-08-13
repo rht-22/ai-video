@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -8,6 +10,19 @@ from pathlib import Path
 class YouTubeAssets:
     video_path: Path
     subtitle_path: Path | None
+
+
+def video_id_of(url: str) -> str:
+    """URL → 유튜브 영상 ID (캐시 경로 구분용). 못 뽑으면 URL 해시로 폴백.
+
+    다운로드 경로가 작품 제목만으로 정해지면, 같은 작품의 다른 영상(URL)을 같은
+    머신에서 돌릴 때 yt-dlp 가 기존 source.mp4 를 보고 다운로드를 건너뛰어
+    **이전 영상으로 쇼츠를 만든다** — 경로에 영상 ID 를 넣어 원천 단위로 가른다."""
+    m = re.search(r"(?:v=|youtu\.be/|/shorts/|/live/|/embed/)([\w-]{11})(?![\w-])",
+                  str(url or ""))
+    if m:
+        return m.group(1)
+    return hashlib.sha256(str(url or "").encode("utf-8")).hexdigest()[:16]
 
 
 def download_youtube_assets(

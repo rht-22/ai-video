@@ -273,12 +273,15 @@ def main() -> None:
         # 입력 소스 해소: YouTube URL이면 자동 다운로드, 아니면 로컬 파일 사용
         if getattr(args, "youtube_url", None):
             import re
-            from app.modules.youtube_downloader import download_youtube_assets
+            from app.modules.youtube_downloader import download_youtube_assets, video_id_of
 
             def _slugify(s: str) -> str:
                 return re.sub(r"[^\w가-힣]+", "_", s).strip("_") or "untitled"
 
-            dl_dir = _resolve_outdir(Path(args.outdir)) / _slugify(args.title) / "_source"
+            # 영상 ID 로 경로를 가른다 — 제목만으로 가르면 같은 작품의 다른 영상이
+            # 기존 source.mp4 를 재사용한다(yt-dlp 는 파일이 있으면 건너뛴다)
+            dl_dir = (_resolve_outdir(Path(args.outdir)) / _slugify(args.title)
+                      / "_source" / video_id_of(args.youtube_url))
             print(f"[YouTube] 다운로드 중: {args.youtube_url}")
             assets = download_youtube_assets(args.youtube_url, dl_dir, lang="ko")
             print(f"  영상: {assets.video_path}")
