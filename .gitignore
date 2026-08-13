@@ -193,4 +193,4 @@ outputs/**
 # outputs/** 만 있던 시절엔 outputs_ab/ 가 무방비였다(2026-07-29 실측 2.1GB 미추적).
 outputs_ab/**
 sources_local/**
-rejected/**
+rejected/**app/assets/fonts/ArialUnicode.ttf
