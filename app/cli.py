@@ -83,6 +83,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="(선택) 직전 결과가 사람에게 반려된 사유. 영상 분석·스토리 구성 프롬프트에 "
              "'이번엔 이것을 고쳐라'로 주입된다 — VES 검수함의 반려 사유가 여기로 들어온다.",
     )
+    create.add_argument(
+        "--edit-overrides", dest="edit_overrides", default=None,
+        help="(선택) 관제 편집실이 고친 제목·구간 JSON(edit_overrides/v1). 체크포인트보다 "
+             "사람 입력이 이긴다 — 구간을 지정하면 자동 보정(대사 경계 스냅·서사 확장·"
+             "갭 메우기)을 건너뛰고 그 구간 그대로 렌더한다. --from-step render 와 함께 쓴다.",
+    )
     create.add_argument("--previous-context", help="이전 에피소드 요약 텍스트 (직접 입력)")  # 이전 맥락 부여 테스트
     create.add_argument("--previous-context-file", help="이전 에피소드 요약이 담긴 텍스트 파일 경로")  # 이전 맥락 부여 테스트
     create.add_argument("--work-context", help="작품 설명/시놉시스 텍스트 (직접 입력)")
@@ -326,6 +332,8 @@ def main() -> None:
                 skip_credits_sec=getattr(args, "skip_credits", 0.0),
                 loudness_target_lufs=_parse_loudness(getattr(args, "loudness_lufs", "-14")),
                 reject_note=getattr(args, "reject_note", None),
+                edit_overrides_path=(Path(args.edit_overrides)
+                                     if getattr(args, "edit_overrides", None) else None),
             ),
             from_step=args.from_step,
             job_id=args.job_id,

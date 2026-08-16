@@ -1125,6 +1125,11 @@ def _fit_storyline_to_duration(
 
     return out, "; ".join(msgs)
 from app.modules.chunker import build_chunks, split_video_chunk
+from app.modules.edit_overrides import (
+    apply_overrides,
+    load_edit_overrides,
+    total_duration,
+)
 from app.modules.gemini_client import (
     _normalize_storyline_tts_cues,
     load_gemini_client,
@@ -1633,6 +1638,9 @@ class PipelineInput:
     # 사람이 직전 결과를 반려한 사유. 영상 분석(analyze_chunk)과 스토리 구성 프롬프트에
     # '재작업 지시'로 주입된다. None 이면 프롬프트가 종전과 완전히 동일하다.
     reject_note: str | None = None
+    # 관제 편집실이 고친 제목·구간 JSON 경로(edit_overrides/v1). None 이면 종전과 동일.
+    # 이 값이 있으면 체크포인트보다 **사람 입력이 이긴다** — app/modules/edit_overrides.py.
+    edit_overrides_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -1852,6 +1860,12 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     else:
         start_idx = 0
 
+    # 편집실 오버라이드는 여기서 한 번만 읽고 검증한다 — 계약 위반이면 무거운 단계를
+    # 돌기 전에 즉시 실패시킨다(사람이 고친 값이 조용히 무시된 채 영상이 나가는 것이 최악).
+    _edit_overrides = load_edit_overrides(payload.edit_overrides_path)
+    if _edit_overrides:
+        print(f"\n[edit] 편집실 오버라이드 로드: {payload.edit_overrides_path}")
+
     # ═══════════════════════════════════════
     # [3/15] 미디어 프로브
     # ═══════════════════════════════════════
@@ -1935,20 +1949,29 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     if _content_start > 0 or _content_end < media_info.duration_sec:
         print(f"  - 사용자 skip 인자 적용: {_content_start:.1f}s ~ {_content_end:.1f}s")
 
-    split_chunks = []
-    for i, chunk in enumerate(chunks, 1):
-        print(f"    청크 {i} 분할 중... ({chunk.start_sec:.1f}초 ~ {chunk.end_sec:.1f}초)")
-        split_path, actual_start_sec = split_video_chunk(
-            proxy_video_path,
-            chunk.start_sec,
-            chunk.end_sec,
-        )
-        split_chunk = replace(chunk, split_path=split_path, actual_start_sec=actual_start_sec)
-        split_chunks.append(split_chunk)
-        print(f"      → {split_path.name} 생성 완료 (실제 시작: {actual_start_sec:.2f}초)")
+    # 분할(=재인코딩)은 split_path 를 실제로 쓰는 단계까지만 — chunk_transcribe(6)·gemini(7).
+    # 그 뒤 단계로 재개하면 두 단계 모두 체크포인트를 읽으므로 분할본이 쓰이지 않는데,
+    # 종전엔 무조건 돌아 매 재렌더마다 전 청크를 libx264 로 다시 인코딩했다
+    # (4시간물 ≈ 34청크 = 수십 분). 편집실의 '고치고 → 보고 → 또 고치고' 루프가
+    # 성립하려면 이 낭비를 없애야 한다(2026-08-16). 게다가 분할본은 gemini 분석 직후
+    # 삭제되므로(아래 2309 근처) 재개 시점엔 어차피 파일이 남아 있지도 않다.
+    if start_idx <= step_idx["gemini"]:
+        split_chunks = []
+        for i, chunk in enumerate(chunks, 1):
+            print(f"    청크 {i} 분할 중... ({chunk.start_sec:.1f}초 ~ {chunk.end_sec:.1f}초)")
+            split_path, actual_start_sec = split_video_chunk(
+                proxy_video_path,
+                chunk.start_sec,
+                chunk.end_sec,
+            )
+            split_chunk = replace(chunk, split_path=split_path, actual_start_sec=actual_start_sec)
+            split_chunks.append(split_chunk)
+            print(f"      → {split_path.name} 생성 완료 (실제 시작: {actual_start_sec:.2f}초)")
 
-    chunks = split_chunks
-    print("[OK] 청크 분할 완료")
+        chunks = split_chunks
+        print("[OK] 청크 분할 완료")
+    else:
+        print(f"[SKIP] 청크 분할 생략 — {from_step} 단계 재개(분할본을 쓰는 단계를 이미 지남)")
 
     # ═══════════════════════════════════════
     # [7/15] 인물 등장 인덱스 (face_id 사전 패스)
@@ -2919,8 +2942,31 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     _branch = "chunk_transcripts" if not used_gemini_fallback else "Gemini 폴백"
     print(f"\n[transcript] {len(transcript_text)}개 segment ({_branch})")
 
+    # ── 편집실 오버라이드(2026-08-16) ─────────────────────────────────────
+    # 사람이 관제 편집실에서 고친 제목·구간을 여기서 먹인다. 적용 지점이 여기인 이유:
+    # silence_cut 캐시 로드가 all_storyline_variants 를 **통째로 교체**하므로 그보다
+    # 앞에서 적용하면 덮여 사라지고, 자동 보정(아래 snap/extend/fill)보다는 앞이어야
+    # pinned 로 그 보정을 건너뛸 수 있다.
+    _edit_pinned = False
+    if _edit_overrides:
+        _before_clips = len(clips)
+        all_storyline_variants, _edit_pinned = apply_overrides(
+            all_storyline_variants, _edit_overrides)
+        clips = list(all_storyline_variants[0][0])
+        title_text = all_storyline_variants[0][1]
+        print(f"\n[edit] 편집실 오버라이드 적용 — 제목: {title_text[:24]!r}"
+              f"{' · 구간 ' + str(_before_clips) + '→' + str(len(clips)) + '개(고정)' if _edit_pinned else ''}"
+              f" · 합계 {total_duration(clips):.1f}s")
+
     # snap/extend/fill (라운드 19C — Gemini 폴백 데이터는 타이밍 부정확이라 건너뜀)
-    if transcript_text and not used_gemini_fallback:
+    # 사람이 구간을 지정했으면(_edit_pinned) 건너뛴다 — 대사 경계 스냅(±5초)·서사 확장
+    # (편측 8초)·갭 메우기가 사람 입력을 최대 8초까지 밀어버리기 때문이다. 편집기에서
+    # 12.5초라고 지정한 것이 20초가 되면 그건 편집기가 아니다. 대신 아래 길이 클램프와
+    # 중복 제거는 그대로 통과시킨다 — 그 둘은 렌더 안전장치(60초 상한·겹침)라 사람이
+    # 넘겨도 되는 종류가 아니다.
+    if _edit_pinned:
+        print("  [edit] 자동 보정(스냅·확장·갭메움) 생략 — 사람이 지정한 구간 고정")
+    if transcript_text and not used_gemini_fallback and not _edit_pinned:
         all_storyline_variants = _snap_clip_boundaries_to_dialogue(
             all_storyline_variants, transcript_text, snap_back_max=5.0, snap_forward_max=5.0,
         )
@@ -2982,7 +3028,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
     # 자막 데이터 생성 (transcript_text → 편집 타임라인 매핑)
     final_segments = []
-    _subtitle_invalidate = from_step in ("gemini", "graph", "story", "silence_cut", "resources")
+    # 편집실이 구간을 바꿨으면 자막을 반드시 다시 매핑한다 — subtitle_segments.json 은
+    # **편집본 타임라인 기준**(쇼츠 0초 시작)이라, 구간이 조금만 달라져도 캐시가 통째로
+    # 어긋난 자막이 된다(2026-08-16).
+    _subtitle_invalidate = (from_step in ("gemini", "graph", "story", "silence_cut", "resources")
+                            or _edit_pinned)
     if not segments_cache_path.exists() or _subtitle_invalidate:
         print("  자막 타임라인 매핑 중...")
         remapped = remap_transcript_to_edited_timeline(
@@ -3045,7 +3095,14 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
     # story/graph 단계부터 재실행 시 클립 구성이 달라질 수 있으므로 resources 캐시 무효화.
     # 이전 라운드의 crop_map 키(role_idx)와 새 라운드의 clip 키가 어긋나면 KeyError 발생.
-    _resources_invalidate = from_step in ("gemini", "graph", "story", "tts_plan", "transcribe", "resources")
+    # 2026-08-16 보정: 'silence_cut' 이 빠져 있었다. tts_plan·transcribe 는 위에서 이미
+    # silence_cut 으로 redirect 된 뒤라 **절대 참이 될 수 없는 죽은 조건**이고(하위호환용
+    # 으로 남겨둠), 정작 클립을 바꾸는 silence_cut 재개가 목록에 없어 crop_map 키(role_idx)가
+    # 새 clips 와 어긋난 채 캐시가 채택되고 있었다 — 크롭이 조용히 빠지거나 남의 것이 붙는다.
+    # 편집실이 구간을 바꾼 경우(_edit_pinned)도 같은 이유로 재생성한다.
+    _resources_invalidate = (from_step in ("gemini", "graph", "story", "tts_plan",
+                                           "transcribe", "silence_cut", "resources")
+                             or _edit_pinned)
     # 라운드 9-fix: face_identifier를 resources 단계 *밖*에서도 안전하게 사용할 수 있도록 미리 None 초기화.
     # --from-step render로 들어와 라인 1490 캐시 로드 분기를 타면 face_identifier가 정의되지 않아
     # 멀티 variant 렌더링 단계(라인 1862, 1873)에서 UnboundLocalError 발생.
@@ -3068,7 +3125,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         tts_cue_files = resources_data.get("tts_cue_files", []) or []
         print(f"  - 크롭 타임라인: {len(crop_map)}개, TTS cue 오디오: {len(tts_cue_files)}개")
         print("[OK] 리소스 로드 완료 (체크포인트에서)")
-    elif start_idx <= step_idx["resources"]:
+    elif start_idx <= step_idx["resources"] or _edit_pinned:
+        # _edit_pinned(2026-08-16): --from-step render 로 들어와도 사람이 구간을 바꿨으면
+        # 크롭을 다시 만든다. crop_map 키는 f"{role}_{idx}" 라 구간이 달라진 채 캐시를 쓰면
+        # **옛 구간의 얼굴 위치**로 크롭이 잡힌다(키가 우연히 맞으면 남의 크롭, 안 맞으면 무크롭).
+        # 클립 총량이 60초라 재생성 비용은 작고, 틀린 크롭보다 낫다.
         print("\n[13/15] 리소스 생성 중...")
         resource_start = time.time()
 
@@ -3214,13 +3275,16 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         else:
             raise FileNotFoundError("체크포인트 파일이나 edit_plan.json을 찾을 수 없습니다.")
 
-    # 편집 계획 생성
-    if start_idx <= step_idx["resources"]:
-        print("  편집 계획 생성 중...")
-        edit_plan = _build_edit_plan(payload, title_text, clips, crop_map, config)
-        # 라운드 6b: skeleton 단계 제거됨. edit_plan에 임베드하던 narrative_skeleton 키도 사라짐.
-        edit_plan_path.write_text(json.dumps(edit_plan, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"  - 편집 계획 저장: {edit_plan_path}")
+    # 편집 계획 생성 — **항상** 쓴다(2026-08-16 수정).
+    # 종전엔 `start_idx <= resources` 일 때만 써서, --from-step render 재렌더가 옛 edit_plan 을
+    # 그대로 남겼다. 그러면 디스크의 계획과 실제 mp4 가 서로 다른 내용을 주장하고, edit_plan 을
+    # 읽는 하류(ingest·관제 편집실)가 영상에 없는 구간을 보게 된다. 렌더 시점엔 clips·title·
+    # crop_map 이 모두 확정돼 있으므로 여기서 쓰는 값이 곧 화면에 나간 값이다.
+    print("  편집 계획 생성 중...")
+    edit_plan = _build_edit_plan(payload, title_text, clips, crop_map, config)
+    # 라운드 6b: skeleton 단계 제거됨. edit_plan에 임베드하던 narrative_skeleton 키도 사라짐.
+    edit_plan_path.write_text(json.dumps(edit_plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"  - 편집 계획 저장: {edit_plan_path}")
 
     # ═══════════════════════════════════════
     # [14/15] 자막 디자인 + 최종 렌더링
