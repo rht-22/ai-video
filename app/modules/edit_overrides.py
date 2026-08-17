@@ -109,7 +109,6 @@ def validate_overrides(data: Any) -> dict[str, Any]:
         if not isinstance(subs, list) or not subs:
             raise EditOverrideError("subtitles 는 비어 있지 않은 배열이어야 합니다 "
                                     "(전량 교체 규약 — 자막을 통째로 끄려면 --no-subtitles)")
-        prev_end = None
         for i, s in enumerate(subs):
             if not isinstance(s, dict):
                 raise EditOverrideError(f"subtitles[{i}] 가 객체가 아닙니다")
@@ -124,13 +123,13 @@ def validate_overrides(data: Any) -> dict[str, Any]:
             if not str(s.get("text", "")).strip():
                 raise EditOverrideError(
                     f"subtitles[{i}]: text 가 비어 있습니다 — 그 줄을 지우려면 배열에서 빼세요")
-            # 겹치면 ASS 가 두 줄을 같은 자리에 겹쳐 그린다. 편집실이 시간을 만지게 될
-            # 3단계를 대비해 지금부터 막는다 — 화면에서야 알아채면 이미 렌더가 끝난 뒤다.
-            if prev_end is not None and a < prev_end - 1e-6:
-                raise EditOverrideError(
-                    f"subtitles[{i}]: 앞 자막과 겹칩니다 (앞 끝 {prev_end} > 이 시작 {a}) "
-                    "— 시간순으로 겹치지 않게 보내세요")
-            prev_end = b
+        # 🛑 겹침은 검사하지 않는다. 넣었다가 실측에서 걷어냈다(2026-08-17):
+        #    실제 subtitle_segments.json 이 겹치는 세그먼트를 정상적으로 담고 있다 —
+        #    피의_게임_X_9d2d1b85 는 20건 중 여러 쌍이 겹쳤다(0.2~3.67 과 1.7~5.3).
+        #    merge_subtitle_segments 가 그렇게 만들고 ASS 도 그대로 그린다. 전량 교체
+        #    규약상 편집실은 **원본 목록을 그대로 되돌려 보내는데**, 겹침을 막으면
+        #    한 줄만 고쳐도 전체가 거부된다. 파이프라인이 허용하는 것을 입력 검증이
+        #    막으면 안 된다 — 편집실이 만든 문제가 아니라 원래 그런 데이터다.
     return data
 
 

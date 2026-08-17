@@ -265,8 +265,6 @@ def test_subtitles_and_clips_coexist():
     ([{"end_sec": 2.0, "text": "시작없음"}], "start_sec"),
     ([{"start_sec": 0.0, "end_sec": 2.0, "text": "   "}], "비어 있습니다"),
     ([{"start_sec": 0.0, "end_sec": 2.0}], "비어 있습니다"),
-    ([{"start_sec": 0.0, "end_sec": 3.0, "text": "앞"},
-      {"start_sec": 2.0, "end_sec": 4.0, "text": "겹침"}], "겹칩니다"),
 ])
 def test_subtitles_contract_violations_fail_loudly(bad, msg):
     with pytest.raises(EditOverrideError) as e:
@@ -274,12 +272,18 @@ def test_subtitles_contract_violations_fail_loudly(bad, msg):
     assert msg in str(e.value)
 
 
-def test_subtitles_touching_boundaries_are_allowed():
-    """앞 끝 == 뒤 시작은 겹침이 아니다 — 연속 대사에서 흔하다."""
+def test_subtitles_overlap_is_allowed():
+    """겹치는 자막을 거부하면 안 된다 — 2026-08-17 실측에서 걷어낸 검사다.
+
+    실제 subtitle_segments.json 이 겹치는 세그먼트를 정상적으로 담는다(피의_게임_X_9d2d1b85
+    는 20건 중 여러 쌍이 겹쳤다). 전량 교체 규약상 편집실은 원본 목록을 그대로 되돌려
+    보내므로, 겹침을 막으면 한 줄만 고쳐도 전체가 거부된다."""
     ov = {"schema": "edit_overrides/v1",
-          "subtitles": [{"start_sec": 0.0, "end_sec": 2.0, "text": "앞"},
-                        {"start_sec": 2.0, "end_sec": 4.0, "text": "뒤"}]}
+          "subtitles": [{"start_sec": 0.2, "end_sec": 3.67, "text": "앞 문장"},
+                        {"start_sec": 1.7, "end_sec": 5.3, "text": "겹치는 뒷 문장"},
+                        {"start_sec": 2.0, "end_sec": 4.0, "text": "완전히 안긴 문장"}]}
     assert validate_overrides(ov) is ov
+    assert len(overrides_subtitles(ov)) == 3
 
 
 def test_load_subtitles_roundtrip(tmp_path):
