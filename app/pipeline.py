@@ -1128,6 +1128,7 @@ from app.modules.chunker import build_chunks, split_video_chunk
 from app.modules.edit_overrides import (
     apply_overrides,
     load_edit_overrides,
+    overrides_subtitles,
     total_duration,
 )
 from app.modules.gemini_client import (
@@ -3062,6 +3063,18 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         cached_data = json.loads(segments_cache_path.read_text(encoding="utf-8"))
         final_segments = [SimpleNamespace(**seg) for seg in cached_data]
         print(f"  자막 캐시 로드 완료 ({len(final_segments)} segments)")
+
+    # ── 편집실 자막 오버라이드(2026-08-17) ──────────────────────────────────
+    # 반드시 **재매핑 뒤**다. 구간을 함께 고치면 위 블록이 전사에서 자막을 새로 만드는데,
+    # 그보다 앞에서 덮으면 사람이 고친 문장이 조용히 기계 전사로 되돌아간다.
+    # 캐시 파일에도 되쓴다 — 편집실을 다시 열 때(editor_assets 가 이 파일을 읽는다)와
+    # 다음 렌더에서도 사람이 고친 문장이 그대로 보여야 한다.
+    _sub_override = overrides_subtitles(_edit_overrides)
+    if _sub_override is not None:
+        final_segments = [SimpleNamespace(**s) for s in _sub_override]
+        segments_cache_path.write_text(
+            json.dumps(_sub_override, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"  [edit] 자막 오버라이드 적용 ({len(final_segments)}건) — 사람이 고친 문장")
 
     # ═══════════════════════════════════════
     # [tts cues] 앵커 해석 — storyline_tts_cues_pool → tts_cues_per_variant

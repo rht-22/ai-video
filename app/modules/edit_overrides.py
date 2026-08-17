@@ -12,10 +12,11 @@ checkpoint_silence_cut → checkpoint_story 순으로 클립·제목을 읽고, 
       "schema": "edit_overrides/v1",
       "title":  { "top_title": "1줄\\n2줄" },
       "clips":  [ {"start_sec": 742.5, "end_sec": 771.0, "role": "hook",
-                   "use_original_audio": true}, ... ]
+                   "use_original_audio": true}, ... ],
+      "subtitles": [ {"start_sec": 0.2, "end_sec": 2.3, "text": "고친 자막"}, ... ]
     }
 
-규약 셋 — 다 이유가 있다:
+규약 넷 — 다 이유가 있다:
   · **clips 는 전량 교체**다(부분 패치 아님). 추가·삭제·순서변경이 섞이면 인덱스
     패치는 반드시 어긋난다. 편집실은 항상 전체 목록을 보내고 여기서 그대로 받는다.
   · **clips 를 지정하면 그 편은 '고정(pinned)'** 이다 — 대사 경계 스냅(±5초)·서사
@@ -23,6 +24,15 @@ checkpoint_silence_cut → checkpoint_story 순으로 클립·제목을 읽고, 
     8초 밀리면 편집기가 아니다. 단 길이 클램프와 중복 제거는 유지한다(렌더 안전장치).
   · **shorts #1(첫 variant)만 대상**이다. 편집은 특정 영상 하나를 고치는 일이고,
     variant #2·#3 은 자동 후보라 사람 손이 닿지 않은 채로 두는 편이 낫다.
+  · **subtitles 는 clips 와 좌표계가 다르다** — clips 는 원본 절대초,
+    subtitles 는 **편집본 시간축**(쇼츠 0초 시작)이다. subtitle_segments.json 과
+    같은 좌표계이며, 그 파일이 자막의 유일한 정본이기 때문이다(clips[].subtitle 은
+    use_original_audio=false 인 컷에서만 쓰이는 다른 값이라 편집 통로가 못 된다).
+    역시 전량 교체다 — 한 줄을 지우려면 그 줄을 뺀 전체 목록을 보낸다.
+
+clips 와 subtitles 를 함께 보내도 자막이 이긴다: 구간이 바뀌면 파이프라인이 자막을
+전사에서 다시 매핑하는데(_subtitle_invalidate), 그 **뒤에** 이 오버라이드를 덮는다.
+순서가 반대면 사람이 고친 문장이 조용히 기계 전사로 되돌아간다.
 
 순수 함수만 둔다 — 파일 입출력은 load_edit_overrides 하나, 나머지는 테스트 대상.
 """
@@ -93,6 +103,34 @@ def validate_overrides(data: Any) -> dict[str, Any]:
             if role not in VALID_ROLES:
                 raise EditOverrideError(
                     f"clips[{i}]: role 은 {'/'.join(VALID_ROLES)} 중 하나 (받은 값: {role!r})")
+
+    subs = data.get("subtitles")
+    if subs is not None:
+        if not isinstance(subs, list) or not subs:
+            raise EditOverrideError("subtitles 는 비어 있지 않은 배열이어야 합니다 "
+                                    "(전량 교체 규약 — 자막을 통째로 끄려면 --no-subtitles)")
+        prev_end = None
+        for i, s in enumerate(subs):
+            if not isinstance(s, dict):
+                raise EditOverrideError(f"subtitles[{i}] 가 객체가 아닙니다")
+            try:
+                a, b = float(s["start_sec"]), float(s["end_sec"])
+            except (KeyError, TypeError, ValueError) as ex:
+                raise EditOverrideError(
+                    f"subtitles[{i}]: start_sec·end_sec 이 필요합니다 ({ex})") from ex
+            if not (0 <= a < b):
+                raise EditOverrideError(
+                    f"subtitles[{i}]: 구간이 뒤집혔거나 음수입니다 ({a} → {b})")
+            if not str(s.get("text", "")).strip():
+                raise EditOverrideError(
+                    f"subtitles[{i}]: text 가 비어 있습니다 — 그 줄을 지우려면 배열에서 빼세요")
+            # 겹치면 ASS 가 두 줄을 같은 자리에 겹쳐 그린다. 편집실이 시간을 만지게 될
+            # 3단계를 대비해 지금부터 막는다 — 화면에서야 알아채면 이미 렌더가 끝난 뒤다.
+            if prev_end is not None and a < prev_end - 1e-6:
+                raise EditOverrideError(
+                    f"subtitles[{i}]: 앞 자막과 겹칩니다 (앞 끝 {prev_end} > 이 시작 {a}) "
+                    "— 시간순으로 겹치지 않게 보내세요")
+            prev_end = b
     return data
 
 
@@ -159,6 +197,19 @@ def apply_overrides(variants: list[tuple[list[StoryClip], str, float]],
     new_title = ((ov.get("title") or {}).get("top_title") or "").strip() or title
     head = (new_clips if new_clips is not None else clips, new_title, score)
     return [head, *variants[1:]], new_clips is not None
+
+
+def overrides_subtitles(ov: dict[str, Any] | None) -> list[dict[str, Any]] | None:
+    """오버라이드 → 자막 세그먼트 목록(편집본 시간축). 키가 없으면 None. 순수.
+
+    subtitle_segments.json 과 **똑같은 3필드**로 정규화해서 돌려준다 — 그 파일이
+    자막의 정본이고, 호출부는 이 결과를 그대로 캐시에 다시 써서 다음 렌더·편집실
+    재방문에서도 사람이 고친 문장이 보이게 한다."""
+    if not ov or not ov.get("subtitles"):
+        return None
+    return [{"start_sec": float(s["start_sec"]),
+             "end_sec": float(s["end_sec"]),
+             "text": str(s["text"]).strip()} for s in ov["subtitles"]]
 
 
 def total_duration(clips: list[StoryClip]) -> float:

@@ -16,6 +16,7 @@ from app.modules.edit_overrides import (
     apply_overrides,
     load_edit_overrides,
     overrides_clips,
+    overrides_subtitles,
     total_duration,
     validate_overrides,
 )
@@ -216,3 +217,73 @@ def test_cli_accepts_edit_overrides_flag():
     # 미지정 시 None — 종전 동작과 완전히 동일해야 한다
     plain = build_parser().parse_args(["create_shorts", "--video", "v.mp4", "--title", "작품"])
     assert plain.edit_overrides is None
+
+
+# ── 자막 오버라이드(2단계) ────────────────────────────────────────────
+# 좌표계가 clips 와 다르다: clips 는 원본 절대초, subtitles 는 편집본 시간축
+# (쇼츠 0초 시작). subtitle_segments.json 과 같은 축이며 그 파일이 자막의 정본이다.
+OV_SUBS = {
+    "schema": "edit_overrides/v1",
+    "subtitles": [{"start_sec": 0.2, "end_sec": 2.3, "text": "고친 첫 줄"},
+                  {"start_sec": 2.4, "end_sec": 5.0, "text": "고친 둘째 줄"}],
+}
+
+
+def test_subtitles_normalized_to_three_fields():
+    """subtitle_segments.json 과 같은 3필드로 정규화 — 호출부가 그대로 되쓴다."""
+    got = overrides_subtitles(OV_SUBS)
+    assert got == [{"start_sec": 0.2, "end_sec": 2.3, "text": "고친 첫 줄"},
+                   {"start_sec": 2.4, "end_sec": 5.0, "text": "고친 둘째 줄"}]
+    # 문자열 숫자·여백도 받아서 정규화한다(화면 input 은 문자열을 보낸다)
+    loose = overrides_subtitles({"schema": "edit_overrides/v1",
+                                 "subtitles": [{"start_sec": "1", "end_sec": "2",
+                                                "text": "  공백 낀 줄  "}]})
+    assert loose == [{"start_sec": 1.0, "end_sec": 2.0, "text": "공백 낀 줄"}]
+
+
+def test_subtitles_absent_returns_none():
+    """키가 없으면 None — 종전 동작(캐시·재매핑 결과)을 그대로 쓴다."""
+    assert overrides_subtitles(None) is None
+    assert overrides_subtitles({"schema": "edit_overrides/v1"}) is None
+    assert overrides_subtitles(OV_FULL) is None          # 구간만 고친 요청
+
+
+def test_subtitles_and_clips_coexist():
+    """구간+자막 동시 수정: clips 는 pinned 를 켜고, 자막은 따로 살아남는다."""
+    ov = {**OV_FULL, "subtitles": OV_SUBS["subtitles"]}
+    validate_overrides(ov)
+    variants, pinned = apply_overrides(_variants(), ov)
+    assert pinned is True and len(variants[0][0]) == 2
+    assert overrides_subtitles(ov) is not None           # 자막이 clips 에 먹히지 않는다
+
+
+@pytest.mark.parametrize("bad,msg", [
+    ([], "비어 있지 않은 배열"),
+    ("문자열", "비어 있지 않은 배열"),
+    ([{"start_sec": 5.0, "end_sec": 2.0, "text": "뒤집힘"}], "뒤집혔"),
+    ([{"start_sec": -1.0, "end_sec": 2.0, "text": "음수"}], "뒤집혔"),
+    ([{"end_sec": 2.0, "text": "시작없음"}], "start_sec"),
+    ([{"start_sec": 0.0, "end_sec": 2.0, "text": "   "}], "비어 있습니다"),
+    ([{"start_sec": 0.0, "end_sec": 2.0}], "비어 있습니다"),
+    ([{"start_sec": 0.0, "end_sec": 3.0, "text": "앞"},
+      {"start_sec": 2.0, "end_sec": 4.0, "text": "겹침"}], "겹칩니다"),
+])
+def test_subtitles_contract_violations_fail_loudly(bad, msg):
+    with pytest.raises(EditOverrideError) as e:
+        validate_overrides({"schema": "edit_overrides/v1", "subtitles": bad})
+    assert msg in str(e.value)
+
+
+def test_subtitles_touching_boundaries_are_allowed():
+    """앞 끝 == 뒤 시작은 겹침이 아니다 — 연속 대사에서 흔하다."""
+    ov = {"schema": "edit_overrides/v1",
+          "subtitles": [{"start_sec": 0.0, "end_sec": 2.0, "text": "앞"},
+                        {"start_sec": 2.0, "end_sec": 4.0, "text": "뒤"}]}
+    assert validate_overrides(ov) is ov
+
+
+def test_load_subtitles_roundtrip(tmp_path):
+    p = tmp_path / "ov.json"
+    p.write_text(json.dumps(OV_SUBS, ensure_ascii=False), encoding="utf-8")
+    got = load_edit_overrides(p)
+    assert overrides_subtitles(got)[1]["text"] == "고친 둘째 줄"
