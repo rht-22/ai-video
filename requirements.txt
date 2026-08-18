@@ -48,7 +48,13 @@ deepface>=0.0.93
 # app/modules/youtube_downloader.py 가 `import yt_dlp` 한다. 이게 없으면 --youtube-url 경로가 즉사한다.
 # 2025.10.14 이하는 YouTube 다운로드가 깨진다("The page needs to be reloaded") — py3.9 에서는
 # 그 버전이 상한이라 설치 자체가 실패해야 정상이다(조용히 깨진 버전을 쓰는 것보다 낫다).
-yt-dlp>=2026.1
+#
+# 🛑 하한은 **주기적으로 올려야 한다**. pip install -r 은 조건을 이미 만족하면 업그레이드하지
+# 않으므로(updater._pip_sync), 하한을 낮게 두면 반년 전 버전이 노드에 그대로 남는다.
+# 2026-08-18 실측: YouTube 소스 5개 채널이 한 시간 사이에 전부
+# `unable to download video data: HTTP Error 403` 으로 죽었다(재시도해도 동일) — 메타데이터
+# 조회는 통과하고 스트림 단계에서만 막히는, 추출기가 낡았을 때의 전형적인 모양이다.
+yt-dlp>=2026.7.4
 gdown>=5.0
 
 # Dev
