@@ -325,3 +325,19 @@ def test_downloader_uses_access_opts():
     from app.modules import youtube_downloader as yd
     src = inspect.getsource(yd.download_youtube_assets)
     assert "**youtube_access_opts()" in src
+
+
+def test_downloader_never_resumes():
+    """🛑 남은 .part 가 실패를 영구화한다 — 2026-08-18 실측의 진짜 범인.
+
+    08-18 새벽 첫 실패가 source.f137.mp4.part 를 9,991,353 바이트 남겼다. 이후 모든
+    재시도가 `Resuming download at byte 9991353` → `HTTP Error 403` 이었다. 유튜브
+    스트림 URL 은 수명이 짧아 몇 분~몇 시간 뒤의 Range 재개는 사실상 항상 거절된다.
+    그래서 원인(로그인 요구)이 쿠키로 사라진 뒤에도 5개 채널이 계속 죽었고, 깨끗한
+    디렉토리로 손수 재현하면 언제나 성공해서 원인을 한참 못 찾았다.
+
+    이어받기를 켜 두면 이 사고가 그대로 돌아온다."""
+    import inspect
+    from app.modules import youtube_downloader as yd
+    src = inspect.getsource(yd.download_youtube_assets)
+    assert '"continuedl": False' in src, "이어받기를 끄지 않으면 .part 가 실패를 붙잡는다"

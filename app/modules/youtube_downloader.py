@@ -98,6 +98,15 @@ def download_youtube_assets(
         "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
         "merge_output_format": "mp4",
         "outtmpl": outtmpl,
+        # ★이어받지 않는다 — 남은 .part 가 실패를 영구화한다(2026-08-18 실측).
+        # 08-18 새벽 첫 실패가 source.f137.mp4.part 를 9,991,353 바이트 남겼고,
+        # 이후 모든 재시도가 `Resuming download at byte 9991353` → `HTTP Error 403`.
+        # 유튜브 스트림 URL 은 수명이 짧아, 몇 분~몇 시간 뒤 오는 재시도가 Range 로
+        # 이어받으면 사실상 항상 거절당한다. 그래서 원인(로그인 요구)이 쿠키로 사라진
+        # 뒤에도 5개 채널이 계속 죽었다 — .part 가 실패를 붙잡고 있었기 때문이다.
+        # 증상이 고약한 이유: 깨끗한 디렉토리로 손수 재현하면 언제나 성공한다.
+        # 대가는 중단된 다운로드를 처음부터 받는 것. 확실히 되는 편이 낫다.
+        "continuedl": False,
         "writesubtitles": True,
         "writeautomaticsub": True,
         "subtitleslangs": [lang, f"{lang}-*", "ko", "ko-KR"],
