@@ -347,6 +347,29 @@ def test_downloader_never_resumes():
     assert '"continuedl": False' in src, "이어받기를 끄지 않으면 .part 가 실패를 붙잡는다"
 
 
+def test_requirements_pins_verified_ytdlp_build():
+    """🛑 yt-dlp 는 **실측으로 통과를 확인한 빌드에 핀**한다 — 하한(>=)이 아니다.
+
+    2026-08-18: 유튜브가 android_vr 을 막아(상류 주석 "Since 2026.08.17, ALL formats …
+    are 403'd") 2026.7.4 의 기본 클라이언트가 통째로 죽었다. 1080p 를 받다가 항상 5.3%
+    부근에서 403. 08-18 나이틀리가 기본에서 android_vr 을 빼고 visionos 를 올리자 같은
+    영상이 완주했다(mm-05 실측).
+
+    하한으로 두면 pip 가 업그레이드를 안 해서(updater._pip_sync) 6대가 서로 다른 빌드를
+    쓰게 되고, 그러면 '어떤 맥에서만 죽는다'가 된다. 반대로 미검증 나이틀리가 자동으로
+    들어오는 것도 위험하다. 그래서 == 로 못 박는다.
+
+    curl-cffi extra 는 import 되는 곳이 없어(yt-dlp 가 런타임에 찾는다) 지워져도 조용하다."""
+    import pathlib as _p
+    import re
+    req = _p.Path(__file__).resolve().parent.parent / "requirements.txt"
+    line = next((ln.strip() for ln in req.read_text(encoding="utf-8").splitlines()
+                 if ln.strip().startswith("yt-dlp")), None)
+    assert line, "yt-dlp 요구가 사라졌다"
+    assert "[curl-cffi]" in line, f"curl-cffi extra 가 빠졌다: {line}"
+    assert re.match(r"^yt-dlp\[curl-cffi\]==\d", line), f"하한이 아니라 == 핀이어야 한다: {line}"
+
+
 # ── 내레이션(tts, v2) ─────────────────────────────────────────────────
 def _old_cues():
     """엔진이 만든 앵커 cue — 편집실이 화면에 보여주고 되돌려 보내는 원본."""
