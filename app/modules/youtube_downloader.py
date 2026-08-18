@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,39 @@ def video_id_of(url: str) -> str:
     if m:
         return m.group(1)
     return hashlib.sha256(str(url or "").encode("utf-8")).hexdigest()[:16]
+
+
+def youtube_access_opts(env: dict | None = None) -> dict:
+    """YouTube 접근 옵션 — 403 회피용. 순수(env 를 받으면 그것만 본다) — 테스트 대상.
+
+    2026-08-18 실측: 최신 yt-dlp(2026.7.4)에서도 YouTube 소스 5개 채널이 전부
+    `unable to download video data: HTTP Error 403` 으로 죽었다. 메타데이터·포맷 조회는
+    통과하고 스트림 요청만 막히는데, 이는 버전이 아니라 **그 IP 에서의 재생 요청을
+    막은 것**이다(드라이브 소스 12건은 같은 시각 전부 성공).
+
+    두 가지 손잡이를 둔다:
+      · player_client — 추출 클라이언트를 여러 개 시도한다. 기본 웹 클라이언트만 막히고
+        tv/web_safari 는 통과하는 경우가 많다. 계정도 쿠키도 필요 없어 먼저 시도할 값이다.
+      · 쿠키 — 위로 안 되면 로그인 세션이 필요하다. **코드가 아니라 env 로** 켠다
+        (YTDLP_COOKIES=파일경로 또는 YTDLP_COOKIES_FROM_BROWSER=chrome). 재배포 없이
+        노드에서 켜고 끌 수 있어야 차단이 왔을 때 즉시 대응된다.
+    """
+    e = os.environ if env is None else env
+    clients = (e.get("YTDLP_PLAYER_CLIENT") or "tv,web_safari,default").strip()
+    opts: dict = {
+        "extractor_args": {"youtube": {"player_client": [c.strip() for c in clients.split(",") if c.strip()]}},
+        # 차단은 간헐적일 때가 많다 — 조각 단위 재시도를 넉넉히 준다(기본 10 → 3회 시도로는 부족)
+        "retries": 10,
+        "fragment_retries": 10,
+        "extractor_retries": 5,
+    }
+    cookiefile = (e.get("YTDLP_COOKIES") or "").strip()
+    if cookiefile:
+        opts["cookiefile"] = cookiefile
+    browser = (e.get("YTDLP_COOKIES_FROM_BROWSER") or "").strip()
+    if browser:
+        opts["cookiesfrombrowser"] = tuple(browser.split(":"))
+    return opts
 
 
 def download_youtube_assets(
@@ -56,6 +90,7 @@ def download_youtube_assets(
         ],
         "quiet": False,
         "no_warnings": False,
+        **youtube_access_opts(),
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:

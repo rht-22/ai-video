@@ -291,3 +291,31 @@ def test_load_subtitles_roundtrip(tmp_path):
     p.write_text(json.dumps(OV_SUBS, ensure_ascii=False), encoding="utf-8")
     got = load_edit_overrides(p)
     assert overrides_subtitles(got)[1]["text"] == "고친 둘째 줄"
+
+
+# ── YouTube 403 대응(2026-08-18) ──────────────────────────────────────
+def test_youtube_access_opts_defaults_and_cookies():
+    """403 회피 손잡이는 **env 로** 돌아가야 한다 — 차단이 왔을 때 코드 재배포 없이
+    노드에서 즉시 켤 수 있어야 하기 때문이다(2026-08-18 실측: 최신 yt-dlp 에서도
+    YouTube 소스 5건이 전부 403, 같은 시각 드라이브 소스 12건은 전부 성공)."""
+    from app.modules.youtube_downloader import youtube_access_opts
+    d = youtube_access_opts({})
+    assert d["extractor_args"]["youtube"]["player_client"] == ["tv", "web_safari", "default"]
+    assert d["retries"] >= 10 and d["fragment_retries"] >= 10
+    assert "cookiefile" not in d and "cookiesfrombrowser" not in d   # 기본은 쿠키 없음
+    got = youtube_access_opts({"YTDLP_PLAYER_CLIENT": "ios, tv"})
+    assert got["extractor_args"]["youtube"]["player_client"] == ["ios", "tv"]
+    assert youtube_access_opts({"YTDLP_COOKIES": "/opt/ves/secrets/yt.txt"})["cookiefile"] \
+        == "/opt/ves/secrets/yt.txt"
+    assert youtube_access_opts({"YTDLP_COOKIES_FROM_BROWSER": "chrome:Default"})["cookiesfrombrowser"] \
+        == ("chrome", "Default")
+    # 빈 값은 '안 켬'(공백만 넣은 실수가 쿠키 경로로 둔갑하지 않게)
+    assert "cookiefile" not in youtube_access_opts({"YTDLP_COOKIES": "   "})
+
+
+def test_downloader_uses_access_opts():
+    """다운로더가 그 옵션을 실제로 ydl_opts 에 합치는지 — 함수만 있고 안 쓰면 소용없다."""
+    import inspect
+    from app.modules import youtube_downloader as yd
+    src = inspect.getsource(yd.download_youtube_assets)
+    assert "**youtube_access_opts()" in src
