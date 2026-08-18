@@ -34,15 +34,32 @@ def youtube_access_opts(env: dict | None = None) -> dict:
     통과하고 스트림 요청만 막히는데, 이는 버전이 아니라 **그 IP 에서의 재생 요청을
     막은 것**이다(드라이브 소스 12건은 같은 시각 전부 성공).
 
+    ★2026-08-18 mm-06 실측(yt-dlp 2026.7.4, LAesXpgKtbw)이 답을 뒤집었다 —
+    **쿠키가 해답이었고, 클라이언트 다중화는 오히려 독이었다.**
+
+        클라이언트      쿠키O                              쿠키X
+        tv              The page needs to be reloaded      (같음)
+        web_embedded    Requested format is not available  (같음)
+        android_vr      통과                                Sign in to confirm you're not a bot
+        web_safari      Requested format is not available  (같음)
+        default         통과                                Sign in to confirm you're not a bot
+
+    쿠키 없이는 **모든** 클라이언트가 봇 검사에서 멈춘다(08-17 14:08 까지는 안 그랬다).
+    그리고 web_safari·web_embedded 는 PO 토큰 없이는 포맷 자체가 안 나온다 — 그런 것을
+    목록에 섞으면 셀렉터가 못 받을 포맷을 고르거나 추출이 통째로 엎어진다. 즉 처음의
+    `tv,web_safari,default` 는 **막힌 문을 세 개 두드리는 설정**이었다.
+
+    그래서 기본값은 다시 `default` 하나다. 다중화가 필요해지는 날이 오면 그때 env 로 켠다.
+
     두 가지 손잡이를 둔다:
-      · player_client — 추출 클라이언트를 여러 개 시도한다. 기본 웹 클라이언트만 막히고
-        tv/web_safari 는 통과하는 경우가 많다. 계정도 쿠키도 필요 없어 먼저 시도할 값이다.
-      · 쿠키 — 위로 안 되면 로그인 세션이 필요하다. **코드가 아니라 env 로** 켠다
+      · player_client — 기본 `default`. 유튜브가 또 바뀌면 노드에서 값만 바꾼다
+        (실측 기준 대안 1순위는 android_vr — PO 토큰이 필요 없는 몇 안 되는 클라이언트다).
+      · 쿠키 — **이제는 필수다**. **코드가 아니라 env 로** 켠다
         (YTDLP_COOKIES=파일경로 또는 YTDLP_COOKIES_FROM_BROWSER=chrome). 재배포 없이
         노드에서 켜고 끌 수 있어야 차단이 왔을 때 즉시 대응된다.
     """
     e = os.environ if env is None else env
-    clients = (e.get("YTDLP_PLAYER_CLIENT") or "tv,web_safari,default").strip()
+    clients = (e.get("YTDLP_PLAYER_CLIENT") or "default").strip()
     opts: dict = {
         "extractor_args": {"youtube": {"player_client": [c.strip() for c in clients.split(",") if c.strip()]}},
         # 차단은 간헐적일 때가 많다 — 조각 단위 재시도를 넉넉히 준다(기본 10 → 3회 시도로는 부족)

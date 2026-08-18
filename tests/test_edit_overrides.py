@@ -297,10 +297,16 @@ def test_load_subtitles_roundtrip(tmp_path):
 def test_youtube_access_opts_defaults_and_cookies():
     """403 회피 손잡이는 **env 로** 돌아가야 한다 — 차단이 왔을 때 코드 재배포 없이
     노드에서 즉시 켤 수 있어야 하기 때문이다(2026-08-18 실측: 최신 yt-dlp 에서도
-    YouTube 소스 5건이 전부 403, 같은 시각 드라이브 소스 12건은 전부 성공)."""
+    YouTube 소스 5건이 전부 403, 같은 시각 드라이브 소스 12건은 전부 성공).
+
+    🛑 기본값은 `default` 하나다. mm-06 실측에서 web_safari·web_embedded 는 쿠키가
+    있어도 'Requested format is not available'(PO 토큰 없이는 포맷이 안 나온다), tv 는
+    'The page needs to be reloaded' 였다. 그런 클라이언트를 목록에 섞은 것이 처음의
+    `tv,web_safari,default` 였고, 그게 막힌 문을 세 개 두드리는 설정이었다.
+    통과한 것은 쿠키 있는 android_vr 과 default 둘뿐이다 — 다중화가 아니라 쿠키가 답이었다."""
     from app.modules.youtube_downloader import youtube_access_opts
     d = youtube_access_opts({})
-    assert d["extractor_args"]["youtube"]["player_client"] == ["tv", "web_safari", "default"]
+    assert d["extractor_args"]["youtube"]["player_client"] == ["default"]
     assert d["retries"] >= 10 and d["fragment_retries"] >= 10
     assert "cookiefile" not in d and "cookiesfrombrowser" not in d   # 기본은 쿠키 없음
     got = youtube_access_opts({"YTDLP_PLAYER_CLIENT": "ios, tv"})
