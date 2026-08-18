@@ -1129,6 +1129,7 @@ from app.modules.edit_overrides import (
     apply_overrides,
     load_edit_overrides,
     overrides_subtitles,
+    overrides_tts,
     total_duration,
 )
 from app.modules.gemini_client import (
@@ -3076,6 +3077,22 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             json.dumps(_sub_override, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"  [edit] 자막 오버라이드 적용 ({len(final_segments)}건) — 사람이 고친 문장")
 
+    # ── 편집실 내레이션 오버라이드(v2) ──────────────────────────────────────
+    # 반드시 앵커 해석(_resolve_cue_anchors) **앞**이다 — 사람이 보내는 좌표가 원본
+    # 절대초(source_time_sec)라, 편집시간 변환은 최종 클립이 확정된 아래 블록이 한다.
+    # 구간을 함께 고쳐도(_edit_pinned) 좌표가 안 흔들리는 이유가 이것이다.
+    # 첫 variant 만 대상 — clips 오버라이드와 같은 규약.
+    _tts_override = overrides_tts(
+        _edit_overrides, storyline_tts_cues_pool[0] if storyline_tts_cues_pool else [])
+    if _tts_override is not None:
+        _before_cues = len(storyline_tts_cues_pool[0]) if storyline_tts_cues_pool else 0
+        if storyline_tts_cues_pool:
+            storyline_tts_cues_pool[0] = _tts_override
+        else:
+            storyline_tts_cues_pool = [_tts_override]
+        print(f"  [edit] 내레이션 오버라이드 적용 {_before_cues}→{len(_tts_override)}건 "
+              f"— 사람이 고친 문구로 재합성")
+
     # ═══════════════════════════════════════
     # [tts cues] 앵커 해석 — storyline_tts_cues_pool → tts_cues_per_variant
     # ═══════════════════════════════════════
@@ -3113,9 +3130,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 으로 남겨둠), 정작 클립을 바꾸는 silence_cut 재개가 목록에 없어 crop_map 키(role_idx)가
     # 새 clips 와 어긋난 채 캐시가 채택되고 있었다 — 크롭이 조용히 빠지거나 남의 것이 붙는다.
     # 편집실이 구간을 바꾼 경우(_edit_pinned)도 같은 이유로 재생성한다.
+    # 내레이션을 고친 경우(_tts_override)도 재생성 — mp3 는 cue 문구에서 합성되므로
+    # 캐시를 쓰면 사람이 고친 문구가 소리에 반영되지 않는다.
     _resources_invalidate = (from_step in ("gemini", "graph", "story", "tts_plan",
                                            "transcribe", "silence_cut", "resources")
-                             or _edit_pinned)
+                             or _edit_pinned or _tts_override is not None)
     # 라운드 9-fix: face_identifier를 resources 단계 *밖*에서도 안전하게 사용할 수 있도록 미리 None 초기화.
     # --from-step render로 들어와 라인 1490 캐시 로드 분기를 타면 face_identifier가 정의되지 않아
     # 멀티 variant 렌더링 단계(라인 1862, 1873)에서 UnboundLocalError 발생.
@@ -3138,7 +3157,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         tts_cue_files = resources_data.get("tts_cue_files", []) or []
         print(f"  - 크롭 타임라인: {len(crop_map)}개, TTS cue 오디오: {len(tts_cue_files)}개")
         print("[OK] 리소스 로드 완료 (체크포인트에서)")
-    elif start_idx <= step_idx["resources"] or _edit_pinned:
+    elif start_idx <= step_idx["resources"] or _edit_pinned or _tts_override is not None:
         # _edit_pinned(2026-08-16): --from-step render 로 들어와도 사람이 구간을 바꿨으면
         # 크롭을 다시 만든다. crop_map 키는 f"{role}_{idx}" 라 구간이 달라진 채 캐시를 쓰면
         # **옛 구간의 얼굴 위치**로 크롭이 잡힌다(키가 우연히 맞으면 남의 크롭, 안 맞으면 무크롭).

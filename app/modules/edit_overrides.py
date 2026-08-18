@@ -6,15 +6,22 @@ checkpoint_silence_cut → checkpoint_story 순으로 클립·제목을 읽고, 
 고쳐도 영상은 그대로였다(2026-08-16 조사 실측). 관제 편집실이 성립하려면
 **체크포인트와 무관한 별도 입력 통로**가 있어야 한다 — 이 모듈이 그 통로다.
 
-계약(v1): `--edit-overrides <json>` 로 받는다.
+계약: `--edit-overrides <json>` 로 받는다. v2 = v1 + tts(내레이션).
 
     {
-      "schema": "edit_overrides/v1",
+      "schema": "edit_overrides/v2",          # v1 도 계속 받는다 (tts 없는 편집)
       "title":  { "top_title": "1줄\\n2줄" },
       "clips":  [ {"start_sec": 742.5, "end_sec": 771.0, "role": "hook",
                    "use_original_audio": true}, ... ],
-      "subtitles": [ {"start_sec": 0.2, "end_sec": 2.3, "text": "고친 자막"}, ... ]
+      "subtitles": [ {"start_sec": 0.2, "end_sec": 2.3, "text": "고친 자막"}, ... ],
+      "tts": [ {"source_time_sec": 743.0, "duration_sec": 3.5,
+                "voice": "ko_female", "text": "고친 내레이션"}, ... ]
     }
+
+스키마를 v2 로 올린 이유: 구 엔진의 validate_overrides 는 모르는 키를 조용히
+무시한다 — tts 를 v1 에 얹으면 구 엔진 노드에서 사람이 고친 내레이션이 소리 없이
+사라진 채 영상이 나간다(이 모듈의 제1원칙 위반). v2 는 구 엔진에서 "알 수 없는
+스키마"로 즉시 실패해 검수함에 남는다. 관제 RPC 는 tts 가 있을 때만 v2 를 찍는다.
 
 규약 넷 — 다 이유가 있다:
   · **clips 는 전량 교체**다(부분 패치 아님). 추가·삭제·순서변경이 섞이면 인덱스
@@ -24,6 +31,12 @@ checkpoint_silence_cut → checkpoint_story 순으로 클립·제목을 읽고, 
     8초 밀리면 편집기가 아니다. 단 길이 클램프와 중복 제거는 유지한다(렌더 안전장치).
   · **shorts #1(첫 variant)만 대상**이다. 편집은 특정 영상 하나를 고치는 일이고,
     variant #2·#3 은 자동 후보라 사람 손이 닿지 않은 채로 두는 편이 낫다.
+  · **tts 는 원본 절대초(source_time_sec)가 좌표이자 신원이다.** cue 는 원래부터
+    원본시간 앵커로 살다가 최종 타임라인 확정 후에야 편집시간으로 변환되므로
+    (_resolve_cue_anchors), 사람이 구간을 함께 고쳐도 좌표가 안 흔들린다 — 자막과
+    달리 구간 편집과 같이 보내도 된다. 역시 전량 교체이며, **빈 배열은 '내레이션
+    전부 삭제'로 유효하다**(자막의 --no-subtitles 같은 별도 스위치가 내레이션엔
+    없고, 안 어울리는 내레이션을 통째로 빼는 것이 실제 편집 수요라서다).
   · **subtitles 는 clips 와 좌표계가 다르다** — clips 는 원본 절대초,
     subtitles 는 **편집본 시간축**(쇼츠 0초 시작)이다. subtitle_segments.json 과
     같은 좌표계이며, 그 파일이 자막의 유일한 정본이기 때문이다(clips[].subtitle 은
@@ -45,7 +58,12 @@ from typing import Any
 from app.modules.story_builder import StoryClip
 
 SCHEMA_V1 = "edit_overrides/v1"
+SCHEMA_V2 = "edit_overrides/v2"          # v1 + tts. v1 은 계속 받는다
+VALID_SCHEMAS = (SCHEMA_V1, SCHEMA_V2)
 VALID_ROLES = ("hook", "build", "payoff")
+# tts 상속 매칭 반경(초) — 편집실은 받은 source_time_sec 을 그대로 되돌려 보내므로
+# 사실상 정확히 일치하지만, 반올림·수기 입력의 오차를 이만큼 관용한다.
+TTS_MATCH_TOLERANCE_SEC = 1.0
 
 
 class EditOverrideError(ValueError):
@@ -74,8 +92,8 @@ def validate_overrides(data: Any) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise EditOverrideError("편집 오버라이드는 JSON 객체여야 합니다")
     schema = data.get("schema")
-    if schema != SCHEMA_V1:
-        raise EditOverrideError(f"알 수 없는 스키마: {schema!r} (기대: {SCHEMA_V1})")
+    if schema not in VALID_SCHEMAS:
+        raise EditOverrideError(f"알 수 없는 스키마: {schema!r} (기대: {'/'.join(VALID_SCHEMAS)})")
 
     title = data.get("title") or {}
     if title and not isinstance(title, dict):
@@ -130,6 +148,32 @@ def validate_overrides(data: Any) -> dict[str, Any]:
         #    규약상 편집실은 **원본 목록을 그대로 되돌려 보내는데**, 겹침을 막으면
         #    한 줄만 고쳐도 전체가 거부된다. 파이프라인이 허용하는 것을 입력 검증이
         #    막으면 안 된다 — 편집실이 만든 문제가 아니라 원래 그런 데이터다.
+
+    tts = data.get("tts")
+    if tts is not None:
+        if not isinstance(tts, list):
+            raise EditOverrideError("tts 는 배열이어야 합니다 "
+                                    "(빈 배열 = 내레이션 전부 삭제, 전량 교체 규약)")
+        for i, c in enumerate(tts):
+            if not isinstance(c, dict):
+                raise EditOverrideError(f"tts[{i}] 가 객체가 아닙니다")
+            try:
+                st = float(c["source_time_sec"])
+            except (KeyError, TypeError, ValueError) as ex:
+                raise EditOverrideError(
+                    f"tts[{i}]: source_time_sec(원본 절대초)이 필요합니다 ({ex})") from ex
+            if st < 0:
+                raise EditOverrideError(f"tts[{i}]: source_time_sec 이 음수입니다 ({st})")
+            if not str(c.get("text", "")).strip():
+                raise EditOverrideError(
+                    f"tts[{i}]: text 가 비어 있습니다 — 그 내레이션을 지우려면 배열에서 빼세요")
+            if c.get("duration_sec") is not None:
+                try:
+                    d = float(c["duration_sec"])
+                except (TypeError, ValueError) as ex:
+                    raise EditOverrideError(f"tts[{i}]: duration_sec 이 숫자가 아닙니다") from ex
+                if d <= 0:
+                    raise EditOverrideError(f"tts[{i}]: duration_sec 은 양수여야 합니다 ({d})")
     return data
 
 
@@ -209,6 +253,51 @@ def overrides_subtitles(ov: dict[str, Any] | None) -> list[dict[str, Any]] | Non
     return [{"start_sec": float(s["start_sec"]),
              "end_sec": float(s["end_sec"]),
              "text": str(s["text"]).strip()} for s in ov["subtitles"]]
+
+
+def overrides_tts(ov: dict[str, Any] | None,
+                  old_cues: list[dict[str, Any]] | None = None,
+                  ) -> list[dict[str, Any]] | None:
+    """오버라이드 → 내레이션 cue 목록(앵커 스키마). tts 키가 없으면 None. 순수.
+
+    호출부는 이 결과로 첫 variant 의 cue pool 을 통째로 바꾼다 — 반드시
+    _resolve_cue_anchors **앞**이어야 한다(좌표가 원본 절대초라, 변환은 최종 클립
+    확정 후 그쪽이 한다). 빈 배열은 '내레이션 전부 삭제'로 유효하다.
+
+    **앵커 메타데이터는 가장 가까운 옛 cue 에서 물려받는다** — overrides_clips 와
+    같은 이유다. 편집실이 보내는 것은 화면에서 만질 수 있는 값(시각·창·목소리·문구)
+    뿐인데, cue 에는 화면에 없지만 해석을 좌우하는 값이 더 있다:
+      · chunk_index/candidate_index — 소재가 잘렸을 때 어느 조각으로 스냅할지 판정
+    문구만 고친 cue(편집실의 대다수 조작)는 source_time_sec 이 그대로라 정확히
+    매칭되고, 어디에도 안 붙는 완전히 새 cue 는 -1 로 남는다 — 그 원본 시각이
+    최종 타임라인에 살아 있으면 위치 매핑은 되고, 잘렸으면 드롭된다(의미상 맞다)."""
+    if not ov or "tts" not in ov:
+        return None
+    olds = old_cues or []
+    out: list[dict[str, Any]] = []
+    for c in ov["tts"]:
+        st = float(c["source_time_sec"])
+        src = None
+        best = TTS_MATCH_TOLERANCE_SEC
+        for o in olds:
+            if o.get("source_time_sec") is None:
+                continue
+            d = abs(float(o["source_time_sec"]) - st)
+            if d <= best:
+                src, best = o, d
+        dur = (float(c["duration_sec"]) if c.get("duration_sec") is not None
+               else float(src.get("duration_sec", 3.0)) if src else 3.0)
+        out.append({
+            "text": str(c["text"]).strip(),
+            "source_time_sec": st,
+            "duration_sec": dur,
+            "voice": str(c.get("voice") or (src.get("voice") if src else "") or "ko_female"),
+            "speed": str(c.get("speed") or (src.get("speed") if src else "") or "normal"),
+            "chunk_index": int(src.get("chunk_index", -1)) if src else -1,
+            "candidate_index": int(src.get("candidate_index", -1)) if src else -1,
+        })
+    out.sort(key=lambda x: x["source_time_sec"])
+    return out
 
 
 def total_duration(clips: list[StoryClip]) -> float:

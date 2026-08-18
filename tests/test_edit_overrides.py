@@ -17,6 +17,7 @@ from app.modules.edit_overrides import (
     load_edit_overrides,
     overrides_clips,
     overrides_subtitles,
+    overrides_tts,
     total_duration,
     validate_overrides,
 )
@@ -45,8 +46,11 @@ OV_FULL = {
 
 # ── 검증 ──────────────────────────────────────────────────────────────
 def test_schema_must_match():
+    # v1·v2 둘 다 유효 — v2 는 v1 + tts(내레이션)
+    validate_overrides({"schema": "edit_overrides/v1", "title": {"top_title": "x"}})
+    validate_overrides({"schema": "edit_overrides/v2", "title": {"top_title": "x"}})
     with pytest.raises(EditOverrideError):
-        validate_overrides({"schema": "edit_overrides/v2", "title": {"top_title": "x"}})
+        validate_overrides({"schema": "edit_overrides/v3", "title": {"top_title": "x"}})
     with pytest.raises(EditOverrideError):
         validate_overrides({"title": {"top_title": "x"}})          # 스키마 누락
     with pytest.raises(EditOverrideError):
@@ -341,3 +345,82 @@ def test_downloader_never_resumes():
     from app.modules import youtube_downloader as yd
     src = inspect.getsource(yd.download_youtube_assets)
     assert '"continuedl": False' in src, "이어받기를 끄지 않으면 .part 가 실패를 붙잡는다"
+
+
+# ── 내레이션(tts, v2) ─────────────────────────────────────────────────
+def _old_cues():
+    """엔진이 만든 앵커 cue — 편집실이 화면에 보여주고 되돌려 보내는 원본."""
+    return [
+        {"text": "원래 내레이션 A", "source_time_sec": 743.0, "duration_sec": 3.5,
+         "voice": "ko_male", "speed": "fast", "chunk_index": 3, "candidate_index": 1},
+        {"text": "원래 내레이션 B", "source_time_sec": 1195.5, "duration_sec": 4.0,
+         "voice": "ko_female", "speed": "normal", "chunk_index": 5, "candidate_index": 0},
+    ]
+
+
+def test_tts_text_edit_inherits_anchor_metadata():
+    # 문구만 고침 — source_time 이 같으므로 앵커 메타데이터(chunk/candidate)와
+    # duration·voice·speed 를 옛 cue 에서 그대로 물려받아야 한다.
+    ov = {"schema": "edit_overrides/v2",
+          "tts": [{"source_time_sec": 743.0, "text": "고친 내레이션 A"},
+                  {"source_time_sec": 1195.5, "text": "원래 내레이션 B"}]}
+    validate_overrides(ov)
+    got = overrides_tts(ov, _old_cues())
+    assert [c["text"] for c in got] == ["고친 내레이션 A", "원래 내레이션 B"]
+    assert got[0]["chunk_index"] == 3 and got[0]["candidate_index"] == 1
+    assert got[0]["voice"] == "ko_male" and got[0]["speed"] == "fast"
+    assert got[0]["duration_sec"] == 3.5
+
+
+def test_tts_delete_by_omission_and_full_wipe():
+    # 전량 교체 — 한 건을 빼면 그 내레이션이 삭제, 빈 배열은 전부 삭제(유효).
+    ov = {"schema": "edit_overrides/v2",
+          "tts": [{"source_time_sec": 743.0, "text": "남는 것"}]}
+    assert len(overrides_tts(ov, _old_cues())) == 1
+    wipe = {"schema": "edit_overrides/v2", "tts": []}
+    validate_overrides(wipe)
+    assert overrides_tts(wipe, _old_cues()) == []
+
+
+def test_tts_new_cue_gets_defaults_and_no_anchor():
+    # 어느 옛 cue 와도 안 붙는 새 내레이션 — 앵커 -1, 기본 목소리, 명시한 창 길이.
+    ov = {"schema": "edit_overrides/v2",
+          "tts": [{"source_time_sec": 2411.0, "duration_sec": 3.0, "text": "새 내레이션"}]}
+    got = overrides_tts(ov, _old_cues())
+    assert got[0]["chunk_index"] == -1 and got[0]["candidate_index"] == -1
+    assert got[0]["voice"] == "ko_female" and got[0]["duration_sec"] == 3.0
+
+
+def test_tts_explicit_fields_win_over_inheritance():
+    ov = {"schema": "edit_overrides/v2",
+          "tts": [{"source_time_sec": 743.0, "duration_sec": 2.0,
+                   "voice": "ko_female_high", "text": "명시가 이긴다"}]}
+    got = overrides_tts(ov, _old_cues())
+    assert got[0]["duration_sec"] == 2.0 and got[0]["voice"] == "ko_female_high"
+    assert got[0]["chunk_index"] == 3          # 앵커는 여전히 상속
+
+
+def test_tts_sorted_by_source_time():
+    ov = {"schema": "edit_overrides/v2",
+          "tts": [{"source_time_sec": 1195.5, "text": "뒤"},
+                  {"source_time_sec": 743.0, "text": "앞"}]}
+    assert [c["text"] for c in overrides_tts(ov, _old_cues())] == ["앞", "뒤"]
+
+
+def test_tts_absent_key_returns_none():
+    assert overrides_tts({"schema": "edit_overrides/v2",
+                          "title": {"top_title": "x"}}, _old_cues()) is None
+    assert overrides_tts(None, _old_cues()) is None
+
+
+@pytest.mark.parametrize("bad,msg", [
+    ({"tts": {"a": 1}}, "배열"),
+    ({"tts": [{"text": "시각 없음"}]}, "source_time_sec"),
+    ({"tts": [{"source_time_sec": -1, "text": "x"}]}, "음수"),
+    ({"tts": [{"source_time_sec": 10, "text": "  "}]}, "text"),
+    ({"tts": [{"source_time_sec": 10, "duration_sec": 0, "text": "x"}]}, "양수"),
+])
+def test_tts_contract_violations_fail_loudly(bad, msg):
+    ov = {"schema": "edit_overrides/v2", **bad}
+    with pytest.raises(EditOverrideError, match=msg):
+        validate_overrides(ov)
