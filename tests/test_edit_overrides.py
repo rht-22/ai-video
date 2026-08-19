@@ -12,14 +12,16 @@ import json
 import pytest
 
 from app.modules.edit_overrides import (
+    IMAGE_MAX_BYTES,
     EditOverrideError,
     apply_overrides,
-    ensure_renderable,
     load_edit_overrides,
     overrides_clips,
     overrides_subtitles,
     overrides_tts,
+    place_anchored_images,
     place_anchored_subtitles,
+    resolve_image_files,
     total_duration,
     validate_overrides,
 )
@@ -526,23 +528,53 @@ def test_v3_subtitle_field_violations_fail_loudly(bad, msg):
       "x": 1.2, "y": 0, "w": 0.5}, "0~1"),
     ({"file": "a.png", "source_time_sec": 1, "duration_sec": 1,
       "x": 0, "y": 0, "w": 0.5, "layer": "위"}, "정수"),
+    ({"file": "a.gif", "source_time_sec": 1, "duration_sec": 1,
+      "x": 0, "y": 0, "w": 0.5}, "확장자"),
 ])
 def test_v3_image_violations_fail_loudly(bad, msg):
     with pytest.raises(EditOverrideError, match=msg):
         validate_overrides({"schema": "edit_overrides/v3", "images": [bad]})
 
 
-def test_v3_images_render_gate_fails_loudly():
-    """images 는 스키마 선언만 — 렌더가 조용히 빼먹는 대신 ensure_renderable 이
-    즉시 실패시킨다(제1원칙). 렌더가 구현되면 이 게이트와 테스트를 걷어낸다."""
-    ov = validate_overrides({"schema": "edit_overrides/v3",
-                             "images": [{"file": "a.png", "source_time_sec": 1,
-                                         "duration_sec": 1, "x": 0, "y": 0, "w": 0.5}]})
-    with pytest.raises(EditOverrideError, match="미구현"):
-        ensure_renderable(ov)
-    # images 없는 오버라이드는 그대로 통과 — 종전 동작 불변
-    assert ensure_renderable(OV_V3) is OV_V3
-    assert ensure_renderable(None) is None
+# ── images 파일 해석(F-408) — run_dir 상대 경로 → 절대 경로, 없는 파일은 fail-loud ──
+def _img(file="assets/arrow.png", **extra):
+    return {"file": file, "source_time_sec": 745.0, "duration_sec": 2.0,
+            "x": 0.1, "y": 0.2, "w": 0.3, **extra}
+
+
+def test_resolve_image_files_returns_absolute_paths(tmp_path):
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "assets" / "arrow.png").write_bytes(b"\x89PNG fake")
+    ov = {"schema": "edit_overrides/v3", "images": [_img()]}
+    got = resolve_image_files(ov, tmp_path)
+    assert len(got) == 1
+    from pathlib import Path as _P
+    assert _P(got[0]["file"]).is_absolute()
+    assert _P(got[0]["file"]) == (tmp_path / "assets" / "arrow.png").resolve()
+    # 원본 dict 는 건드리지 않는다 (file 만 절대 경로로 치환한 사본)
+    assert ov["images"][0]["file"] == "assets/arrow.png"
+    # images 없으면 빈 목록 — 종전 동작 불변
+    assert resolve_image_files(None, tmp_path) == []
+    assert resolve_image_files({"schema": "edit_overrides/v3"}, tmp_path) == []
+
+
+def test_resolve_image_files_missing_file_fails_loudly(tmp_path):
+    """사람이 올린 이미지가 run_dir 에 없으면 렌더 전에 즉시 실패 — 조용히 빼고
+    렌더하면 이미지가 소리 없이 사라진 영상이 나간다(제1원칙)."""
+    ov = {"schema": "edit_overrides/v3", "images": [_img("없는파일.png")]}
+    with pytest.raises(EditOverrideError, match="파일이 없습니다"):
+        resolve_image_files(ov, tmp_path)
+
+
+def test_resolve_image_files_enforces_size_cap(tmp_path):
+    (tmp_path / "big.png").write_bytes(b"\x00" * (IMAGE_MAX_BYTES + 1))
+    (tmp_path / "empty.png").write_bytes(b"")
+    with pytest.raises(EditOverrideError, match="상한"):
+        resolve_image_files(
+            {"schema": "edit_overrides/v3", "images": [_img("big.png")]}, tmp_path)
+    with pytest.raises(EditOverrideError, match="빈 파일"):
+        resolve_image_files(
+            {"schema": "edit_overrides/v3", "images": [_img("empty.png")]}, tmp_path)
 
 
 def test_overrides_subtitles_passes_anchor_and_style_through():
@@ -646,4 +678,38 @@ def test_v3_full_roundtrip_with_clips(tmp_path):
     assert dropped == []
     assert placed[0]["start_sec"] == 10.0            # 0 + (105-95)
     assert placed[0]["style"]["color"] == "#FFDD00"
+
+
+# ── v3 images 배치(F-408) — 자막 앵커와 같은 규칙, 창 길이는 duration_sec ──
+def test_anchored_image_follows_clip_offset():
+    imgs = [_img(source_time_sec=105.0, duration_sec=2.0, layer=1),
+            _img(source_time_sec=12.0, duration_sec=3.0)]
+    placed, dropped = place_anchored_images(imgs, _final_clips())
+    assert dropped == []
+    # 배열 순서 보존 — 같은 layer 의 쌓임 순서 계약이라 시각순 정렬하지 않는다
+    assert [(i["start_sec"], i["end_sec"]) for i in placed] == [(20.0, 22.0), (2.0, 5.0)]
+    # 변환 후 원본축 좌표는 사라지고 렌더러 입력(위치·레이어)은 그대로 통과
+    assert "source_time_sec" not in placed[0] and "duration_sec" not in placed[0]
+    assert (placed[0]["x"], placed[0]["y"], placed[0]["w"], placed[0]["layer"]) == (0.1, 0.2, 0.3, 1)
+
+
+def test_anchored_image_orphan_dropped_and_tail_clamped():
+    """클립 밖 앵커는 tts 고아 규칙 = 드롭(호출부가 로그). 타임라인 끝을 넘는 창은
+    클램프되고, 클램프 후 0.1s 미만이면 역시 드롭이다."""
+    placed, dropped = place_anchored_images(
+        [_img(source_time_sec=500.0),                       # 최종 구간 밖 → 고아
+         _img(source_time_sec=119.0, duration_sec=5.0),     # 편집 34.0 + 5.0 → 35.0 클램프
+         _img(source_time_sec=120.3, duration_sec=2.0)],    # 슬롭 매칭 끝자락 → 0s → 드롭
+        _final_clips())
+    assert len(dropped) == 2
+    assert dropped[0]["source_time_sec"] == 500.0            # 로그용 좌표 보존
+    assert [(i["start_sec"], i["end_sec"]) for i in placed] == [(34.0, 35.0)]
+
+
+def test_anchored_image_slop_matches_boundary():
+    """포함 판정 슬롭 ±0.5s — 자막·편집실 UI 와 동일 규약."""
+    placed, dropped = place_anchored_images(
+        [_img(source_time_sec=9.6, duration_sec=2.0)], _final_clips())
+    assert dropped == []
+    assert (placed[0]["start_sec"], placed[0]["end_sec"]) == (0.0, 2.0)
 

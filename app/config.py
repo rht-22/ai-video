@@ -24,6 +24,9 @@ class DesignConfig:
     title_colors: list[str] = field(default_factory=lambda: ["white", "#FFFF00"])
     title_sizes: list[int] = field(default_factory=lambda: [70, 90])
     title_y: int = 120
+    # F-409: True 면 동적 배치(영상 위 20px) 대신 title_y 를 그대로 쓴다 — 편집실 제목
+    # 드래그용. 기본 False 라 기존 채널 전부 무영향.
+    title_y_fixed: bool = False
 
     # 자막 설정 (ASS 스타일 기준)
     subtitle_font: str = "여기어때 잘난체 2 TTF"

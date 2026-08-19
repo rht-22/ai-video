@@ -44,9 +44,13 @@ v3 추가분:
   · **subtitles[].style (F-407)** — 줄 단위 스타일 오버라이드 {size, y, color}.
     채널/편 전역 프리셋 위에 그 줄만 얹는다. size = 1080×1920 캔버스 기준 폰트 px,
     y = 자막 하단이 놓일 세로 위치(0=상단, 1=하단, 캔버스 비율), color = "#RRGGBB".
-  · **images** — 스키마 선언만(2026-08-19). x·y·w 는 1080×1920 캔버스 대비 0~1 비율,
-    file 은 run_dir 상대 경로. 렌더는 미구현이라 ensure_renderable 이 fail-loud 로
-    거절한다 — 조용히 빼고 렌더하면 제1원칙 위반이다. 구현은 후속 세션.
+  · **images (F-408)** — 자막처럼 시간 창을 갖는 이미지(스티커·짤) 오버레이.
+    x·y·w 는 1080×1920 캔버스 대비 0~1 비율(w 만 지정 — 세로는 원본비 유지),
+    file 은 run_dir 상대 경로(png/jpg, 상한 IMAGE_MAX_BYTES). 스토리지 다운로드는
+    오케스트레이터 어댑터 몫이다 — 엔진은 로컬 파일만 받는다(스토리지 자격 없음).
+    시간 창은 자막 앵커와 같은 원본 절대초(source_time_sec + duration_sec) —
+    place_anchored_images 가 최종 타임라인으로 변환하고 고아는 tts 규칙대로 드롭한다.
+    layer 로 자막 아래(≤0, 기본 0)/위(≥1)를 가른다.
 
 규약 넷 — 다 이유가 있다:
   · **clips 는 전량 교체**다(부분 패치 아님). 추가·삭제·순서변경이 섞이면 인덱스
@@ -99,6 +103,10 @@ SUBTITLE_ANCHOR_SLOP_SEC = 0.5
 # 줄 단위 스타일 계약 — 이 세 키만 받는다. 모르는 키를 조용히 무시하면 사람이 고친
 # 값이 반영 안 된 채 영상이 나가므로(제1원칙) 즉시 실패한다.
 SUBTITLE_STYLE_KEYS = ("size", "y", "color")
+# images 파일 계약 — ffmpeg 이 그대로 읽는 정지 이미지만(알파가 필요하면 png).
+# 크기 상한은 스티커·짤 용도 기준 재량값이다(캔버스 전체를 덮는 png 도 수 MB 면 충분).
+IMAGE_ALLOWED_SUFFIXES = (".png", ".jpg", ".jpeg")
+IMAGE_MAX_BYTES = 10 * 1024 * 1024
 _COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
 
@@ -281,7 +289,9 @@ def _validate_subtitle_v3_fields(i: int, s: dict[str, Any], schema: str) -> None
 
 
 def _validate_image(i: int, im: Any) -> None:
-    """images[i] 스키마 검증(2026-08-19 — 스키마 선언만, 렌더는 ensure_renderable 이 거절)."""
+    """images[i] 스키마 검증 — 정적(파일시스템 무관) 검사만. 순수.
+
+    파일 존재·크기 검증은 run_dir 를 아는 resolve_image_files 가 한다."""
     if not isinstance(im, dict):
         raise EditOverrideError(f"images[{i}] 가 객체가 아닙니다")
     file = str(im.get("file") or "").strip()
@@ -290,6 +300,10 @@ def _validate_image(i: int, im: Any) -> None:
     if file.startswith(("/", "~")) or ".." in Path(file).parts:
         raise EditOverrideError(
             f"images[{i}]: file 은 run_dir 상대 경로여야 합니다 (받은 값: {file!r})")
+    if Path(file).suffix.lower() not in IMAGE_ALLOWED_SUFFIXES:
+        raise EditOverrideError(
+            f"images[{i}]: 지원 확장자는 {'/'.join(IMAGE_ALLOWED_SUFFIXES)} 뿐입니다 "
+            f"(받은 값: {file!r} — 알파가 필요하면 png)")
     try:
         st = float(im["source_time_sec"])
     except (KeyError, TypeError, ValueError) as ex:
@@ -315,17 +329,39 @@ def _validate_image(i: int, im: Any) -> None:
         raise EditOverrideError(f"images[{i}]: layer 는 정수여야 합니다 ({im['layer']!r})")
 
 
-def ensure_renderable(ov: dict[str, Any] | None) -> dict[str, Any] | None:
-    """렌더 직전 게이트 — 스키마는 선언됐지만 렌더가 아직 없는 기능을 fail-loud 로 거절.
+def resolve_image_files(ov: dict[str, Any] | None,
+                        run_dir: str | Path) -> list[dict[str, Any]]:
+    """images[].file(run_dir 상대 경로) → 절대 경로 해석 + 파일 검증(F-408).
 
-    images(v3, 2026-08-19): 이 스키마는 선언·검증까지만 구현됐다. 조용히 빼고
-    렌더하면 사람이 올린 이미지가 소리 없이 사라진 영상이 나간다(제1원칙 위반) —
-    즉시 실패시켜 검수함에 남긴다. 이미지 오버레이 렌더가 구현되면 이 가드를 지운다."""
-    if ov and ov.get("images"):
-        raise EditOverrideError(
-            "edit_overrides/v3 images 는 아직 렌더 미구현입니다 (스키마 선언만 존재) — "
-            "이미지 오버레이가 구현될 때까지 images 없이 제출하세요")
-    return ov
+    파이프라인 시작 직후(무거운 단계를 돌기 전)에 호출한다 — 없는 파일을 조용히 빼고
+    렌더하면 사람이 올린 이미지가 소리 없이 사라진 영상이 나간다(제1원칙). 스토리지
+    다운로드는 오케스트레이터 어댑터 몫이라 여기 도달한 시점엔 파일이 run_dir 에
+    있어야 정상이다. 검증: run_dir 이탈 재확인(validate 의 정적 검사 + resolve 후
+    방어), 존재, 크기 상한 IMAGE_MAX_BYTES. 반환 항목의 file 은 절대 경로 문자열."""
+    if not ov or not ov.get("images"):
+        return []
+    base = Path(run_dir).resolve()
+    out: list[dict[str, Any]] = []
+    for i, im in enumerate(ov["images"]):
+        p = (base / str(im["file"])).resolve()
+        if not p.is_relative_to(base):
+            raise EditOverrideError(
+                f"images[{i}]: file 이 run_dir 를 벗어납니다 (받은 값: {im['file']!r})")
+        if not p.is_file():
+            raise EditOverrideError(
+                f"images[{i}]: 파일이 없습니다: {p} — 오케스트레이터 어댑터가 스토리지에서 "
+                "run_dir 로 내려받은 뒤 상대 경로로 보내는 계약입니다")
+        size = p.stat().st_size
+        if size == 0:
+            raise EditOverrideError(f"images[{i}]: 빈 파일입니다: {p.name}")
+        if size > IMAGE_MAX_BYTES:
+            raise EditOverrideError(
+                f"images[{i}]: 파일이 상한을 넘습니다 ({size / 1048576:.1f}MB > "
+                f"{IMAGE_MAX_BYTES // 1048576}MB): {p.name}")
+        item = dict(im)
+        item["file"] = str(p)
+        out.append(item)
+    return out
 
 
 def _best_overlap(start: float, end: float, olds: list[StoryClip]) -> StoryClip | None:
@@ -429,6 +465,30 @@ def overrides_subtitles(ov: dict[str, Any] | None) -> list[dict[str, Any]] | Non
     return out
 
 
+def _clip_spans(clips: list[StoryClip]) -> tuple[list[tuple[float, float, float]], float]:
+    """최종 클립 목록 → (원본 start, 원본 end, 편집 base) 스팬 목록 + 총 길이. 순수."""
+    spans: list[tuple[float, float, float]] = []
+    total = 0.0
+    for c in clips or []:
+        s, e = float(c.start_sec), float(c.end_sec)
+        spans.append((s, e, total))
+        total += max(0.0, e - s)
+    return spans, total
+
+
+def _pick_span(spans: list[tuple[float, float, float]],
+               t: float) -> tuple[float, float, float] | None:
+    """앵커 t 를 담은 스팬 — 정확 포함(start ≤ t < end) 우선, 없으면 슬롭
+    ±SUBTITLE_ANCHOR_SLOP_SEC 로 재판정해 가장 가까운 것. 없으면 None(고아). 순수."""
+    pick = next((sp for sp in spans if sp[0] <= t < sp[1]), None)
+    if pick is None:
+        slop = [sp for sp in spans
+                if sp[0] - SUBTITLE_ANCHOR_SLOP_SEC <= t <= sp[1] + SUBTITLE_ANCHOR_SLOP_SEC]
+        if slop:
+            pick = min(slop, key=lambda sp: min(abs(t - sp[0]), abs(t - sp[1])))
+    return pick
+
+
 def place_anchored_subtitles(
     subs: list[dict[str, Any]],
     clips: list[StoryClip],
@@ -452,12 +512,7 @@ def place_anchored_subtitles(
     그대로 통과한다."""
     if not subs:
         return [], []
-    spans: list[tuple[float, float, float]] = []   # (원본 start, 원본 end, 편집 base)
-    total = 0.0
-    for c in clips or []:
-        s, e = float(c.start_sec), float(c.end_sec)
-        spans.append((s, e, total))
-        total += max(0.0, e - s)
+    spans, total = _clip_spans(clips)
 
     placed: list[dict[str, Any]] = []
     dropped: list[dict[str, Any]] = []
@@ -467,12 +522,7 @@ def place_anchored_subtitles(
             placed.append(dict(sub))
             continue
         t = float(t_raw)
-        pick = next((sp for sp in spans if sp[0] <= t < sp[1]), None)
-        if pick is None:
-            slop = [sp for sp in spans
-                    if sp[0] - SUBTITLE_ANCHOR_SLOP_SEC <= t <= sp[1] + SUBTITLE_ANCHOR_SLOP_SEC]
-            if slop:
-                pick = min(slop, key=lambda sp: min(abs(t - sp[0]), abs(t - sp[1])))
+        pick = _pick_span(spans, t)
         if pick is None:
             dropped.append(sub)
             continue
@@ -489,6 +539,48 @@ def place_anchored_subtitles(
         out["end_sec"] = round(end, 3)
         placed.append(out)
     placed.sort(key=lambda x: (float(x["start_sec"]), float(x["end_sec"])))
+    return placed, dropped
+
+
+def place_anchored_images(
+    images: list[dict[str, Any]],
+    clips: list[StoryClip],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """v3 images 배치(F-408) — source_time_sec(원본 절대초) → 편집 타임라인. 순수.
+
+    자막 앵커(place_anchored_subtitles)와 같은 규칙: 담은 최종 클립의 편집 오프셋 +
+    클립 내 상대시각, 포함 판정 슬롭 ±0.5s, 클립 밖 앵커는 tts 고아와 같은 규칙 =
+    **드롭**이다(변환 후 0.1s 미만 포함). 드롭 항목은 둘째 반환값 — 호출부는 반드시
+    로그로 남겨라(조용한 드롭 = 제1원칙 위반).
+
+    자막과 달리 창 길이가 duration_sec 로 오므로, 편집 창 = [start, start+duration]
+    을 타임라인 끝에서 클램프한다. 반환 항목은 편집본 시간축의 start_sec/end_sec 를
+    갖고 source_time_sec·duration_sec 은 제거된다(렌더러 입력 = 편집본 시간축).
+    file·x·y·w·layer 는 그대로 통과하며, **배열 순서를 보존한다** — 같은 layer 의
+    쌓임 순서가 배열 순서 계약이라 자막처럼 시각순 정렬하면 안 된다."""
+    if not images:
+        return [], []
+    spans, total = _clip_spans(clips)
+    placed: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for im in images:
+        t = float(im["source_time_sec"])
+        pick = _pick_span(spans, t)
+        if pick is None:
+            dropped.append(im)
+            continue
+        s0, e0, base = pick
+        rel = min(max(t - s0, 0.0), e0 - s0)       # 슬롭 매칭은 클립 안쪽으로 클램프
+        start = base + rel
+        end = min(start + float(im["duration_sec"]), total)
+        if end - start < 0.1:
+            dropped.append(im)
+            continue
+        out = {k: v for k, v in im.items()
+               if k not in ("source_time_sec", "duration_sec")}
+        out["start_sec"] = round(start, 3)
+        out["end_sec"] = round(end, 3)
+        placed.append(out)
     return placed, dropped
 
 
