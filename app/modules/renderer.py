@@ -608,6 +608,9 @@ class RenderInputs:
     enable_hwaccel: bool = True
     title_textfile: Path | None = None
     work_title_textfile: Path | None = None
+    # 편집실 이미지 오버레이(edit_overrides/v3 images, F-408) — place_anchored_images 로
+    # 배치가 끝난 항목: {file(절대 경로), start_sec, end_sec(편집본 시간축), x, y, w, layer}
+    image_overlays: list[dict] | None = None
 
 
 def render_short(inputs: RenderInputs) -> list[str]:
@@ -1070,9 +1073,13 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     # 제목 위치: 영상 영역 시작점 바로 위에 동적 배치 (사용자 요구).
     # 영상 위쪽 여백(=overlay_y)이 충분히 크면 그 안에 제목 + 20px gap을 두고 배치.
     # 여백이 부족하면(=영상이 캔버스 위쪽까지 차지) d.title_y 폴백.
+    # title_y_fixed(F-409)면 동적 배치를 끄고 title_y 를 그대로 쓴다 — 편집실 제목
+    # 드래그가 보내는 좌표는 절대 위치라, 동적 배치가 이기면 드래그가 반영되지 않는다.
     _gap_above_video = 20
     _dynamic_title_top = overlay_y - title_total_height - _gap_above_video
-    if _dynamic_title_top >= 10:
+    if getattr(d, 'title_y_fixed', False):
+        cumulative_y = d.title_y
+    elif _dynamic_title_top >= 10:
         cumulative_y = _dynamic_title_top
     else:
         cumulative_y = d.title_y
@@ -1223,7 +1230,38 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         escaped_val = _escape_text_for_drawtext(raw_work)
         filters.append(f"{last_v_label}drawtext=expansion=none:fontfile='{font_arg}':text='{escaped_val}':fontcolor={d.work_color}:fontsize={d.work_font_size}:x=(w-text_w)/2:y={work_y_final}{work_label}")
 
-  
+
+    # [6.5] 편집실 이미지 오버레이(edit_overrides/v3 images, F-408)
+    # 좌표는 1080×1920 캔버스 비율→px(w 만 지정, 세로는 원본비 = scale 높이 -2),
+    # 시간 창은 편집본 시간축(enable=between) — 배치는 place_anchored_images 가 끝냈다.
+    # layer ≤ 0 은 자막 아래(기본 0), ≥ 1 은 자막(ASS 두 겹) 위. 같은 그룹 안에서는
+    # layer 오름차순으로 쌓이고, 동률이면 배열 순서(stable sort)로 뒤가 위에 온다.
+    _eimgs = sorted(list(inputs.image_overlays or []),
+                    key=lambda im: int(im.get("layer") or 0))
+    _eimgs_below = [im for im in _eimgs if int(im.get("layer") or 0) <= 0]
+    _eimgs_above = [im for im in _eimgs if int(im.get("layer") or 0) > 0]
+
+    def _overlay_images(imgs: list[dict], in_label: str, tag: str) -> str:
+        label = in_label
+        for j, im in enumerate(imgs):
+            img_path = str(Path(str(im["file"])).resolve()).replace("\\", "/").replace(":", "\\:")
+            img_w = max(2, int(round(float(im["w"]) * W)) // 2 * 2)
+            img_x = int(round(float(im["x"]) * W))
+            img_y = int(round(float(im["y"]) * H))
+            s, e = float(im["start_sec"]), float(im["end_sec"])
+            out = f"[{tag}{j}]"
+            print(f"  [EditImage] {Path(str(im['file'])).name}: w={img_w}px @ ({img_x},{img_y}) "
+                  f"{s:.2f}~{e:.2f}s layer={int(im.get('layer') or 0)}")
+            filters.append(
+                f"movie='{img_path}',scale={img_w}:-2[{tag}src{j}];"
+                f"{label}[{tag}src{j}]overlay={img_x}:{img_y}:"
+                f"enable='between(t,{s:.3f},{e:.3f})'{out}"
+            )
+            label = out
+        return label
+
+    pre_sub_label = _overlay_images(_eimgs_below, work_label, "eimgb")
+
     # [7] 자막(ASS) 적용
     font_dir_fixed = _to_short_path(str(font_folder.resolve())).replace("\\", "/").replace(":", "\\:")
 
@@ -1237,19 +1275,26 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         ass_path.write_text(ass_content, encoding="utf-8")
 
         sub_path_fixed = _to_short_path(str(ass_path)).replace("\\", "/").replace(":", "\\:")
-        filters.append(f"{work_label}ass='{sub_path_fixed}':fontsdir='{font_dir_fixed}'[vsub]")
+        filters.append(f"{pre_sub_label}ass='{sub_path_fixed}':fontsdir='{font_dir_fixed}'[vsub]")
         last_v_label = "[vsub]"
     else:
-        filters.append(f"{work_label}null[vsub]")
+        filters.append(f"{pre_sub_label}null[vsub]")
         last_v_label = "[vsub]"
 
+    # 자막 위 이미지가 있으면 ASS 출력을 중간 라벨로 받고 그 위에 얹은 뒤 [vout] 으로 마감
+    _tts_out = "[vpretop]" if _eimgs_above else "[vout]"
     if inputs.tts_subtitle_path and inputs.tts_subtitle_path.exists():
         tts_ass_path = inputs.tts_subtitle_path.resolve()
         tts_sub_fixed = _to_short_path(str(tts_ass_path)).replace("\\", "/").replace(":", "\\:")
-        filters.append(f"{last_v_label}ass='{tts_sub_fixed}':fontsdir='{font_dir_fixed}'[vout]")
-        last_v_label = "[vout]"
+        filters.append(f"{last_v_label}ass='{tts_sub_fixed}':fontsdir='{font_dir_fixed}'{_tts_out}")
+        last_v_label = _tts_out
     else:
-        filters.append(f"{last_v_label}null[vout]")
+        filters.append(f"{last_v_label}null{_tts_out}")
+        last_v_label = _tts_out
+
+    if _eimgs_above:
+        _top_label = _overlay_images(_eimgs_above, last_v_label, "eimga")
+        filters.append(f"{_top_label}null[vout]")
         last_v_label = "[vout]"
 
     audio_filter = _build_audio_filter(inputs, num_clip_inputs, num_cue_inputs)

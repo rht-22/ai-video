@@ -119,7 +119,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="엔딩 크레딧 건너뛰기 (초, 예: 120)")
     # ── 디자인 파라미터 (DesignConfig 오버라이드) ──
     design = create.add_argument_group("design", "영상 디자인/레이아웃 설정 (YouTube Shorts safe zone 기준)")
-    design.add_argument("--design-title-y", type=int, default=None, help="제목 Y 위치 (기본: 120)")
+    design.add_argument("--design-title-y", type=int, default=None,
+                        help="제목 Y 위치 (기본: 120). 평소엔 동적 배치(영상 위 20px)가 이기고 "
+                             "여백 부족 시 폴백으로만 쓰인다 — 항상 이 값을 쓰려면 --design-title-y-fixed")
+    design.add_argument("--design-title-y-fixed", action="store_true",
+                        help="제목 Y 를 동적 배치 대신 --design-title-y 값에 고정 (F-409). "
+                             "편집실 제목 드래그용 — 기본은 종전 동적 배치(기존 채널 무영향)")
     design.add_argument("--design-video-y", type=int, default=None,
                         help="영상영역 상단 Y (기본: 세로 중앙). 위로 올리면 아래 밴드가 넓어져 "
                              "TTS 자막·로고를 영상 아래에 쌓을 수 있다. 제목은 영상 위에 동적 배치라 따라온다")
@@ -128,7 +133,9 @@ def build_parser() -> argparse.ArgumentParser:
     design.add_argument("--design-title-font", type=str, default=None, help="제목 폰트명")
     design.add_argument("--design-subtitle-font", type=str, default=None,
                         help="자막/TTS 자막 폰트명 (기본: 장르 프리셋 폰트). 일본어 등 프리셋 폰트에 없는 글리프가 필요할 때 지정")
-    design.add_argument("--design-title-size", type=int, default=None, help="제목 폰트 크기")
+    design.add_argument("--design-title-size", type=int, default=None,
+                        help="제목 폰트 크기 (1줄 기준). 기본 [70,90]의 줄 간 비율을 유지한 채 "
+                             "전체를 스케일한다 — 90/70 배율로 2줄 크기가 함께 커진다")
     design.add_argument("--design-title-color", type=str, default=None, help="제목 1번째 줄 색상 (기본: white)")
     design.add_argument("--design-title-color2", type=str, default=None, help="제목 2번째 줄 색상 (기본: #FFFF00)")
     design.add_argument("--design-subtitle-size", type=int, default=None, help="자막 폰트 크기")
@@ -227,6 +234,22 @@ def _build_design_config(args: argparse.Namespace) -> DesignConfig:
     # 리프레이밍 스위치 — store_true 라 None 이 아니어서 위 루프에 못 태운다(끄는 쪽만 의미 있음).
     if getattr(args, "no_reframe", False):
         overrides["enable_reframe"] = False
+
+    # 제목 Y 고정(F-409) — 같은 이유로 store_true 는 켜는 쪽만 의미 있다.
+    if getattr(args, "design_title_y_fixed", False):
+        overrides["title_y_fixed"] = True
+
+    # 제목 크기(F-409): 렌더러가 실제 그리는 건 title_sizes 리스트다 — title_size 단일
+    # 필드는 줄바꿈 계산에만 쓰여, 여기서 조립하지 않으면 --design-title-size 가 화면에
+    # 반영되지 않는다(2026-08-19 오케스트레이터 실측). title_color→title_colors 와 같은
+    # 패턴: 기본 [70,90]에서 시작하되, 지정 값을 1줄 기준으로 삼아 **줄 간 비율을 유지한
+    # 채** 전체를 스케일한다(90/70 배율). 편집실 제목 드래그 = 블록 전체 확대/축소라
+    # 두 줄의 위계(후킹 줄이 더 크다)가 유지돼야 한다 — 계약: docs/edit_overrides_v3.md.
+    title_size = getattr(args, "design_title_size", None)
+    if title_size:
+        base_sizes = list(DesignConfig().title_sizes)
+        overrides["title_sizes"] = [
+            max(1, round(sz * title_size / base_sizes[0])) for sz in base_sizes]
 
     # 자막/TTS 색상은 ASS 형식(&HAABBGGRR) — 사용자가 #RRGGBB로 줘도 받도록 정규화.
     # (제목·작품명 색은 ffmpeg drawtext라 hex를 그대로 쓰므로 변환하지 않는다)

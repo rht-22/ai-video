@@ -1133,11 +1133,12 @@ def _fit_storyline_to_duration(
 from app.modules.chunker import build_chunks, split_video_chunk
 from app.modules.edit_overrides import (
     apply_overrides,
-    ensure_renderable,
     load_edit_overrides,
     overrides_subtitles,
     overrides_tts,
+    place_anchored_images,
     place_anchored_subtitles,
+    resolve_image_files,
     total_duration,
 )
 from app.modules.gemini_client import (
@@ -1873,11 +1874,14 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 편집실 오버라이드는 여기서 한 번만 읽고 검증한다 — 계약 위반이면 무거운 단계를
     # 돌기 전에 즉시 실패시킨다(사람이 고친 값이 조용히 무시된 채 영상이 나가는 것이 최악).
     _edit_overrides = load_edit_overrides(payload.edit_overrides_path)
-    # v3 images 는 스키마 선언만 있고 렌더가 아직 없다(2026-08-19) — 조용히 빼고
-    # 렌더하는 대신 여기서 fail-loud. 렌더가 구현되면 이 게이트가 함수 안에서 사라진다.
-    ensure_renderable(_edit_overrides)
+    # v3 images(F-408) 파일 검증 — file 은 run_dir(=output_dir) 상대 경로 계약이다.
+    # 없는 파일·계약 밖 파일은 무거운 단계를 돌기 전에 여기서 fail-loud (스토리지
+    # 다운로드는 오케스트레이터 어댑터 몫 — 여기 도달했으면 파일이 있어야 정상).
+    _edit_images = resolve_image_files(_edit_overrides, output_dir)
     if _edit_overrides:
         print(f"\n[edit] 편집실 오버라이드 로드: {payload.edit_overrides_path}")
+        if _edit_images:
+            print(f"[edit] 이미지 오버레이 {len(_edit_images)}건 파일 검증 완료")
 
     # ═══════════════════════════════════════
     # [3/15] 미디어 프로브
@@ -3106,6 +3110,20 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             json.dumps(_sub_override, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"  [edit] 자막 오버라이드 적용 ({len(final_segments)}건) — 사람이 고친 문장")
 
+    # ── 편집실 이미지 오버레이(v3 F-408) ────────────────────────────────────
+    # 앵커 규칙은 자막과 동일(원본 절대초 → 담은 클립 오프셋 + 상대시각, 슬롭 ±0.5s)
+    # 이라 최종 clips 가 확정된 여기서만 배치할 수 있다. 고아는 tts 규칙대로 드롭 + 로그.
+    # 첫 variant 한정(오버라이드 공통 규약) — variant #2·#3 렌더에는 넘기지 않는다.
+    _image_overlays: list[dict[str, Any]] = []
+    if _edit_images:
+        _image_overlays, _img_orphans = place_anchored_images(_edit_images, clips)
+        for _o in _img_orphans:
+            print(f"  [edit] 앵커 소재가 최종 타임라인에 없음 → 이미지 드롭"
+                  f"(tts 고아 규칙과 동일): source_time_sec={_o.get('source_time_sec')} "
+                  f"{Path(str(_o.get('file', ''))).name}")
+        if _image_overlays:
+            print(f"  [edit] 이미지 오버레이 {len(_image_overlays)}건 배치 — 편집 타임라인 변환 완료")
+
     # ── 편집실 내레이션 오버라이드(v2) ──────────────────────────────────────
     # 반드시 앵커 해석(_resolve_cue_anchors) **앞**이다 — 사람이 보내는 좌표가 원본
     # 절대초(source_time_sec)라, 편집시간 변환은 최종 클립이 확정된 아래 블록이 한다.
@@ -3492,6 +3510,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             tts_audio_gain_db=config.tts_gain_db,
             render_preset=config.render_preset,
             enable_hwaccel=config.enable_hwaccel,
+            image_overlays=_image_overlays or None,
         )
 
         ffmpeg_cmd = render_short(render_inputs)
