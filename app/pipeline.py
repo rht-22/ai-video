@@ -1133,9 +1133,11 @@ def _fit_storyline_to_duration(
 from app.modules.chunker import build_chunks, split_video_chunk
 from app.modules.edit_overrides import (
     apply_overrides,
+    ensure_renderable,
     load_edit_overrides,
     overrides_subtitles,
     overrides_tts,
+    place_anchored_subtitles,
     total_duration,
 )
 from app.modules.gemini_client import (
@@ -1871,6 +1873,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 편집실 오버라이드는 여기서 한 번만 읽고 검증한다 — 계약 위반이면 무거운 단계를
     # 돌기 전에 즉시 실패시킨다(사람이 고친 값이 조용히 무시된 채 영상이 나가는 것이 최악).
     _edit_overrides = load_edit_overrides(payload.edit_overrides_path)
+    # v3 images 는 스키마 선언만 있고 렌더가 아직 없다(2026-08-19) — 조용히 빼고
+    # 렌더하는 대신 여기서 fail-loud. 렌더가 구현되면 이 게이트가 함수 안에서 사라진다.
+    ensure_renderable(_edit_overrides)
     if _edit_overrides:
         print(f"\n[edit] 편집실 오버라이드 로드: {payload.edit_overrides_path}")
 
@@ -3088,6 +3093,14 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 다음 렌더에서도 사람이 고친 문장이 그대로 보여야 한다.
     _sub_override = overrides_subtitles(_edit_overrides)
     if _sub_override is not None:
+        # v3 앵커 자막(F-401) — source_time_sec 있는 항목은 tts 와 같은 규칙으로
+        # 최종 클립(위에서 확정된 clips) 기준 편집 타임라인으로 변환 배치한다.
+        # 앵커가 최종 구간에 없으면 tts 고아 규칙과 동일하게 드롭 — 반드시 로그에 남긴다.
+        _sub_override, _sub_orphans = place_anchored_subtitles(_sub_override, clips)
+        for _o in _sub_orphans:
+            print(f"  [edit] 앵커 소재가 최종 타임라인에 없음 → 자막 드롭"
+                  f"(tts 고아 규칙과 동일): source_time_sec={_o.get('source_time_sec')} "
+                  f"{str(_o.get('text', ''))[:24]!r}")
         final_segments = [SimpleNamespace(**s) for s in _sub_override]
         segments_cache_path.write_text(
             json.dumps(_sub_override, ensure_ascii=False, indent=2), encoding="utf-8")
