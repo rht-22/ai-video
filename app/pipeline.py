@@ -933,6 +933,7 @@ def _fit_storyline_to_duration(
     candidates_lookup: dict,
     target_min: float = 40.0,
     target_max: float = 60.0,
+    allow_remove: bool = True,
 ) -> tuple[list, str]:
     """라운드 11: storyline clips 합계 길이를 target 범위로 단축/확장 자동 보정.
 
@@ -942,6 +943,11 @@ def _fit_storyline_to_duration(
       가장 긴 clip의 끝을 잘라 단축. hook/payoff는 가능한 보존.
     - 합계 < target_min → 마지막 clip의 끝을 같은 candidate.end_sec까지 확장 (있으면).
       그래도 부족하면 워닝 메시지 (호출부에서 reject 또는 다음 storyline 시도).
+
+    allow_remove=False 면 build 통째 제거를 금지하고 역할별 부분 trim 만 쓴다 —
+    편집실 pinned 구간용(2026-08-19 실측: 사람이 추가한 19.6s build 가 상한을 0.08s
+    넘겼다는 이유로 통째로 사라졌다. 사람이 넣은 장면은 지워도 되는 후보가 아니다.
+    편집실 추가 장면은 chunk_index=-1 → score 0.0 이라 항상 첫 제거 후보가 된다).
 
     반환: (조정된 clips, 처방 메시지) — 메시지가 비어 있으면 변경 없음.
     """
@@ -974,7 +980,7 @@ def _fit_storyline_to_duration(
         # 점수 낮은 build부터 1개씩 제거하며 target_max 이하로
         # 단, 다음 제거가 target_min 미만으로 떨어뜨리면 *부분 단축*으로 전환
         partial_trim = False
-        while cur_total > target_max and build_indices:
+        while allow_remove and cur_total > target_max and build_indices:
             idx, _score = build_indices[0]
             build_clip = out[idx]
             build_dur = build_clip.end_sec - build_clip.start_sec
@@ -2994,16 +3000,26 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 최종 길이 클램프(무조건 실행): snap/extend/fill 이 target_max 를 넘길 수 있고(대사 경계 스냅·
     # 갭 메움), ffmpeg 렌더 시 컨테이너/오디오 priming 오버헤드(~0.1s)가 더해져 최종 mp4 가 60s 를
     # 살짝 넘는 문제를 막는다. 역할별 trim 으로 hook 시작·payoff 끝을 보존하며 줄인다.
+    #
+    # 편집실 pinned(첫 variant)는 규칙이 다르다(2026-08-19 참교육_b32cec9f 실측 — 상한을
+    # 0.08s 넘었다고 사람이 추가한 19.6s build 를 통째로 삭제했다):
+    #   · 상한 = 쇼츠 성립 한계(3분)까지 — 60s 는 자동 생성물의 편집 정책이지 사람의
+    #     한계가 아니다. YouTube 는 세로 ≤3분이면 쇼츠로 분류한다(2024-10 확대).
+    #   · 통째 제거 금지(allow_remove=False) — 넘치면 역할별 부분 trim 으로만 줄인다.
+    #   · 하한(확장) 없음 — 사람이 짧게 만들었으면 그것이 의도다.
     _RENDER_SAFETY_MARGIN = 0.3
+    _EDIT_PINNED_MAX_SEC = 180.0 - _RENDER_SAFETY_MARGIN   # 쇼츠 3분 한계 - 렌더 오버헤드
     _clamp_max = max(float(config.min_duration_sec), float(config.max_duration_sec) - _RENDER_SAFETY_MARGIN)
     _clamp_lookup = _build_candidates_lookup(all_candidates)
     _clamped_variants: list[tuple[list[StoryClip], str, float]] = []
-    for _vc, _vt, _vs in all_storyline_variants:
+    for _ci, (_vc, _vt, _vs) in enumerate(all_storyline_variants):
+        _pinned_v = _edit_pinned and _ci == 0
         _before = sum(c.end_sec - c.start_sec for c in _vc)
         _vc2, _ = _fit_storyline_to_duration(
             _vc, _clamp_lookup,
-            target_min=float(config.min_duration_sec),
-            target_max=_clamp_max,
+            target_min=0.0 if _pinned_v else float(config.min_duration_sec),
+            target_max=_EDIT_PINNED_MAX_SEC if _pinned_v else _clamp_max,
+            allow_remove=not _pinned_v,
         )
         _after = sum(c.end_sec - c.start_sec for c in _vc2)
         if _before - _after > 0.05:
@@ -3482,10 +3498,12 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         if not output_video.exists():
             raise FileNotFoundError(f"검증할 영상 파일을 찾을 수 없습니다: {output_video}")
 
+        # 편집실 pinned 는 클램프와 같은 기준으로 검증 — 사람이 3분 안에서 정한 길이를
+        # 60s 정책으로 FAIL 찍으면 로그가 거짓말을 한다(클램프 블록 주석 참고).
         validation = validate_output(
             output_video,
-            config.min_duration_sec,
-            config.max_duration_sec,
+            1.0 if _edit_pinned else config.min_duration_sec,
+            180.0 if _edit_pinned else config.max_duration_sec,
         )
         validation_dict = validation.__dict__.copy()
         for key, value in validation_dict.items():

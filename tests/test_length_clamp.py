@@ -49,3 +49,35 @@ def test_multiclip_over_budget_clamped():
     clips = [_clip("hook", 0.0, 28.0), _clip("payoff", 100.0, 132.5)]
     out, _ = _fit_storyline_to_duration(clips, {}, target_min=40.0, target_max=59.7)
     assert _total(out) <= 59.7 + 1e-6
+
+
+def test_pinned_no_whole_clip_removal():
+    # 2026-08-19 참교육_b32cec9f 실측 재현: 편집실이 보낸 4구간 합계 59.78s(상한 59.7 을
+    # 0.08s 초과). 종전엔 score 0.0 인 build(사람이 추가, chunk_index=-1) 19.63s 를
+    # **통째로 제거**해 40.15s 로 만들었다 — 사람이 넣은 장면이 사라진다.
+    # allow_remove=False 면 부분 trim 만으로 줄이고 4구간이 모두 남아야 한다.
+    import dataclasses
+    clips = [
+        _clip("hook", 809.44, 825.0),
+        _clip("build", 929.2, 948.83),
+        _clip("build", 957.7, 961.8),
+        _clip("payoff", 966.548, 987.038),
+    ]
+    clips[1:3] = [dataclasses.replace(c, chunk_index=-1, candidate_index=-1)
+                  for c in clips[1:3]]
+    out, _ = _fit_storyline_to_duration(clips, {}, target_min=40.0, target_max=59.7,
+                                        allow_remove=False)
+    assert len(out) == 4                      # 어떤 구간도 통째로 사라지지 않는다
+    assert _total(out) <= 59.7 + 1e-6
+
+
+def test_default_still_removes_low_score_build():
+    # 기본(allow_remove=True) 동작 회귀 방지 — 자동 생성 경로는 종전과 같아야 한다.
+    clips = [
+        _clip("hook", 0.0, 20.0),
+        _clip("build", 100.0, 125.0),
+        _clip("payoff", 200.0, 235.0),
+    ]  # 합계 80s, build 제거 시 55s (in-band)
+    out, _ = _fit_storyline_to_duration(clips, {}, target_min=40.0, target_max=59.7)
+    assert len(out) == 2
+    assert all(c.role != "build" for c in out)
