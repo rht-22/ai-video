@@ -1,0 +1,29 @@
+{
+  "code": "CG0g2_color",
+  "source_file": "가왕쇼_logo_final_color.png",
+  "method": "alpha",
+  "original_size": [
+    2710,
+    1394
+  ],
+  "ink_bbox": [
+    121,
+    161,
+    2622,
+    1288
+  ],
+  "ink_size": [
+    2501,
+    1127
+  ],
+  "trim_percent_w": 7.7,
+  "trim_percent_h": 19.2,
+  "trim_percent_area": 25.4,
+  "padding": {
+    "left": 121,
+    "right": 88,
+    "top": 161,
+    "bottom": 106
+  },
+  "normalized_at": "2026-08-19T12:10:55"
+}

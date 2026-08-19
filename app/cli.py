@@ -120,6 +120,9 @@ def build_parser() -> argparse.ArgumentParser:
     # ── 디자인 파라미터 (DesignConfig 오버라이드) ──
     design = create.add_argument_group("design", "영상 디자인/레이아웃 설정 (YouTube Shorts safe zone 기준)")
     design.add_argument("--design-title-y", type=int, default=None, help="제목 Y 위치 (기본: 120)")
+    design.add_argument("--design-video-y", type=int, default=None,
+                        help="영상영역 상단 Y (기본: 세로 중앙). 위로 올리면 아래 밴드가 넓어져 "
+                             "TTS 자막·로고를 영상 아래에 쌓을 수 있다. 제목은 영상 위에 동적 배치라 따라온다")
     design.add_argument("--design-work-title-y", type=int, default=None, help="작품명 Y 위치 (기본: 1560)")
     design.add_argument("--design-aspect-ratio", type=str, default=None, help="비디오 영역 비율 (예: 16:9, 4:3, 1:1)")
     design.add_argument("--design-title-font", type=str, default=None, help="제목 폰트명")
@@ -146,6 +149,27 @@ def build_parser() -> argparse.ArgumentParser:
                         help="로고 이미지 세로 상한(px). 지정 시 (가로x세로) 박스에 비율 유지로 맞춘다")
     design.add_argument("--design-work-align", type=str, default=None, choices=["top", "center"],
                         help="로고 세로 정렬. top=영상 하단에 붙임(기본) · center=하단 밴드 중앙")
+    # 플랫폼 표기 — 권리사 '영상 내 플랫폼 노출' 요구용. 영상영역 왼쪽 상단 기준.
+    design.add_argument("--design-platform-image", type=str, default=None,
+                        help="영상영역 왼쪽 상단에 얹을 플랫폼 로고 이미지. 이름만 주면 assets/logos 에서 찾는다(작품 로고와 같은 규약)")
+    design.add_argument("--design-platform-text", type=str, default=None,
+                        help="이미지 대신 텍스트로 표기(예: 티빙). --design-platform-image 와 함께 주면 이미지가 우선")
+    design.add_argument("--design-platform-x", type=int, default=None,
+                        help="영상영역 왼쪽 상단 기준 가로 오프셋 px (기본 24)")
+    design.add_argument("--design-platform-y", type=int, default=None,
+                        help="영상영역 왼쪽 상단 기준 세로 오프셋 px (기본 24)")
+    design.add_argument("--design-platform-image-width", type=int, default=None,
+                        help="플랫폼 로고 가로 상한 px (기본 150, 비율 유지 contain)")
+    design.add_argument("--design-platform-image-height", type=int, default=None,
+                        help="플랫폼 로고 세로 상한 px (기본 80)")
+    design.add_argument("--design-platform-font-size", type=int, default=None,
+                        help="플랫폼 텍스트 크기 (기본 40)")
+    design.add_argument("--design-platform-color", type=str, default=None,
+                        help="플랫폼 텍스트 색 (기본 white)")
+    design.add_argument("--design-platform-align", type=str, default=None,
+                        choices=["left", "right"],
+                        help="플랫폼 표기 가로 앵커 (기본 left). right 면 영상 오른쪽 상단 — "
+                             "platform-x 는 오른쪽 가장자리에서 안쪽으로의 오프셋이 된다")
     design.add_argument("--no-reframe", action="store_true",
                         help="얼굴 추종 크롭(리프레이밍) 끄기 — 원본을 가운데 정렬로 넣는다. "
                              "인물이 고정된 인터뷰 소재에 적합하고(확대하면 원본 자막이 잘린다) "
@@ -163,6 +187,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 _CLI_TO_DESIGN_FIELD = {
     "design_title_y": "title_y",
+    "design_video_y": "video_y",
     "design_work_title_y": "work_title_y",
     "design_aspect_ratio": "aspect_ratio",
     "design_title_font": "title_font",
@@ -180,6 +205,14 @@ _CLI_TO_DESIGN_FIELD = {
     "design_work_image_height": "work_image_height",
     "design_work_align": "work_image_align",
     "design_subtitle_style": "subtitle_style_preset",
+    "design_platform_text": "platform_text",
+    "design_platform_x": "platform_x",
+    "design_platform_y": "platform_y",
+    "design_platform_image_width": "platform_image_width",
+    "design_platform_image_height": "platform_image_height",
+    "design_platform_font_size": "platform_font_size",
+    "design_platform_color": "platform_color",
+    "design_platform_align": "platform_align",
 }
 
 
@@ -222,6 +255,12 @@ def _build_design_config(args: argparse.Namespace) -> DesignConfig:
         overrides["work_type"] = "image"
         overrides["work_value"] = get_logo_path(
             work_image, Path(__file__).resolve().parent)
+
+    # 플랫폼 로고도 같은 규약 — 이름만 주면 assets/logos 에서 찾아 절대경로로.
+    platform_image = getattr(args, "design_platform_image", None)
+    if platform_image:
+        overrides["platform_image"] = get_logo_path(
+            platform_image, Path(__file__).resolve().parent)
 
     # aspect_ratio 형식 검증
     if "aspect_ratio" in overrides:

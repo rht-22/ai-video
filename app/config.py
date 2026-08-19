@@ -11,7 +11,11 @@ class DesignConfig:
     aspect_ratio: str = "1:1"
     video_width: int = 800
     video_height: int = 1100
-    video_y_pos: int = 480
+    video_y_pos: int = 480   # (레거시 — 렌더러가 읽지 않는다. video_y 를 쓸 것)
+    # 영상영역 상단 Y(캔버스 px). None = 세로 중앙(현행 동작 유지). 지정하면 제목·영상이
+    # 통째로 그 위치로 옮겨지고(제목은 영상 위에 동적 배치라 따라온다) 아래 밴드가 그만큼
+    # 넓어진다 — TTS 자막·로고를 영상 아래에 쌓는 템플릿(한 입 주막 2026-08-19)용.
+    video_y: int | None = None
 
     # 제목 설정 (2줄 구조: line1=맥락, line2=후킹)
     title_font: str = "Jalnan"
@@ -53,6 +57,23 @@ class DesignConfig:
     # top=영상 하단에 붙임 · center=영상 하단~캔버스 하단 밴드의 세로 중앙.
     # center 는 로고 높이가 달라져도 균형이 유지돼 작품별로 y 를 다시 찾지 않아도 된다.
     work_image_align: str = "center"
+
+    # 플랫폼 표기 — 권리사 '영상 내 플랫폼 노출' 요구(티빙·Wavve·쿠팡플레이 등)용.
+    # 영상영역(캔버스가 아니라 실제 영상이 그려지는 사각형) **왼쪽 상단** 기준 오프셋에 그린다 —
+    # 캔버스 기준으로 두면 aspect_ratio 를 바꿀 때마다 위치를 다시 잡아야 한다.
+    # 이미지(assets/logos 파일)와 텍스트 중 하나를 쓴다. 둘 다 주면 이미지가 우선.
+    platform_image: str | None = None      # cli 가 get_logo_path 로 절대경로 해석해 넣는다
+    platform_text: str | None = None       # 예: "티빙" (가이드가 '텍스트/로고 병기 가능'이면 충분)
+    platform_x: int = 24                   # 영상영역 왼쪽 상단 기준 오프셋(px)
+    platform_y: int = 24
+    # 이미지 박스(contain) — 작품 로고와 같은 두-축 제한. 워터마크 용도라 기본은 작게.
+    platform_image_width: int = 150
+    platform_image_height: int | None = 80
+    platform_font_size: int = 40           # 텍스트일 때
+    platform_color: str = "white"          # 텍스트 색(drawtext hex/이름 그대로)
+    # 가로 앵커 — left=왼쪽 상단(기본), right=오른쪽 상단. platform_x 는 앵커 쪽 모서리에서의
+    # 오프셋이 된다(right 면 오른쪽 가장자리에서 안쪽으로 platform_x px).
+    platform_align: str = "left"
 
     overlay_image_path: str | None = None # 필요 시 이미지 경로
 

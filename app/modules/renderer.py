@@ -955,7 +955,13 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     except:
         scaled_h = W
 
-    overlay_y = (H - scaled_h) // 2
+    # 영상 세로 위치 — video_y 지정 시 그 위치(위로 올려 아래 밴드를 넓히는 템플릿용),
+    # 미지정이면 종전대로 세로 중앙. 캔버스를 벗어나지 않게 클램프.
+    _video_y = getattr(d, 'video_y', None)
+    if _video_y is not None:
+        overlay_y = min(max(0, int(_video_y)), max(0, H - scaled_h))
+    else:
+        overlay_y = (H - scaled_h) // 2
 
     # FFmpeg 짝수 보정
     scaled_w -= scaled_w % 2
@@ -1109,6 +1115,53 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         )
         last_v_label = next_label
 
+
+    # [5.5] 플랫폼 표기 — 권리사 '영상 내 플랫폼 노출' 요구(티빙·Wavve·쿠팡플레이 등).
+    # 위치는 캔버스가 아니라 **영상영역 왼쪽 상단**(overlay_y) 기준 오프셋 — aspect_ratio 를
+    # 바꿔도 표기가 영상을 따라간다. 이미지·텍스트 중 이미지 우선(둘 다 준 경우).
+    _pf_img = getattr(d, 'platform_image', None)
+    _pf_txt = getattr(d, 'platform_text', None)
+    if _pf_img or _pf_txt:
+        pf_off = getattr(d, 'platform_x', 24)          # 앵커 쪽 모서리에서의 오프셋
+        pf_right = getattr(d, 'platform_align', 'left') == "right"
+        pf_x = pf_off                                   # left 기본 — right 는 아래서 재계산
+        pf_y = overlay_y + getattr(d, 'platform_y', 24)
+        if _pf_img:
+            _pf_path = Path(_pf_img).resolve()
+            _bw = getattr(d, 'platform_image_width', 150)
+            _bh = getattr(d, 'platform_image_height', None) or _bw
+            # 작품 로고와 같은 이유로 실측한다 — 비율은 파일마다 제각각이라 가정이 성립하지 않는다.
+            try:
+                _pw, _ph = _probe_video_dims(_pf_path)
+            except Exception as e:
+                print(f"  [Platform] 크기 측정 실패({e}) — 너비 {_bw} 고정, 높이는 자동")
+                _pw = _ph = 0
+            if _pw > 0 and _ph > 0:
+                _s = min(_bw / _pw, _bh / _ph)
+                pf_w, pf_h = max(2, int(_pw * _s) // 2 * 2), max(2, int(_ph * _s) // 2 * 2)
+            else:
+                pf_w, pf_h = _bw, -1   # 높이 자동(-1) 폴백
+            if pf_right:
+                # 이미지 폭을 알면 우변 기준 고정 좌표. 폭 미상(-1 폴백)이면 overlay 식으로.
+                pf_x = f"W-w-{pf_off}" if pf_h == -1 else W - pf_w - pf_off
+            _pf_str = str(_pf_path).replace("\\", "/").replace(":", "\\:")
+            print(f"  [Platform] 로고 {_pw}x{_ph} → {pf_w}x{pf_h} @ ({pf_x},{pf_y})")
+            filters.append(
+                f"movie='{_pf_str}',scale={pf_w}:{pf_h}[pfm];"
+                f"{last_v_label}[pfm]overlay={pf_x}:{pf_y}[with_pf]"
+            )
+        else:
+            if pf_right:
+                pf_x = f"w-text_w-{pf_off}"   # drawtext 는 텍스트 폭을 자기 식으로 안다
+            _pf_esc = _escape_text_for_drawtext(str(_pf_txt))
+            print(f"  [Platform] 텍스트 '{_pf_txt}' @ ({pf_x},{pf_y})")
+            filters.append(
+                f"{last_v_label}drawtext=expansion=none:fontfile='{font_arg}':text='{_pf_esc}':"
+                f"fontcolor={getattr(d, 'platform_color', 'white')}:"
+                f"fontsize={getattr(d, 'platform_font_size', 40)}:"
+                f"x={pf_x}:y={pf_y}[with_pf]"
+            )
+        last_v_label = "[with_pf]"
 
     # [6] 작품명(Logo)
     work_label = "[with_work]"
