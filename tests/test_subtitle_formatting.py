@@ -165,6 +165,32 @@ class TestPerLineStyleOverride:
                     if l.startswith("Dialogue:"))
         assert line.split(",", 9)[7] == "1"
 
+    def test_rotate_rendered_as_frz_with_sign_flip(self, tmp_path: Path) -> None:
+        # 계약(F-410)은 시계방향 양수, ASS \frz 는 반시계 양수 — 부호 반전은 엔진 책임
+        seg = SimpleNamespace(start_sec=0.0, end_sec=2.0, text="기울인 줄",
+                              style={"rotate": 12.5})
+        out = tmp_path / "sub.ass"
+        build_ass_from_segments([seg], out, SubtitleStyle())
+        line = next(l for l in out.read_text(encoding="utf-8-sig").splitlines()
+                    if l.startswith("Dialogue:"))
+        assert "\\frz-12.5" in line
+        seg2 = SimpleNamespace(start_sec=0.0, end_sec=2.0, text="반대로 기울인 줄",
+                               style={"rotate": -45})
+        build_ass_from_segments([seg2], out, SubtitleStyle())
+        line2 = next(l for l in out.read_text(encoding="utf-8-sig").splitlines()
+                     if l.startswith("Dialogue:"))
+        assert "\\frz45" in line2
+
+    def test_rotate_zero_emits_no_tag(self, tmp_path: Path) -> None:
+        # 0 은 기본값 — 태그를 안 박아 종전 출력과 동일하게 유지한다
+        seg = SimpleNamespace(start_sec=0.0, end_sec=2.0, text="안 기울인 줄",
+                              style={"rotate": 0, "size": 64})
+        out = tmp_path / "sub.ass"
+        build_ass_from_segments([seg], out, SubtitleStyle())
+        line = next(l for l in out.read_text(encoding="utf-8-sig").splitlines()
+                    if l.startswith("Dialogue:"))
+        assert "\\frz" not in line and "\\fs64" in line
+
     def test_unstyled_segments_unchanged(self, tmp_path: Path) -> None:
         # SpeechSegment(스타일 attr 없음)·style 없는 SimpleNamespace 모두 종전 출력 그대로
         segs = [SpeechSegment(start_sec=0.0, end_sec=2.0, text="옛날 줄"),
