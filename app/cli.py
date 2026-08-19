@@ -85,7 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     create.add_argument(
         "--edit-overrides", dest="edit_overrides", default=None,
-        help="(선택) 관제 편집실이 고친 제목·구간 JSON(edit_overrides/v1). 체크포인트보다 "
+        help="(선택) 관제 편집실이 고친 제목·구간 JSON(edit_overrides/v1~v3). 체크포인트보다 "
              "사람 입력이 이긴다 — 구간을 지정하면 자동 보정(대사 경계 스냅·서사 확장·"
              "갭 메우기)을 건너뛰고 그 구간 그대로 렌더한다. --from-step render 와 함께 쓴다.",
     )

@@ -269,6 +269,46 @@ def parse_subtitle(path: Path) -> list[SpeechSegment]:
         raise ValueError(f"지원하지 않는 자막 형식: {ext} (지원: .srt, .ass, .ssa, .vtt, .smi)")
 
 
+# ASS 캔버스 좌표계 — _ass_header 의 PlayResX/PlayResY 와 반드시 일치해야 한다.
+# 줄 단위 스타일(edit_overrides/v3 style.y)의 0~1 비율을 픽셀로 바꿀 때 쓴다.
+ASS_PLAY_RES_X = 1080
+ASS_PLAY_RES_Y = 1920
+
+
+def _hex_to_ass_color(color: str) -> str:
+    """'#RRGGBB' → ASS 인라인 색 '&HBBGGRR&' (ASS 는 BGR 순서)."""
+    c = color.lstrip("#")
+    return f"&H{c[4:6]}{c[2:4]}{c[0:2]}&".upper()
+
+
+def _line_style_overrides(style_ov: dict | None, base_alignment: int) -> tuple[str, str]:
+    """줄 단위 스타일(edit_overrides/v3 subtitles[].style) → (인라인 태그, MarginV 필드).
+
+    · size  → {\\fsN} — 캔버스(1080×1920) 기준 폰트 px
+    · color → {\\1c&HBBGGRR&}
+    · y     → 자막 하단이 놓일 세로 위치(0=상단, 1=하단, 캔버스 비율).
+      하단 정렬(alignment 1~3)은 이벤트 MarginV 로 표현한다 — 줄바꿈 폭(MarginL/R)을
+      보존하고 libass 충돌 회피가 그대로 동작한다. MarginV=0 은 ASS 규약상 "스타일
+      기본값 사용"이라 최소 1 로 클램프한다. 그 외 정렬(상단/중단 프리셋이 생기면)은
+      \\pos 로 화면 중앙 x 에 고정한다.
+    """
+    if not isinstance(style_ov, dict) or not style_ov:
+        return "", ""
+    tags: list[str] = []
+    margin_v = ""
+    if style_ov.get("size") is not None:
+        tags.append(f"\\fs{int(round(float(style_ov['size'])))}")
+    if style_ov.get("color"):
+        tags.append(f"\\1c{_hex_to_ass_color(str(style_ov['color']))}")
+    if style_ov.get("y") is not None:
+        y = min(max(float(style_ov["y"]), 0.0), 1.0)
+        if base_alignment <= 3:
+            margin_v = str(max(1, int(round((1.0 - y) * ASS_PLAY_RES_Y))))
+        else:
+            tags.append(f"\\pos({ASS_PLAY_RES_X // 2},{int(round(y * ASS_PLAY_RES_Y))})")
+    return ("{" + "".join(tags) + "}") if tags else "", margin_v
+
+
 @dataclass(frozen=True)
 class SubtitleStyle:
     font_name: str = "Malgun Gothic"  # Windows 기본 한글 폰트
@@ -368,8 +408,11 @@ def build_ass_from_segments(
 
         # 3. 한 segment = 한 화면. \N 으로 묶어 시간 균등 분할 깜빡임 제거.
         joined = _wrap_for_ass(text, max_chars=15, max_lines=2)
+        # 줄 단위 스타일(edit_overrides/v3) — segment 에 style dict 가 실려 오면
+        # 그 줄만 인라인 태그·이벤트 MarginV 로 전역 스타일 위에 얹는다.
+        tags, margin_v = _line_style_overrides(getattr(seg, "style", None), style.alignment)
         clip_events_list.append(
-            f"Dialogue: 0,{start_str},{end_str},Default,,,,,, {joined}\n"
+            f"Dialogue: 0,{start_str},{end_str},Default,,,,{margin_v},, {tags}{joined}\n"
         )
 
     events = "".join(clip_events_list)
@@ -699,8 +742,8 @@ def _ass_header(style: SubtitleStyle, tts_style: SubtitleStyle | None = None) ->
     return (
         "[Script Info]\n"
         "ScriptType: v4.00+\n"
-        "PlayResX: 1080\n"
-        "PlayResY: 1920\n"
+        f"PlayResX: {ASS_PLAY_RES_X}\n"
+        f"PlayResY: {ASS_PLAY_RES_Y}\n"
         "ScaledBorderAndShadow: yes\n"
         "\n"
         "[V4+ Styles]\n"

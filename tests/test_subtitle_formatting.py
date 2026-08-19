@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from app.modules.speech import SpeechSegment
 from app.modules.subtitle import (
@@ -123,6 +124,57 @@ class TestBuildAssFromSegments:
         content = out.read_text(encoding="utf-8-sig")
         dialogue_lines = [l for l in content.splitlines() if l.startswith("Dialogue:")]
         assert dialogue_lines == []
+
+
+class TestPerLineStyleOverride:
+    """줄 단위 스타일(edit_overrides/v3 subtitles[].style) — 전역 프리셋 위에 그 줄만
+    인라인 태그(\\fs·\\1c)와 이벤트 MarginV 로 얹는다."""
+
+    def test_size_color_y_rendered_as_inline_overrides(self, tmp_path: Path) -> None:
+        seg = SimpleNamespace(start_sec=0.0, end_sec=2.0, text="스타일 얹은 줄",
+                              style={"size": 64, "y": 0.8, "color": "#FFDD00"})
+        out = tmp_path / "sub.ass"
+        build_ass_from_segments([seg], out, SubtitleStyle())
+        line = next(l for l in out.read_text(encoding="utf-8-sig").splitlines()
+                    if l.startswith("Dialogue:"))
+        assert "\\fs64" in line
+        assert "\\1c&H00DDFF&" in line                    # #FFDD00 → BGR 00DDFF
+        # y=0.8 → 자막 하단이 1920*0.8 → MarginV = 1920-1536 = 384 (이벤트 필드)
+        fields = line.split(",", 9)
+        assert fields[7] == "384"                          # MarginV
+        assert "스타일 얹은 줄" in fields[9]
+
+    def test_partial_style_only_emits_given_keys(self, tmp_path: Path) -> None:
+        seg = SimpleNamespace(start_sec=0.0, end_sec=2.0, text="색만 바꾼 줄",
+                              style={"color": "#FF0000"})
+        out = tmp_path / "sub.ass"
+        build_ass_from_segments([seg], out, SubtitleStyle())
+        line = next(l for l in out.read_text(encoding="utf-8-sig").splitlines()
+                    if l.startswith("Dialogue:"))
+        assert "\\1c&H0000FF&" in line and "\\fs" not in line
+        assert line.split(",", 9)[7] == ""                 # MarginV 는 스타일 기본값 유지
+
+    def test_y_bottom_edge_clamps_margin_to_one(self, tmp_path: Path) -> None:
+        # ASS 규약상 이벤트 MarginV=0 은 "스타일 기본값 사용" — y=1.0 이 0 으로
+        # 떨어지면 오버라이드가 조용히 사라지므로 최소 1 로 클램프해야 한다.
+        seg = SimpleNamespace(start_sec=0.0, end_sec=2.0, text="맨 아래 줄",
+                              style={"y": 1.0})
+        out = tmp_path / "sub.ass"
+        build_ass_from_segments([seg], out, SubtitleStyle())
+        line = next(l for l in out.read_text(encoding="utf-8-sig").splitlines()
+                    if l.startswith("Dialogue:"))
+        assert line.split(",", 9)[7] == "1"
+
+    def test_unstyled_segments_unchanged(self, tmp_path: Path) -> None:
+        # SpeechSegment(스타일 attr 없음)·style 없는 SimpleNamespace 모두 종전 출력 그대로
+        segs = [SpeechSegment(start_sec=0.0, end_sec=2.0, text="옛날 줄"),
+                SimpleNamespace(start_sec=2.0, end_sec=4.0, text="캐시 줄")]
+        out = tmp_path / "sub.ass"
+        build_ass_from_segments(segs, out, SubtitleStyle())
+        for line in out.read_text(encoding="utf-8-sig").splitlines():
+            if line.startswith("Dialogue:"):
+                assert ",Default,,,,,, " in line           # 종전 이벤트 형식 불변
+                assert "{" not in line
 
 
 class TestMergeSubtitleSegments:

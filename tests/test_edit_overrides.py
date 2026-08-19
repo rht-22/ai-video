@@ -14,10 +14,12 @@ import pytest
 from app.modules.edit_overrides import (
     EditOverrideError,
     apply_overrides,
+    ensure_renderable,
     load_edit_overrides,
     overrides_clips,
     overrides_subtitles,
     overrides_tts,
+    place_anchored_subtitles,
     total_duration,
     validate_overrides,
 )
@@ -46,11 +48,14 @@ OV_FULL = {
 
 # ── 검증 ──────────────────────────────────────────────────────────────
 def test_schema_must_match():
-    # v1·v2 둘 다 유효 — v2 는 v1 + tts(내레이션)
+    # v1~v3 유효 — v2 = v1 + tts, v3 = v2 + 자막 앵커/줄 스타일 + images.
+    # 미지 스키마 즉시 거절은 구/신 엔진 공통 안전장치다: v2 엔진에 v3 를 넣으면
+    # "알 수 없는 스키마"로 즉시 실패한다(2026-08-19 실측 — v3 배포 전 스탬프 전환 금지 근거).
     validate_overrides({"schema": "edit_overrides/v1", "title": {"top_title": "x"}})
     validate_overrides({"schema": "edit_overrides/v2", "title": {"top_title": "x"}})
+    validate_overrides({"schema": "edit_overrides/v3", "title": {"top_title": "x"}})
     with pytest.raises(EditOverrideError):
-        validate_overrides({"schema": "edit_overrides/v3", "title": {"top_title": "x"}})
+        validate_overrides({"schema": "edit_overrides/v4", "title": {"top_title": "x"}})
     with pytest.raises(EditOverrideError):
         validate_overrides({"title": {"top_title": "x"}})          # 스키마 누락
     with pytest.raises(EditOverrideError):
@@ -447,3 +452,198 @@ def test_tts_contract_violations_fail_loudly(bad, msg):
     ov = {"schema": "edit_overrides/v2", **bad}
     with pytest.raises(EditOverrideError, match=msg):
         validate_overrides(ov)
+
+
+# ── v3: 자막 앵커(F-401)·줄 스타일(F-407)·images ──────────────────────
+def _sub(start, end, text, **extra):
+    return {"start_sec": start, "end_sec": end, "text": text, **extra}
+
+
+OV_V3 = {
+    "schema": "edit_overrides/v3",
+    "subtitles": [
+        _sub(0.2, 2.3, "앵커 자막", source_time_sec=743.2,
+             style={"size": 64, "y": 0.8, "color": "#FFDD00"}),
+        _sub(2.4, 5.0, "신규 줄 (앵커 없음)"),
+    ],
+}
+
+
+def test_v3_schema_accepts_anchor_style_images():
+    validate_overrides(OV_V3)
+    validate_overrides({"schema": "edit_overrides/v3",
+                        "images": [{"file": "assets/arrow.png", "source_time_sec": 745.0,
+                                    "duration_sec": 2.0, "x": 0.1, "y": 0.2, "w": 0.3,
+                                    "layer": 1}]})
+    # v3 는 v2 의 초집합 — tts 도 그대로 받는다
+    validate_overrides({"schema": "edit_overrides/v3",
+                        "tts": [{"source_time_sec": 743.0, "text": "내레이션"}]})
+
+
+def test_v3_fields_require_v3_stamp():
+    """v3 필드가 v1·v2 스탬프에 실려 오면 즉시 거절 — 구 엔진은 이 필드를 조용히
+    무시하므로, 스탬프 없이 받아주면 노드마다 결과가 달라진다."""
+    for schema in ("edit_overrides/v1", "edit_overrides/v2"):
+        with pytest.raises(EditOverrideError, match="v3 전용"):
+            validate_overrides({"schema": schema,
+                                "subtitles": [_sub(0.2, 2.3, "x", source_time_sec=743.2)]})
+        with pytest.raises(EditOverrideError, match="v3 전용"):
+            validate_overrides({"schema": schema,
+                                "subtitles": [_sub(0.2, 2.3, "x", style={"size": 64})]})
+        with pytest.raises(EditOverrideError, match="v3 전용"):
+            validate_overrides({"schema": schema,
+                                "images": [{"file": "a.png", "source_time_sec": 1,
+                                            "duration_sec": 1, "x": 0, "y": 0, "w": 0.5}]})
+
+
+@pytest.mark.parametrize("bad,msg", [
+    (_sub(0, 2, "x", source_time_sec=-1), "음수"),
+    (_sub(0, 2, "x", source_time_sec="abc"), "숫자"),
+    (_sub(0, 2, "x", style={}), "비어 있지 않은 객체"),
+    (_sub(0, 2, "x", style={"font": "Jalnan"}), "모르는 키"),
+    (_sub(0, 2, "x", style={"size": 0}), "양수"),
+    (_sub(0, 2, "x", style={"size": "크게"}), "숫자"),
+    (_sub(0, 2, "x", style={"y": 1.5}), "0~1"),
+    (_sub(0, 2, "x", style={"color": "노랑"}), "#RRGGBB"),
+    (_sub(0, 2, "x", style={"color": "#FFF"}), "#RRGGBB"),
+])
+def test_v3_subtitle_field_violations_fail_loudly(bad, msg):
+    with pytest.raises(EditOverrideError, match=msg):
+        validate_overrides({"schema": "edit_overrides/v3", "subtitles": [bad]})
+
+
+@pytest.mark.parametrize("bad,msg", [
+    ({"source_time_sec": 1, "duration_sec": 1, "x": 0, "y": 0, "w": 0.5}, "file"),
+    ({"file": "/abs/a.png", "source_time_sec": 1, "duration_sec": 1,
+      "x": 0, "y": 0, "w": 0.5}, "상대 경로"),
+    ({"file": "../탈출.png", "source_time_sec": 1, "duration_sec": 1,
+      "x": 0, "y": 0, "w": 0.5}, "상대 경로"),
+    ({"file": "a.png", "duration_sec": 1, "x": 0, "y": 0, "w": 0.5}, "source_time_sec"),
+    ({"file": "a.png", "source_time_sec": 1, "x": 0, "y": 0, "w": 0.5}, "duration_sec"),
+    ({"file": "a.png", "source_time_sec": 1, "duration_sec": 0,
+      "x": 0, "y": 0, "w": 0.5}, "양수"),
+    ({"file": "a.png", "source_time_sec": 1, "duration_sec": 1,
+      "x": 1.2, "y": 0, "w": 0.5}, "0~1"),
+    ({"file": "a.png", "source_time_sec": 1, "duration_sec": 1,
+      "x": 0, "y": 0, "w": 0.5, "layer": "위"}, "정수"),
+])
+def test_v3_image_violations_fail_loudly(bad, msg):
+    with pytest.raises(EditOverrideError, match=msg):
+        validate_overrides({"schema": "edit_overrides/v3", "images": [bad]})
+
+
+def test_v3_images_render_gate_fails_loudly():
+    """images 는 스키마 선언만 — 렌더가 조용히 빼먹는 대신 ensure_renderable 이
+    즉시 실패시킨다(제1원칙). 렌더가 구현되면 이 게이트와 테스트를 걷어낸다."""
+    ov = validate_overrides({"schema": "edit_overrides/v3",
+                             "images": [{"file": "a.png", "source_time_sec": 1,
+                                         "duration_sec": 1, "x": 0, "y": 0, "w": 0.5}]})
+    with pytest.raises(EditOverrideError, match="미구현"):
+        ensure_renderable(ov)
+    # images 없는 오버라이드는 그대로 통과 — 종전 동작 불변
+    assert ensure_renderable(OV_V3) is OV_V3
+    assert ensure_renderable(None) is None
+
+
+def test_overrides_subtitles_passes_anchor_and_style_through():
+    got = overrides_subtitles(OV_V3)
+    assert got[0]["source_time_sec"] == 743.2
+    assert got[0]["style"] == {"size": 64.0, "y": 0.8, "color": "#FFDD00"}
+    assert "source_time_sec" not in got[1] and "style" not in got[1]
+
+
+# ── v3 앵커 배치(F-401) — tts 와 같은 규칙: 담은 클립 오프셋 + 클립 내 상대시각 ──
+def _final_clips():
+    """최종 타임라인: [10~25) → 편집 0~15, [100~120) → 편집 15~35."""
+    return [_clip("hook", 10, 25), _clip("payoff", 100, 120)]
+
+
+def test_anchored_subtitle_follows_clip_offset():
+    subs = [_sub(0.0, 2.0, "둘째 클립 자막", source_time_sec=105.0,
+                 style={"size": 64.0}),
+            _sub(3.0, 5.0, "첫째 클립 자막", source_time_sec=12.0)]
+    placed, dropped = place_anchored_subtitles(subs, _final_clips())
+    assert dropped == []
+    # 시간순 정렬: 12.0 → 편집 2.0 이 앞, 105.0 → 편집 20.0 이 뒤
+    assert [(s["start_sec"], s["end_sec"], s["text"]) for s in placed] == [
+        (2.0, 4.0, "첫째 클립 자막"), (20.0, 22.0, "둘째 클립 자막")]
+    # 변환 후 source_time_sec 은 사라지고(캐시 = 편집본 시간축 정본) style 은 남는다
+    assert "source_time_sec" not in placed[1]
+    assert placed[1]["style"] == {"size": 64.0}
+
+
+def test_anchored_subtitle_survives_clip_change():
+    """F-401 의 핵심: 구간을 고쳐도 앵커 자막은 화면 내용을 따라간다.
+
+    같은 자막(원본 105초)이, 클립 경계가 [100~120)→[95~120)로 바뀌면
+    편집 시각만 달라진 채 같은 장면 위에 남아야 한다."""
+    subs = [_sub(0.0, 2.0, "따라오는 자막", source_time_sec=105.0)]
+    placed_a, _ = place_anchored_subtitles(subs, [_clip("hook", 10, 25), _clip("payoff", 100, 120)])
+    placed_b, _ = place_anchored_subtitles(subs, [_clip("hook", 10, 25), _clip("payoff", 95, 120)])
+    assert placed_a[0]["start_sec"] == 20.0          # 15 + (105-100)
+    assert placed_b[0]["start_sec"] == 25.0          # 15 + (105-95) — 장면은 동일
+
+
+def test_anchor_slop_clamps_into_nearest_clip():
+    """포함 판정 슬롭 ±0.5s — 편집실 UI 와 동일 규약. 경계 반올림 오차로 클립 밖에
+    떨어진 앵커는 가장 가까운 클립 안쪽으로 클램프되고, 슬롭 밖(0.6s)은 고아다."""
+    placed, dropped = place_anchored_subtitles(
+        [_sub(0.0, 2.0, "경계 직전", source_time_sec=9.6),      # 10-0.4 → 클립 시작으로
+         _sub(0.0, 2.0, "슬롭 밖", source_time_sec=9.4)],       # 10-0.6 → 고아
+        _final_clips())
+    assert [s["text"] for s in dropped] == ["슬롭 밖"]
+    assert placed[0]["start_sec"] == 0.0                         # 편집 0 (클립 시작 클램프)
+    assert placed[0]["end_sec"] == 2.0
+
+
+def test_anchor_at_timeline_tail_too_short_is_dropped():
+    """앵커가 마지막 클립 끝(슬롭 안)에 붙으면 변환 후 표시 시간이 0 — 화면에 못
+    남으므로 고아와 같이 드롭 목록으로 돌려준다(호출부가 로그로 남긴다)."""
+    placed, dropped = place_anchored_subtitles(
+        [_sub(0.0, 2.0, "끝자락", source_time_sec=120.3)], _final_clips())
+    assert placed == [] and len(dropped) == 1
+
+
+def test_orphan_anchor_dropped_and_reported():
+    """앵커 소재가 최종 구간에 없으면 tts 고아 규칙과 동일 = 드롭. 조용히 사라지면
+    안 되므로 드롭 목록을 함께 돌려준다 — 호출부(pipeline)가 로그로 남긴다."""
+    placed, dropped = place_anchored_subtitles(
+        [_sub(0.0, 2.0, "잘려나간 장면", source_time_sec=500.0),
+         _sub(3.0, 5.0, "남은 장면", source_time_sec=12.0)],
+        _final_clips())
+    assert [s["text"] for s in placed] == ["남은 장면"]
+    assert [s["text"] for s in dropped] == ["잘려나간 장면"]
+    assert dropped[0]["source_time_sec"] == 500.0    # 로그에 좌표를 남길 수 있게 보존
+
+
+def test_unanchored_subtitle_keeps_edit_timeline_coords():
+    """앵커 없는 항목(신규 줄)은 종전대로 start_sec(편집본 시간축) 그대로 —
+    v1·v2 자막 오버라이드의 동작 불변."""
+    subs = [_sub(1.0, 3.0, "신규 줄", style={"color": "#FF0000"})]
+    placed, dropped = place_anchored_subtitles(subs, _final_clips())
+    assert dropped == []
+    assert placed == [{"start_sec": 1.0, "end_sec": 3.0, "text": "신규 줄",
+                       "style": {"color": "#FF0000"}}]
+    # 클립이 아예 없어도(방어) 무앵커 항목은 통과한다
+    placed2, _ = place_anchored_subtitles(subs, [])
+    assert placed2[0]["text"] == "신규 줄"
+
+
+def test_v3_full_roundtrip_with_clips(tmp_path):
+    """구간+앵커 자막 동시 제출 — v3 의 존재 이유. clips 는 pinned, 자막은 앵커를
+    따라 새 구간 위에 배치된다."""
+    ov = {"schema": "edit_overrides/v3",
+          "clips": [{"start_sec": 95.0, "end_sec": 120.0, "role": "hook"}],
+          "subtitles": [_sub(0.0, 2.0, "따라오는 자막", source_time_sec=105.0,
+                             style={"size": 60, "y": 0.75, "color": "#FFDD00"})]}
+    p = tmp_path / "ov.json"
+    p.write_text(json.dumps(ov, ensure_ascii=False), encoding="utf-8")
+    loaded = load_edit_overrides(p)
+    variants, pinned = apply_overrides(_variants(), loaded)
+    assert pinned is True
+    placed, dropped = place_anchored_subtitles(
+        overrides_subtitles(loaded), variants[0][0])
+    assert dropped == []
+    assert placed[0]["start_sec"] == 10.0            # 0 + (105-95)
+    assert placed[0]["style"]["color"] == "#FFDD00"
+

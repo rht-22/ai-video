@@ -7,21 +7,46 @@ checkpoint_silence_cut → checkpoint_story 순으로 클립·제목을 읽고, 
 **체크포인트와 무관한 별도 입력 통로**가 있어야 한다 — 이 모듈이 그 통로다.
 
 계약: `--edit-overrides <json>` 로 받는다. v2 = v1 + tts(내레이션).
+v3 = v2 + 자막 앵커/줄 스타일 + images (정본 문서: docs/edit_overrides_v3.md).
 
     {
-      "schema": "edit_overrides/v2",          # v1 도 계속 받는다 (tts 없는 편집)
+      "schema": "edit_overrides/v3",          # v1·v2 도 계속 받는다
       "title":  { "top_title": "1줄\\n2줄" },
       "clips":  [ {"start_sec": 742.5, "end_sec": 771.0, "role": "hook",
                    "use_original_audio": true}, ... ],
-      "subtitles": [ {"start_sec": 0.2, "end_sec": 2.3, "text": "고친 자막"}, ... ],
+      "subtitles": [ {"start_sec": 0.2, "end_sec": 2.3, "text": "고친 자막",
+                      "source_time_sec": 743.2,            # (v3) 원본 절대초 앵커
+                      "style": {"size": 64, "y": 0.8,       # (v3) 줄 단위 스타일
+                                "color": "#FFDD00"}}, ... ],
       "tts": [ {"source_time_sec": 743.0, "duration_sec": 3.5,
-                "voice": "ko_female", "text": "고친 내레이션"}, ... ]
+                "voice": "ko_female", "text": "고친 내레이션"}, ... ],
+      "images": [ {"file": "assets/arrow.png", "source_time_sec": 745.0,   # (v3)
+                   "duration_sec": 2.0, "x": 0.1, "y": 0.2, "w": 0.3,
+                   "layer": 1}, ... ]
     }
 
-스키마를 v2 로 올린 이유: 구 엔진의 validate_overrides 는 모르는 키를 조용히
-무시한다 — tts 를 v1 에 얹으면 구 엔진 노드에서 사람이 고친 내레이션이 소리 없이
-사라진 채 영상이 나간다(이 모듈의 제1원칙 위반). v2 는 구 엔진에서 "알 수 없는
-스키마"로 즉시 실패해 검수함에 남는다. 관제 RPC 는 tts 가 있을 때만 v2 를 찍는다.
+스키마를 올린 이유(v2·v3 공통): 구 엔진의 validate_overrides 는 모르는 키를 조용히
+무시한다 — 새 기능을 구 스키마에 얹으면 구 엔진 노드에서 사람이 고친 값이 소리 없이
+사라진 채 영상이 나간다(이 모듈의 제1원칙 위반). 새 스키마는 구 엔진에서 "알 수 없는
+스키마"로 즉시 실패해 검수함에 남는다(2026-08-19 실측: v2 엔진에 v3 를 넣으면
+"알 수 없는 스키마: 'edit_overrides/v3'"). 같은 이유로 **이 엔진도 v3 전용 필드
+(subtitles[].source_time_sec/style, images)가 v1·v2 스탬프에 실려 오면 즉시 거절**
+한다 — 스탬프와 내용이 어긋난 채 받아주면 노드마다 결과가 달라진다.
+관제 RPC 는 v3 필드가 있을 때만 v3 를 찍는다.
+
+v3 추가분:
+  · **subtitles[].source_time_sec (F-401)** — 원본 절대초 앵커. 있으면 대사 재매핑
+    대신 tts 와 같은 규칙으로 최종 타임라인에 변환 배치한다(place_anchored_subtitles,
+    포함 판정 슬롭 ±0.5s = 편집실 UI 규약). 이로써 clips 와 subtitles 를 **같이
+    보내도 안전**하다 — 종전엔 구간이 바뀌면 자막 좌표(편집본 시간축)가 통째로
+    어긋나서 편집실이 자막을 아예 안 보냈다(2-pass 강제). 앵커 없는 항목(신규 줄)은
+    종전대로 start_sec(편집본 시간축)를 그대로 쓴다.
+  · **subtitles[].style (F-407)** — 줄 단위 스타일 오버라이드 {size, y, color}.
+    채널/편 전역 프리셋 위에 그 줄만 얹는다. size = 1080×1920 캔버스 기준 폰트 px,
+    y = 자막 하단이 놓일 세로 위치(0=상단, 1=하단, 캔버스 비율), color = "#RRGGBB".
+  · **images** — 스키마 선언만(2026-08-19). x·y·w 는 1080×1920 캔버스 대비 0~1 비율,
+    file 은 run_dir 상대 경로. 렌더는 미구현이라 ensure_renderable 이 fail-loud 로
+    거절한다 — 조용히 빼고 렌더하면 제1원칙 위반이다. 구현은 후속 세션.
 
 규약 넷 — 다 이유가 있다:
   · **clips 는 전량 교체**다(부분 패치 아님). 추가·삭제·순서변경이 섞이면 인덱스
@@ -54,6 +79,7 @@ clips 와 subtitles 를 함께 보내도 자막이 이긴다: 구간이 바뀌�
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -61,11 +87,19 @@ from app.modules.story_builder import StoryClip
 
 SCHEMA_V1 = "edit_overrides/v1"
 SCHEMA_V2 = "edit_overrides/v2"          # v1 + tts. v1 은 계속 받는다
-VALID_SCHEMAS = (SCHEMA_V1, SCHEMA_V2)
+SCHEMA_V3 = "edit_overrides/v3"          # v2 + 자막 앵커/줄 스타일 + images
+VALID_SCHEMAS = (SCHEMA_V1, SCHEMA_V2, SCHEMA_V3)
 VALID_ROLES = ("hook", "build", "payoff")
 # tts 상속 매칭 반경(초) — 편집실은 받은 source_time_sec 을 그대로 되돌려 보내므로
 # 사실상 정확히 일치하지만, 반올림·수기 입력의 오차를 이만큼 관용한다.
 TTS_MATCH_TOLERANCE_SEC = 1.0
+# 앵커 자막 포함 판정 슬롭(초) — 편집실 UI 와 동일 규약. 클립 경계 반올림(소수 3자리)
+# 오차로 경계 위의 자막이 고아가 되지 않게 한다.
+SUBTITLE_ANCHOR_SLOP_SEC = 0.5
+# 줄 단위 스타일 계약 — 이 세 키만 받는다. 모르는 키를 조용히 무시하면 사람이 고친
+# 값이 반영 안 된 채 영상이 나가므로(제1원칙) 즉시 실패한다.
+SUBTITLE_STYLE_KEYS = ("size", "y", "color")
+_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
 
 class EditOverrideError(ValueError):
@@ -143,6 +177,7 @@ def validate_overrides(data: Any) -> dict[str, Any]:
             if not str(s.get("text", "")).strip():
                 raise EditOverrideError(
                     f"subtitles[{i}]: text 가 비어 있습니다 — 그 줄을 지우려면 배열에서 빼세요")
+            _validate_subtitle_v3_fields(i, s, schema)
         # 🛑 겹침은 검사하지 않는다. 넣었다가 실측에서 걷어냈다(2026-08-17):
         #    실제 subtitle_segments.json 이 겹치는 세그먼트를 정상적으로 담고 있다 —
         #    피의_게임_X_9d2d1b85 는 20건 중 여러 쌍이 겹쳤다(0.2~3.67 과 1.7~5.3).
@@ -176,7 +211,121 @@ def validate_overrides(data: Any) -> dict[str, Any]:
                     raise EditOverrideError(f"tts[{i}]: duration_sec 이 숫자가 아닙니다") from ex
                 if d <= 0:
                     raise EditOverrideError(f"tts[{i}]: duration_sec 은 양수여야 합니다 ({d})")
+
+    images = data.get("images")
+    if images is not None:
+        if schema != SCHEMA_V3:
+            raise EditOverrideError(
+                "images 는 edit_overrides/v3 전용입니다 — 스키마를 v3 로 찍으세요 "
+                "(구 스키마에 얹으면 구 엔진 노드가 조용히 무시합니다)")
+        if not isinstance(images, list) or not images:
+            raise EditOverrideError("images 는 비어 있지 않은 배열이어야 합니다 "
+                                    "(이미지를 안 쓰면 키 자체를 빼세요)")
+        for i, im in enumerate(images):
+            _validate_image(i, im)
     return data
+
+
+def _validate_subtitle_v3_fields(i: int, s: dict[str, Any], schema: str) -> None:
+    """subtitles[i] 의 v3 전용 필드(source_time_sec 앵커·style) 검증.
+
+    v3 필드가 v1·v2 스탬프에 실려 오면 즉시 거절 — 구 엔진은 이 필드를 조용히
+    무시하므로, 스탬프 없이 받아주면 노드마다 결과가 달라진다(모듈 머리말 참고)."""
+    has_v3 = s.get("source_time_sec") is not None or s.get("style") is not None
+    if not has_v3:
+        return
+    if schema != SCHEMA_V3:
+        raise EditOverrideError(
+            f"subtitles[{i}]: source_time_sec/style 은 edit_overrides/v3 전용입니다 — "
+            "스키마를 v3 로 찍으세요 (구 스키마에 얹으면 구 엔진 노드가 조용히 무시합니다)")
+    if s.get("source_time_sec") is not None:
+        try:
+            st = float(s["source_time_sec"])
+        except (TypeError, ValueError) as ex:
+            raise EditOverrideError(
+                f"subtitles[{i}]: source_time_sec 이 숫자가 아닙니다") from ex
+        if st < 0:
+            raise EditOverrideError(f"subtitles[{i}]: source_time_sec 이 음수입니다 ({st})")
+    style = s.get("style")
+    if style is None:
+        return
+    if not isinstance(style, dict) or not style:
+        raise EditOverrideError(
+            f"subtitles[{i}]: style 은 비어 있지 않은 객체여야 합니다 — "
+            "스타일을 안 고치면 키 자체를 빼세요")
+    unknown = [k for k in style if k not in SUBTITLE_STYLE_KEYS]
+    if unknown:
+        raise EditOverrideError(
+            f"subtitles[{i}]: style 에 모르는 키 {unknown} — "
+            f"계약은 {'/'.join(SUBTITLE_STYLE_KEYS)} 뿐입니다")
+    if style.get("size") is not None:
+        try:
+            size = float(style["size"])
+        except (TypeError, ValueError) as ex:
+            raise EditOverrideError(f"subtitles[{i}]: style.size 가 숫자가 아닙니다") from ex
+        if size <= 0:
+            raise EditOverrideError(f"subtitles[{i}]: style.size 는 양수여야 합니다 ({size})")
+    if style.get("y") is not None:
+        try:
+            y = float(style["y"])
+        except (TypeError, ValueError) as ex:
+            raise EditOverrideError(f"subtitles[{i}]: style.y 가 숫자가 아닙니다") from ex
+        if not (0.0 <= y <= 1.0):
+            raise EditOverrideError(
+                f"subtitles[{i}]: style.y 는 0~1 (캔버스 세로 비율)이어야 합니다 ({y})")
+    if style.get("color") is not None:
+        if not _COLOR_RE.match(str(style["color"])):
+            raise EditOverrideError(
+                f"subtitles[{i}]: style.color 는 '#RRGGBB' 형식이어야 합니다 "
+                f"(받은 값: {style['color']!r})")
+
+
+def _validate_image(i: int, im: Any) -> None:
+    """images[i] 스키마 검증(2026-08-19 — 스키마 선언만, 렌더는 ensure_renderable 이 거절)."""
+    if not isinstance(im, dict):
+        raise EditOverrideError(f"images[{i}] 가 객체가 아닙니다")
+    file = str(im.get("file") or "").strip()
+    if not file:
+        raise EditOverrideError(f"images[{i}]: file(run_dir 상대 경로)이 필요합니다")
+    if file.startswith(("/", "~")) or ".." in Path(file).parts:
+        raise EditOverrideError(
+            f"images[{i}]: file 은 run_dir 상대 경로여야 합니다 (받은 값: {file!r})")
+    try:
+        st = float(im["source_time_sec"])
+    except (KeyError, TypeError, ValueError) as ex:
+        raise EditOverrideError(
+            f"images[{i}]: source_time_sec(원본 절대초)이 필요합니다 ({ex})") from ex
+    if st < 0:
+        raise EditOverrideError(f"images[{i}]: source_time_sec 이 음수입니다 ({st})")
+    try:
+        d = float(im["duration_sec"])
+    except (KeyError, TypeError, ValueError) as ex:
+        raise EditOverrideError(f"images[{i}]: duration_sec 이 필요합니다 ({ex})") from ex
+    if d <= 0:
+        raise EditOverrideError(f"images[{i}]: duration_sec 은 양수여야 합니다 ({d})")
+    for k in ("x", "y", "w"):
+        try:
+            v = float(im[k])
+        except (KeyError, TypeError, ValueError) as ex:
+            raise EditOverrideError(
+                f"images[{i}]: {k}(1080×1920 캔버스 대비 0~1 비율)가 필요합니다 ({ex})") from ex
+        if not (0.0 <= v <= 1.0):
+            raise EditOverrideError(f"images[{i}]: {k} 는 0~1 비율이어야 합니다 ({v})")
+    if im.get("layer") is not None and not isinstance(im["layer"], int):
+        raise EditOverrideError(f"images[{i}]: layer 는 정수여야 합니다 ({im['layer']!r})")
+
+
+def ensure_renderable(ov: dict[str, Any] | None) -> dict[str, Any] | None:
+    """렌더 직전 게이트 — 스키마는 선언됐지만 렌더가 아직 없는 기능을 fail-loud 로 거절.
+
+    images(v3, 2026-08-19): 이 스키마는 선언·검증까지만 구현됐다. 조용히 빼고
+    렌더하면 사람이 올린 이미지가 소리 없이 사라진 영상이 나간다(제1원칙 위반) —
+    즉시 실패시켜 검수함에 남긴다. 이미지 오버레이 렌더가 구현되면 이 가드를 지운다."""
+    if ov and ov.get("images"):
+        raise EditOverrideError(
+            "edit_overrides/v3 images 는 아직 렌더 미구현입니다 (스키마 선언만 존재) — "
+            "이미지 오버레이가 구현될 때까지 images 없이 제출하세요")
+    return ov
 
 
 def _best_overlap(start: float, end: float, olds: list[StoryClip]) -> StoryClip | None:
@@ -245,16 +394,102 @@ def apply_overrides(variants: list[tuple[list[StoryClip], str, float]],
 
 
 def overrides_subtitles(ov: dict[str, Any] | None) -> list[dict[str, Any]] | None:
-    """오버라이드 → 자막 세그먼트 목록(편집본 시간축). 키가 없으면 None. 순수.
+    """오버라이드 → 자막 세그먼트 목록. 키가 없으면 None. 순수.
 
-    subtitle_segments.json 과 **똑같은 3필드**로 정규화해서 돌려준다 — 그 파일이
-    자막의 정본이고, 호출부는 이 결과를 그대로 캐시에 다시 써서 다음 렌더·편집실
-    재방문에서도 사람이 고친 문장이 보이게 한다."""
+    subtitle_segments.json 과 **똑같은 3필드**(start_sec·end_sec·text)로 정규화해서
+    돌려준다 — 그 파일이 자막의 정본이고, 호출부는 이 결과를 그대로 캐시에 다시 써서
+    다음 렌더·편집실 재방문에서도 사람이 고친 문장이 보이게 한다.
+
+    v3 추가 필드는 있을 때만 얹는다:
+      · source_time_sec — 원본 절대초 앵커. **place_anchored_subtitles 를 거쳐
+        편집 타임라인으로 변환된 뒤 사라진다**(캐시는 편집본 시간축 정본이라
+        원본축 좌표를 섞지 않는다 — 편집실은 source_sec 을 스스로 역산한다).
+      · style — {size, y, color} 정규화(숫자화). 배치 후에도 남아 캐시에 저장된다 —
+        오버라이드 없는 재렌더에서도 사람이 고친 스타일이 유지돼야 하기 때문이다."""
     if not ov or not ov.get("subtitles"):
         return None
-    return [{"start_sec": float(s["start_sec"]),
-             "end_sec": float(s["end_sec"]),
-             "text": str(s["text"]).strip()} for s in ov["subtitles"]]
+    out: list[dict[str, Any]] = []
+    for s in ov["subtitles"]:
+        item: dict[str, Any] = {"start_sec": float(s["start_sec"]),
+                                "end_sec": float(s["end_sec"]),
+                                "text": str(s["text"]).strip()}
+        if s.get("source_time_sec") is not None:
+            item["source_time_sec"] = float(s["source_time_sec"])
+        style = s.get("style")
+        if style:
+            norm: dict[str, Any] = {}
+            if style.get("size") is not None:
+                norm["size"] = float(style["size"])
+            if style.get("y") is not None:
+                norm["y"] = float(style["y"])
+            if style.get("color") is not None:
+                norm["color"] = str(style["color"])
+            item["style"] = norm
+        out.append(item)
+    return out
+
+
+def place_anchored_subtitles(
+    subs: list[dict[str, Any]],
+    clips: list[StoryClip],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """v3 앵커 자막 배치(F-401) — source_time_sec(원본 절대초) → 편집 타임라인. 순수.
+
+    tts(_resolve_cue_anchors)와 같은 규칙: 담은 최종 클립의 편집 오프셋 + 클립 내
+    상대시각. 포함 판정 슬롭 ±SUBTITLE_ANCHOR_SLOP_SEC(0.5s) — 편집실 UI 와 동일
+    규약이다. 정확 포함이 우선이고, 슬롭 매칭은 경계 위 자막을 가장 가까운 클립
+    안쪽으로 클램프한다. 이 변환 덕에 clips 와 subtitles 를 **같이 보내도** 구간
+    변경이 자막 시각을 흔들지 않는다.
+
+    앵커가 최종 구간 목록에 없으면 tts 고아와 같은 규칙 = **드롭**이다
+    (_resolve_cue_anchors 의 "앵커 클립 소재가 최종 타임라인에 없음 → 드롭".
+    tts 의 중간 단계인 같은 (chunk,candidate) 조각으로의 스냅은 자막에 그 메타데이터가
+    없어 성립하지 않는다). 드롭된 항목을 둘째 반환값으로 돌려주니 호출부는 반드시
+    로그로 남겨라 — 조용한 드롭은 제1원칙 위반이다.
+
+    앵커 없는 항목은 종전대로 start_sec(편집본 시간축)를 그대로 쓴다. 반환 목록에서
+    source_time_sec 은 제거된다(캐시 = 편집본 시간축 정본). style 등 나머지 필드는
+    그대로 통과한다."""
+    if not subs:
+        return [], []
+    spans: list[tuple[float, float, float]] = []   # (원본 start, 원본 end, 편집 base)
+    total = 0.0
+    for c in clips or []:
+        s, e = float(c.start_sec), float(c.end_sec)
+        spans.append((s, e, total))
+        total += max(0.0, e - s)
+
+    placed: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for sub in subs:
+        t_raw = sub.get("source_time_sec")
+        if t_raw is None:
+            placed.append(dict(sub))
+            continue
+        t = float(t_raw)
+        pick = next((sp for sp in spans if sp[0] <= t < sp[1]), None)
+        if pick is None:
+            slop = [sp for sp in spans
+                    if sp[0] - SUBTITLE_ANCHOR_SLOP_SEC <= t <= sp[1] + SUBTITLE_ANCHOR_SLOP_SEC]
+            if slop:
+                pick = min(slop, key=lambda sp: min(abs(t - sp[0]), abs(t - sp[1])))
+        if pick is None:
+            dropped.append(sub)
+            continue
+        s0, e0, base = pick
+        rel = min(max(t - s0, 0.0), e0 - s0)       # 슬롭 매칭은 클립 안쪽으로 클램프
+        dur = float(sub["end_sec"]) - float(sub["start_sec"])
+        start = base + rel
+        end = min(start + dur, total)
+        if end - start < 0.1:                      # 변환 후 화면에 못 남는 길이 = 고아
+            dropped.append(sub)
+            continue
+        out = {k: v for k, v in sub.items() if k != "source_time_sec"}
+        out["start_sec"] = round(start, 3)
+        out["end_sec"] = round(end, 3)
+        placed.append(out)
+    placed.sort(key=lambda x: (float(x["start_sec"]), float(x["end_sec"])))
+    return placed, dropped
 
 
 def overrides_tts(ov: dict[str, Any] | None,
