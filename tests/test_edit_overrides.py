@@ -482,6 +482,15 @@ def test_v3_schema_accepts_anchor_style_images():
                         "tts": [{"source_time_sec": 743.0, "text": "내레이션"}]})
 
 
+def test_rotate_accepted_in_images_and_style():
+    """rotate(F-410) — images·style 공통 계약: 도 단위 숫자, -180~180, 시계방향 양수."""
+    for r in (45, -90, 12.5, 0, 180, -180):
+        validate_overrides({"schema": "edit_overrides/v3",
+                            "images": [_img(rotate=r)]})
+        validate_overrides({"schema": "edit_overrides/v3",
+                            "subtitles": [_sub(0, 2, "기울인 줄", style={"rotate": r})]})
+
+
 def test_v3_fields_require_v3_stamp():
     """v3 필드가 v1·v2 스탬프에 실려 오면 즉시 거절 — 구 엔진은 이 필드를 조용히
     무시하므로, 스탬프 없이 받아주면 노드마다 결과가 달라진다."""
@@ -508,6 +517,8 @@ def test_v3_fields_require_v3_stamp():
     (_sub(0, 2, "x", style={"y": 1.5}), "0~1"),
     (_sub(0, 2, "x", style={"color": "노랑"}), "#RRGGBB"),
     (_sub(0, 2, "x", style={"color": "#FFF"}), "#RRGGBB"),
+    (_sub(0, 2, "x", style={"rotate": "많이"}), "숫자"),
+    (_sub(0, 2, "x", style={"rotate": -181}), "-180~180"),
 ])
 def test_v3_subtitle_field_violations_fail_loudly(bad, msg):
     with pytest.raises(EditOverrideError, match=msg):
@@ -530,6 +541,12 @@ def test_v3_subtitle_field_violations_fail_loudly(bad, msg):
       "x": 0, "y": 0, "w": 0.5, "layer": "위"}, "정수"),
     ({"file": "a.gif", "source_time_sec": 1, "duration_sec": 1,
       "x": 0, "y": 0, "w": 0.5}, "확장자"),
+    ({"file": "a.png", "source_time_sec": 1, "duration_sec": 1,
+      "x": 0, "y": 0, "w": 0.5, "rotate": "빙글"}, "숫자"),
+    ({"file": "a.png", "source_time_sec": 1, "duration_sec": 1,
+      "x": 0, "y": 0, "w": 0.5, "rotate": 180.5}, "-180~180"),
+    ({"file": "a.png", "source_time_sec": 1, "duration_sec": 1,
+      "x": 0, "y": 0, "w": 0.5, "tilt": 3}, "모르는 키"),
 ])
 def test_v3_image_violations_fail_loudly(bad, msg):
     with pytest.raises(EditOverrideError, match=msg):
@@ -667,7 +684,8 @@ def test_v3_full_roundtrip_with_clips(tmp_path):
     ov = {"schema": "edit_overrides/v3",
           "clips": [{"start_sec": 95.0, "end_sec": 120.0, "role": "hook"}],
           "subtitles": [_sub(0.0, 2.0, "따라오는 자막", source_time_sec=105.0,
-                             style={"size": 60, "y": 0.75, "color": "#FFDD00"})]}
+                             style={"size": 60, "y": 0.75, "color": "#FFDD00",
+                                    "rotate": -8})]}
     p = tmp_path / "ov.json"
     p.write_text(json.dumps(ov, ensure_ascii=False), encoding="utf-8")
     loaded = load_edit_overrides(p)
@@ -678,19 +696,24 @@ def test_v3_full_roundtrip_with_clips(tmp_path):
     assert dropped == []
     assert placed[0]["start_sec"] == 10.0            # 0 + (105-95)
     assert placed[0]["style"]["color"] == "#FFDD00"
+    # rotate 는 정규화(overrides_subtitles)를 지나 배치 후에도 남아야 한다 —
+    # 실측(2026-08-19)에서 정규화 whitelist 가 rotate 를 떨어뜨린 걸 잡은 회귀 가드.
+    assert placed[0]["style"]["rotate"] == -8.0
 
 
 # ── v3 images 배치(F-408) — 자막 앵커와 같은 규칙, 창 길이는 duration_sec ──
 def test_anchored_image_follows_clip_offset():
-    imgs = [_img(source_time_sec=105.0, duration_sec=2.0, layer=1),
+    imgs = [_img(source_time_sec=105.0, duration_sec=2.0, layer=1, rotate=-15),
             _img(source_time_sec=12.0, duration_sec=3.0)]
     placed, dropped = place_anchored_images(imgs, _final_clips())
     assert dropped == []
     # 배열 순서 보존 — 같은 layer 의 쌓임 순서 계약이라 시각순 정렬하지 않는다
     assert [(i["start_sec"], i["end_sec"]) for i in placed] == [(20.0, 22.0), (2.0, 5.0)]
-    # 변환 후 원본축 좌표는 사라지고 렌더러 입력(위치·레이어)은 그대로 통과
+    # 변환 후 원본축 좌표는 사라지고 렌더러 입력(위치·레이어·회전)은 그대로 통과
     assert "source_time_sec" not in placed[0] and "duration_sec" not in placed[0]
     assert (placed[0]["x"], placed[0]["y"], placed[0]["w"], placed[0]["layer"]) == (0.1, 0.2, 0.3, 1)
+    assert placed[0]["rotate"] == -15                    # rotate(F-410) 통과
+    assert "rotate" not in placed[1]                     # 안 보낸 키를 만들어내지 않는다
 
 
 def test_anchored_image_orphan_dropped_and_tail_clamped():

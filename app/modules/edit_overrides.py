@@ -22,7 +22,7 @@ v3 = v2 + 자막 앵커/줄 스타일 + images (정본 문서: docs/edit_overrid
                 "voice": "ko_female", "text": "고친 내레이션"}, ... ],
       "images": [ {"file": "assets/arrow.png", "source_time_sec": 745.0,   # (v3)
                    "duration_sec": 2.0, "x": 0.1, "y": 0.2, "w": 0.3,
-                   "layer": 1}, ... ]
+                   "layer": 1, "rotate": -15}, ... ]           # rotate 는 F-410
     }
 
 스키마를 올린 이유(v2·v3 공통): 구 엔진의 validate_overrides 는 모르는 키를 조용히
@@ -41,11 +41,14 @@ v3 추가분:
     보내도 안전**하다 — 종전엔 구간이 바뀌면 자막 좌표(편집본 시간축)가 통째로
     어긋나서 편집실이 자막을 아예 안 보냈다(2-pass 강제). 앵커 없는 항목(신규 줄)은
     종전대로 start_sec(편집본 시간축)를 그대로 쓴다.
-  · **subtitles[].style (F-407)** — 줄 단위 스타일 오버라이드 {size, y, color}.
-    채널/편 전역 프리셋 위에 그 줄만 얹는다. size = 1080×1920 캔버스 기준 폰트 px,
-    y = 자막 하단이 놓일 세로 위치(0=상단, 1=하단, 캔버스 비율), color = "#RRGGBB".
+  · **subtitles[].style (F-407)** — 줄 단위 스타일 오버라이드 {size, y, color,
+    rotate}. 채널/편 전역 프리셋 위에 그 줄만 얹는다. size = 1080×1920 캔버스 기준
+    폰트 px, y = 자막 하단이 놓일 세로 위치(0=상단, 1=하단, 캔버스 비율),
+    color = "#RRGGBB", rotate = 도 단위 -180~180 시계방향 양수(F-410 — ASS \\frz 는
+    반시계 양수라 부호 반전은 subtitle.py 가 책임진다).
   · **images (F-408)** — 자막처럼 시간 창을 갖는 이미지(스티커·짤) 오버레이.
-    x·y·w 는 1080×1920 캔버스 대비 0~1 비율(w 만 지정 — 세로는 원본비 유지),
+    x·y·w 는 1080×1920 캔버스 대비 0~1 비율(w 만 지정 — 세로는 원본비 유지,
+    rotate 가 있어도 w 는 회전 **전** 원본 기준 F-410),
     file 은 run_dir 상대 경로(png/jpg, 상한 IMAGE_MAX_BYTES). 스토리지 다운로드는
     오케스트레이터 어댑터 몫이다 — 엔진은 로컬 파일만 받는다(스토리지 자격 없음).
     시간 창은 자막 앵커와 같은 원본 절대초(source_time_sec + duration_sec) —
@@ -100,13 +103,21 @@ TTS_MATCH_TOLERANCE_SEC = 1.0
 # 앵커 자막 포함 판정 슬롭(초) — 편집실 UI 와 동일 규약. 클립 경계 반올림(소수 3자리)
 # 오차로 경계 위의 자막이 고아가 되지 않게 한다.
 SUBTITLE_ANCHOR_SLOP_SEC = 0.5
-# 줄 단위 스타일 계약 — 이 세 키만 받는다. 모르는 키를 조용히 무시하면 사람이 고친
+# 줄 단위 스타일 계약 — 이 키들만 받는다. 모르는 키를 조용히 무시하면 사람이 고친
 # 값이 반영 안 된 채 영상이 나가므로(제1원칙) 즉시 실패한다.
-SUBTITLE_STYLE_KEYS = ("size", "y", "color")
+SUBTITLE_STYLE_KEYS = ("size", "y", "color", "rotate")
 # images 파일 계약 — ffmpeg 이 그대로 읽는 정지 이미지만(알파가 필요하면 png).
 # 크기 상한은 스티커·짤 용도 기준 재량값이다(캔버스 전체를 덮는 png 도 수 MB 면 충분).
 IMAGE_ALLOWED_SUFFIXES = (".png", ".jpg", ".jpeg")
 IMAGE_MAX_BYTES = 10 * 1024 * 1024
+# images 항목 허용 키 — style 과 같은 이유로 모르는 키는 즉시 거절한다. 이 목록에
+# 키를 더하는 쪽(신 엔진)이 먼저 배포돼야 구 엔진 노드가 그 키를 fail-loud 로
+# 거절한다(조용한 무시 = 노드마다 결과가 갈린다).
+IMAGE_KEYS = ("file", "source_time_sec", "duration_sec", "x", "y", "w", "layer",
+              "rotate")
+# 회전 계약(images[].rotate · subtitles[].style.rotate 공통) — 도 단위, 시계방향
+# 양수, 원점은 이미지 중심/자막 앵커, 기본 0.
+ROTATE_RANGE_DEG = 180.0
 _COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
 
@@ -286,6 +297,20 @@ def _validate_subtitle_v3_fields(i: int, s: dict[str, Any], schema: str) -> None
             raise EditOverrideError(
                 f"subtitles[{i}]: style.color 는 '#RRGGBB' 형식이어야 합니다 "
                 f"(받은 값: {style['color']!r})")
+    if style.get("rotate") is not None:
+        _validate_rotate(f"subtitles[{i}]: style.rotate", style["rotate"])
+
+
+def _validate_rotate(where: str, value: Any) -> None:
+    """회전 공통 검증(images[].rotate · subtitles[].style.rotate) — 계약 동일:
+    도 단위 숫자, -180~180, 시계방향 양수."""
+    try:
+        r = float(value)
+    except (TypeError, ValueError) as ex:
+        raise EditOverrideError(f"{where} 가 숫자가 아닙니다 ({value!r})") from ex
+    if not (-ROTATE_RANGE_DEG <= r <= ROTATE_RANGE_DEG):
+        raise EditOverrideError(
+            f"{where} 는 -180~180 (도 단위, 시계방향 양수)이어야 합니다 ({r})")
 
 
 def _validate_image(i: int, im: Any) -> None:
@@ -294,6 +319,11 @@ def _validate_image(i: int, im: Any) -> None:
     파일 존재·크기 검증은 run_dir 를 아는 resolve_image_files 가 한다."""
     if not isinstance(im, dict):
         raise EditOverrideError(f"images[{i}] 가 객체가 아닙니다")
+    unknown = [k for k in im if k not in IMAGE_KEYS]
+    if unknown:
+        raise EditOverrideError(
+            f"images[{i}]: 모르는 키 {unknown} — 계약은 {'/'.join(IMAGE_KEYS)} "
+            "뿐입니다 (구 엔진 노드가 조용히 무시하지 못하게 즉시 거절)")
     file = str(im.get("file") or "").strip()
     if not file:
         raise EditOverrideError(f"images[{i}]: file(run_dir 상대 경로)이 필요합니다")
@@ -327,6 +357,8 @@ def _validate_image(i: int, im: Any) -> None:
             raise EditOverrideError(f"images[{i}]: {k} 는 0~1 비율이어야 합니다 ({v})")
     if im.get("layer") is not None and not isinstance(im["layer"], int):
         raise EditOverrideError(f"images[{i}]: layer 는 정수여야 합니다 ({im['layer']!r})")
+    if im.get("rotate") is not None:
+        _validate_rotate(f"images[{i}]: rotate", im["rotate"])
 
 
 def resolve_image_files(ov: dict[str, Any] | None,
@@ -440,8 +472,9 @@ def overrides_subtitles(ov: dict[str, Any] | None) -> list[dict[str, Any]] | Non
       · source_time_sec — 원본 절대초 앵커. **place_anchored_subtitles 를 거쳐
         편집 타임라인으로 변환된 뒤 사라진다**(캐시는 편집본 시간축 정본이라
         원본축 좌표를 섞지 않는다 — 편집실은 source_sec 을 스스로 역산한다).
-      · style — {size, y, color} 정규화(숫자화). 배치 후에도 남아 캐시에 저장된다 —
-        오버라이드 없는 재렌더에서도 사람이 고친 스타일이 유지돼야 하기 때문이다."""
+      · style — {size, y, color, rotate} 정규화(숫자화). 배치 후에도 남아 캐시에
+        저장된다 — 오버라이드 없는 재렌더에서도 사람이 고친 스타일이 유지돼야
+        하기 때문이다."""
     if not ov or not ov.get("subtitles"):
         return None
     out: list[dict[str, Any]] = []
@@ -460,6 +493,8 @@ def overrides_subtitles(ov: dict[str, Any] | None) -> list[dict[str, Any]] | Non
                 norm["y"] = float(style["y"])
             if style.get("color") is not None:
                 norm["color"] = str(style["color"])
+            if style.get("rotate") is not None:
+                norm["rotate"] = float(style["rotate"])
             item["style"] = norm
         out.append(item)
     return out
@@ -556,8 +591,8 @@ def place_anchored_images(
     자막과 달리 창 길이가 duration_sec 로 오므로, 편집 창 = [start, start+duration]
     을 타임라인 끝에서 클램프한다. 반환 항목은 편집본 시간축의 start_sec/end_sec 를
     갖고 source_time_sec·duration_sec 은 제거된다(렌더러 입력 = 편집본 시간축).
-    file·x·y·w·layer 는 그대로 통과하며, **배열 순서를 보존한다** — 같은 layer 의
-    쌓임 순서가 배열 순서 계약이라 자막처럼 시각순 정렬하면 안 된다."""
+    file·x·y·w·layer·rotate 는 그대로 통과하며, **배열 순서를 보존한다** — 같은
+    layer 의 쌓임 순서가 배열 순서 계약이라 자막처럼 시각순 정렬하면 안 된다."""
     if not images:
         return [], []
     spans, total = _clip_spans(clips)

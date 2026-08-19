@@ -286,6 +286,10 @@ def _line_style_overrides(style_ov: dict | None, base_alignment: int) -> tuple[s
 
     · size  → {\\fsN} — 캔버스(1080×1920) 기준 폰트 px
     · color → {\\1c&HBBGGRR&}
+    · rotate → {\\frz} — 계약(F-410)은 **시계방향 양수**(images[].rotate 와 동일)인데
+      ASS \\frz 는 **반시계 양수**다. 부호 반전은 여기(엔진)가 책임진다 — 편집실·
+      오케스트레이터는 계약 부호만 안다. 회전 원점은 ASS 기본 \\org = 그 줄의 정렬
+      앵커(하단 정렬이면 자막 하단 중앙). 0 은 태그를 안 박는다(기본값).
     · y     → 자막 하단이 놓일 세로 위치(0=상단, 1=하단, 캔버스 비율).
       하단 정렬(alignment 1~3)은 이벤트 MarginV 로 표현한다 — 줄바꿈 폭(MarginL/R)을
       보존하고 libass 충돌 회피가 그대로 동작한다. MarginV=0 은 ASS 규약상 "스타일
@@ -300,6 +304,8 @@ def _line_style_overrides(style_ov: dict | None, base_alignment: int) -> tuple[s
         tags.append(f"\\fs{int(round(float(style_ov['size'])))}")
     if style_ov.get("color"):
         tags.append(f"\\1c{_hex_to_ass_color(str(style_ov['color']))}")
+    if style_ov.get("rotate") is not None and float(style_ov["rotate"]) != 0.0:
+        tags.append(f"\\frz{-float(style_ov['rotate']):g}")
     if style_ov.get("y") is not None:
         y = min(max(float(style_ov["y"]), 0.0), 1.0)
         if base_alignment <= 3:

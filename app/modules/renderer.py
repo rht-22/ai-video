@@ -485,6 +485,7 @@
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 from dataclasses import dataclass, replace, field
 from pathlib import Path
@@ -1236,6 +1237,9 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     # 시간 창은 편집본 시간축(enable=between) — 배치는 place_anchored_images 가 끝냈다.
     # layer ≤ 0 은 자막 아래(기본 0), ≥ 1 은 자막(ASS 두 겹) 위. 같은 그룹 안에서는
     # layer 오름차순으로 쌓이고, 동률이면 배열 순서(stable sort)로 뒤가 위에 온다.
+    # rotate(F-410, 도 단위 시계방향 양수)는 원본비 스케일 후 이미지 **중심** 기준
+    # 회전 — w 는 회전 전 원본 기준이고, 회전으로 커진 바운딩 박스는 중심이 안
+    # 움직이게 overlay 좌표를 되물린다.
     _eimgs = sorted(list(inputs.image_overlays or []),
                     key=lambda im: int(im.get("layer") or 0))
     _eimgs_below = [im for im in _eimgs if int(im.get("layer") or 0) <= 0]
@@ -1249,12 +1253,34 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
             img_x = int(round(float(im["x"]) * W))
             img_y = int(round(float(im["y"]) * H))
             s, e = float(im["start_sec"]), float(im["end_sec"])
+            rot = float(im.get("rotate") or 0.0)
+            if rot:
+                # 회전은 스케일 높이를 미리 알아야 한다(-2 자동값으론 바운딩 박스
+                # 계산 불가) — 원본 크기를 probe 해 짝수 px 로 직접 정한다.
+                src_w, src_h = _probe_image_size(str(im["file"]))
+                img_h = max(2, int(round(img_w * src_h / src_w / 2.0)) * 2)
+                rad = math.radians(rot)          # ffmpeg rotate 도 시계방향 양수(라디안)
+                # ceil 앞 1e-6 보정: cos(π/2) 류가 정확히 0 이 아니어서(6e-17) 90°
+                # 같은 직각이 한 픽셀 커지는 것을 막는다.
+                bb_w = int(math.ceil(abs(img_w * math.cos(rad)) + abs(img_h * math.sin(rad)) - 1e-6))
+                bb_h = int(math.ceil(abs(img_w * math.sin(rad)) + abs(img_h * math.cos(rad)) - 1e-6))
+                # x/y(회전 전 좌상단) → 중심 고정: 커진 박스의 절반만큼 되물린다
+                ox = img_x + int(round((img_w - bb_w) / 2.0))
+                oy = img_y + int(round((img_h - bb_h) / 2.0))
+                # format=rgba 선행 — jpg(알파 없음)도 모서리 여백이 투명(c=black@0)이
+                # 되게 한다. ow/oh 를 직접 주면 rotw/roth 반올림 차이가 안 생긴다.
+                src_chain = (f"movie='{img_path}',scale={img_w}:{img_h},format=rgba,"
+                             f"rotate={rad:.10f}:ow={bb_w}:oh={bb_h}:c=black@0")
+            else:
+                ox, oy = img_x, img_y
+                src_chain = f"movie='{img_path}',scale={img_w}:-2"
             out = f"[{tag}{j}]"
             print(f"  [EditImage] {Path(str(im['file'])).name}: w={img_w}px @ ({img_x},{img_y}) "
-                  f"{s:.2f}~{e:.2f}s layer={int(im.get('layer') or 0)}")
+                  f"{s:.2f}~{e:.2f}s layer={int(im.get('layer') or 0)}"
+                  + (f" rotate={rot:g}° → overlay=({ox},{oy})" if rot else ""))
             filters.append(
-                f"movie='{img_path}',scale={img_w}:-2[{tag}src{j}];"
-                f"{label}[{tag}src{j}]overlay={img_x}:{img_y}:"
+                f"{src_chain}[{tag}src{j}];"
+                f"{label}[{tag}src{j}]overlay={ox}:{oy}:"
                 f"enable='between(t,{s:.3f},{e:.3f})'{out}"
             )
             label = out
@@ -1301,6 +1327,23 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     audio_filter = _apply_loudnorm(audio_filter, getattr(inputs, "loudness_target_lufs", None))
     filters.append(audio_filter)
     return ";".join(filters)
+
+def _probe_image_size(path: str) -> tuple[int, int]:
+    """이미지 원본 (width, height) 를 ffprobe 로 읽는다 — rotate(F-410) 바운딩 박스
+    계산용. 파일 존재는 resolve_image_files 가 이미 보장했으므로 여기서 못 읽으면
+    파일이 이미지가 아니라는 뜻 — 조용히 회전을 빼는 대신 즉시 실패한다(제1원칙)."""
+    ffprobe = find_ffmpeg_command("ffprobe")
+    out = subprocess.check_output([
+        ffprobe, "-v", "quiet", "-print_format", "json",
+        "-show_streams", str(path)
+    ])
+    streams = json.loads(out).get("streams") or []
+    for st in streams:
+        w, h = st.get("width"), st.get("height")
+        if w and h:
+            return int(w), int(h)
+    raise RuntimeError(f"이미지 크기를 읽지 못했습니다(회전 합성에 필요): {path}")
+
 
 def _get_audio_duration(path: Path) -> float:
     """ffprobe로 오디오 파일 길이를 측정합니다."""

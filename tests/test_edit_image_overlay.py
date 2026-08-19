@@ -72,3 +72,36 @@ def test_layer_sort_stacks_ascending_below():
     # layer 오름차순 — b(-1) 가 먼저 깔리고 a(0) 가 그 위에 체인으로 쌓인다
     assert fg.index("b.png") < fg.index("a.png")
     assert "[eimgb0][eimgbsrc1]overlay" in fg
+
+
+# ── rotate(F-410) — 알파 보존 회전, 중심 고정, w 는 회전 전 기준 ──────────
+def _patch_probe(monkeypatch, size=(200, 100)):
+    import app.modules.renderer as renderer
+    monkeypatch.setattr(renderer, "_probe_image_size", lambda _p: size)
+
+
+def test_rotate_90_bounding_box_and_center_kept(monkeypatch):
+    _patch_probe(monkeypatch)                  # 원본 200×100 → w=324px 면 높이 162px
+    fg = _build_filtergraph(_inputs([_img(rotate=90)]), 1, 0)
+    # 알파 보존: rgba 선행 + 투명 fill, ow/oh 는 90° 바운딩 박스(가로세로 맞바꿈)
+    assert "format=rgba,rotate=1.5707963268:ow=162:oh=324:c=black@0" in fg
+    # 스케일은 회전 전 원본 기준 그대로(w=0.3 → 324px), -2 자동값 대신 명시 높이
+    assert "scale=324:162" in fg
+    # 중심 고정 — 좌상단(108,384)의 중심 (270,465) 이 유지되게 박스 절반만큼 되물림
+    assert "overlay=189:303" in fg
+    assert "enable='between(t,1.000,3.000)'" in fg       # 시간 창은 종전 그대로
+
+
+def test_rotate_45_ceil_bounding_box(monkeypatch):
+    _patch_probe(monkeypatch)
+    fg = _build_filtergraph(_inputs([_img(rotate=45)]), 1, 0)
+    # 45°: bb = ceil((324+162)/√2) = ceil(343.65…) = 344 (정사각)
+    assert ":ow=344:oh=344:c=black@0" in fg
+    assert "overlay=98:293" in fg              # 108-(344-324)/2, 384-(344-162)/2
+
+
+def test_rotate_zero_or_missing_keeps_plain_chain():
+    # rotate 미지정·0 은 종전 체인 그대로 — probe 도 rotate 필터도 없다
+    fg = _build_filtergraph(_inputs([_img(), _img(rotate=0)]), 1, 0)
+    assert "rotate" not in fg
+    assert "scale=324:-2" in fg
