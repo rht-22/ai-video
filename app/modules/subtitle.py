@@ -274,6 +274,12 @@ def parse_subtitle(path: Path) -> list[SpeechSegment]:
 ASS_PLAY_RES_X = 1080
 ASS_PLAY_RES_Y = 1920
 
+# libass 한 줄 높이 근사(폰트 크기 대비) — TTS 블록 회전(E7-1)의 \org(블록 중심) 계산용.
+# 번들 한글 폰트들의 ascender+descender 실측이 1.15~1.25 범위라 중간값을 쓴다. 오차 δ가
+# 나도 원점이 블록 중심에서 δ/2 만큼 어긋날 뿐이고, 그로 인한 블록 이동은 2·(δ/2)·sin(θ/2)
+# 이하(θ=90° 에서도 수 px)다. θ=0 이면 태그 자체를 안 박아 종전 렌더와 바이트 동일.
+_ASS_LINE_HEIGHT_FACTOR = 1.2
+
 
 def _hex_to_ass_color(color: str) -> str:
     """'#RRGGBB' → ASS 인라인 색 '&HBBGGRR&' (ASS 는 BGR 순서)."""
@@ -445,16 +451,36 @@ def build_tts_ass(
     tts_segments: list[SpeechSegment],
     output_path: Path,
     style: SubtitleStyle,
+    rotate_deg: float = 0.0,
 ) -> None:
-    """TTS 자막만 담은 ASS 파일을 생성합니다."""
+    """TTS 자막만 담은 ASS 파일을 생성합니다.
+
+    rotate_deg(E7-1, 디자인 레벨 design.tts_rotate): 도 단위 **시계방향 양수**(-180~180,
+    images[].rotate·subtitles[].style.rotate 와 동일 계약). ASS \\frz 는 반시계 양수라
+    부호 반전은 여기(엔진)가 책임진다 — F-410 과 동일. 원점은 계약대로 텍스트 블록
+    **중심**이어야 하는데 ASS 기본 원점은 정렬 앵커(하단 중앙 = 블록 하단)라, 이벤트마다
+    \\org 를 블록 중심(하단 앵커에서 블록 높이 절반 위)으로 박는다. 블록 높이는
+    줄 수 × 폰트크기 × _ASS_LINE_HEIGHT_FACTOR 근사 — 오차 영향은 상수 주석 참고.
+    TTS 스타일은 하단 중앙 정렬(alignment 2)·MarginL/R 80 대칭 고정이라 앵커 x 는
+    화면 중앙이다. 0 이면 태그를 안 박아 종전 출력과 바이트 동일(회귀 없음).
+    """
+    if not (-180.0 <= float(rotate_deg) <= 180.0):
+        raise ValueError(f"tts_rotate 범위 밖: {rotate_deg} (-180~180)")
     header = _ass_header(style)
+    margin_v = style.margin_v if style.margin_v >= 0 else 480
     events = ""
     for seg in tts_segments:
         text = _strip_speaker_prefix(seg.text.replace("\n", " ").strip())
         if not text:
             continue
         joined = _wrap_for_ass(text, max_chars=15, max_lines=2)
-        events += f"Dialogue: 0,{_format_time(seg.start_sec)},{_format_time(seg.end_sec)},Default,,,,,, {joined}\n"
+        tag = ""
+        if float(rotate_deg) != 0.0:
+            n_lines = joined.count("\\N") + 1
+            blk_h = n_lines * style.font_size * _ASS_LINE_HEIGHT_FACTOR
+            org_y = int(round(ASS_PLAY_RES_Y - margin_v - blk_h / 2))
+            tag = f"{{\\frz{-float(rotate_deg):g}\\org({ASS_PLAY_RES_X // 2},{org_y})}}"
+        events += f"Dialogue: 0,{_format_time(seg.start_sec)},{_format_time(seg.end_sec)},Default,,,,,, {tag}{joined}\n"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes((header + events).encode("utf-8-sig"))
 

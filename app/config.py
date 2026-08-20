@@ -42,6 +42,17 @@ class DesignConfig:
     tts_line_color: str = "&H00EBCE87"
     tts_line_y_margin: int = 580
 
+    # E7-1: 디자인 레벨 회전(이 편 전체) — 도 단위, **시계방향 양수**, -180~180
+    # (subtitles[].style.rotate·images[].rotate 와 동일 계약). 0 = 회전 없음(종전 경로 그대로).
+    # 원점은 텍스트 블록 중심 — 편집실 CSS 미리보기(transform-origin: center)와 일치.
+    title_rotate: float = 0.0
+    tts_rotate: float = 0.0
+
+    # E7-2: 영상 배속 (0.8~2.0, 1=기본). 원본 영상·현장음에만 적용 — TTS 내레이션
+    # 오디오는 배속하지 않는다(내레이션 속도는 cue.speed 가 합성 시점에 담당).
+    # 출력 시각 좌표(자막·TTS 창·이미지 창·덕킹)는 렌더에서 ×1/S 로 함께 움직인다.
+    video_speed: float = 1.0
+
     # 작품명 및 이미지 설정
     work_title_y: int = 1400
     work_font_size: int = 40
