@@ -1213,6 +1213,25 @@ def _compute_subtitle_margin_v(
     return max(padding_px, H - (overlay_y + scaled_h) + padding_px)
 
 
+def _scale_segments_for_speed(segments: list, speed: float) -> list:
+    """자막 세그먼트의 출력 시각 ×1/S (E7-2, 구현 지점 A). 순수 — 입력을 바꾸지 않는다.
+
+    영상 배속(video_speed=S)은 렌더 그래프의 concat 직후 setpts/atempo 한 번이고, ASS 는
+    그 **뒤**에 입혀지므로 이벤트 시각은 출력 시각이어야 한다. 여기서 사본의
+    start_sec/end_sec 만 나눈다 — segments_cache_path(소스 편집 타임라인, 편집실이 읽는
+    파일)는 절대 건드리지 않는다. style 등 다른 속성은 그대로 보존(편집실 자막 오버라이드).
+    """
+    if speed == 1.0:
+        return list(segments)
+    out = []
+    for s in segments:
+        ns = SimpleNamespace(**vars(s))
+        ns.start_sec = float(s.start_sec) / speed
+        ns.end_sec = float(s.end_sec) / speed
+        out.append(ns)
+    return out
+
+
 def _build_candidates_lookup(all_candidates: list[dict]) -> dict[tuple[int, int], dict]:
     """all_candidates에서 (chunk_index, candidate_index) → candidate dict 맵 생성.
 
@@ -3029,6 +3048,14 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 넘겨도 되는 종류가 아니다.
     if _edit_pinned:
         print("  [edit] 자동 보정(스냅·확장·갭메움) 생략 — 사람이 지정한 구간 고정")
+    # E7-2 영상 배속: 출력 길이 = 소스 합계 / S. 길이 정책(40~60s·쇼츠 3분)은 **출력**에
+    # 대한 것이므로, 소스 시간축에서 도는 확장 상한·길이 클램프의 예산은 정책 × S 다 —
+    # S=0.8 이면 소스 ≤ 47.8s(출력 ≤ 59.7s), S=2.0 이면 소스 80~120s 를 요구한다.
+    # 출력 mp4 를 재는 validate_output 의 정책 값은 그대로 둔다.
+    _speed = float(getattr(payload.design, "video_speed", 1.0) or 1.0)
+    if _speed != 1.0:
+        print(f"  [speed] video_speed={_speed:g} — 소스 길이 예산 ×{_speed:g} "
+              f"(출력 = 소스/{_speed:g})")
     if transcript_text and not used_gemini_fallback and not _edit_pinned:
         all_storyline_variants = _snap_clip_boundaries_to_dialogue(
             all_storyline_variants, transcript_text, snap_back_max=5.0, snap_forward_max=5.0,
@@ -3036,7 +3063,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         all_storyline_variants = _extend_storyline_for_narrative(
             all_storyline_variants,
             candidates_lookup=_build_candidates_lookup(all_candidates),
-            target_max=float(config.max_duration_sec),
+            target_max=float(config.max_duration_sec) * _speed,
             max_extend_per_side=8.0,
         )
         all_storyline_variants = _fill_intra_storyline_gaps(
@@ -3062,9 +3089,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     #     한계가 아니다. YouTube 는 세로 ≤3분이면 쇼츠로 분류한다(2024-10 확대).
     #   · 통째 제거 금지(allow_remove=False) — 넘치면 역할별 부분 trim 으로만 줄인다.
     #   · 하한(확장) 없음 — 사람이 짧게 만들었으면 그것이 의도다.
+    # 클램프 예산도 위 [speed] 규약대로 ×S (정의는 snap/extend 블록 위 _speed 참고)
     _RENDER_SAFETY_MARGIN = 0.3
-    _EDIT_PINNED_MAX_SEC = 180.0 - _RENDER_SAFETY_MARGIN   # 쇼츠 3분 한계 - 렌더 오버헤드
-    _clamp_max = max(float(config.min_duration_sec), float(config.max_duration_sec) - _RENDER_SAFETY_MARGIN)
+    _EDIT_PINNED_MAX_SEC = (180.0 - _RENDER_SAFETY_MARGIN) * _speed   # 쇼츠 3분 한계 - 렌더 오버헤드
+    _clamp_max = max(float(config.min_duration_sec),
+                     float(config.max_duration_sec) - _RENDER_SAFETY_MARGIN) * _speed
     _clamp_lookup = _build_candidates_lookup(all_candidates)
     _clamped_variants: list[tuple[list[StoryClip], str, float]] = []
     for _ci, (_vc, _vt, _vs) in enumerate(all_storyline_variants):
@@ -3072,7 +3101,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         _before = sum(c.end_sec - c.start_sec for c in _vc)
         _vc2, _ = _fit_storyline_to_duration(
             _vc, _clamp_lookup,
-            target_min=0.0 if _pinned_v else float(config.min_duration_sec),
+            target_min=0.0 if _pinned_v else float(config.min_duration_sec) * _speed,
             target_max=_EDIT_PINNED_MAX_SEC if _pinned_v else _clamp_max,
             allow_remove=not _pinned_v,
         )
@@ -3225,9 +3254,23 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 편집실이 구간을 바꾼 경우(_edit_pinned)도 같은 이유로 재생성한다.
     # 내레이션을 고친 경우(_tts_override)도 재생성 — mp3 는 cue 문구에서 합성되므로
     # 캐시를 쓰면 사람이 고친 문구가 소리에 반영되지 않는다.
+    # E7-2: 배속이 바뀌면 TTS fit 목표((e-s)/S)가 달라진다 — 캐시 mp3 를 그대로 쓰면
+    # 배속 후 cue 창을 넘치는 내레이션이 조용히 나간다. 체크포인트에 video_speed 를
+    # 기록해 두고 다르면 리소스를 재생성한다(크롭 재생성 비용은 정확성에 양보).
+    _resources_speed_stale = False
+    if checkpoint_resources.exists():
+        try:
+            _ck_speed = float(json.loads(
+                checkpoint_resources.read_text(encoding="utf-8")).get("video_speed", 1.0))
+            _resources_speed_stale = abs(_ck_speed - _speed) > 1e-9
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            _resources_speed_stale = True
+        if _resources_speed_stale:
+            print(f"  [speed] 체크포인트 video_speed ≠ {_speed:g} — 리소스(TTS fit) 재생성")
     _resources_invalidate = (from_step in ("gemini", "graph", "story", "tts_plan",
                                            "transcribe", "silence_cut", "resources")
-                             or _edit_pinned or _tts_override is not None)
+                             or _edit_pinned or _tts_override is not None
+                             or _resources_speed_stale)
     # 라운드 9-fix: face_identifier를 resources 단계 *밖*에서도 안전하게 사용할 수 있도록 미리 None 초기화.
     # --from-step render로 들어와 라인 1490 캐시 로드 분기를 타면 face_identifier가 정의되지 않아
     # 멀티 variant 렌더링 단계(라인 1862, 1873)에서 UnboundLocalError 발생.
@@ -3250,7 +3293,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         tts_cue_files = resources_data.get("tts_cue_files", []) or []
         print(f"  - 크롭 타임라인: {len(crop_map)}개, TTS cue 오디오: {len(tts_cue_files)}개")
         print("[OK] 리소스 로드 완료 (체크포인트에서)")
-    elif start_idx <= step_idx["resources"] or _edit_pinned or _tts_override is not None:
+    elif (start_idx <= step_idx["resources"] or _edit_pinned or _tts_override is not None
+          or _resources_speed_stale):
         # _edit_pinned(2026-08-16): --from-step render 로 들어와도 사람이 구간을 바꿨으면
         # 크롭을 다시 만든다. crop_map 키는 f"{role}_{idx}" 라 구간이 달라진 채 캐시를 쓰면
         # **옛 구간의 얼굴 위치**로 크롭이 잡힌다(키가 우연히 맞으면 남의 크롭, 안 맞으면 무크롭).
@@ -3353,7 +3397,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         tts_cue_files: list[dict[str, Any]] = []
         for ci, cue in enumerate(tts_cues):
             tts_path = output_dir / f"tts_cue_{ci}.mp3"
-            target_sec = max(0.5, float(cue.get("end_sec", 0.0)) - float(cue.get("start_sec", 0.0)))
+            # E7-2: cue 창(소스 편집 타임라인)은 배속 후 출력에서 (e-s)/S 로 줄어든다 —
+            # 내레이션 오디오는 배속하지 않으므로 fit 목표가 곧 출력 시각의 창이어야 한다.
+            target_sec = max(0.5, (float(cue.get("end_sec", 0.0))
+                                   - float(cue.get("start_sec", 0.0))) / _speed)
             final_text, actual_sec = synthesize_tts_with_fit(
                 cue["text"], tts_path, target_sec=target_sec,
                 voice=cue.get("voice", "narrative_female"),
@@ -3376,6 +3423,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             json.dumps({
                 "crop_map": {k: str(v) for k, v in crop_map.items()},
                 "tts_cue_files": tts_cue_files,
+                # E7-2: TTS fit 목표가 (e-s)/S 라 배속이 바뀌면 이 캐시는 못 쓴다(위 무효화 참고)
+                "video_speed": _speed,
             }, ensure_ascii=False, indent=2),
             encoding="utf-8"
         )
@@ -3450,11 +3499,14 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             # TTS 자막 세그먼트 생성 — 라운드 12.2: end_sec을 *mp3 실제 길이* 기준으로 갱신.
             # 이전엔 cue 계획 시간 그대로 사용 → mp3가 cue 길이보다 짧으면(0.5~1s) 음성 끝난 후 자막
             # 잔류. 사용자 보고 "TTS 자막이 오디오와 다르다"의 원인.
+            # E7-2: TTS 자막은 렌더 그래프의 setpts **뒤**에 입혀지므로 출력 시각이다 —
+            # 시작은 cue 시각 ×1/S, 끝은 시작 + mp3 실제 길이(내레이션은 배속하지 않으니
+            # 실시간 그대로). fit 목표가 (e-s)/S 라 창(e/S)을 넘지 않는다.
             tts_line_segs: list[SimpleNamespace] = []
             for _cf in tts_cue_files:
                 _cue = _cf.get("cue", {})
-                _cue_start = float(_cue.get("start_sec", 0.0))
-                _cue_end_planned = float(_cue.get("end_sec", 0.0))
+                _cue_start = float(_cue.get("start_sec", 0.0)) / _speed
+                _cue_end_planned = float(_cue.get("end_sec", 0.0)) / _speed
                 _mp3_path = _cf.get("path")
                 _cue_end = _cue_end_planned
                 if _mp3_path and Path(_mp3_path).exists():
@@ -3477,12 +3529,16 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             # TTS 활성 시간 범위 계산 (메인 자막 숨김용)
             tts_time_ranges = [(seg.start_sec, seg.end_sec) for seg in tts_line_segs] if tts_line_segs else None
 
-            build_ass_from_segments(final_segments, subtitle_path, sub_style, tts_time_ranges=tts_time_ranges)
+            # E7-2: 대사 자막도 출력 시각(×1/S)으로 사본만 변환해 ASS 를 만든다 —
+            # segments_cache(소스 편집 타임라인, 편집실 원료)는 그대로 둔다.
+            build_ass_from_segments(_scale_segments_for_speed(final_segments, _speed),
+                                    subtitle_path, sub_style, tts_time_ranges=tts_time_ranges)
             print(f"  [OK] 자막 파일 생성 완료: {subtitle_path}")
 
             tts_subtitle_path = output_dir / "tts_subtitles.ass"
             if tts_line_segs and tts_line_style:
-                build_tts_ass(tts_line_segs, tts_subtitle_path, tts_line_style)
+                build_tts_ass(tts_line_segs, tts_subtitle_path, tts_line_style,
+                              rotate_deg=getattr(payload.design, "tts_rotate", 0.0))
                 print(f"  [OK] TTS 자막 파일 생성 완료: {tts_subtitle_path}")
             else:
                 tts_subtitle_path = None
@@ -3501,8 +3557,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             tts_line_segs = []
             for _cf in tts_cue_files:
                 _cue = _cf.get("cue", {})
-                _cue_start = float(_cue.get("start_sec", 0.0))
-                _cue_end = float(_cue.get("end_sec", 0.0))
+                # E7-2: 위 분기와 동일 — 시작 ×1/S, 끝 = 시작 + mp3 실시간 길이
+                _cue_start = float(_cue.get("start_sec", 0.0)) / _speed
+                _cue_end = float(_cue.get("end_sec", 0.0)) / _speed
                 _mp3_path = _cf.get("path")
                 if _mp3_path and Path(_mp3_path).exists():
                     _mp3_dur = _get_audio_duration(Path(_mp3_path))
@@ -3519,7 +3576,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     margin_v=payload.design.tts_line_y_margin,
                 )
                 tts_subtitle_path = output_dir / "tts_subtitles.ass"
-                build_tts_ass(tts_line_segs, tts_subtitle_path, tts_line_style)
+                build_tts_ass(tts_line_segs, tts_subtitle_path, tts_line_style,
+                              rotate_deg=getattr(payload.design, "tts_rotate", 0.0))
                 print(f"  [OK] TTS 자막 파일 생성 완료 (대사자막 0건): {tts_subtitle_path}")
             else:
                 tts_subtitle_path = None
@@ -3690,8 +3748,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 var_tts_cue_files: list[dict[str, Any]] = []
                 for ci, cue in enumerate(var_cues):
                     tts_out = output_dir / f"tts_{var_num}_cue_{ci}.mp3"
-                    if not tts_out.exists():
-                        target_sec = max(0.5, float(cue.get("end_sec", 0.0)) - float(cue.get("start_sec", 0.0)))
+                    # E7-2: 배속이 바뀌면 variant mp3 도 fit 이 낡는다 — 존재해도 재합성
+                    if not tts_out.exists() or _resources_speed_stale:
+                        # E7-2: 정본과 동일 — fit 목표는 배속 후 출력 창 (e-s)/S
+                        target_sec = max(0.5, (float(cue.get("end_sec", 0.0))
+                                               - float(cue.get("start_sec", 0.0))) / _speed)
                         final_text, actual_sec = synthesize_tts_with_fit(
                             cue["text"], tts_out, target_sec=target_sec,
                             voice=cue.get("voice", "narrative_female"),
@@ -3710,8 +3771,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 var_tts_segs: list[SimpleNamespace] = []
                 for _cf in var_tts_cue_files:
                     _cue = _cf.get("cue", {})
-                    _cue_start = float(_cue.get("start_sec", 0.0))
-                    _cue_end_planned = float(_cue.get("end_sec", 0.0))
+                    # E7-2: 정본과 동일 — 시작 ×1/S, 끝 = 시작 + mp3 실시간 길이
+                    _cue_start = float(_cue.get("start_sec", 0.0)) / _speed
+                    _cue_end_planned = float(_cue.get("end_sec", 0.0)) / _speed
                     _mp3_path = _cf.get("path")
                     _cue_end = _cue_end_planned
                     if _mp3_path and Path(_mp3_path).exists():
@@ -3743,7 +3805,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 }
                 sub_style, _ = select_subtitle_style(_genre_tag, _cli_override, _var_user_overrides)
                 var_tts_ranges = [(s.start_sec, s.end_sec) for s in var_tts_segs] if var_tts_segs else None
-                build_ass_from_segments(var_final_segs, var_sub_path, sub_style, tts_time_ranges=var_tts_ranges)
+                # E7-2: 대사 자막도 출력 시각(×1/S) 사본으로 ASS 생성 (정본과 동일)
+                build_ass_from_segments(_scale_segments_for_speed(var_final_segs, _speed),
+                                        var_sub_path, sub_style, tts_time_ranges=var_tts_ranges)
 
                 var_tts_line_style = SubtitleStyle(
                     font_name=payload.design.subtitle_font,
@@ -3754,7 +3818,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
                 var_tts_sub_final = None
                 if var_tts_segs and var_tts_line_style:
-                    build_tts_ass(var_tts_segs, var_tts_sub_path, var_tts_line_style)
+                    build_tts_ass(var_tts_segs, var_tts_sub_path, var_tts_line_style,
+                                  rotate_deg=getattr(payload.design, "tts_rotate", 0.0))
                     var_tts_sub_final = var_tts_sub_path
 
                 # 얼굴 크롭 타임라인 (--no-reframe 면 정본과 같이 생략 — 빈 map = 가운데 정렬)
@@ -3962,6 +4027,9 @@ def _build_edit_plan(
             "top_title": title_text,
             "bottom_label": payload.work_title,
             "background_style": "blur",
+            # E7-2: timeline 합계는 소스 시간이고 출력 mp4 는 합계/S 다 — 이 값을 빼먹으면
+            # edit_plan 으로 길이를 검산하는 하류(ingest·관제)가 영상과 다른 답을 얻는다.
+            "video_speed": float(getattr(payload.design, "video_speed", 1.0) or 1.0),
         },
         "timeline": timeline,
         "audio_mix": {

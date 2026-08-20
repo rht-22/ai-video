@@ -155,6 +155,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="TTS 자막 색상 (#RRGGBB 또는 &H00BBGGRR, 기본: 하늘색 #87CEEB)")
     design.add_argument("--design-tts-size", type=int, default=None, help="TTS 자막 폰트 크기 (기본: 70)")
     design.add_argument("--design-tts-y-margin", type=int, default=None, help="TTS 자막 MarginV (기본: 580)")
+    design.add_argument("--design-title-rotate", type=float, default=None,
+                        help="제목 블록 회전 (도, -180~180, 시계방향 양수, 기본 0). "
+                             "줄 묶음 전체를 블록 중심 기준으로 회전한다")
+    design.add_argument("--design-tts-rotate", type=float, default=None,
+                        help="TTS 자막 블록 회전 (도, -180~180, 시계방향 양수, 기본 0)")
+    design.add_argument("--design-video-speed", type=float, default=None,
+                        help="영상 배속 (0.8~2.0, 기본 1). 원본 영상·현장음에만 적용 — "
+                             "TTS 내레이션 오디오는 배속하지 않는다")
     design.add_argument("--design-work-font-size", type=int, default=None, help="작품명 폰트 크기")
     design.add_argument("--design-work-color", type=str, default=None, help="작품명 색상")
     design.add_argument("--design-work-image", type=str, default=None,
@@ -215,6 +223,9 @@ _CLI_TO_DESIGN_FIELD = {
     "design_tts_color": "tts_line_color",
     "design_tts_size": "tts_line_font_size",
     "design_tts_y_margin": "tts_line_y_margin",
+    "design_title_rotate": "title_rotate",
+    "design_tts_rotate": "tts_rotate",
+    "design_video_speed": "video_speed",
     "design_work_font_size": "work_font_size",
     "design_work_color": "work_color",
     "design_work_image_width": "work_image_width",
@@ -239,6 +250,21 @@ def _build_design_config(args: argparse.Namespace) -> DesignConfig:
         value = getattr(args, cli_name, None)
         if value is not None:
             overrides[field_name] = value
+
+    # E7: 회전·배속 범위 검증 — 밖이면 즉시 실패(조용한 무시 금지, v3 검증과 동일 원칙).
+    # 비숫자는 argparse type=float 가 이미 즉시 실패시킨다.
+    _E7_RANGES = {
+        "title_rotate": (-180.0, 180.0, "--design-title-rotate"),
+        "tts_rotate": (-180.0, 180.0, "--design-tts-rotate"),
+        "video_speed": (0.8, 2.0, "--design-video-speed"),
+    }
+    for _field, (_lo, _hi, _flag) in _E7_RANGES.items():
+        if _field in overrides:
+            _v = float(overrides[_field])
+            if not (_lo <= _v <= _hi):
+                raise ValueError(
+                    f"{_flag} 값 {overrides[_field]} 이 범위 밖입니다 ({_lo:g}~{_hi:g})")
+            overrides[_field] = _v
 
     # 리프레이밍 스위치 — store_true 라 None 이 아니어서 위 루프에 못 태운다(끄는 쪽만 의미 있음).
     if getattr(args, "no_reframe", False):

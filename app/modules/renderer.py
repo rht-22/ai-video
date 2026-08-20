@@ -911,6 +911,15 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
 
     ratio = getattr(d, 'aspect_ratio', '16:9')
 
+    # E7: 계약 범위를 렌더 경계에서도 지킨다 — CLI 를 안 거친 호출(파이프라인 재개·테스트)이
+    # 범위 밖 값을 들고 오면 조용히 이상한 영상을 만드는 대신 즉시 실패한다(제1원칙).
+    speed = float(getattr(d, 'video_speed', 1.0) or 1.0)
+    if not (0.8 <= speed <= 2.0):
+        raise ValueError(f"video_speed 범위 밖: {speed} (0.8~2.0)")
+    title_rotate = float(getattr(d, 'title_rotate', 0.0) or 0.0)
+    if not (-180.0 <= title_rotate <= 180.0):
+        raise ValueError(f"title_rotate 범위 밖: {title_rotate} (-180~180)")
+
     # [1] 제목 줄바꿈 로직 — 라운드 7-A: orig_line_idx 보존하여 색상/폰트 매핑 정확히
     def split_text_smart(text: str, max_chars: int = 14) -> list[tuple[int, str]]:
         """입력 text를 \\n 구분으로 원본 라인 분리 후 각 라인을 max_chars 어절 경계로 wrap.
@@ -1007,6 +1016,17 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         concat_inputs.append(f"[a{i}]")
     filters.append(f"{''.join(concat_inputs)}concat=n={num_clip_inputs}:v=1:a=1[vcat][acat]")
 
+    # [4.5] 영상 배속(E7-2, 구현 지점 A) — concat **직후** 딱 한 번 setpts.
+    # 얼굴 추종 crop 은 [3]의 클립별 체인(= setpts 앞)에서 원본 t 로 계산이 끝났으므로
+    # 시간축이 어긋나지 않는다. 이 지점 **이후**의 모든 시간 좌표(ASS 이벤트·이미지
+    # enable 창·adelay·덕킹 창)는 출력 시각(×1/S)이어야 한다 — ASS 는 파이프라인이
+    # 이벤트 시각을 ×1/S 로 써서 넘기고, 나머지는 이 파일 안에서 나눈다.
+    # 오디오 배속(atempo, 원본·현장음만)은 _build_audio_filter 가 같은 규약으로 담당.
+    base_after_concat = "[vcat]"
+    if speed != 1.0:
+        filters.append(f"[vcat]setpts=PTS/{speed:g}[vspd]")
+        base_after_concat = "[vspd]"
+
 
     # 폰트 경로
     current_file_path = Path(__file__).resolve()
@@ -1063,7 +1083,7 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     actual_font = str(d.title_font)
 
     font_arg = actual_font
-    last_v_label = "[vcat]"
+    last_v_label = base_after_concat
     custom_colors = getattr(d, 'title_colors', ["white"])
     if "/" in actual_font or "\\" in actual_font:
         # 유니코드 경로(한글 등)를 FFmpeg이 인식할 수 있도록 8.3 단축 경로로 변환
@@ -1107,21 +1127,58 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         scale = _TITLE_LENGTH_SCALE[cc]
         return max(1, int(round(base_size * scale)))
 
-    for visual_idx, (orig_idx, raw_line) in enumerate(title_lines):
+    # 줄별 스펙(색·크기·프레임 y)을 먼저 확정 — 회전 유무와 무관하게 좌표 규약은 동일하다.
+    _title_specs: list[tuple[str, int, int, str]] = []  # (color, font_size, frame_y, escaped)
+    _title_block_top = cumulative_y
+    for orig_idx, raw_line in title_lines:
         base_color = custom_colors[orig_idx] if orig_idx < len(custom_colors) else custom_colors[-1]
         base_font_size = title_sizes[orig_idx] if orig_idx < len(title_sizes) else title_sizes[-1]
         font_size = _scale_font_for_length(base_font_size, len(raw_line))
-        y_pos = cumulative_y
+        _title_specs.append(
+            (base_color, font_size, cumulative_y, _escape_text_for_drawtext(raw_line)))
         cumulative_y += font_size + line_spacing
-        escaped_full = _escape_text_for_drawtext(raw_line)
-        next_label = f"[title_{visual_idx}]"
 
-        filters.append(
-            f"{last_v_label}drawtext=expansion=none:fontfile='{font_arg}':text='{escaped_full}':"
-            f"fontcolor={base_color}:fontsize={font_size}:"
-            f"x=(w-text_w)/2:y={y_pos}{next_label}"
-        )
-        last_v_label = next_label
+    if _title_specs and title_rotate:
+        # E7-1: drawtext 는 회전이 없다 — 제목 줄 묶음 전체를 투명 캔버스에 그린 뒤
+        # rotate(시계방향 양수 = ffmpeg rotate 와 동일, F-410 실측) → overlay.
+        # 원점 = 텍스트 블록 중심. 줄들은 x 로 중앙 정렬이라 캔버스(W×블록높이)의 중심이
+        # 곧 블록 중심이다. 위아래 패딩은 대칭이라 중심을 움직이지 않으면서 글리프
+        # 디센더가 캔버스 모서리에 잘리는 것을 막는다. 바운딩 박스·중심 고정 되물림은
+        # images[].rotate(F-410)와 같은 계산이다.
+        _blk_pad = (max(fs for _, fs, _, _ in _title_specs) + 1) // 2
+        _blk_h = (sum(fs for _, fs, _, _ in _title_specs)
+                  + max(0, len(_title_specs) - 1) * line_spacing + 2 * _blk_pad)
+        _blk_h += _blk_h % 2
+        _canvas_top = _title_block_top - _blk_pad
+        _rad = math.radians(title_rotate)
+        _bb_w = int(math.ceil(abs(W * math.cos(_rad)) + abs(_blk_h * math.sin(_rad)) - 1e-6))
+        _bb_h = int(math.ceil(abs(W * math.sin(_rad)) + abs(_blk_h * math.cos(_rad)) - 1e-6))
+        _ox = int(round(W / 2.0 - _bb_w / 2.0))
+        _oy = int(round(_canvas_top + _blk_h / 2.0 - _bb_h / 2.0))
+        _ttl_label = "[ttl0]"
+        filters.append(f"color=c=black@0.0:s={W}x{_blk_h}:d=1,format=rgba{_ttl_label}")
+        for visual_idx, (base_color, font_size, frame_y, escaped_full) in enumerate(_title_specs):
+            next_label = f"[ttl{visual_idx + 1}]"
+            filters.append(
+                f"{_ttl_label}drawtext=expansion=none:fontfile='{font_arg}':text='{escaped_full}':"
+                f"fontcolor={base_color}:fontsize={font_size}:"
+                f"x=(w-text_w)/2:y={frame_y - _canvas_top}{next_label}"
+            )
+            _ttl_label = next_label
+        print(f"  [TitleRotate] {title_rotate:g}° — 블록 {W}x{_blk_h} → bb {_bb_w}x{_bb_h}, "
+              f"overlay=({_ox},{_oy})")
+        filters.append(f"{_ttl_label}rotate={_rad:.10f}:ow={_bb_w}:oh={_bb_h}:c=black@0[ttlrot]")
+        filters.append(f"{last_v_label}[ttlrot]overlay={_ox}:{_oy}[with_title]")
+        last_v_label = "[with_title]"
+    else:
+        for visual_idx, (base_color, font_size, frame_y, escaped_full) in enumerate(_title_specs):
+            next_label = f"[title_{visual_idx}]"
+            filters.append(
+                f"{last_v_label}drawtext=expansion=none:fontfile='{font_arg}':text='{escaped_full}':"
+                f"fontcolor={base_color}:fontsize={font_size}:"
+                f"x=(w-text_w)/2:y={frame_y}{next_label}"
+            )
+            last_v_label = next_label
 
 
     # [5.5] 플랫폼 표기 — 권리사 '영상 내 플랫폼 노출' 요구(티빙·Wavve·쿠팡플레이 등).
@@ -1252,7 +1309,8 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
             img_w = max(2, int(round(float(im["w"]) * W)) // 2 * 2)
             img_x = int(round(float(im["x"]) * W))
             img_y = int(round(float(im["y"]) * H))
-            s, e = float(im["start_sec"]), float(im["end_sec"])
+            # 창은 편집본(소스) 시간축으로 들어온다 — 오버레이는 setpts 뒤라 출력 시각(×1/S).
+            s, e = float(im["start_sec"]) / speed, float(im["end_sec"]) / speed
             rot = float(im.get("rotate") or 0.0)
             if rot:
                 # 회전은 스케일 높이를 미리 알아야 한다(-2 자동값으론 바운딩 박스
@@ -1379,20 +1437,26 @@ def _apply_loudnorm(audio_filter: str, target_lufs: float | None) -> str:
 def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, num_cue_inputs: int) -> str:
     """편집 타임라인 절대 시간 기준 cue 리스트로 오디오 필터를 만든다.
 
-    voice/speed는 이미 mp3 합성 시점에 적용됐으므로 atempo는 추가하지 않는다.
-    cue 시간(start_sec~end_sec)이 원본 오디오 덕킹 구간이며 adelay 위치이다.
+    cue.voice/cue.speed 는 이미 mp3 합성 시점에 적용됐으므로 내레이션에 atempo 를 걸지
+    않는다. 영상 배속(E7-2, design.video_speed)도 마찬가지로 **원본·현장음([acat])에만**
+    atempo 를 건다 — 내레이션 속도는 cue.speed 의 소관이다. atempo 뒤의 시간축은 출력
+    시각이므로 덕킹 창·adelay 위치는 cue 시간(소스 편집 타임라인) ×1/S 로 변환한다.
+    0.8~2.0 은 atempo 단일 필터 범위(0.5~100) 안이다.
     """
+    speed = float(getattr(inputs.design, "video_speed", 1.0) or 1.0)
+    _tempo = f"atempo={speed:g}," if speed != 1.0 else ""
+
     if not inputs.tts_cue_files:
-        return f"[acat]volume={inputs.original_audio_gain_db}dB[aout]"
+        return f"[acat]{_tempo}volume={inputs.original_audio_gain_db}dB[aout]"
 
     cue_files = list(inputs.tts_cue_files or [])
 
-    # 덕킹 구간: cue.start_sec ~ cue.end_sec 그대로
+    # 덕킹 구간: cue.start_sec ~ cue.end_sec (출력 시각으로 ×1/S)
     duck_ranges: list[tuple[float, float]] = []
     for cf in cue_files:
         cue = cf.get("cue") or {}
-        s = float(cue.get("start_sec", 0.0))
-        e = float(cue.get("end_sec", 0.0))
+        s = float(cue.get("start_sec", 0.0)) / speed
+        e = float(cue.get("end_sec", 0.0)) / speed
         if e > s:
             duck_ranges.append((s, e))
 
@@ -1401,11 +1465,11 @@ def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, num_cue_inpu
             f"between(t,{s:.3f},{e:.3f})" for s, e in duck_ranges
         )
         original_vol = (
-            f"[acat]volume=enable='{duck_expr}':volume=0.5,"
+            f"[acat]{_tempo}volume=enable='{duck_expr}':volume=0.5,"
             f"volume={inputs.original_audio_gain_db}dB[orig_vol]"
         )
     else:
-        original_vol = f"[acat]volume={inputs.original_audio_gain_db}dB[orig_vol]"
+        original_vol = f"[acat]{_tempo}volume={inputs.original_audio_gain_db}dB[orig_vol]"
 
     tts_filters: list[str] = []
     mix_inputs: list[str] = ["[orig_vol]"]
@@ -1417,7 +1481,7 @@ def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, num_cue_inpu
         tts_vol = f"[{cue_input_idx}:a]volume={inputs.tts_audio_gain_db}dB[cue{ci}_vol]"
         tts_filters.append(tts_vol)
 
-        start_sec = float(cue.get("start_sec", 0.0))
+        start_sec = float(cue.get("start_sec", 0.0)) / speed
         if start_sec > 0:
             delay_ms = int(start_sec * 1000)
             tts_delayed = (
