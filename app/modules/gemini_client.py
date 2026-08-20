@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from app.modules.editorial import format_editorial_block
+
 from dotenv import load_dotenv
 
 
@@ -1567,6 +1569,9 @@ class GeminiClient:
             min_candidates=min_candidates,
         )
         prompt += _format_reject_note(payload.get("reject_note"), use_case="analysis")
+        # 작품별 편집 지침(권리사 가이드/운영 지시) — 청크 단계는 태깅·상세 기술만 시키고
+        # 절대 좁히지 않는다(여기서 잘린 정보는 하류에서 복구 불가). editorial.py 가 정본.
+        prompt += format_editorial_block(payload.get("editorial"), use_case="analysis")
 
         video_path = payload.get("video_path")
         content_parts = [prompt]
@@ -1891,6 +1896,7 @@ class GeminiClient:
         work_context: str | None = None,
         previous_episodes_context: str | None = None,
         reject_note: str | None = None,
+        editorial: dict | None = None,
         relationship_edges: list[dict] | None = None,
         chunk_meta: list[dict] | None = None,
     ) -> dict[str, Any]:
@@ -1951,6 +1957,9 @@ class GeminiClient:
             prompt += "\n".join(lines)
 
         prompt += _format_reject_note(reject_note, use_case="story")
+        # 작품별 편집 지침 — 이 프롬프트가 선정·제목·tts_cues 를 한 번에 내므로
+        # 하드 필터(장면+문구)·랭킹 편향·문체가 전부 여기 걸린다. editorial.py 가 정본.
+        prompt += format_editorial_block(editorial, use_case="story")
 
         for attempt in range(self.config.max_retries):
             try:

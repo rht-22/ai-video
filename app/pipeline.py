@@ -1131,6 +1131,7 @@ def _fit_storyline_to_duration(
 
     return out, "; ".join(msgs)
 from app.modules.chunker import build_chunks, split_video_chunk
+from app.modules.editorial import filter_flagged_candidates, filter_log_entry
 from app.modules.edit_overrides import (
     apply_overrides,
     load_edit_overrides,
@@ -1649,6 +1650,11 @@ class PipelineInput:
     # 사람이 직전 결과를 반려한 사유. 영상 분석(analyze_chunk)과 스토리 구성 프롬프트에
     # '재작업 지시'로 주입된다. None 이면 프롬프트가 종전과 완전히 동일하다.
     reject_note: str | None = None
+    # 작품별 편집 지침(권리사 가이드/운영 지시) — app/modules/editorial.py 가 계약 정본.
+    # 청크 분석에는 태깅·상세 기술 지시로, 스토리 구성에는 하드 필터·랭킹 편향·문체로
+    # 주입되고, avoid 태깅된 후보는 스토리 구성 전에 코드에서도 결정적으로 걸러진다.
+    # None 이면 프롬프트가 종전과 완전히 동일하다(reject_note 와 같은 규약).
+    editorial: dict | None = None
     # 관제 편집실이 고친 제목·구간 JSON 경로(edit_overrides/v1). None 이면 종전과 동일.
     # 이 값이 있으면 체크포인트보다 **사람 입력이 이긴다** — app/modules/edit_overrides.py.
     edit_overrides_path: Path | None = None
@@ -1691,6 +1697,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         run_log_path = output_dir / "run_log.json"
         if run_log_path.exists():
             run_log = json.loads(run_log_path.read_text(encoding="utf-8"))
+            # 재개 실행에 지침이 (새로) 실려 왔으면 기록을 이번 실행 기준으로 갱신 —
+            # 반려 재생성이 이 경로를 타므로, 실행 단위 지시가 여기서 provenance 에 남는다.
+            if payload.editorial:
+                run_log.setdefault("input", {})["editorial"] = payload.editorial
         else:
             run_log = {
                 "job_id": job_id,
@@ -1699,6 +1709,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     "work_title": payload.work_title,
                     "topic": payload.topic,
                     "language": payload.language,
+                    # 편집 지침(병합 후 실제 적용본) — 검수함이 "이 run 에 어떤 지침이
+                    # 적용됐는지"를 여기서 읽는다. 지침 없는 run 은 키 자체가 없다.
+                    **({"editorial": payload.editorial} if payload.editorial else {}),
                 },
                 "steps": [],
             }
@@ -1739,6 +1752,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 "work_title": payload.work_title,
                 "topic": payload.topic,
                 "language": payload.language,
+                # 편집 지침(병합 후 실제 적용본) — 위 재개 분기와 같은 규약.
+                **({"editorial": payload.editorial} if payload.editorial else {}),
             },
             "steps": [],
         }
@@ -2156,6 +2171,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 "work_title": payload.work_title,
                 "topic": payload.topic,
                 "reject_note": payload.reject_note,
+                "editorial": payload.editorial,
                 "previous_episodes_context": payload.previous_episodes_context,
                 "work_context": payload.work_context,
                 "chunk_index": chunk.index,
@@ -2497,6 +2513,26 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     _updated += 1
         print(f"  candidate.transcript 갱신: {_updated}/{len(all_candidates)}건")
 
+        # 작품별 편집 지침 — avoid 태깅된 후보를 스토리 구성 전에 결정적으로 제외.
+        # 프롬프트 지시(사용 금지)만으로는 LLM 이 놓칠 수 있어 코드가 이중으로 거른다.
+        # 제외 내역은 반드시 찍는다 — 조용한 축소는 "다 봤다"로 읽힌다(no silent caps).
+        all_candidates, _ed_dropped = filter_flagged_candidates(all_candidates, payload.editorial)
+        if payload.editorial and payload.editorial.get("avoid"):
+            # dropped 0건이어도 기록 — "필터가 돌았는데 걸린 게 없다"는 사실 자체가 정보다.
+            run_log["steps"].append(filter_log_entry(all_candidates, _ed_dropped))
+        if _ed_dropped:
+            print(f"  [editorial] 금지 태깅 후보 {len(_ed_dropped)}건 제외:")
+            for _d in _ed_dropped:
+                print(f"    - chunk {_d.get('chunk_index')} "
+                      f"{float(_d.get('start_sec', 0)):.1f}~{float(_d.get('end_sec', 0)):.1f}s "
+                      f"flags={_d.get('guideline_flags')}")
+            if not all_candidates:
+                # 전부 금지면 위반 영상을 만드는 것보다 크게 실패하는 쪽이 낫다 —
+                # 과잉 태깅(회차 전체가 걸림)이면 지침 문구나 태깅 기준을 손봐야 한다.
+                raise RuntimeError(
+                    "[editorial] 모든 후보가 금지 태깅으로 제외됐습니다 — "
+                    "avoid 지침이 과잉 적용됐는지(작품 카드 editorial) 확인하세요.")
+
         # 짧은 소재 완화 — 후보 커버리지가 min_duration_sec 에 못 미치면 이번 런의 최소 길이를
         # 커버리지까지 내린다. 안 내리면 LLM(프롬프트의 최소 길이)과 _fit_storyline_to_duration 이
         # 40s 를 맞추려고 같은 구간을 두 번 넣는다 — 2026-08-12 스트릿 레스토랑 파이터 EP1
@@ -2522,6 +2558,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             work_context=payload.work_context,
             previous_episodes_context=payload.previous_episodes_context,
             reject_note=payload.reject_note,
+            editorial=payload.editorial,
             relationship_edges=relationship_edges or None,
             chunk_meta=chunk_meta_list or None,
         )

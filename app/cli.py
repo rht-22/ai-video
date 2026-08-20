@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from app.config import DesignConfig, get_logo_path, to_ass_color
+from app.modules.editorial import merge_editorial, parse_editorial
 from app.modules.ffmpeg_utils import ensure_ffmpeg_supported
 from app.pipeline import PipelineInput, run_pipeline
 
@@ -66,6 +67,14 @@ def build_parser() -> argparse.ArgumentParser:
     # ── 선택 입력 (기본값 제공) ──
     create.add_argument("--topic", default="",
                         help="(선택) 집중할 주제 한 줄 — 미지정 시 전체 맥락으로 자동 구성")
+    create.add_argument("--editorial-json", dest="editorial_json", default=None,
+                        help="(선택) 작품별 편집 지침 JSON — "
+                             '{"avoid":[…],"prefer":[…],"tone":"…"}. '
+                             "avoid=금지(태깅→하드 필터·문구 금지), prefer=방향(랭킹 편향), "
+                             "tone=title·TTS 문체. app/modules/editorial.py 가 계약 정본")
+    create.add_argument("--editorial-run-json", dest="editorial_run_json", default=None,
+                        help="(선택) 이번 실행에만 얹는 편집 지시 JSON(같은 스키마) — "
+                             "prefer·tone 은 추가·교체되지만 avoid 는 완화 불가(합집합)")
     create.add_argument("--outdir", default="outputs",
                         help="(선택) 출력 디렉토리 — 기본: outputs/")
     create.add_argument(
@@ -373,6 +382,16 @@ def main() -> None:
         # A/B 노브(silence/length) CLI 플래그 → env (config 가 env 로 읽음). run_pipeline 전에 적용.
         _apply_ab_env(args)
 
+        # 작품별 편집 지침 — 잘못된 JSON·모르는 키는 여기서 즉시 실패(밤중 생성에서
+        # 조용히 무시되면 "지침이 적용되고 있다"는 착각이 제일 위험하다).
+        try:
+            editorial = merge_editorial(
+                parse_editorial(getattr(args, "editorial_json", None)),
+                parse_editorial(getattr(args, "editorial_run_json", None)),
+            )
+        except ValueError as e:
+            parser.error(str(e))
+
         output = run_pipeline(
             PipelineInput(
                 video_path=video_path,
@@ -394,6 +413,7 @@ def main() -> None:
                 skip_credits_sec=getattr(args, "skip_credits", 0.0),
                 loudness_target_lufs=_parse_loudness(getattr(args, "loudness_lufs", "-14")),
                 reject_note=getattr(args, "reject_note", None),
+                editorial=editorial,
                 edit_overrides_path=(Path(args.edit_overrides)
                                      if getattr(args, "edit_overrides", None) else None),
             ),
