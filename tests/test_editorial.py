@@ -56,12 +56,13 @@ def test_parse_wrong_types_fail_loud():
 
 # ── merge (상시 카드 ⊕ 실행 단위) ──
 
-def test_merge_avoid_is_union_never_relaxed():
-    # 실행 단위 지시가 avoid 를 비워 보내도 상시 금지는 그대로 — 권리 제약에 "이번만 예외"는 없다
-    base = {"avoid": ["경연 결과"], "prefer": ["무대"]}
-    run = {"prefer": ["전유진"], "avoid": []}
+def test_merge_avoid_and_rules_are_union_never_relaxed():
+    # 실행 단위 지시가 avoid·rules 를 비워 보내도 상시 제약은 그대로 — "이번만 예외"는 없다
+    base = {"avoid": ["경연 결과"], "rules": ["같은 곡 음악 1분 이내"], "prefer": ["무대"]}
+    run = {"prefer": ["전유진"], "avoid": [], "rules": []}
     merged = merge_editorial(base, run)
     assert merged["avoid"] == ["경연 결과"]
+    assert merged["rules"] == ["같은 곡 음악 1분 이내"]
     assert merged["prefer"] == ["무대", "전유진"]
 
 
@@ -112,6 +113,16 @@ def test_story_block_hard_filters_scene_and_wording():
     assert "guideline_flags" in block           # 태깅된 후보 사용 금지
     assert "title" in block and "tts_cues" in block  # 문구 스포 차단
     assert "✅" in block                         # 금지가 아닌 것 명시 — 과잉 회피 방지
+
+
+def test_rules_are_story_only_composition_constraints():
+    # 구성 제약(조합·길이)은 장면별 태깅이 성립하지 않는다 — 청크 분석 미주입, 구성에만
+    ed = {"rules": ["같은 곡(한 무대)의 가창 사용 합계가 1분을 넘지 않게"]}
+    assert format_editorial_block(ed, "analysis") == ""
+    block = format_editorial_block(ed, "story")
+    assert "구성 제약" in block and "절대 규칙" in block
+    assert "같은 곡(한 무대)" in block
+    assert "guideline_flags" not in block  # 태깅 모델과 무관
 
 
 def test_story_block_prefer_is_bias_not_rule():

@@ -13,8 +13,18 @@
       "tone":   "차분한 다큐 톤"        # 선택 — title·tts_cues 문체
     }
 
-세 종류를 나누는 이유 — 틀렸을 때의 비용이 달라 강제 수준이 달라야 한다:
-  · avoid  = 위반하면 권리 사고. 하드 필터(과잉 차단이 미달 차단보다 낫다).
+출처 규약(2026-08-20 운영자): **avoid·rules 에는 권리사가 요구한 것만** 넣는다 —
+어기면 계약 문제가 되는 층이다. **prefer·tone 은 기획이 희망하는 방향**이다(어겨도
+품질 문제일 뿐). 기획 희망을 avoid·rules 에 넣으면 검수·화면에서 권리사 요구로
+표시돼 권위가 부풀고, 권리사 요구를 prefer 에 넣으면 어겨도 되는 것처럼 보인다.
+화면(검수 카드)도 이 구분대로 '권리 지침'/'기획 방향' 두 그룹으로 표시한다.
+
+네 종류를 나누는 이유 — 틀렸을 때의 비용이 달라 강제 수준이 달라야 한다:
+  · avoid  = 장면 단위 금지(위반하면 권리 사고). 태깅→하드 필터(과잉 차단이 낫다).
+  · rules  = 구성 단위 절대 규칙(정량 제약 — 예: 가왕쇼 "같은 곡의 음악 사용이
+             1분 넘지 않게, 1분 이상 활용 시 수익 창출 문제"·guide 원문). 같은
+             무대에서 뽑은 클립들의 합산처럼 **조합에서 판정되는** 제약이라 장면별
+             태깅이 성립하지 않는다 — 스토리 구성 프롬프트에만 주입한다.
   · prefer = 방향. 절대 규칙로 쓰면 소재 부족 회차에서 후보가 마르거나 LLM 이
              억지로 끼워 맞춘다(관찰 비약) — 랭킹 편향으로만 적용.
   · tone   = 표현. 선정과 무관, title·tts_cues 생성에만.
@@ -43,7 +53,7 @@ from typing import Any
 
 # 모르는 키는 즉시 실패 — 조용히 무시하면 오타 난 지침이 "적용되고 있다"는 착각을
 # 낳는다(edit_overrides 의 제1원칙과 동일). '_' 프리픽스는 문서용 키라 허용·무시.
-_ALLOWED_KEYS = frozenset({"avoid", "prefer", "tone"})
+_ALLOWED_KEYS = frozenset({"avoid", "rules", "prefer", "tone"})
 
 
 def parse_editorial(raw: str | None) -> dict[str, Any] | None:
@@ -61,7 +71,7 @@ def parse_editorial(raw: str | None) -> dict[str, Any] | None:
         raise ValueError(
             f"editorial 에 알 수 없는 키 {sorted(unknown)} — 허용: {sorted(_ALLOWED_KEYS)}")
     out: dict[str, Any] = {}
-    for key in ("avoid", "prefer"):
+    for key in ("avoid", "rules", "prefer"):
         items = data.get(key)
         if items is None:
             continue
@@ -83,7 +93,7 @@ def merge_editorial(base: dict[str, Any] | None,
                     run: dict[str, Any] | None) -> dict[str, Any] | None:
     """상시 지침(작품 카드) ⊕ 실행 단위 지시(1회성).
 
-    prefer 는 추가, tone 은 실행분이 교체. **avoid 는 합집합만** — 권리 제약에
+    prefer 는 추가, tone 은 실행분이 교체. **avoid·rules 는 합집합만** — 권리 제약에
     "이번만 예외"는 없으므로 실행 단위 지시로 완화할 수 없다.
     """
     if not base:
@@ -91,10 +101,11 @@ def merge_editorial(base: dict[str, Any] | None,
     if not run:
         return base
     out: dict[str, Any] = {}
-    avoid = list(base.get("avoid") or [])
-    avoid += [s for s in (run.get("avoid") or []) if s not in avoid]
-    if avoid:
-        out["avoid"] = avoid
+    for hard in ("avoid", "rules"):
+        items = list(base.get(hard) or [])
+        items += [s for s in (run.get(hard) or []) if s not in items]
+        if items:
+            out[hard] = items
     prefer = list(base.get("prefer") or [])
     prefer += [s for s in (run.get("prefer") or []) if s not in prefer]
     if prefer:
@@ -114,6 +125,7 @@ def format_editorial_block(editorial: dict[str, Any] | None, use_case: str) -> s
     if not editorial:
         return ""
     avoid = editorial.get("avoid") or []
+    rules = editorial.get("rules") or []
     prefer = editorial.get("prefer") or []
     tone = editorial.get("tone")
 
@@ -156,6 +168,12 @@ def format_editorial_block(editorial: dict[str, Any] | None, use_case: str) -> s
                 "언급·암시하지 말라 — 장면에 없어도 제목이 결과를 스포하면 똑같은 위반이다.\n"
                 "- ✅ 위 요소가 **없는** 장면·소재는 종전과 완전히 동일하게 자유롭게 쓴다 — "
                 "이 금지를 주변 소재로 확대 적용하지 말라.")
+        if rules:
+            parts.append(
+                "\n구성 제약 — 절대 규칙 (장면이 아니라 조합·길이에 대한 제약):\n"
+                + _bullets(rules) + "\n"
+                "- 스토리라인의 클립 선택과 길이 합산이 위 제약을 넘는 구성을 출력하지 말라.\n"
+                "- 제약 때문에 소재가 부족하면 억지로 맞추지 말고 다른 장면으로 정상 구성하라.")
         if prefer:
             parts.append(
                 "\n우선 소재 — 랭킹 편향 (절대 규칙 아님):\n"
