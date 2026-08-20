@@ -1655,6 +1655,10 @@ class PipelineInput:
     # 주입되고, avoid 태깅된 후보는 스토리 구성 전에 코드에서도 결정적으로 걸러진다.
     # None 이면 프롬프트가 종전과 완전히 동일하다(reject_note 와 같은 규약).
     editorial: dict | None = None
+    # 실행 단위 지시의 **원문**(--editorial-run-json 파싱본). 프롬프트에는 위 editorial
+    # (병합본)만 쓰이고, 이건 run_log 표시용 — 검수 카드가 "이번 편에만 얹은 지시"를
+    # 상시 지침과 구분해 보여준다(운영 결정 8/20). None 이면 기록 안 함.
+    editorial_run: dict | None = None
     # 관제 편집실이 고친 제목·구간 JSON 경로(edit_overrides/v1). None 이면 종전과 동일.
     # 이 값이 있으면 체크포인트보다 **사람 입력이 이긴다** — app/modules/edit_overrides.py.
     edit_overrides_path: Path | None = None
@@ -1701,6 +1705,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             # 반려 재생성이 이 경로를 타므로, 실행 단위 지시가 여기서 provenance 에 남는다.
             if payload.editorial:
                 run_log.setdefault("input", {})["editorial"] = payload.editorial
+            if payload.editorial_run:
+                run_log.setdefault("input", {})["editorial_run"] = payload.editorial_run
         else:
             run_log = {
                 "job_id": job_id,
@@ -1712,6 +1718,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     # 편집 지침(병합 후 실제 적용본) — 검수함이 "이 run 에 어떤 지침이
                     # 적용됐는지"를 여기서 읽는다. 지침 없는 run 은 키 자체가 없다.
                     **({"editorial": payload.editorial} if payload.editorial else {}),
+                    # 실행 단위 지시 원문 — 검수 카드가 상시 지침과 구분해 보여준다(8/20)
+                    **({"editorial_run": payload.editorial_run} if payload.editorial_run else {}),
                 },
                 "steps": [],
             }
@@ -1752,8 +1760,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 "work_title": payload.work_title,
                 "topic": payload.topic,
                 "language": payload.language,
-                # 편집 지침(병합 후 실제 적용본) — 위 재개 분기와 같은 규약.
+                # 편집 지침(병합 적용본 + 실행 단위 원문) — 위 재개 분기와 같은 규약.
                 **({"editorial": payload.editorial} if payload.editorial else {}),
+                **({"editorial_run": payload.editorial_run} if payload.editorial_run else {}),
             },
             "steps": [],
         }

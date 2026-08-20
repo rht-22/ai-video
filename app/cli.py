@@ -385,10 +385,9 @@ def main() -> None:
         # 작품별 편집 지침 — 잘못된 JSON·모르는 키는 여기서 즉시 실패(밤중 생성에서
         # 조용히 무시되면 "지침이 적용되고 있다"는 착각이 제일 위험하다).
         try:
+            editorial_run = parse_editorial(getattr(args, "editorial_run_json", None))
             editorial = merge_editorial(
-                parse_editorial(getattr(args, "editorial_json", None)),
-                parse_editorial(getattr(args, "editorial_run_json", None)),
-            )
+                parse_editorial(getattr(args, "editorial_json", None)), editorial_run)
         except ValueError as e:
             parser.error(str(e))
 
@@ -414,6 +413,7 @@ def main() -> None:
                 loudness_target_lufs=_parse_loudness(getattr(args, "loudness_lufs", "-14")),
                 reject_note=getattr(args, "reject_note", None),
                 editorial=editorial,
+                editorial_run=editorial_run,
                 edit_overrides_path=(Path(args.edit_overrides)
                                      if getattr(args, "edit_overrides", None) else None),
             ),
