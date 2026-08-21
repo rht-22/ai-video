@@ -56,6 +56,15 @@ v3 추가분:
     시간 창은 자막 앵커와 같은 원본 절대초(source_time_sec + duration_sec) —
     place_anchored_images 가 최종 타임라인으로 변환하고 고아는 tts 규칙대로 드롭한다.
     layer 로 자막 아래(≤0, 기본 0)/위(≥1)를 가른다.
+  · **texts (F-411)** — 대사가 아닌 글자(의성어·의태어·강조·보조설명)를 화면 아무
+    데나 얹는 자유 텍스트 오브젝트. 대사 자막(subtitles, 전사 기반·하단 정렬 프리셋)과
+    **별개 레이어**다 — 편집실 '텍스트' 탭이 보내고 AI 효과 텍스트 제안도 같은
+    형식으로 온다. 시간 창·앵커·배치는 images 와 동일(source_time_sec + duration_sec,
+    place_anchored_texts, 고아 드롭). x·y 는 글자 **중심**의 캔버스 비율(0~1),
+    size 는 1080×1920 기준 폰트 px, color "#RRGGBB", stroke(dark/none/white),
+    fx(none/pop/shake — 등장 효과), rotate 는 images 와 같은 시계방향 양수,
+    font 는 번들 폰트 4종 중 하나. 렌더는 별도 ASS 한 장(build_texts_ass)으로
+    대사 자막·TTS 자막 **위**, images layer≥1 **아래**에 그린다(layer 키 없음).
   · **title.segments (E8)** — 시간대별 제목. 자막처럼 시간 창(편집본 시간축, 초)을
     갖는 제목 세그먼트 목록. 있으면 **그 창들만 그린다** — 창 밖 시간은 제목 없음
     (빈 화면이 유효값: '뒤에는 제목을 끄고 싶다'가 이 기능의 절반이다). top_title 은
@@ -123,6 +132,16 @@ IMAGE_MAX_BYTES = 10 * 1024 * 1024
 # 거절한다(조용한 무시 = 노드마다 결과가 갈린다).
 IMAGE_KEYS = ("file", "source_time_sec", "duration_sec", "x", "y", "w", "layer",
               "rotate")
+# texts(F-411) 항목 허용 키 — images 와 같은 fail-loud 규약(모르는 키 즉시 거절).
+TEXT_KEYS = ("text", "source_time_sec", "duration_sec", "x", "y", "size", "color",
+             "stroke", "fx", "rotate", "font")
+TEXT_STROKES = ("dark", "none", "white")     # 테두리: 어둡게(기본)/없음/흰색
+TEXT_FX = ("none", "pop", "shake")           # 등장 효과: 없음(기본)/튀어나옴/흔들림
+TEXT_FONTS = ("Jalnan", "JalnanGothic", "mulmaru", "Griun")   # 번들 폰트 파일 stem
+TEXT_SIZE_RANGE = (12, 400)                  # 캔버스(1080×1920) 기준 폰트 px
+TEXT_MAX_CHARS = 60                          # 한 오브젝트의 글자 수 상한(줄바꿈 포함)
+TEXT_DEFAULTS = {"size": 72, "color": "#FFFFFF", "stroke": "dark", "fx": "none",
+                 "rotate": 0.0, "font": "Jalnan"}
 # 회전 계약(images[].rotate · subtitles[].style.rotate 공통) — 도 단위, 시계방향
 # 양수, 원점은 이미지 중심/자막 앵커, 기본 0.
 ROTATE_RANGE_DEG = 180.0
@@ -260,6 +279,18 @@ def validate_overrides(data: Any) -> dict[str, Any]:
                                     "(이미지를 안 쓰면 키 자체를 빼세요)")
         for i, im in enumerate(images):
             _validate_image(i, im)
+
+    texts = data.get("texts")
+    if texts is not None:
+        if schema != SCHEMA_V3:
+            raise EditOverrideError(
+                "texts 는 edit_overrides/v3 전용입니다 — 스키마를 v3 로 찍으세요 "
+                "(구 스키마에 얹으면 구 엔진 노드가 조용히 무시합니다)")
+        if not isinstance(texts, list) or not texts:
+            raise EditOverrideError("texts 는 비어 있지 않은 배열이어야 합니다 "
+                                    "(텍스트를 안 쓰면 키 자체를 빼세요)")
+        for i, t in enumerate(texts):
+            _validate_text(i, t)
     return data
 
 
@@ -443,6 +474,102 @@ def _validate_image(i: int, im: Any) -> None:
         raise EditOverrideError(f"images[{i}]: layer 는 정수여야 합니다 ({im['layer']!r})")
     if im.get("rotate") is not None:
         _validate_rotate(f"images[{i}]: rotate", im["rotate"])
+
+
+def _validate_text(i: int, t: Any) -> None:
+    """texts[i] 스키마 검증(F-411) — 전부 정적 검사, 파일 없음. 순수."""
+    if not isinstance(t, dict):
+        raise EditOverrideError(f"texts[{i}] 가 객체가 아닙니다")
+    unknown = [k for k in t if k not in TEXT_KEYS]
+    if unknown:
+        raise EditOverrideError(
+            f"texts[{i}]: 모르는 키 {unknown} — 계약은 {'/'.join(TEXT_KEYS)} "
+            "뿐입니다 (구 엔진 노드가 조용히 무시하지 못하게 즉시 거절)")
+    text = str(t.get("text") or "")
+    if not text.strip():
+        raise EditOverrideError(
+            f"texts[{i}]: text 가 비어 있습니다 — 그 텍스트를 지우려면 배열에서 빼세요")
+    if len(text) > TEXT_MAX_CHARS:
+        raise EditOverrideError(
+            f"texts[{i}]: text 가 {TEXT_MAX_CHARS}자를 넘습니다 ({len(text)}자) — "
+            "긴 설명은 대사 자막으로")
+    try:
+        st = float(t["source_time_sec"])
+    except (KeyError, TypeError, ValueError) as ex:
+        raise EditOverrideError(
+            f"texts[{i}]: source_time_sec(원본 절대초)이 필요합니다 ({ex})") from ex
+    if st < 0:
+        raise EditOverrideError(f"texts[{i}]: source_time_sec 이 음수입니다 ({st})")
+    try:
+        d = float(t["duration_sec"])
+    except (KeyError, TypeError, ValueError) as ex:
+        raise EditOverrideError(f"texts[{i}]: duration_sec 이 필요합니다 ({ex})") from ex
+    if d <= 0:
+        raise EditOverrideError(f"texts[{i}]: duration_sec 은 양수여야 합니다 ({d})")
+    for k in ("x", "y"):
+        try:
+            v = float(t[k])
+        except (KeyError, TypeError, ValueError) as ex:
+            raise EditOverrideError(
+                f"texts[{i}]: {k}(글자 중심, 1080×1920 캔버스 대비 0~1 비율)가 "
+                f"필요합니다 ({ex})") from ex
+        if not (0.0 <= v <= 1.0):
+            raise EditOverrideError(f"texts[{i}]: {k} 는 0~1 비율이어야 합니다 ({v})")
+    if t.get("size") is not None:
+        try:
+            sz = float(t["size"])
+        except (TypeError, ValueError) as ex:
+            raise EditOverrideError(f"texts[{i}]: size 가 숫자가 아닙니다 ({t['size']!r})") from ex
+        if not (TEXT_SIZE_RANGE[0] <= sz <= TEXT_SIZE_RANGE[1]):
+            raise EditOverrideError(
+                f"texts[{i}]: size 는 {TEXT_SIZE_RANGE[0]}~{TEXT_SIZE_RANGE[1]} px "
+                f"여야 합니다 ({sz})")
+    if t.get("color") is not None and not _COLOR_RE.match(str(t["color"])):
+        raise EditOverrideError(
+            f"texts[{i}]: color 는 '#RRGGBB' 형식이어야 합니다 (받은 값: {t['color']!r})")
+    if t.get("stroke") is not None and t["stroke"] not in TEXT_STROKES:
+        raise EditOverrideError(
+            f"texts[{i}]: stroke 는 {'/'.join(TEXT_STROKES)} 중 하나여야 합니다 "
+            f"(받은 값: {t['stroke']!r})")
+    if t.get("fx") is not None and t["fx"] not in TEXT_FX:
+        raise EditOverrideError(
+            f"texts[{i}]: fx 는 {'/'.join(TEXT_FX)} 중 하나여야 합니다 "
+            f"(받은 값: {t['fx']!r})")
+    if t.get("font") is not None and t["font"] not in TEXT_FONTS:
+        raise EditOverrideError(
+            f"texts[{i}]: font 는 번들 폰트 {'/'.join(TEXT_FONTS)} 중 하나여야 합니다 "
+            f"(받은 값: {t['font']!r} — 없는 폰트명은 시스템 폰트로 조용히 대체되므로 거절)")
+    if t.get("rotate") is not None:
+        _validate_rotate(f"texts[{i}]: rotate", t["rotate"])
+
+
+def overrides_texts(ov: dict[str, Any] | None) -> list[dict[str, Any]] | None:
+    """v3 texts(F-411) → 정규화된 목록(기본값 채움, 숫자형 통일). 순수.
+
+    반환 항목: {text, source_time_sec, duration_sec, x, y, size, color, stroke, fx,
+    rotate, font}. 키가 없으면 None(= 텍스트 오버라이드 없음)."""
+    if not ov or ov.get("texts") is None:
+        return None
+    out: list[dict[str, Any]] = []
+    for t in ov["texts"]:
+        item = dict(TEXT_DEFAULTS)
+        item.update({
+            "text": str(t["text"]),
+            "source_time_sec": float(t["source_time_sec"]),
+            "duration_sec": float(t["duration_sec"]),
+            "x": float(t["x"]), "y": float(t["y"]),
+        })
+        if t.get("size") is not None:
+            item["size"] = int(round(float(t["size"])))
+        if t.get("color") is not None:
+            item["color"] = str(t["color"]).upper()
+        for k in ("stroke", "fx", "font"):
+            if t.get(k) is not None:
+                item[k] = str(t[k])
+        if t.get("rotate") is not None:
+            item["rotate"] = float(t["rotate"])
+        out.append(item)
+    return out
 
 
 def resolve_image_files(ov: dict[str, Any] | None,
@@ -701,6 +828,17 @@ def place_anchored_images(
         out["end_sec"] = round(end, 3)
         placed.append(out)
     return placed, dropped
+
+
+def place_anchored_texts(
+    texts: list[dict[str, Any]],
+    clips: list[StoryClip],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """v3 texts 배치(F-411) — images 와 같은 규칙(담은 클립 오프셋 + 상대시각, 슬롭
+    ±0.5s, 고아·0.1s 미만 드롭, 끝 클램프, 배열 순서 보존). 반환 항목은 편집본 시간축의
+    start_sec/end_sec 를 갖고 source_time_sec·duration_sec 은 제거된다. 드롭 항목은
+    둘째 반환값 — 호출부가 반드시 로그로 남긴다."""
+    return place_anchored_images(texts, clips)
 
 
 def overrides_tts(ov: dict[str, Any] | None,
