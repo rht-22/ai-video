@@ -991,6 +991,17 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     title_rotate = float(getattr(d, 'title_rotate', 0.0) or 0.0)
     if not (-180.0 <= title_rotate <= 180.0):
         raise ValueError(f"title_rotate 범위 밖: {title_rotate} (-180~180)")
+    # E10: 영상 밴드 가로 크기(캔버스 px). None = 미지정 = 꽉 찬 폭(종전 필터그래프와
+    # 바이트 동일). 명시 시(1080 포함) 자막·TTS margin 이 밴드 앵커로 전환되는 것은
+    # pipeline 쪽 몫이고, 렌더 기하는 명시 1080 과 미지정이 동일하다. 비숫자·범위 밖은
+    # 같은 원칙으로 즉시 실패 — int(str(...)) 라 800.5 같은 소수도 조용히 절단되지 않는다.
+    _vw_raw = getattr(d, 'video_width', None)
+    try:
+        video_width = W if _vw_raw is None else int(str(_vw_raw))
+    except ValueError:
+        raise ValueError(f"video_width 가 정수가 아닙니다: {_vw_raw!r}") from None
+    if not (320 <= video_width <= 1080):
+        raise ValueError(f"video_width 범위 밖: {video_width} (320~1080)")
 
     # [1] 제목 줄바꿈 로직 — 라운드 7-A: orig_line_idx 보존하여 색상/폰트 매핑 정확히
     def split_text_smart(text: str, max_chars: int = 14) -> list[tuple[int, str]]:
@@ -1059,8 +1070,9 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     def _bold_w(font_size: int, bold: bool) -> int:
         return max(1, int(round(0.025 * font_size))) if bold else 0
 
-    # [2] 비디오 레이아웃 설정
-    scaled_w = W
+    # [2] 비디오 레이아웃 설정 — E10: 밴드 폭 = video_width(미지정 = 캔버스 꽉 참).
+    # 화면비는 밴드 직사각형의 모양을, video_width 는 크기를 정한다(편집실 미리보기와 합의된 계약).
+    scaled_w = video_width
 
     line_spacing = 30
 
@@ -1081,9 +1093,9 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
 
     try:
         r_w, r_h = map(int, ratio.split(':'))
-        scaled_h = int(W * r_h / r_w)
+        scaled_h = int(scaled_w * r_h / r_w)   # E10: 밴드 **폭** 기준 — 캔버스(W) 기준이 아니다
     except:
-        scaled_h = W
+        scaled_h = scaled_w
 
     # 영상 세로 위치 — video_y 지정 시 그 위치(위로 올려 아래 밴드를 넓히는 템플릿용),
     # 미지정이면 종전대로 세로 중앙. 캔버스를 벗어나지 않게 클램프.
@@ -1097,6 +1109,8 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     scaled_w -= scaled_w % 2
     scaled_h -= scaled_h % 2
     overlay_y = max(0, overlay_y)
+    # E10: 밴드가 캔버스보다 좁으면 가로 중앙(가로 위치 지정은 범위 밖 — 항상 중앙)
+    pad_x = (W - scaled_w) // 2
 
     filters: list[str] = []
 
@@ -1120,8 +1134,8 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
             f"[{i}:v]{crop_filter}"
             f"scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=increase,"
             f"setsar=1,"
-            f"crop={W}:{scaled_h},"
-            f"pad={W}:{H}:0:{overlay_y}:color=#0D0011[v{i}]"
+            f"crop={scaled_w}:{scaled_h},"
+            f"pad={W}:{H}:{pad_x}:{overlay_y}:color=#0D0011[v{i}]"
         )
         filters.append(v_filter)
         filters.append(f"[{i}:a]anull[a{i}]")
@@ -1391,7 +1405,11 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     if _pf_img or _pf_txt:
         pf_off = getattr(d, 'platform_x', 24)          # 앵커 쪽 모서리에서의 오프셋
         pf_right = getattr(d, 'platform_align', 'left') == "right"
-        pf_x = pf_off                                   # left 기본 — right 는 아래서 재계산
+        # E10: 앵커는 캔버스가 아니라 **밴드 모서리** — video_width 로 밴드가 좁아져도
+        # 표기가 영상 위에 남는다(위 '영상영역 기준' 계약과 동일). right 앵커의 오프셋은
+        # 캔버스 오른쪽 가장자리 기준으로 환산해 둔다(밴드 오른쪽까지의 여백 + platform_x).
+        pf_x = pad_x + pf_off                           # left 기본 — right 는 아래서 재계산
+        _pf_right_margin = (W - (pad_x + scaled_w)) + pf_off
         pf_y = overlay_y + getattr(d, 'platform_y', 24)
         if _pf_img:
             _pf_path = Path(_pf_img).resolve()
@@ -1409,8 +1427,10 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
             else:
                 pf_w, pf_h = _bw, -1   # 높이 자동(-1) 폴백
             if pf_right:
-                # 이미지 폭을 알면 우변 기준 고정 좌표. 폭 미상(-1 폴백)이면 overlay 식으로.
-                pf_x = f"W-w-{pf_off}" if pf_h == -1 else W - pf_w - pf_off
+                # 이미지 폭을 알면 밴드 오른쪽 가장자리 기준 고정 좌표.
+                # 폭 미상(-1 폴백)이면 overlay 식으로 — 캔버스 오른쪽에서 환산 여백만큼 안쪽.
+                pf_x = (f"W-w-{_pf_right_margin}" if pf_h == -1
+                        else pad_x + scaled_w - pf_w - pf_off)
             _pf_str = str(_pf_path).replace("\\", "/").replace(":", "\\:")
             print(f"  [Platform] 로고 {_pw}x{_ph} → {pf_w}x{pf_h} @ ({pf_x},{pf_y})")
             filters.append(
@@ -1419,7 +1439,8 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
             )
         else:
             if pf_right:
-                pf_x = f"w-text_w-{pf_off}"   # drawtext 는 텍스트 폭을 자기 식으로 안다
+                # drawtext 는 텍스트 폭을 자기 식으로 안다 — 캔버스 오른쪽에서 환산 여백만큼 안쪽
+                pf_x = f"w-text_w-{_pf_right_margin}"
             _pf_esc = _escape_text_for_drawtext(str(_pf_txt))
             print(f"  [Platform] 텍스트 '{_pf_txt}' @ ({pf_x},{pf_y})")
             filters.append(

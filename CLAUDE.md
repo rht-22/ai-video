@@ -21,3 +21,48 @@
 - **Pro 모델** (`gemini-3.1-pro-preview`): 청크별 영상 분석 (Agent 2, `analyze_chunk()`)
 - **Flash 모델** (`gemini-3-flash-preview`): 스크리닝 및 스토리 구성 (Agent 1/3, `screen_candidates()`, `compose_story()`)
 - **청크 분할**: 프록시(480p)를 청크별로 물리적 분할 후 각각 독립 업로드 → 10fps 유지 가능
+
+## 영상 밴드 레이아웃 계약 (E10, 2026-08-21)
+
+캔버스 1080×1920 안의 영상 직사각형("밴드")은 세 개의 디자인 키로 정해진다.
+수식은 편집실 미리보기·ves-orchestrator 어댑터와 합의된 계약이다 — **바꾸려면
+양쪽을 같이 바꿔야 한다**(어긋나면 미리보기가 거짓말을 한다).
+
+- `aspect_ratio` — 밴드의 **모양** (W:H 문자열)
+- `video_width` (`--design-video-width`) — 밴드의 **크기** (캔버스 px, 320~1080,
+  기본 None = 미지정 = 꽉 찬 폭 + **종전 자막 기하**). 범위 밖·비숫자는 CLI·렌더
+  경계 양쪽에서 즉시 실패, 홀수는 짝수 보정
+- `video_y` (`--design-video-y`) — 밴드 상단 y (미지정 = 세로 중앙)
+
+렌더 수식 (`renderer._build_filtergraph` [2]~[3]):
+
+- `scaled_w = video_width` · `scaled_h = int(scaled_w * r_h / r_w)` — **밴드 폭 기준**
+- `pad_x = (W - scaled_w) // 2` — 가로는 항상 중앙 (video_x 는 없다)
+- `overlay_y` = video_y 지정 시 그 위치(`H - scaled_h` 클램프), 미지정 = 세로 중앙
+- 클립 체인: `crop_timeline → scale=scaled_w:scaled_h:…increase → setsar=1 →
+  crop=scaled_w:scaled_h → pad=W:H:pad_x:overlay_y`
+
+밴드를 따라 움직이는 것들("영상영역 기준" 계약 — 밴드를 바꿔도 위치를 다시 잡지 않는다):
+
+- **플랫폼 표기**: left/right 앵커가 캔버스가 아니라 **밴드 모서리** 기준
+- **제목 동적 배치**(영상 위 20px)·**작품명/로고 클램프**(밴드 하단+20px):
+  overlay_y·scaled_h 파생 — 실렌더 픽셀 실측으로 확인됨
+- **메인 자막 margin_v**: `pipeline._compute_subtitle_margin_v` — 항상 밴드 하단 10px 위
+- **TTS 자막 margin_v**: `pipeline._compute_tts_margin_v` — `tts_line_y_margin` 은
+  사용자 노브라 절대 재계산이 아니라 **델타 앵커**(종전 기하 대비 밴드 하단이 움직인
+  만큼 이동 = 밴드 하단으로부터의 오프셋 상수). 음수는 0 클램프(`build_tts_ass` 가
+  음수를 '미지정' 480 폴백으로 해석)
+- ⚠ **자막·TTS margin 의 밴드 앵커는 `video_width` 명시 시에만**(1080 포함).
+  미지정이면 종전 기하(세로 중앙 가정·절대 tts_line_y_margin) 그대로 — video_y 만
+  쓰는 기존 채널(한 입 주막 video_y=440·tts 550, 사람이 실렌더로 픽셀 튜닝)의 승인된
+  출력이 조용히 움직이면 안 된다(8/21 발주 검수 교정). video_width 는 오케스트레이터
+  editor_e10 게이트 뒤에서만 들어오므로 '명시 = 신규 채널'이 곧 회귀 0 조건이다.
+  렌더 기하 자체는 명시 1080 과 미지정이 동일하다(차이는 자막 계열뿐).
+- 밴드 기하 단일 소스: `pipeline._video_band_bottom` (렌더러 [2]와 같은 수식)
+
+⚠ 레거시: `DesignConfig.video_width` 는 E10 이전에도 있었지만(기본 800) 렌더러가
+읽지 않았다 — 렌더러가 읽기 시작하며 기본값을 None(미지정)으로 바꿨다(videoApi 도
+미전달이면 None). **800 이 살아나면 플래그 없는 기존 채널 전부가 800px 로 줄어든다.**
+
+회귀 가드: video_width·video_y 미지정이면 필터그래프·margin 모두 종전과 동일해야
+한다 — `tests/test_e10_video_band_width.py` 가 문자열·수치로 고정한다.
