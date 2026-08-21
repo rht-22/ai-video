@@ -139,6 +139,10 @@ def build_parser() -> argparse.ArgumentParser:
                              "TTS 자막·로고를 영상 아래에 쌓을 수 있다. 제목은 영상 위에 동적 배치라 따라온다")
     design.add_argument("--design-work-title-y", type=int, default=None, help="작품명 Y 위치 (기본: 1560)")
     design.add_argument("--design-aspect-ratio", type=str, default=None, help="비디오 영역 비율 (예: 16:9, 4:3, 1:1)")
+    design.add_argument("--design-video-width", type=int, default=None,
+                        help="영상 밴드 가로 크기 (캔버스 px, 320~1080, 기본 1080=꽉 찬 폭). "
+                             "화면비는 밴드의 모양을, 이 값은 크기를 정한다(높이 = 폭 × 비율). "
+                             "가로는 항상 중앙 배치")
     design.add_argument("--design-title-font", type=str, default=None, help="제목 폰트명")
     design.add_argument("--design-subtitle-font", type=str, default=None,
                         help="자막/TTS 자막 폰트명 (기본: 장르 프리셋 폰트). 일본어 등 프리셋 폰트에 없는 글리프가 필요할 때 지정")
@@ -212,6 +216,7 @@ def build_parser() -> argparse.ArgumentParser:
 _CLI_TO_DESIGN_FIELD = {
     "design_title_y": "title_y",
     "design_video_y": "video_y",
+    "design_video_width": "video_width",
     "design_work_title_y": "work_title_y",
     "design_aspect_ratio": "aspect_ratio",
     "design_title_font": "title_font",
@@ -265,6 +270,14 @@ def _build_design_config(args: argparse.Namespace) -> DesignConfig:
                 raise ValueError(
                     f"{_flag} 값 {overrides[_field]} 이 범위 밖입니다 ({_lo:g}~{_hi:g})")
             overrides[_field] = _v
+
+    # E10: 영상 밴드 가로 크기 — 같은 원칙(범위 밖 즉시 실패). 비숫자는 argparse type=int
+    # 가 이미 즉시 실패시킨다. 홀수는 렌더러가 짝수 보정한다(scaled_w -= scaled_w % 2).
+    if "video_width" in overrides:
+        _vw = int(overrides["video_width"])
+        if not (320 <= _vw <= 1080):
+            raise ValueError(
+                f"--design-video-width 값 {_vw} 이 범위 밖입니다 (320~1080)")
 
     # 리프레이밍 스위치 — store_true 라 None 이 아니어서 위 루프에 못 태운다(끄는 쪽만 의미 있음).
     if getattr(args, "no_reframe", False):

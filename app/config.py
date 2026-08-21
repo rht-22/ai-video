@@ -9,7 +9,12 @@ import os
 class DesignConfig:
     # 영상 프레임 (9:16, 1:1 등)
     aspect_ratio: str = "1:1"
-    video_width: int = 800
+    # E10: 영상 밴드의 가로 크기(캔버스 px, 320~1080). 1080 = 꽉 찬 폭(종전 동작).
+    # 화면비(aspect_ratio)는 밴드 직사각형의 **모양**을, video_width 는 **크기**를 정한다
+    # (scaled_h 는 밴드 폭 기준: int(video_width * r_h / r_w)). 가로는 항상 중앙 배치.
+    # ⚠ E10 이전 기본값은 800 이었지만 렌더러가 이 필드를 읽지 않아 무의미했다 —
+    # 렌더러가 읽기 시작하면서 1080 으로 올렸다(안 올리면 기존 채널 전부 800px 로 줄어든다).
+    video_width: int = 1080
     video_height: int = 1100
     video_y_pos: int = 480   # (레거시 — 렌더러가 읽지 않는다. video_y 를 쓸 것)
     # 영상영역 상단 Y(캔버스 px). None = 세로 중앙(현행 동작 유지). 지정하면 제목·영상이

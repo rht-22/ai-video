@@ -35,7 +35,9 @@ async def generate_shorts(
    
     design = DesignConfig(
         aspect_ratio=req.video_config.get("aspect_ratio", "9:16"),
-        video_width=req.video_config.get("width", 800),
+        # E10: 렌더러가 video_width 를 실제로 읽기 시작 — 기본값을 DesignConfig 와 같은
+        # 1080(꽉 찬 폭)으로 맞춘다. 종전 800 은 렌더러가 안 읽어 사실상 무의미했다.
+        video_width=req.video_config.get("width", 1080),
         video_height=req.video_config.get("height", 720),
         video_y_pos=req.video_config.get("y_pos", 480),
         
