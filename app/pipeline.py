@@ -1136,6 +1136,7 @@ from app.modules.edit_overrides import (
     apply_overrides,
     load_edit_overrides,
     overrides_subtitles,
+    overrides_title_segments,
     overrides_tts,
     place_anchored_images,
     place_anchored_subtitles,
@@ -3040,6 +3041,14 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
               f"{' · 구간 ' + str(_before_clips) + '→' + str(len(clips)) + '개(고정)' if _edit_pinned else ''}"
               f" · 합계 {total_duration(clips):.1f}s")
 
+    # 시간대별 제목(E8, title.segments) — 좌표가 자막과 같은 편집본 시간축이라 앵커
+    # 변환이 필요 없다(원본 절대초가 아니다). 첫 variant 렌더에만 넘긴다(오버라이드
+    # 공통 규약). 배속(×1/S) 변환은 제목을 setpts 뒤에 얹는 렌더러가 이미지 오버레이와
+    # 같은 지점에서 한다.
+    _title_segments = overrides_title_segments(_edit_overrides)
+    if _title_segments:
+        print(f"  [edit] 시간대별 제목 {len(_title_segments)}개 창 — 창 밖 시간은 제목 없음")
+
     # snap/extend/fill (라운드 19C — Gemini 폴백 데이터는 타이밍 부정확이라 건너뜀)
     # 사람이 구간을 지정했으면(_edit_pinned) 건너뛴다 — 대사 경계 스냅(±5초)·서사 확장
     # (편측 8초)·갭 메우기가 사람 입력을 최대 8초까지 밀어버리기 때문이다. 편집기에서
@@ -3455,7 +3464,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 읽는 하류(ingest·관제 편집실)가 영상에 없는 구간을 보게 된다. 렌더 시점엔 clips·title·
     # crop_map 이 모두 확정돼 있으므로 여기서 쓰는 값이 곧 화면에 나간 값이다.
     print("  편집 계획 생성 중...")
-    edit_plan = _build_edit_plan(payload, title_text, clips, crop_map, config)
+    edit_plan = _build_edit_plan(payload, title_text, clips, crop_map, config,
+                                 title_segments=_title_segments)
     # 라운드 6b: skeleton 단계 제거됨. edit_plan에 임베드하던 narrative_skeleton 키도 사라짐.
     edit_plan_path.write_text(json.dumps(edit_plan, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"  - 편집 계획 저장: {edit_plan_path}")
@@ -3615,6 +3625,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             render_preset=config.render_preset,
             enable_hwaccel=config.enable_hwaccel,
             image_overlays=_image_overlays or None,
+            title_segments=(_title_segments
+                            if (payload.show_title_overlay and _title_segments) else None),
         )
 
         ffmpeg_cmd = render_short(render_inputs)
@@ -3997,6 +4009,7 @@ def _build_edit_plan(
     clips: list[StoryClip],
     crop_map: dict[str, Path],
     config: AppConfig,
+    title_segments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     timeline = []
     for idx, clip in enumerate(clips):
@@ -4015,6 +4028,19 @@ def _build_edit_plan(
                 ),
             }
         )
+    layout: dict[str, Any] = {
+        "canvas": f"{config.canvas_width}x{config.canvas_height}",
+        "top_title": title_text,
+        "bottom_label": payload.work_title,
+        "background_style": "blur",
+        # E7-2: timeline 합계는 소스 시간이고 출력 mp4 는 합계/S 다 — 이 값을 빼먹으면
+        # edit_plan 으로 길이를 검산하는 하류(ingest·관제)가 영상과 다른 답을 얻는다.
+        "video_speed": float(getattr(payload.design, "video_speed", 1.0) or 1.0),
+    }
+    if title_segments:
+        # E8: 적용된 시간대별 제목 기록(편집본 시간축) — 하류 검산·검수 노출용.
+        # 없을 때는 키 자체를 빼 구 edit_plan 소비자와의 diff 를 만들지 않는다.
+        layout["title_segments"] = title_segments
     return {
         "input": {
             "video_path": str(payload.video_path),
@@ -4022,15 +4048,7 @@ def _build_edit_plan(
             "topic": payload.topic,
             "language": payload.language,
         },
-        "layout": {
-            "canvas": f"{config.canvas_width}x{config.canvas_height}",
-            "top_title": title_text,
-            "bottom_label": payload.work_title,
-            "background_style": "blur",
-            # E7-2: timeline 합계는 소스 시간이고 출력 mp4 는 합계/S 다 — 이 값을 빼먹으면
-            # edit_plan 으로 길이를 검산하는 하류(ingest·관제)가 영상과 다른 답을 얻는다.
-            "video_speed": float(getattr(payload.design, "video_speed", 1.0) or 1.0),
-        },
+        "layout": layout,
         "timeline": timeline,
         "audio_mix": {
             "tts_gain_db": config.tts_gain_db,
