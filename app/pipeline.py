@@ -1198,14 +1198,25 @@ def _compute_subtitle_margin_v(
     - ASS alignment=2(하단 중앙) 기준 margin_v = canvas_height - 자막 baseline = canvas_height - (overlay_y + scaled_h) + padding_px
 
     aspect_ratio는 DesignConfig에, 캔버스 크기는 AppConfig에 있으므로 호출부에서 명시 전달.
+
+    E10 후속: 밴드 높이는 렌더러 [2]와 같은 수식으로 **밴드 폭(video_width) 기준** —
+    캔버스 기준으로 두면 video_width 로 밴드가 작아졌을 때 자막이 밴드 하단보다 아래
+    (종전 꽉 찬 밴드 위치)에 남는다. 비숫자 video_width 는 비율 파싱과 같은 관용으로
+    W 폴백 — 범위 검증은 렌더 경계 담당이라 어차피 직후 렌더가 즉시 실패한다.
+    ※ video_y 지정 채널은 여전히 세로 중앙 가정으로 계산한다(E10 이전부터의 한계 —
+    자막 위치 계약을 편집실 미리보기와 함께 정리해야 해서 이 후속의 범위 밖).
     """
     H = canvas_height
     W = canvas_width
     try:
+        scaled_w = int(str(getattr(design, "video_width", W)))
+    except (TypeError, ValueError):
+        scaled_w = W
+    try:
         r_w, r_h = map(int, str(getattr(design, "aspect_ratio", "1:1")).split(":"))
-        scaled_h = int(W * r_h / r_w)
+        scaled_h = int(scaled_w * r_h / r_w)
     except Exception:
-        scaled_h = W
+        scaled_h = scaled_w
     scaled_h -= scaled_h % 2
     if scaled_h >= H:
         # 영상이 캔버스 전체 채움 → 하단 끝에서 padding_px 위

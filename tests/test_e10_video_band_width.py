@@ -171,6 +171,32 @@ def test_work_clamp_follows_band_bottom():
     assert "y=1691[with_work]" in fg
 
 
+# ── 자막 margin_v — 밴드 하단 추종 (E10 후속) ───────────────────────────
+
+def test_subtitle_margin_default_unchanged():
+    from app.pipeline import _compute_subtitle_margin_v
+    # 1:1 꽉 찬 폭: scaled_h=1080, overlay_y=420, 밴드 하단 1500 → 1920-1500+10
+    assert _compute_subtitle_margin_v(DesignConfig()) == 430
+    # 16:9 꽉 찬 폭: scaled_h=607→606, overlay_y=657, 하단 1263 → 667 (종전 값 그대로)
+    assert _compute_subtitle_margin_v(DesignConfig(aspect_ratio="16:9")) == 667
+    assert _compute_subtitle_margin_v(DesignConfig(video_width=1080)) == 430
+
+
+def test_subtitle_margin_follows_band_width():
+    from app.pipeline import _compute_subtitle_margin_v
+    # 밴드가 좁아지면 하단이 올라가고 자막도 따라 올라와야 한다(캔버스 기준이면 회귀)
+    # 800×1:1: scaled_h=800, overlay_y=560, 하단 1360 → 1920-1360+10 = 570
+    assert _compute_subtitle_margin_v(DesignConfig(aspect_ratio="1:1", video_width=800)) == 570
+    # 800×16:9: scaled_h=450, overlay_y=735, 하단 1185 → 745 (렌더러 실측 밴드와 일치)
+    assert _compute_subtitle_margin_v(DesignConfig(aspect_ratio="16:9", video_width=800)) == 745
+
+
+def test_subtitle_margin_non_numeric_width_falls_back():
+    from app.pipeline import _compute_subtitle_margin_v
+    # 비숫자는 비율 파싱과 같은 관용으로 W 폴백 — 범위 검증은 렌더 경계가 즉시 실패시킨다
+    assert _compute_subtitle_margin_v(DesignConfig(video_width="wide")) == 430
+
+
 # ── 범위 검증 — CLI·렌더 경계 양쪽 즉시 실패 ────────────────────────────
 
 def test_cli_flag_wired():
