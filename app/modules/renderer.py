@@ -617,6 +617,9 @@ class RenderInputs:
     # {text, start_sec, end_sec(편집본 시간축)}. 있으면 그 창들만 그린다(창 밖 = 제목
     # 없음, title_text 는 무시). 창의 ×1/S(배속) 변환은 필터 조립부가 한다.
     title_segments: list[dict] | None = None
+    # 편집실 자유 텍스트(edit_overrides/v3 texts, F-411) — build_texts_ass 가 쓴 ASS.
+    # 대사 자막·TTS 자막 위, images layer≥1 아래에 입힌다. None/부재 = 레이어 없음.
+    text_subtitle_path: Path | None = None
 
 
 def render_short(inputs: RenderInputs) -> list[str]:
@@ -1588,8 +1591,11 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         filters.append(f"{pre_sub_label}null[vsub]")
         last_v_label = "[vsub]"
 
-    # 자막 위 이미지가 있으면 ASS 출력을 중간 라벨로 받고 그 위에 얹은 뒤 [vout] 으로 마감
-    _tts_out = "[vpretop]" if _eimgs_above else "[vout]"
+    # 자막 위에 더 얹을 것(텍스트 레이어 F-411 · layer≥1 이미지)이 있으면 ASS 출력을
+    # 중간 라벨로 받고 그 위에 얹은 뒤 [vout] 으로 마감
+    _txt_path = getattr(inputs, "text_subtitle_path", None)
+    _has_texts = bool(_txt_path and Path(_txt_path).exists())
+    _tts_out = "[vpretxt]" if _has_texts else ("[vpretop]" if _eimgs_above else "[vout]")
     if inputs.tts_subtitle_path and inputs.tts_subtitle_path.exists():
         tts_ass_path = inputs.tts_subtitle_path.resolve()
         tts_sub_fixed = _to_short_path(str(tts_ass_path)).replace("\\", "/").replace(":", "\\:")
@@ -1598,6 +1604,13 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     else:
         filters.append(f"{last_v_label}null{_tts_out}")
         last_v_label = _tts_out
+
+    # [7.5] 자유 텍스트 레이어(F-411) — 대사·TTS 자막 위, layer≥1 이미지 아래
+    if _has_texts:
+        _txt_out = "[vpretop]" if _eimgs_above else "[vout]"
+        txt_fixed = _to_short_path(str(Path(_txt_path).resolve())).replace("\\", "/").replace(":", "\\:")
+        filters.append(f"{last_v_label}ass='{txt_fixed}':fontsdir='{font_dir_fixed}'{_txt_out}")
+        last_v_label = _txt_out
 
     if _eimgs_above:
         _top_label = _overlay_images(_eimgs_above, last_v_label, "eimga")

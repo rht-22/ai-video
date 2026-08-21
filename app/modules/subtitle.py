@@ -747,6 +747,68 @@ def merge_subtitle_segments(
     return merged
 
 
+# ── 편집실 자유 텍스트(edit_overrides/v3 texts, F-411) ─────────────────────
+# 대사 자막과 별개의 ASS 한 장. 이벤트마다 \an5\pos(중심) 으로 화면 아무 데나 놓고,
+# 크기·색·테두리·회전·등장효과를 인라인 태그로 박는다. Style 은 자리표시자(폰트는 \fn).
+_TEXT_STROKE_BORDER = {"dark": ("&H00000000", 0.07), "white": ("&H00FFFFFF", 0.06),
+                       "none": ("&H00000000", 0.0)}
+
+
+def _text_fx_tags(fx: str, base_rot_ass: float) -> str:
+    """등장 효과 → ASS \t 애니메이션. base_rot_ass 는 이미 부호 반전된 \frz 값."""
+    if fx == "pop":
+        # 30% → 110% → 100% (짧은 오버슈트) — 200ms
+        return ("\\fscx30\\fscy30\\t(0,140,\\fscx110\\fscy110)"
+                "\\t(140,220,\\fscx100\\fscy100)")
+    if fx == "shake":
+        a = base_rot_ass
+        return (f"\\t(0,70,\\frz{a + 6:g})\\t(70,140,\\frz{a - 6:g})"
+                f"\\t(140,210,\\frz{a + 3:g})\\t(210,280,\\frz{a:g})")
+    return ""
+
+
+def _escape_ass_text(text: str) -> str:
+    r"""ASS 본문 이스케이프 — 태그 주입 방지({ } → 전각) · 줄바꿈 → \N."""
+    return (str(text).replace("{", "｛").replace("}", "｝")
+            .replace("\r\n", "\n").replace("\n", "\\N"))
+
+
+def build_texts_ass(texts: list[dict], output_path: Path, *, speed: float = 1.0) -> None:
+    r"""place_anchored_texts 가 배치한 항목(편집본 시간축 start_sec/end_sec) → ASS 파일.
+
+    · x·y = 글자 중심(0~1 캔버스 비율) → \an5\pos(px)
+    · size → \fs, color → \1c, stroke → \3c + \bord(크기 비례), fx → \t 애니메이션
+    · rotate → \frz(부호 반전 — 계약은 시계방향 양수, ASS 는 반시계 양수, F-410 과 동일)
+    · font → \fn(패밀리명, to_font_family) — 번들 폰트만 오도록 edit_overrides 가 막는다
+    · speed → 이벤트 시각 ×1/S (E7-2 와 같은 이유: ASS 는 setpts 뒤에 입혀진다)
+    항목이 없어도 빈 파일을 쓴다(옛 잔재 방지 — 자막과 같은 규약)."""
+    from app.config import to_font_family
+
+    base = SubtitleStyle(font_name="Jalnan", font_size=72, primary_color="&H00FFFFFF",
+                         outline_color="&H00000000", outline=4, shadow=0, margin_v=1,
+                         bold=True, alignment=5)
+    lines = [_ass_header(base).replace("Style: Default,", "Style: Text,")]
+    for t in texts or []:
+        s = float(t["start_sec"]) / speed
+        e = float(t["end_sec"]) / speed
+        size = int(round(float(t.get("size") or 72)))
+        px = int(round(float(t["x"]) * ASS_PLAY_RES_X))
+        py = int(round(float(t["y"]) * ASS_PLAY_RES_Y))
+        rot_ass = -float(t.get("rotate") or 0.0)
+        stroke = str(t.get("stroke") or "dark")
+        outline_color, bord_ratio = _TEXT_STROKE_BORDER.get(stroke, _TEXT_STROKE_BORDER["dark"])
+        bord = max(1, int(round(size * bord_ratio))) if bord_ratio else 0
+        tags = [f"\\an5\\pos({px},{py})", f"\\fn{to_font_family(str(t.get('font') or 'Jalnan'))}",
+                f"\\fs{size}", f"\\1c{_hex_to_ass_color(str(t.get('color') or '#FFFFFF'))}",
+                f"\\3c{outline_color}", f"\\bord{bord}", "\\shad0"]
+        if rot_ass != 0.0:
+            tags.append(f"\\frz{rot_ass:g}")
+        tags.append(_text_fx_tags(str(t.get("fx") or "none"), rot_ass))
+        lines.append(f"Dialogue: 2,{_format_time(s)},{_format_time(e)},Text,,0,0,0,,"
+                     f"{{{''.join(tags)}}}{_escape_ass_text(t['text'])}\n")
+    output_path.write_text("".join(lines), encoding="utf-8-sig")
+
+
 def _ass_header(style: SubtitleStyle, tts_style: SubtitleStyle | None = None) -> str:
     # ⚠️ FONT_NAME_MAP(파일명 맵)이 아니라 to_font_family 를 쓴다. ASS 의 Fontname 은 폰트 내부
     # 패밀리명이라 파일명을 넣으면 libass 가 못 찾고 시스템 폰트로 조용히 대체한다.

@@ -1136,10 +1136,12 @@ from app.modules.edit_overrides import (
     apply_overrides,
     load_edit_overrides,
     overrides_subtitles,
+    overrides_texts,
     overrides_title_segments,
     overrides_tts,
     place_anchored_images,
     place_anchored_subtitles,
+    place_anchored_texts,
     resolve_image_files,
     total_duration,
 )
@@ -3282,6 +3284,18 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         if _image_overlays:
             print(f"  [edit] 이미지 오버레이 {len(_image_overlays)}건 배치 — 편집 타임라인 변환 완료")
 
+    # ── 편집실 자유 텍스트(v3 F-411) — 배치 규칙은 images 와 동일 ───────────────
+    _text_overlays: list[dict[str, Any]] = []
+    _edit_texts = overrides_texts(_edit_overrides)
+    if _edit_texts:
+        _text_overlays, _txt_orphans = place_anchored_texts(_edit_texts, clips)
+        for _o in _txt_orphans:
+            print(f"  [edit] 앵커 소재가 최종 타임라인에 없음 → 텍스트 드롭"
+                  f"(tts 고아 규칙과 동일): source_time_sec={_o.get('source_time_sec')} "
+                  f"{str(_o.get('text', ''))[:20]!r}")
+        if _text_overlays:
+            print(f"  [edit] 텍스트 오버레이 {len(_text_overlays)}건 배치 — 편집 타임라인 변환 완료")
+
     # ── 편집실 내레이션 오버라이드(v2) ──────────────────────────────────────
     # 반드시 앵커 해석(_resolve_cue_anchors) **앞**이다 — 사람이 보내는 좌표가 원본
     # 절대초(source_time_sec)라, 편집시간 변환은 최종 클립이 확정된 아래 블록이 한다.
@@ -3683,6 +3697,15 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             subtitle_font=actual_subtitle_font_path,
         )
 
+        # 자유 텍스트 ASS(F-411) — 항목이 있을 때만 파일을 만들고 렌더에 넘긴다. 배속은
+        # 대사 자막(E7-2)과 같은 이유로 ×1/S.
+        text_subtitle_path: Path | None = None
+        if _text_overlays:
+            from app.modules.subtitle import build_texts_ass
+            text_subtitle_path = output_dir / "texts.ass"
+            build_texts_ass(_text_overlays, text_subtitle_path, speed=_speed)
+            print(f"  [OK] 텍스트 레이어 ASS 생성: {text_subtitle_path} ({len(_text_overlays)}건)")
+
         render_inputs = RenderInputs(
             video_path=payload.video_path,
             clips=clips,
@@ -3707,6 +3730,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             image_overlays=_image_overlays or None,
             title_segments=(_title_segments
                             if (payload.show_title_overlay and _title_segments) else None),
+            text_subtitle_path=text_subtitle_path,
         )
 
         ffmpeg_cmd = render_short(render_inputs)

@@ -736,3 +736,79 @@ def test_anchored_image_slop_matches_boundary():
     assert dropped == []
     assert (placed[0]["start_sec"], placed[0]["end_sec"]) == (0.0, 2.0)
 
+
+
+# ── v3 texts(F-411) — 자유 텍스트 오브젝트: 검증·정규화·배치(images 와 같은 규칙) ──
+from app.modules.edit_overrides import (  # noqa: E402
+    TEXT_DEFAULTS, overrides_texts, place_anchored_texts,
+)
+
+
+def _txt(**extra):
+    base = {"text": "쾅!!", "source_time_sec": 105.0, "duration_sec": 1.2,
+            "x": 0.6, "y": 0.4}
+    base.update(extra)
+    return base
+
+
+def test_v3_texts_accepted_with_all_keys():
+    validate_overrides({"schema": "edit_overrides/v3", "texts": [
+        _txt(size=96, color="#FFDD00", stroke="dark", fx="pop", rotate=-8, font="mulmaru")]})
+
+
+def test_texts_require_v3_stamp():
+    for schema in ("edit_overrides/v1", "edit_overrides/v2"):
+        with pytest.raises(EditOverrideError, match="v3 전용"):
+            validate_overrides({"schema": schema, "texts": [_txt()]})
+
+
+def test_texts_empty_array_rejected():
+    with pytest.raises(EditOverrideError, match="비어 있지 않은 배열"):
+        validate_overrides({"schema": "edit_overrides/v3", "texts": []})
+
+
+@pytest.mark.parametrize("bad,msg", [
+    (_txt(text=""), "text 가 비어 있습니다"),
+    (_txt(text="가" * 61), "60자를 넘습니다"),
+    ({k: v for k, v in _txt().items() if k != "source_time_sec"}, "source_time_sec"),
+    (_txt(source_time_sec=-1), "음수"),
+    (_txt(duration_sec=0), "양수"),
+    (_txt(x=1.2), "0~1 비율"),
+    ({k: v for k, v in _txt().items() if k != "y"}, "y\\(글자 중심"),
+    (_txt(size=5), "12~400 px"),
+    (_txt(size="big"), "숫자가 아닙니다"),
+    (_txt(color="yellow"), "#RRGGBB"),
+    (_txt(stroke="glow"), "stroke 는 dark/none/white"),
+    (_txt(fx="bounce"), "fx 는 none/pop/shake"),
+    (_txt(font="Arial"), "번들 폰트"),
+    (_txt(rotate=200), "-180~180"),
+    (_txt(layer=1), "모르는 키"),          # texts 에는 layer 가 없다(항상 자막 위)
+    (_txt(w=0.3), "모르는 키"),
+    ("문자열", "객체가 아닙니다"),
+])
+def test_texts_violations_fail_loudly(bad, msg):
+    with pytest.raises(EditOverrideError, match=msg):
+        validate_overrides({"schema": "edit_overrides/v3", "texts": [bad]})
+
+
+def test_overrides_texts_fills_defaults_and_normalizes():
+    out = overrides_texts({"schema": "edit_overrides/v3",
+                           "texts": [_txt(), _txt(size="80", color="#ffdd00", rotate="-8")]})
+    assert out[0] == {"text": "쾅!!", "source_time_sec": 105.0, "duration_sec": 1.2,
+                      "x": 0.6, "y": 0.4, **TEXT_DEFAULTS}
+    assert (out[1]["size"], out[1]["color"], out[1]["rotate"]) == (80, "#FFDD00", -8.0)
+    assert overrides_texts({"schema": "edit_overrides/v3"}) is None
+    assert overrides_texts(None) is None
+
+
+def test_anchored_text_follows_clip_offset_and_preserves_order():
+    placed, dropped = place_anchored_texts(
+        overrides_texts({"schema": "edit_overrides/v3", "texts": [
+            _txt(source_time_sec=105.0, duration_sec=2.0, rotate=-15),
+            _txt(text="*생방송 중", source_time_sec=12.0, duration_sec=3.0),
+            _txt(source_time_sec=500.0)]}),                 # 최종 구간 밖 → 고아
+        _final_clips())
+    assert [(t["start_sec"], t["end_sec"]) for t in placed] == [(20.0, 22.0), (2.0, 5.0)]
+    assert "source_time_sec" not in placed[0] and "duration_sec" not in placed[0]
+    assert placed[0]["rotate"] == -15 and placed[0]["text"] == "쾅!!"
+    assert len(dropped) == 1 and dropped[0]["source_time_sec"] == 500.0
