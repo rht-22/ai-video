@@ -920,6 +920,62 @@ def _probe_video_dims(video_path: Path) -> tuple[int, int]:
 
 
 
+def _parse_drawtext_color(color: str) -> tuple[int, int, int, int]:
+    """drawtext 색 문자열(#RRGGBB · white · black@0.6 · #RRGGBBAA)을 Pillow RGBA 로.
+    모르는 이름은 검정 — 박스가 안 보이는 것보다 검은 박스가 눈에 띄어 고치기 쉽다."""
+    from PIL import ImageColor
+    s = str(color).strip()
+    alpha = 1.0
+    if "@" in s:
+        s, a = s.rsplit("@", 1)
+        try:
+            alpha = min(1.0, max(0.0, float(a)))
+        except ValueError:
+            alpha = 1.0
+    try:
+        rgb = ImageColor.getrgb(s)
+    except ValueError:
+        rgb = (0, 0, 0)
+    r, g, b = rgb[:3]
+    a = rgb[3] if len(rgb) == 4 else 255
+    return (r, g, b, int(round(a * alpha)))
+
+
+def _measure_title_text_width(text: str, font_path: str, font_size: int) -> int:
+    """drawtext 가 그릴 글자 폭의 근사 — 같은 TTF 를 Pillow 로 재서 둥근 박스 PNG 폭을 정한다.
+    ffmpeg 와 수 px 차이는 박스 여백(0.30em)이 흡수한다. 폰트 파일이 아니면(테스트·폰트명만
+    온 경우) 1em/글자 근사 — 한글·CJK 는 거의 정사각이라 충분하다."""
+    try:
+        if font_path and Path(font_path).is_file():
+            from PIL import ImageFont
+            return int(math.ceil(ImageFont.truetype(font_path, font_size).getlength(text)))
+    except Exception:
+        pass
+    return font_size * max(1, len(text))
+
+
+def _make_title_box_png(text: str, font_path: str, font_size: int, color: str,
+                        pad: int, radius: int, stroke_w: int, out_path: Path) -> tuple[Path, int, int]:
+    """둥근네모 제목 배경 — drawtext 의 box 는 모서리를 못 둥글리므로 Pillow 로 RGBA PNG 를
+    만들어 movie+overlay 로 글자 **아래**에 깐다(로고·이미지 오버레이와 같은 경로).
+    반환 (경로, 폭, 높이). 폭·높이는 짝수로 맞춘다(yuv 오버레이 안전)."""
+    from PIL import Image, ImageDraw
+    text_w = _measure_title_text_width(text, font_path, font_size)
+    box_w = text_w + 2 * pad + 2 * stroke_w
+    box_h = font_size + 2 * pad
+    box_w += box_w % 2
+    box_h += box_h % 2
+    img = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 0))
+    ImageDraw.Draw(img).rounded_rectangle(
+        [0, 0, box_w - 1, box_h - 1], radius=max(0, radius), fill=_parse_drawtext_color(color))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(out_path)
+    return out_path, box_w, box_h
+
+
+_TITLE_BOX_STYLES = ("none", "round", "rect")
+
+
 def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_inputs: int) -> str:
     W = inputs.canvas_width
     H = inputs.canvas_height
@@ -993,6 +1049,27 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     # 줄별 폰트 크기 (title_sizes가 있으면 사용, 없으면 title_size로 통일)
     title_sizes = getattr(d, 'title_sizes', [d.title_size])
 
+    # 줄별 배경 박스·굵게(2026-08-21) — 인덱스는 원본 줄(orig_idx). 리스트가 짧으면 마지막
+    # 값을 잇는다(title_colors 규약). 여백·라운드·획은 **그 줄의 최종 글자 크기** 비례
+    # 고정값이라 길이 축소(_TITLE_LENGTH_SCALE)와 같이 줄어든다. 범위 밖 값은 즉시 실패.
+    # 굵게 획 0.025em(70·90px → 2px): Jalnan 은 원래 극굵 글꼴이라 3px 부터 글자 속이 메워진다
+    # (2026-08-21 실측 bold.png) — 가는 글꼴(mulmaru·Griun)에서 효과가 더 크다.
+    title_boxes = list(getattr(d, 'title_boxes', None) or ["none"])
+    title_box_colors = list(getattr(d, 'title_box_colors', None) or ["#000000"])
+    title_bolds = list(getattr(d, 'title_bolds', None) or [False])
+    for _bs in title_boxes:
+        if _bs not in _TITLE_BOX_STYLES:
+            raise ValueError(f"title_box 값 '{_bs}' 은 none·round·rect 중 하나여야 합니다")
+
+    def _per_line(lst: list, orig_idx: int):
+        return lst[orig_idx] if orig_idx < len(lst) else lst[-1]
+
+    def _box_pad(font_size: int, box_style: str) -> int:
+        return int(round(0.30 * font_size)) if box_style != "none" else 0
+
+    def _bold_w(font_size: int, bold: bool) -> int:
+        return max(1, int(round(0.025 * font_size))) if bold else 0
+
     # [2] 비디오 레이아웃 설정 — E10: 밴드 폭 = video_width(미지정 = 캔버스 꽉 참).
     # 화면비는 밴드 직사각형의 모양을, video_width 는 크기를 정한다(편집실 미리보기와 합의된 계약).
     scaled_w = video_width
@@ -1000,8 +1077,11 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     line_spacing = 30
 
     def _title_block_height(lines: list[tuple[int, str]]) -> int:
+        # 박스 줄은 위아래 여백(pad)이 줄 높이에 들어간다 — 동적 배치가 **박스 기준**으로
+        # 영상 위 20px 을 지키고, 이웃 줄의 박스끼리 겹치지 않는다(박스 없으면 종전과 동일).
         return sum(
-            (title_sizes[orig_idx] if orig_idx < len(title_sizes) else title_sizes[-1])
+            _per_line(title_sizes, orig_idx)
+            + 2 * _box_pad(_per_line(title_sizes, orig_idx), _per_line(title_boxes, orig_idx))
             for orig_idx, _ in lines
         ) + max(0, len(lines) - 1) * line_spacing
 
@@ -1183,29 +1263,74 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     # 달라도 모든 세그먼트의 첫 줄이 같은 y 에서 시작한다(위 title_total_height 참고).
     _title_block_top = cumulative_y
 
-    def _line_specs(lines: list[tuple[int, str]]) -> list[tuple[str, int, int, str]]:
-        specs: list[tuple[str, int, int, str]] = []  # (color, font_size, frame_y, escaped)
+    def _line_specs(lines: list[tuple[int, str]]) -> list[tuple[str, int, int, str, dict]]:
+        # (color, font_size, frame_y, escaped, style) — frame_y 는 **글자** 윗변(박스 윗변은
+        # frame_y - pad). style: box(none|round|rect)·box_color·pad·bold_w·raw(원문, PNG 폭 측정용)
+        specs: list[tuple[str, int, int, str, dict]] = []
         y = _title_block_top
         for orig_idx, raw_line in lines:
             base_color = custom_colors[orig_idx] if orig_idx < len(custom_colors) else custom_colors[-1]
             base_font_size = title_sizes[orig_idx] if orig_idx < len(title_sizes) else title_sizes[-1]
             font_size = _scale_font_for_length(base_font_size, len(raw_line))
-            specs.append((base_color, font_size, y, _escape_text_for_drawtext(raw_line)))
-            y += font_size + line_spacing
+            box_style = _per_line(title_boxes, orig_idx)
+            pad = _box_pad(font_size, box_style)
+            style = {
+                "box": box_style,
+                "box_color": _per_line(title_box_colors, orig_idx),
+                "pad": pad,
+                "bold_w": _bold_w(font_size, bool(_per_line(title_bolds, orig_idx))),
+                "raw": raw_line,
+            }
+            specs.append((base_color, font_size, y + pad, _escape_text_for_drawtext(raw_line), style))
+            y += font_size + 2 * pad + line_spacing
         return specs
+
+    def _drawtext_extra(base_color: str, style: dict) -> str:
+        # 각진 박스는 drawtext 내장 box(글자 폭에 딱 맞게 ffmpeg 가 직접 잰다), 굵게는 같은 색
+        # 외곽선. 단일값 boxborderw 만 쓴다(4값형은 ffmpeg 버전에 따라 없다 — 함대 호환).
+        extra = ""
+        if style["box"] == "rect":
+            extra += f":box=1:boxcolor={style['box_color']}:boxborderw={style['pad']}"
+        if style["bold_w"]:
+            extra += f":borderw={style['bold_w']}:bordercolor={base_color}"
+        return extra
+
+    def _emit_round_boxes(specs, in_label: str, prefix: str, y_offset: int,
+                          enable_clause: str = "") -> str:
+        # 둥근 박스는 PNG overlay — **모든 줄의 박스를 먼저** 깔고 글자는 그 뒤에 그린다.
+        # 그래야 어떤 줄의 박스도 다른 줄 글자를 덮지 못한다. y_offset 은 회전 캔버스
+        # 좌표계(캔버스 윗변 = 0)로 옮길 때 쓴다. PNG 는 출력 파일 옆에 남긴다(디버그 자료).
+        label = in_label
+        for visual_idx, (_c, font_size, frame_y, _e, style) in enumerate(specs):
+            if style["box"] != "round":
+                continue
+            png_path = inputs.output_path.parent / f"title_box_{prefix}{visual_idx}.png"
+            png, box_w, box_h = _make_title_box_png(
+                style["raw"], actual_font, font_size, style["box_color"], style["pad"],
+                int(round(0.25 * font_size)), style["bold_w"], png_path)
+            bx = int(round((W - box_w) / 2.0))
+            by = frame_y - style["pad"] - y_offset
+            src = str(png).replace("\\", "/").replace(":", "\\:")
+            print(f"  [TitleBox] 줄{visual_idx} round {box_w}x{box_h} @ ({bx},{by}) {style['box_color']}")
+            filters.append(
+                f"movie='{src}'[{prefix}bx{visual_idx}];"
+                f"{label}[{prefix}bx{visual_idx}]overlay={bx}:{by}{enable_clause}[{prefix}bo{visual_idx}]"
+            )
+            label = f"[{prefix}bo{visual_idx}]"
+        return label
 
     _title_specs = _line_specs(title_lines)
 
     def _emit_title_lines(specs: list[tuple[str, int, int, str]], in_label: str,
                           prefix: str, enable_clause: str = "") -> str:
         """줄별 drawtext 를 메인 체인에 직결 — 종전(무회전) 제목 경로."""
-        label = in_label
-        for visual_idx, (base_color, font_size, frame_y, escaped_full) in enumerate(specs):
+        label = _emit_round_boxes(specs, in_label, prefix, 0, enable_clause)
+        for visual_idx, (base_color, font_size, frame_y, escaped_full, style) in enumerate(specs):
             next_label = f"[{prefix}{visual_idx}]"
             filters.append(
                 f"{label}drawtext=expansion=none:fontfile='{font_arg}':text='{escaped_full}':"
                 f"fontcolor={base_color}:fontsize={font_size}:"
-                f"x=(w-text_w)/2:y={frame_y}{enable_clause}{next_label}"
+                f"x=(w-text_w)/2:y={frame_y}{_drawtext_extra(base_color, style)}{enable_clause}{next_label}"
             )
             label = next_label
         return label
@@ -1220,8 +1345,10 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         images[].rotate(F-410)와 같은 계산이다. E8 세그먼트는 세그먼트별 캔버스로
         같은 창(enable_clause)을 overlay 에 단다 — 캔버스 높이는 그 세그먼트의 블록
         높이라 회전 원점(블록 중심)도 세그먼트별로 제 자리다."""
-        _blk_pad = (max(fs for _, fs, _, _ in specs) + 1) // 2
-        _blk_h = (sum(fs for _, fs, _, _ in specs)
+        # 박스 줄은 위아래 pad 만큼 블록이 커진다(_line_specs 의 y 전진과 같은 값) — 박스는
+        # 캔버스 안에서 회전 **전에** 깔리므로 글자와 같이 돈다.
+        _blk_pad = (max(fs for _, fs, _, _, _ in specs) + 1) // 2
+        _blk_h = (sum(fs + 2 * st["pad"] for _, fs, _, _, st in specs)
                   + max(0, len(specs) - 1) * line_spacing + 2 * _blk_pad)
         _blk_h += _blk_h % 2
         _canvas_top = _title_block_top - _blk_pad
@@ -1232,12 +1359,13 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         _oy = int(round(_canvas_top + _blk_h / 2.0 - _bb_h / 2.0))
         _ttl_label = f"[{prefix}0]"
         filters.append(f"color=c=black@0.0:s={W}x{_blk_h}:d=1,format=rgba{_ttl_label}")
-        for visual_idx, (base_color, font_size, frame_y, escaped_full) in enumerate(specs):
+        _ttl_label = _emit_round_boxes(specs, _ttl_label, prefix, _canvas_top)
+        for visual_idx, (base_color, font_size, frame_y, escaped_full, style) in enumerate(specs):
             next_label = f"[{prefix}{visual_idx + 1}]"
             filters.append(
                 f"{_ttl_label}drawtext=expansion=none:fontfile='{font_arg}':text='{escaped_full}':"
                 f"fontcolor={base_color}:fontsize={font_size}:"
-                f"x=(w-text_w)/2:y={frame_y - _canvas_top}{next_label}"
+                f"x=(w-text_w)/2:y={frame_y - _canvas_top}{_drawtext_extra(base_color, style)}{next_label}"
             )
             _ttl_label = next_label
         print(f"  [TitleRotate] {title_rotate:g}° — 블록 {W}x{_blk_h} → bb {_bb_w}x{_bb_h}, "
