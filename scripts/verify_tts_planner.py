@@ -3,6 +3,8 @@
 
 Gemini API를 호출하지 않고 다음을 검증:
   1. synthesize_tts(voice, speed) — 4 voice × 5 speed 일부 조합으로 mp3 생성
+  1b. (E11) speed 프리셋 단조성 — very_slow > normal > very_fast 로 mp3 길이가
+      줄어드는지 실측. ElevenLabs 백엔드(키 있음)에서 특히 이 차이가 뚜렷해야 한다.
   2. TTSCue dataclass JSON round-trip
   3. _build_audio_filter / _build_input_args — 가짜 cue로 ffmpeg 필터/인자 생성 검증
   4. STORY_COMPOSITION_PROMPT format() 무결성 + tts_cues 출력 필드 노출 검증
@@ -72,6 +74,29 @@ def step1_synth_combinations() -> None:
         print(f"  - {voice} ({voice_id}, pitch={pitch}) / {speed} ({rate}) → {dur:.2f}s, {out.stat().st_size} bytes")
         assert dur > 0.5, f"mp3 길이 비정상: {dur:.2f}s"
     print("  ✅ Phase 1 PASS")
+
+
+def step1b_speed_monotonic() -> None:
+    """E11 — 같은 문장의 mp3 길이가 speed 프리셋 순서대로 줄어드는지 실측.
+
+    edge-tts 시절 '속도가 안 먹히는 것 같다'(8/21)의 재발 방지 가드다: 합성 경로
+    어딘가가 speed 를 조용히 떨어뜨리면 세 길이가 같아져 여기서 잡힌다."""
+    print("\n[1b/4] speed 프리셋 단조성 (E11)")
+    from app.modules.tts import active_backend
+    backend = active_backend()
+    print(f"  - backend={backend}")
+    if backend == "silence":
+        print("  ⏭  합성 백엔드 없음(개발 환경) — 건너뜀")
+        return
+    text = "속도 검증용 문장입니다. 프리셋 사이 길이 차이가 뚜렷하게 들려야 합니다."
+    durs: dict[str, float] = {}
+    for speed in ("very_slow", "normal", "very_fast"):
+        out = TMP / f"speed_{speed}.mp3"
+        synthesize_tts(text, out, lang="ko", voice="ko_female", speed=speed)
+        durs[speed] = _ffprobe_duration(out)
+        print(f"  - {speed}: {durs[speed]:.2f}s")
+    assert durs["very_slow"] > durs["normal"] > durs["very_fast"], f"speed 단조성 위반: {durs}"
+    print("  ✅ Phase 1b PASS")
 
 
 def step2_cue_roundtrip() -> None:
@@ -175,6 +200,7 @@ def step4_format_prompts() -> None:
 
 def main() -> None:
     step1_synth_combinations()
+    step1b_speed_monotonic()
     step2_cue_roundtrip()
     step3_filter_graph()
     step4_format_prompts()

@@ -66,3 +66,23 @@
 
 회귀 가드: video_width·video_y 미지정이면 필터그래프·margin 모두 종전과 동일해야
 한다 — `tests/test_e10_video_band_width.py` 가 문자열·수치로 고정한다.
+
+## KR 내레이션 TTS 백엔드 계약 (E11, 2026-08-21)
+
+`app/modules/tts.py` — 발주서: ves-orchestrator `docs/prompts/e11-kr-tts-elevenlabs.md`.
+
+- 1순위 **ElevenLabs**: `ELEVENLABS_API_KEY` 가 있으면 무조건 ElevenLabs
+  (모델 `eleven_multilingual_v2`, env `ELEVENLABS_MODEL_ID` 로 교체 가능).
+  키가 없으면 edge-tts 폴백 — **stdout 에 `[TTS] backend=` 한 줄 명시**(조용한
+  대체 금지). API 실패는 429·5xx·네트워크만 재시도(2회), 그 외 4xx 는 즉시 실패 —
+  edge-tts 로 조용히 넘어가면 같은 채널 목소리가 편마다 달라진다.
+- **voice/speed 라벨은 불변 계약**: `ko_female`·`ko_female_high`·`ko_male`·
+  `ko_male_low`·`chat_*` 와 `very_slow`~`very_fast` 는 편집실·edit_overrides/v2·
+  체크포인트 cue 에 실려 있는 값이다. ElevenLabs 매핑은 `EL_VOICE_PRESETS`
+  (라벨 → premade voice_id, pitch 변형은 목소리 선정으로 재현)·`EL_SPEED`
+  (very_slow 0.7 · slow 0.85 · normal 1.0 · fast 1.1 · very_fast 1.2 —
+  voice_settings.speed 허용 범위 0.7~1.2) 한 곳에서만 고친다.
+- 합성 백엔드는 run_log `steps[{step:"resources"}].tts_backend` 와
+  `checkpoint_resources.tts_backend` 에 남는다 — 키 없는 노드의 폴백 추적 근거.
+- edge-tts 경로의 '예외 → rate/pitch 빼고 재시도' 무성 폴백은 **제거됐다**(속도·
+  피치가 소리 없이 무시되던 지점). 회귀 가드: `tests/test_e11_tts_elevenlabs.py`.

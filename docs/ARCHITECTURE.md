@@ -234,6 +234,9 @@ docs/                           본 문서 + PPTX/덱
 ### 11. resources
 - 클립별 얼굴 크롭 타임라인(`build_crop_timeline` + character_index lookup)
 - TTS cue별 mp3 합성(voice/speed 적용, `synthesize_tts`). 자막이 cue에 비해 길면 Flash로 텍스트 단축
+  - E11(2026-08-21): 1순위 백엔드는 **ElevenLabs**(`ELEVENLABS_API_KEY`, speed → voice_settings.speed 0.7~1.2).
+    키 없으면 edge-tts 폴백(stdout 명시), API 실패는 재시도 후 즉시 실패(조용한 대체 금지).
+    합성 백엔드는 run_log steps·checkpoint_resources 의 `tts_backend` 로 남는다.
 
 ### 12. render
 - ffmpeg `filter_complex` 로:

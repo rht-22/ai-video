@@ -3488,7 +3488,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         # TTS 오디오 생성 (cue별 — voice/speed 적용)
         # cue 시간(end_sec - start_sec) 안에 들어가도록 fit. 초과 시 Flash로 텍스트 단축.
         print("  TTS 오디오 생성 중 (cue별, fit 적용)...")
-        from app.modules.tts import synthesize_tts_with_fit
+        from app.modules.tts import active_backend, synthesize_tts_with_fit
         _flash_for_shorten = locals().get("gemini") or load_gemini_client()
         _shorten = getattr(_flash_for_shorten, "shorten_text", None) if _flash_for_shorten else None
         tts_cue_files: list[dict[str, Any]] = []
@@ -3516,17 +3516,23 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 print(f"    진행 중... ({ci + 1}/{len(tts_cues)})")
 
         resource_elapsed = time.time() - resource_start
+        # E11: 어느 TTS 백엔드로 합성됐는지 남긴다 — 키 없는 노드의 edge-tts 폴백을
+        # 검수함·run_log 에서 추적할 수 있어야 한다(조용한 대체 금지 원칙).
+        _tts_backend = active_backend()
+        run_log["steps"].append({"step": "resources", "tts_backend": _tts_backend,
+                                 "tts_cues": len(tts_cue_files)})
         checkpoint_resources.write_text(
             json.dumps({
                 "crop_map": {k: str(v) for k, v in crop_map.items()},
                 "tts_cue_files": tts_cue_files,
                 # E7-2: TTS fit 목표가 (e-s)/S 라 배속이 바뀌면 이 캐시는 못 쓴다(위 무효화 참고)
                 "video_speed": _speed,
+                "tts_backend": _tts_backend,
             }, ensure_ascii=False, indent=2),
             encoding="utf-8"
         )
         print(f"[OK] 리소스 생성 완료 (소요 시간: {resource_elapsed:.1f}초)")
-        print(f"  - TTS cue 오디오: {len(tts_cue_files)}개")
+        print(f"  - TTS cue 오디오: {len(tts_cue_files)}개 (backend={_tts_backend})")
     else:
         if checkpoint_resources.exists():
             resources_data = json.loads(checkpoint_resources.read_text(encoding="utf-8"))
