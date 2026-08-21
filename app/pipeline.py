@@ -1201,10 +1201,11 @@ def _compute_subtitle_margin_v(
 
     E10 후속: 밴드 높이는 렌더러 [2]와 같은 수식으로 **밴드 폭(video_width) 기준** —
     캔버스 기준으로 두면 video_width 로 밴드가 작아졌을 때 자막이 밴드 하단보다 아래
-    (종전 꽉 찬 밴드 위치)에 남는다. 비숫자 video_width 는 비율 파싱과 같은 관용으로
-    W 폴백 — 범위 검증은 렌더 경계 담당이라 어차피 직후 렌더가 즉시 실패한다.
-    ※ video_y 지정 채널은 여전히 세로 중앙 가정으로 계산한다(E10 이전부터의 한계 —
-    자막 위치 계약을 편집실 미리보기와 함께 정리해야 해서 이 후속의 범위 밖).
+    (종전 꽉 찬 밴드 위치)에 남는다. video_y 지정 채널도 렌더러와 같은 규약(지정 위치,
+    H-scaled_h 클램프, 미지정 = 세로 중앙)으로 밴드 하단을 따른다 — 종전엔 세로 중앙
+    가정 고정이라 video_y 로 밴드를 올린 채널의 자막이 옛 중앙 밴드 위치에 남았다.
+    비숫자 video_width/video_y 는 비율 파싱과 같은 관용으로 폴백(꽉 찬 폭/세로 중앙) —
+    범위 검증은 렌더 경계 담당이라 어차피 직후 렌더가 즉시 실패한다.
     """
     H = canvas_height
     W = canvas_width
@@ -1221,7 +1222,14 @@ def _compute_subtitle_margin_v(
     if scaled_h >= H:
         # 영상이 캔버스 전체 채움 → 하단 끝에서 padding_px 위
         return padding_px
-    overlay_y = max(0, (H - scaled_h) // 2)
+    try:
+        video_y = int(getattr(design, "video_y", None))
+    except (TypeError, ValueError):
+        video_y = None
+    if video_y is not None:
+        overlay_y = min(max(0, video_y), max(0, H - scaled_h))
+    else:
+        overlay_y = max(0, (H - scaled_h) // 2)
     return max(padding_px, H - (overlay_y + scaled_h) + padding_px)
 
 

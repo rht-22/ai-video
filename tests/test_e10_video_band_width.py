@@ -197,6 +197,30 @@ def test_subtitle_margin_non_numeric_width_falls_back():
     assert _compute_subtitle_margin_v(DesignConfig(video_width="wide")) == 430
 
 
+def test_subtitle_margin_follows_video_y():
+    from app.pipeline import _compute_subtitle_margin_v
+    # 렌더러와 같은 규약: 지정 위치 그대로 — 밴드를 올리면 자막도 밴드 하단을 따라 올라온다
+    # 13:9, video_y=380: scaled_h=747→746, 하단 380+746=1126 → 1920-1126+10 = 804
+    # (렌더러 test_video_y_moves_stack_up 의 pad y=380·짝수보정 746 과 같은 밴드)
+    d = DesignConfig(aspect_ratio="13:9", video_y=380)
+    assert _compute_subtitle_margin_v(d) == 804
+    # video_width 와 결합: 800×1:1, video_y=380 → 하단 1180 → 750
+    d = DesignConfig(aspect_ratio="1:1", video_width=800, video_y=380)
+    assert _compute_subtitle_margin_v(d) == 750
+
+
+def test_subtitle_margin_video_y_clamped():
+    from app.pipeline import _compute_subtitle_margin_v
+    # 클램프 상한 = H - scaled_h (렌더러와 동일): 밴드 하단이 캔버스 끝 → padding 하한
+    d = DesignConfig(aspect_ratio="1:1", video_width=800, video_y=5000)
+    assert _compute_subtitle_margin_v(d) == 10
+
+
+def test_subtitle_margin_non_numeric_video_y_falls_back_to_center():
+    from app.pipeline import _compute_subtitle_margin_v
+    assert _compute_subtitle_margin_v(DesignConfig(video_y="abc")) == 430
+
+
 # ── 범위 검증 — CLI·렌더 경계 양쪽 즉시 실패 ────────────────────────────
 
 def test_cli_flag_wired():
