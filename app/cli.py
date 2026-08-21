@@ -147,6 +147,20 @@ def build_parser() -> argparse.ArgumentParser:
                              "전체를 스케일한다 — 90/70 배율로 2줄 크기가 함께 커진다")
     design.add_argument("--design-title-color", type=str, default=None, help="제목 1번째 줄 색상 (기본: white)")
     design.add_argument("--design-title-color2", type=str, default=None, help="제목 2번째 줄 색상 (기본: #FFFF00)")
+    # 제목 줄별 배경 박스·굵게(2026-08-21) — 값은 렌더러의 title_boxes/title_box_colors/title_bolds
+    # 리스트로 조립된다(title_color(2) 와 같은 패턴). 여백·라운드는 글자 크기 비례 고정값.
+    design.add_argument("--design-title-box", type=str, default=None, choices=["none", "round", "rect"],
+                        help="제목 1번째 줄 배경: none(없음, 기본)·round(둥근네모)·rect(각진네모)")
+    design.add_argument("--design-title-box2", type=str, default=None, choices=["none", "round", "rect"],
+                        help="제목 2번째 줄 배경: none·round·rect")
+    design.add_argument("--design-title-box-color", type=str, default=None,
+                        help="제목 1번째 줄 배경 박스 색 (기본: #000000, 예: #FF3E9D · black@0.6)")
+    design.add_argument("--design-title-box-color2", type=str, default=None,
+                        help="제목 2번째 줄 배경 박스 색 (기본: #000000)")
+    design.add_argument("--design-title-bold", action="store_true",
+                        help="제목 1번째 줄 굵게(같은 색 외곽선으로 획 두껍게)")
+    design.add_argument("--design-title-bold2", action="store_true",
+                        help="제목 2번째 줄 굵게")
     design.add_argument("--design-subtitle-size", type=int, default=None, help="자막 폰트 크기")
     design.add_argument("--design-subtitle-color", type=str, default=None,
                         help="메인 자막 색상 (#RRGGBB 또는 &H00BBGGRR). 미지정 시 장르 프리셋 색상 사용.")
@@ -304,6 +318,28 @@ def _build_design_config(args: argparse.Namespace) -> DesignConfig:
         if title_color2:
             title_colors[1] = title_color2
         overrides["title_colors"] = title_colors
+
+    # 제목 배경 박스·굵게: 렌더러는 리스트 필드만 읽는다 — title_colors 와 같은 조립.
+    # 기본값에서 시작해 지정한 줄만 치환(한 줄만 바꿔도 다른 줄은 기본 유지). 스위치(bold)는
+    # store_true 라 켜는 쪽만 의미 있다(title_y_fixed 와 같은 이유).
+    box1 = getattr(args, "design_title_box", None)
+    box2 = getattr(args, "design_title_box2", None)
+    if box1 or box2:
+        boxes = list(DesignConfig().title_boxes)
+        if box1: boxes[0] = box1
+        if box2: boxes[1] = box2
+        overrides["title_boxes"] = boxes
+    bc1 = getattr(args, "design_title_box_color", None)
+    bc2 = getattr(args, "design_title_box_color2", None)
+    if bc1 or bc2:
+        bcs = list(DesignConfig().title_box_colors)
+        if bc1: bcs[0] = bc1
+        if bc2: bcs[1] = bc2
+        overrides["title_box_colors"] = bcs
+    bold1 = bool(getattr(args, "design_title_bold", False))
+    bold2 = bool(getattr(args, "design_title_bold2", False))
+    if bold1 or bold2:
+        overrides["title_bolds"] = [bold1, bold2]
 
     # --design-work-image 지정 시 work_type="image" + work_value=경로 자동 설정.
     # 이름만 준 경우(예: RZsv4.png) assets/logos 에서 찾는다 — 루프·작품 카드가 레포 경로를

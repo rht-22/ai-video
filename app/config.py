@@ -27,6 +27,16 @@ class DesignConfig:
     # F-409: True 면 동적 배치(영상 위 20px) 대신 title_y 를 그대로 쓴다 — 편집실 제목
     # 드래그용. 기본 False 라 기존 채널 전부 무영향.
     title_y_fixed: bool = False
+    # 제목 줄별 배경 박스·굵게 — 렌더러는 이 리스트들만 읽는다(title_colors/title_sizes 와
+    # 같은 규약, F-409 교훈). 인덱스 = 원본 줄(0=윗줄, 1=아랫줄), 줄바꿈으로 늘어난 시각 줄은
+    # 원본 줄의 값을 잇는다. CLI 단수 플래그(--design-title-box(2) 등)를 cli 가 조립한다.
+    #   title_boxes:      "none"(기본) | "round"(둥근네모, Pillow PNG overlay) | "rect"(각진, drawtext box)
+    #   title_box_colors: drawtext 색 문자열(#RRGGBB · white · black@0.6) — 박스 채움색
+    #   title_bolds:      True 면 같은 색 borderw 로 획을 두껍게(가짜 볼드 — 번들 폰트가 전부 단일 굵기)
+    # 여백·라운드는 글자 크기 비례 고정값(renderer: pad 0.30em · radius 0.25em · stroke 0.025em).
+    title_boxes: list[str] = field(default_factory=lambda: ["none", "none"])
+    title_box_colors: list[str] = field(default_factory=lambda: ["#000000", "#000000"])
+    title_bolds: list[bool] = field(default_factory=lambda: [False, False])
 
     # 자막 설정 (ASS 스타일 기준)
     subtitle_font: str = "여기어때 잘난체 2 TTF"
