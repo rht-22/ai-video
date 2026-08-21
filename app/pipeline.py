@@ -1183,6 +1183,51 @@ from app.modules.silence_cutter import (
 from app.modules.beat_trimmer import beat_trim_storyline
 
 
+def _video_band_bottom(
+    design: DesignConfig,
+    *,
+    canvas_width: int = 1080,
+    canvas_height: int = 1920,
+    legacy_center: bool = False,
+) -> int:
+    """영상 밴드 하단 y(캔버스 px) — 렌더러 [2]와 같은 수식.
+
+    - scaled_h = int(video_width * r_h / r_w) (E10: 밴드 **폭** 기준) + 짝수 보정
+    - overlay_y = video_y 지정 시 그 위치(H - scaled_h 클램프), 미지정 = 세로 중앙
+
+    legacy_center=True 면 video_width·video_y 를 무시한 종전 기하(꽉 찬 폭·세로 중앙)
+    — TTS margin 델타(_compute_tts_margin_v)의 기준선용. 비숫자 video_width/video_y 는
+    비율 파싱과 같은 관용으로 폴백(꽉 찬 폭/세로 중앙) — 범위 검증은 렌더 경계 담당이라
+    어차피 직후 렌더가 즉시 실패한다. 밴드가 캔버스를 넘치면 반환값도 H 를 넘을 수 있다
+    — 호출부가 용도에 맞게 클램프한다.
+    """
+    H = canvas_height
+    W = canvas_width
+    scaled_w = W
+    if not legacy_center:
+        try:
+            scaled_w = int(str(getattr(design, "video_width", W)))
+        except (TypeError, ValueError):
+            scaled_w = W
+    try:
+        r_w, r_h = map(int, str(getattr(design, "aspect_ratio", "1:1")).split(":"))
+        scaled_h = int(scaled_w * r_h / r_w)
+    except Exception:
+        scaled_h = scaled_w
+    scaled_h -= scaled_h % 2
+    video_y = None
+    if not legacy_center:
+        try:
+            video_y = int(getattr(design, "video_y", None))
+        except (TypeError, ValueError):
+            video_y = None
+    if video_y is not None:
+        overlay_y = min(max(0, video_y), max(0, H - scaled_h))
+    else:
+        overlay_y = max(0, (H - scaled_h) // 2)
+    return overlay_y + scaled_h
+
+
 def _compute_subtitle_margin_v(
     design: DesignConfig,
     *,
@@ -1190,47 +1235,47 @@ def _compute_subtitle_margin_v(
     canvas_height: int = 1920,
     padding_px: int = 10,
 ) -> int:
-    """ASS 자막의 margin_v를 영상 영역 끝에서 padding_px 위에 위치하도록 동적으로 계산.
+    """ASS 메인 자막의 margin_v — 영상 밴드 하단에서 padding_px 위에 오도록 동적 계산.
 
-    캔버스 canvas_width×canvas_height에 영상이 aspect_ratio로 중앙 배치될 때:
-    - 영상 영역 끝점 = overlay_y + scaled_h
-    - 자막 baseline = 영상 영역 끝 - padding_px
-    - ASS alignment=2(하단 중앙) 기준 margin_v = canvas_height - 자막 baseline = canvas_height - (overlay_y + scaled_h) + padding_px
+    - 자막 baseline = 밴드 하단(_video_band_bottom) - padding_px
+    - ASS alignment=2(하단 중앙) 기준 margin_v = canvas_height - baseline
+    - 밴드가 캔버스를 채우면 하단 끝에서 padding_px 위(padding 하한)
 
     aspect_ratio는 DesignConfig에, 캔버스 크기는 AppConfig에 있으므로 호출부에서 명시 전달.
-
-    E10 후속: 밴드 높이는 렌더러 [2]와 같은 수식으로 **밴드 폭(video_width) 기준** —
-    캔버스 기준으로 두면 video_width 로 밴드가 작아졌을 때 자막이 밴드 하단보다 아래
-    (종전 꽉 찬 밴드 위치)에 남는다. video_y 지정 채널도 렌더러와 같은 규약(지정 위치,
-    H-scaled_h 클램프, 미지정 = 세로 중앙)으로 밴드 하단을 따른다 — 종전엔 세로 중앙
-    가정 고정이라 video_y 로 밴드를 올린 채널의 자막이 옛 중앙 밴드 위치에 남았다.
-    비숫자 video_width/video_y 는 비율 파싱과 같은 관용으로 폴백(꽉 찬 폭/세로 중앙) —
-    범위 검증은 렌더 경계 담당이라 어차피 직후 렌더가 즉시 실패한다.
+    E10 후속: 밴드 기하는 _video_band_bottom(video_width·video_y 반영)이 담당한다 —
+    캔버스 기준으로 두면 밴드를 줄이거나 올렸을 때 자막이 옛 밴드 위치에 남는다.
     """
     H = canvas_height
-    W = canvas_width
-    try:
-        scaled_w = int(str(getattr(design, "video_width", W)))
-    except (TypeError, ValueError):
-        scaled_w = W
-    try:
-        r_w, r_h = map(int, str(getattr(design, "aspect_ratio", "1:1")).split(":"))
-        scaled_h = int(scaled_w * r_h / r_w)
-    except Exception:
-        scaled_h = scaled_w
-    scaled_h -= scaled_h % 2
-    if scaled_h >= H:
-        # 영상이 캔버스 전체 채움 → 하단 끝에서 padding_px 위
-        return padding_px
-    try:
-        video_y = int(getattr(design, "video_y", None))
-    except (TypeError, ValueError):
-        video_y = None
-    if video_y is not None:
-        overlay_y = min(max(0, video_y), max(0, H - scaled_h))
-    else:
-        overlay_y = max(0, (H - scaled_h) // 2)
-    return max(padding_px, H - (overlay_y + scaled_h) + padding_px)
+    bottom = _video_band_bottom(
+        design, canvas_width=canvas_width, canvas_height=canvas_height)
+    return max(padding_px, H - bottom + padding_px)
+
+
+def _compute_tts_margin_v(
+    design: DesignConfig,
+    *,
+    canvas_width: int = 1080,
+    canvas_height: int = 1920,
+) -> int:
+    """TTS 자막 MarginV — tts_line_y_margin 을 영상 밴드에 앵커한다 (E10 후속 3).
+
+    tts_line_y_margin(기본 580)은 종전엔 캔버스 하단 기준 고정이라 video_width·video_y
+    로 밴드가 움직여도 TTS 줄이 제자리에 남았다. 종전 기하(꽉 찬 폭·세로 중앙,
+    legacy_center) 대비 밴드 하단이 움직인 델타만큼 margin 을 함께 움직인다 —
+    **밴드 하단으로부터의 오프셋이 상수**가 되는 변환이다. 메인 자막(항상 밴드 하단
+    10px 위)과 달리 사용자 노브(tts_line_y_margin)를 유지해야 해서 절대 재계산이 아니라
+    델타로 따른다. video_width·video_y 미지정이면 델타 0 = 종전 값 그대로(회귀 0 —
+    aspect_ratio 만 쓰는 기존 채널 포함). 하단은 H 클램프(캔버스 밖 밴드 무의미),
+    결과는 0 하한 — build_tts_ass 가 음수 margin 을 '미지정'(480 폴백)으로 해석한다.
+    """
+    H = canvas_height
+    base = int(getattr(design, "tts_line_y_margin", 580))
+    legacy_bottom = min(H, _video_band_bottom(
+        design, canvas_width=canvas_width, canvas_height=canvas_height,
+        legacy_center=True))
+    band_bottom = min(H, _video_band_bottom(
+        design, canvas_width=canvas_width, canvas_height=canvas_height))
+    return max(0, base + (legacy_bottom - band_bottom))
 
 
 def _scale_segments_for_speed(segments: list, speed: float) -> list:
@@ -3552,7 +3597,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 font_name=payload.design.subtitle_font,
                 font_size=payload.design.tts_line_font_size,
                 primary_color=payload.design.tts_line_color,
-                margin_v=payload.design.tts_line_y_margin,
+                # E10 후속 3: 밴드(video_width·video_y)가 움직인 만큼 TTS 줄도 따라간다
+                margin_v=_compute_tts_margin_v(
+                    payload.design, canvas_width=config.canvas_width,
+                    canvas_height=config.canvas_height),
             ) if tts_line_segs else None
 
             # TTS 활성 시간 범위 계산 (메인 자막 숨김용)
@@ -3602,7 +3650,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     font_name=payload.design.subtitle_font,
                     font_size=payload.design.tts_line_font_size,
                     primary_color=payload.design.tts_line_color,
-                    margin_v=payload.design.tts_line_y_margin,
+                    # E10 후속 3: 정본 분기와 동일 — 밴드 이동을 TTS 줄이 따라간다
+                    margin_v=_compute_tts_margin_v(
+                        payload.design, canvas_width=config.canvas_width,
+                        canvas_height=config.canvas_height),
                 )
                 tts_subtitle_path = output_dir / "tts_subtitles.ass"
                 build_tts_ass(tts_line_segs, tts_subtitle_path, tts_line_style,
@@ -3844,7 +3895,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     font_name=payload.design.subtitle_font,
                     font_size=payload.design.tts_line_font_size,
                     primary_color=payload.design.tts_line_color,
-                    margin_v=payload.design.tts_line_y_margin,
+                    # E10 후속 3: variant 도 정본과 같은 밴드 앵커 (영상 1개당 동일 위치)
+                    margin_v=_compute_tts_margin_v(
+                        payload.design, canvas_width=config.canvas_width,
+                        canvas_height=config.canvas_height),
                 ) if var_tts_segs else None
 
                 var_tts_sub_final = None

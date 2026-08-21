@@ -221,6 +221,46 @@ def test_subtitle_margin_non_numeric_video_y_falls_back_to_center():
     assert _compute_subtitle_margin_v(DesignConfig(video_y="abc")) == 430
 
 
+# ── TTS 자막 margin_v — 밴드 앵커 델타 (E10 후속 3) ─────────────────────
+# tts_line_y_margin 은 사용자 노브라 절대 재계산이 아니라 **종전 기하(꽉 찬 폭·세로
+# 중앙) 대비 밴드 하단이 움직인 델타**로 따른다 — 밴드 하단으로부터의 오프셋 상수 유지.
+
+def test_tts_margin_default_unchanged():
+    from app.pipeline import _compute_tts_margin_v
+    # video_width·video_y 미지정 = 델타 0 → 종전 값 그대로 (aspect_ratio 무관 — 회귀 0)
+    assert _compute_tts_margin_v(DesignConfig()) == 580
+    assert _compute_tts_margin_v(DesignConfig(aspect_ratio="16:9")) == 580
+    assert _compute_tts_margin_v(DesignConfig(aspect_ratio="9:16")) == 580  # 꽉 찬 캔버스
+    assert _compute_tts_margin_v(DesignConfig(video_width=1080)) == 580
+    assert _compute_tts_margin_v(DesignConfig(tts_line_y_margin=400)) == 400
+
+
+def test_tts_margin_follows_band_width():
+    from app.pipeline import _compute_tts_margin_v
+    # 800×1:1: 밴드 하단 1500 → 1360, 델타 140 → 580+140 = 720 (오프셋 상수 유지)
+    assert _compute_tts_margin_v(DesignConfig(aspect_ratio="1:1", video_width=800)) == 720
+    # 사용자 노브 유지: base 400 도 같은 델타로 이동
+    assert _compute_tts_margin_v(
+        DesignConfig(aspect_ratio="1:1", video_width=800, tts_line_y_margin=400)) == 540
+    # 종전 꽉 찬 캔버스(9:16, 하단 1920=H 클램프) → 800 폭 밴드 하단 1671, 델타 249
+    assert _compute_tts_margin_v(DesignConfig(aspect_ratio="9:16", video_width=800)) == 829
+
+
+def test_tts_margin_follows_video_y():
+    from app.pipeline import _compute_tts_margin_v
+    # 13:9 + video_y=380: 종전 하단 587+746=1333 → 380+746=1126, 델타 207 → 787
+    assert _compute_tts_margin_v(DesignConfig(aspect_ratio="13:9", video_y=380)) == 787
+
+
+def test_tts_margin_clamped_at_zero():
+    from app.pipeline import _compute_tts_margin_v
+    # 밴드를 아래로 내리면 델타 음수 — 0 하한(build_tts_ass 가 음수를 '미지정' 480 으로
+    # 해석하므로 음수를 내보내면 안 된다)
+    d = DesignConfig(aspect_ratio="1:1", video_width=800, video_y=5000,
+                     tts_line_y_margin=100)
+    assert _compute_tts_margin_v(d) == 0  # 100 + (1500-1920) = -320 → 0
+
+
 # ── 범위 검증 — CLI·렌더 경계 양쪽 즉시 실패 ────────────────────────────
 
 def test_cli_flag_wired():
