@@ -491,6 +491,7 @@ from dataclasses import dataclass, replace, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from app.modules.edit_overrides import validate_title_segments
 from app.modules.ffmpeg_utils import find_ffmpeg_command
 from app.modules.story_builder import StoryClip
 from app.config import DesignConfig,AppConfig
@@ -612,6 +613,10 @@ class RenderInputs:
     # 편집실 이미지 오버레이(edit_overrides/v3 images, F-408) — place_anchored_images 로
     # 배치가 끝난 항목: {file(절대 경로), start_sec, end_sec(편집본 시간축), x, y, w, layer}
     image_overlays: list[dict] | None = None
+    # 시간대별 제목(E8, edit_overrides/v3 title.segments) — 각 항목:
+    # {text, start_sec, end_sec(편집본 시간축)}. 있으면 그 창들만 그린다(창 밖 = 제목
+    # 없음, title_text 는 무시). 창의 ×1/S(배속) 변환은 필터 조립부가 한다.
+    title_segments: list[dict] | None = None
 
 
 def render_short(inputs: RenderInputs) -> list[str]:
@@ -684,7 +689,18 @@ def render_short(inputs: RenderInputs) -> list[str]:
 
     base_size = inputs.design.title_size
     wrapped_title = _wrap_text(inputs.title_text, _max_chars_for(base_size), base_size)
-    title_lines = wrapped_title.count("\n") + 1
+    # E8: 시간대별 제목이면 창 밖에서 title_text 는 안 그려진다 — 줄 수 기반 폰트 축소는
+    # 전 세그먼트 공통 title_size(디자인 레벨)에 대한 것이므로, 실제로 그려질 세그먼트
+    # 중 **가장 줄이 많은 것**을 기준으로 한 번만 정한다(기준선 고정과 같은 이유 —
+    # 세그먼트마다 크기가 널뛰면 그건 세그먼트별 스타일이고, 이번 판 범위 밖이다).
+    if inputs.title_segments:
+        title_lines = max(
+            sum(_wrap_text(ln, _max_chars_for(base_size), base_size).count("\n") + 1
+                for ln in str(sg["text"]).split("\n") if ln.strip())
+            for sg in inputs.title_segments
+        )
+    else:
+        title_lines = wrapped_title.count("\n") + 1
 
     if title_lines >= 4:
         scaled_title_size = max(24, int(base_size * 0.70))
@@ -950,6 +966,19 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     # 라운드 22: 최대 20자까지 한 줄 유지 (이전 15자). 20자 초과는 pipeline에서 LLM 재작성 또는 절단.
     title_lines = split_text_smart(inputs.title_text, 20)
 
+    # E8: 시간대별 제목 — 세그먼트가 있으면 그 창들만 그린다(창 밖 시간은 제목 없음이
+    # 유효값, title_text 는 무시). 창은 자막과 같은 편집본 시간축으로 들어오고, 제목은
+    # setpts 뒤에 얹히므로 enable 창만 출력 시각(×1/S)으로 나눈다 — 이미지 오버레이
+    # ([6.5])와 같은 규약. CLI·오버라이드 검증을 안 거친 호출(파이프라인 재개·테스트)이
+    # 깨진 창을 들고 오면 즉시 실패한다(E7 과 같은 렌더 경계 검증).
+    _tsegs = list(inputs.title_segments or [])
+    if _tsegs:
+        validate_title_segments(_tsegs)
+        _tsegs.sort(key=lambda sg: (float(sg["start_sec"]), float(sg["end_sec"])))
+        _tseg_lines = [split_text_smart(str(sg["text"]), 20) for sg in _tsegs]
+    else:
+        _tseg_lines = []
+
     # 줄별 폰트 크기 (title_sizes가 있으면 사용, 없으면 title_size로 통일)
     title_sizes = getattr(d, 'title_sizes', [d.title_size])
 
@@ -957,10 +986,18 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     scaled_w = W
 
     line_spacing = 30
-    title_total_height = sum(
-        (title_sizes[orig_idx] if orig_idx < len(title_sizes) else title_sizes[-1])
-        for orig_idx, _ in title_lines
-    ) + max(0, len(title_lines) - 1) * line_spacing
+
+    def _title_block_height(lines: list[tuple[int, str]]) -> int:
+        return sum(
+            (title_sizes[orig_idx] if orig_idx < len(title_sizes) else title_sizes[-1])
+            for orig_idx, _ in lines
+        ) + max(0, len(lines) - 1) * line_spacing
+
+    # E8: 자동 배치의 기준 y 는 전 세그먼트 공통 한 벌이어야 한다(세그먼트마다 제목이
+    # 위아래로 튀면 안 된다) — **최대 블록 높이(=최대 줄 수) 기준**으로 잡으면 가장 큰
+    # 세그먼트도 영상과 안 겹치고, 모든 세그먼트의 첫 줄이 같은 y 에서 시작한다.
+    title_total_height = (max(_title_block_height(ls) for ls in _tseg_lines)
+                          if _tseg_lines else _title_block_height(title_lines))
 
     try:
         r_w, r_h = map(int, ratio.split(':'))
@@ -1128,26 +1165,50 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         return max(1, int(round(base_size * scale)))
 
     # 줄별 스펙(색·크기·프레임 y)을 먼저 확정 — 회전 유무와 무관하게 좌표 규약은 동일하다.
-    _title_specs: list[tuple[str, int, int, str]] = []  # (color, font_size, frame_y, escaped)
+    # E8: 기준선(_title_block_top)은 전 세그먼트 공통 한 벌 — 세그먼트마다 줄 수가
+    # 달라도 모든 세그먼트의 첫 줄이 같은 y 에서 시작한다(위 title_total_height 참고).
     _title_block_top = cumulative_y
-    for orig_idx, raw_line in title_lines:
-        base_color = custom_colors[orig_idx] if orig_idx < len(custom_colors) else custom_colors[-1]
-        base_font_size = title_sizes[orig_idx] if orig_idx < len(title_sizes) else title_sizes[-1]
-        font_size = _scale_font_for_length(base_font_size, len(raw_line))
-        _title_specs.append(
-            (base_color, font_size, cumulative_y, _escape_text_for_drawtext(raw_line)))
-        cumulative_y += font_size + line_spacing
 
-    if _title_specs and title_rotate:
-        # E7-1: drawtext 는 회전이 없다 — 제목 줄 묶음 전체를 투명 캔버스에 그린 뒤
-        # rotate(시계방향 양수 = ffmpeg rotate 와 동일, F-410 실측) → overlay.
-        # 원점 = 텍스트 블록 중심. 줄들은 x 로 중앙 정렬이라 캔버스(W×블록높이)의 중심이
-        # 곧 블록 중심이다. 위아래 패딩은 대칭이라 중심을 움직이지 않으면서 글리프
-        # 디센더가 캔버스 모서리에 잘리는 것을 막는다. 바운딩 박스·중심 고정 되물림은
-        # images[].rotate(F-410)와 같은 계산이다.
-        _blk_pad = (max(fs for _, fs, _, _ in _title_specs) + 1) // 2
-        _blk_h = (sum(fs for _, fs, _, _ in _title_specs)
-                  + max(0, len(_title_specs) - 1) * line_spacing + 2 * _blk_pad)
+    def _line_specs(lines: list[tuple[int, str]]) -> list[tuple[str, int, int, str]]:
+        specs: list[tuple[str, int, int, str]] = []  # (color, font_size, frame_y, escaped)
+        y = _title_block_top
+        for orig_idx, raw_line in lines:
+            base_color = custom_colors[orig_idx] if orig_idx < len(custom_colors) else custom_colors[-1]
+            base_font_size = title_sizes[orig_idx] if orig_idx < len(title_sizes) else title_sizes[-1]
+            font_size = _scale_font_for_length(base_font_size, len(raw_line))
+            specs.append((base_color, font_size, y, _escape_text_for_drawtext(raw_line)))
+            y += font_size + line_spacing
+        return specs
+
+    _title_specs = _line_specs(title_lines)
+
+    def _emit_title_lines(specs: list[tuple[str, int, int, str]], in_label: str,
+                          prefix: str, enable_clause: str = "") -> str:
+        """줄별 drawtext 를 메인 체인에 직결 — 종전(무회전) 제목 경로."""
+        label = in_label
+        for visual_idx, (base_color, font_size, frame_y, escaped_full) in enumerate(specs):
+            next_label = f"[{prefix}{visual_idx}]"
+            filters.append(
+                f"{label}drawtext=expansion=none:fontfile='{font_arg}':text='{escaped_full}':"
+                f"fontcolor={base_color}:fontsize={font_size}:"
+                f"x=(w-text_w)/2:y={frame_y}{enable_clause}{next_label}"
+            )
+            label = next_label
+        return label
+
+    def _emit_rotated_title(specs: list[tuple[str, int, int, str]], in_label: str,
+                            prefix: str, out_label: str, enable_clause: str = "") -> str:
+        """E7-1: drawtext 는 회전이 없다 — 제목 줄 묶음 전체를 투명 캔버스에 그린 뒤
+        rotate(시계방향 양수 = ffmpeg rotate 와 동일, F-410 실측) → overlay.
+        원점 = 텍스트 블록 중심. 줄들은 x 로 중앙 정렬이라 캔버스(W×블록높이)의 중심이
+        곧 블록 중심이다. 위아래 패딩은 대칭이라 중심을 움직이지 않으면서 글리프
+        디센더가 캔버스 모서리에 잘리는 것을 막는다. 바운딩 박스·중심 고정 되물림은
+        images[].rotate(F-410)와 같은 계산이다. E8 세그먼트는 세그먼트별 캔버스로
+        같은 창(enable_clause)을 overlay 에 단다 — 캔버스 높이는 그 세그먼트의 블록
+        높이라 회전 원점(블록 중심)도 세그먼트별로 제 자리다."""
+        _blk_pad = (max(fs for _, fs, _, _ in specs) + 1) // 2
+        _blk_h = (sum(fs for _, fs, _, _ in specs)
+                  + max(0, len(specs) - 1) * line_spacing + 2 * _blk_pad)
         _blk_h += _blk_h % 2
         _canvas_top = _title_block_top - _blk_pad
         _rad = math.radians(title_rotate)
@@ -1155,10 +1216,10 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         _bb_h = int(math.ceil(abs(W * math.sin(_rad)) + abs(_blk_h * math.cos(_rad)) - 1e-6))
         _ox = int(round(W / 2.0 - _bb_w / 2.0))
         _oy = int(round(_canvas_top + _blk_h / 2.0 - _bb_h / 2.0))
-        _ttl_label = "[ttl0]"
+        _ttl_label = f"[{prefix}0]"
         filters.append(f"color=c=black@0.0:s={W}x{_blk_h}:d=1,format=rgba{_ttl_label}")
-        for visual_idx, (base_color, font_size, frame_y, escaped_full) in enumerate(_title_specs):
-            next_label = f"[ttl{visual_idx + 1}]"
+        for visual_idx, (base_color, font_size, frame_y, escaped_full) in enumerate(specs):
+            next_label = f"[{prefix}{visual_idx + 1}]"
             filters.append(
                 f"{_ttl_label}drawtext=expansion=none:fontfile='{font_arg}':text='{escaped_full}':"
                 f"fontcolor={base_color}:fontsize={font_size}:"
@@ -1167,18 +1228,31 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
             _ttl_label = next_label
         print(f"  [TitleRotate] {title_rotate:g}° — 블록 {W}x{_blk_h} → bb {_bb_w}x{_bb_h}, "
               f"overlay=({_ox},{_oy})")
-        filters.append(f"{_ttl_label}rotate={_rad:.10f}:ow={_bb_w}:oh={_bb_h}:c=black@0[ttlrot]")
-        filters.append(f"{last_v_label}[ttlrot]overlay={_ox}:{_oy}[with_title]")
-        last_v_label = "[with_title]"
+        filters.append(f"{_ttl_label}rotate={_rad:.10f}:ow={_bb_w}:oh={_bb_h}:c=black@0[{prefix}rot]")
+        filters.append(f"{in_label}[{prefix}rot]overlay={_ox}:{_oy}{enable_clause}{out_label}")
+        return out_label
+
+    if _tsegs:
+        # E8: 세그먼트별로 같은 기준선에서 스펙을 만들고 창(enable)만 단다 — 겹침은
+        # 검증에서 거절됐으므로 어느 시점이든 최대 한 세그먼트만 그려진다. 회전이
+        # 있으면 세그먼트별 캔버스 → rotate → overlay 의 enable 파라미터로 같은 창.
+        for k, (sg, seg_lines) in enumerate(zip(_tsegs, _tseg_lines)):
+            s_out = float(sg["start_sec"]) / speed
+            e_out = float(sg["end_sec"]) / speed
+            enable = f":enable='between(t,{s_out:.3f},{e_out:.3f})'"
+            specs = _line_specs(seg_lines)
+            print(f"  [TitleSegment {k}] {s_out:.3f}~{e_out:.3f}s ({len(specs)}줄)"
+                  + (f" — 편집본 {float(sg['start_sec']):g}~{float(sg['end_sec']):g}s"
+                     f" ×1/{speed:g}" if speed != 1.0 else ""))
+            if title_rotate:
+                last_v_label = _emit_rotated_title(
+                    specs, last_v_label, f"tsg{k}_", f"[tsg{k}out]", enable)
+            else:
+                last_v_label = _emit_title_lines(specs, last_v_label, f"tseg{k}_", enable)
+    elif _title_specs and title_rotate:
+        last_v_label = _emit_rotated_title(_title_specs, last_v_label, "ttl", "[with_title]")
     else:
-        for visual_idx, (base_color, font_size, frame_y, escaped_full) in enumerate(_title_specs):
-            next_label = f"[title_{visual_idx}]"
-            filters.append(
-                f"{last_v_label}drawtext=expansion=none:fontfile='{font_arg}':text='{escaped_full}':"
-                f"fontcolor={base_color}:fontsize={font_size}:"
-                f"x=(w-text_w)/2:y={frame_y}{next_label}"
-            )
-            last_v_label = next_label
+        last_v_label = _emit_title_lines(_title_specs, last_v_label, "title_")
 
 
     # [5.5] 플랫폼 표기 — 권리사 '영상 내 플랫폼 노출' 요구(티빙·Wavve·쿠팡플레이 등).

@@ -11,7 +11,9 @@ v3 = v2 + 자막 앵커/줄 스타일 + images (정본 문서: docs/edit_overrid
 
     {
       "schema": "edit_overrides/v3",          # v1·v2 도 계속 받는다
-      "title":  { "top_title": "1줄\\n2줄" },
+      "title":  { "top_title": "1줄\\n2줄",
+                  "segments": [ {"text": "첫 제목\\n둘째 줄",        # (E8, v3 전용)
+                                 "start_sec": 0, "end_sec": 12.5}, ... ] },
       "clips":  [ {"start_sec": 742.5, "end_sec": 771.0, "role": "hook",
                    "use_original_audio": true}, ... ],
       "subtitles": [ {"start_sec": 0.2, "end_sec": 2.3, "text": "고친 자막",
@@ -54,6 +56,12 @@ v3 추가분:
     시간 창은 자막 앵커와 같은 원본 절대초(source_time_sec + duration_sec) —
     place_anchored_images 가 최종 타임라인으로 변환하고 고아는 tts 규칙대로 드롭한다.
     layer 로 자막 아래(≤0, 기본 0)/위(≥1)를 가른다.
+  · **title.segments (E8)** — 시간대별 제목. 자막처럼 시간 창(편집본 시간축, 초)을
+    갖는 제목 세그먼트 목록. 있으면 **그 창들만 그린다** — 창 밖 시간은 제목 없음
+    (빈 화면이 유효값: '뒤에는 제목을 끄고 싶다'가 이 기능의 절반이다). top_title 은
+    세그먼트가 없거나 구 대시보드가 보낼 때의 종전 경로(전체 상영) 그대로.
+    title_y_fixed/title_y·title_size·title_rotate(E7)는 전 세그먼트 공통(디자인 레벨
+    유지) — 세그먼트별 스타일은 후속. 검증 규칙은 validate_title_segments 참고.
 
 규약 넷 — 다 이유가 있다:
   · **clips 는 전량 교체**다(부분 패치 아님). 추가·삭제·순서변경이 섞이면 인덱스
@@ -118,6 +126,10 @@ IMAGE_KEYS = ("file", "source_time_sec", "duration_sec", "x", "y", "w", "layer",
 # 회전 계약(images[].rotate · subtitles[].style.rotate 공통) — 도 단위, 시계방향
 # 양수, 원점은 이미지 중심/자막 앵커, 기본 0.
 ROTATE_RANGE_DEG = 180.0
+# 시간대별 제목(E8) — title.segments[] 항목 허용 키. 세그먼트별 스타일(크기·색·회전)은
+# 이번 판 범위 밖(후속)이라 키 자체를 거절한다 — style 과 같은 fail-loud 규약.
+TITLE_SEGMENT_KEYS = ("text", "start_sec", "end_sec")
+TITLE_MAX_SEGMENTS = 20
 _COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
 
@@ -155,6 +167,12 @@ def validate_overrides(data: Any) -> dict[str, Any]:
         raise EditOverrideError("title 은 객체여야 합니다")
     if title.get("top_title") is not None and not str(title["top_title"]).strip():
         raise EditOverrideError("top_title 이 비어 있습니다 — 고치지 않을 거면 키를 빼세요")
+    if title.get("segments") is not None:
+        if schema != SCHEMA_V3:
+            raise EditOverrideError(
+                "title.segments 는 edit_overrides/v3 전용입니다 — 스키마를 v3 로 찍으세요 "
+                "(구 스키마에 얹으면 구 엔진 노드가 조용히 무시합니다)")
+        validate_title_segments(title["segments"])
 
     clips = data.get("clips")
     if clips is not None:
@@ -299,6 +317,72 @@ def _validate_subtitle_v3_fields(i: int, s: dict[str, Any], schema: str) -> None
                 f"(받은 값: {style['color']!r})")
     if style.get("rotate") is not None:
         _validate_rotate(f"subtitles[{i}]: style.rotate", style["rotate"])
+
+
+def validate_title_segments(segs: Any) -> None:
+    """시간대별 제목(E8) title.segments 계약 검증 — 즉시 실패, 조용한 무시 금지. 순수.
+
+    렌더 경계(_build_filtergraph)에서도 다시 부른다(E7 과 같은 이유 — CLI·오버라이드
+    검증을 안 거친 호출이 이상한 창을 들고 오면 조용히 이상한 영상을 만드는 대신
+    즉시 실패한다). 규칙:
+      · 비어 있지 않은 배열, 최대 TITLE_MAX_SEGMENTS(20)개
+      · text 비면 거절 · start_sec ≥ 0 · end_sec > start_sec
+      · 창끼리 겹침 거절 — 제목은 한 벌 자리라 겹치면 포개진다
+    좌표계는 subtitles 와 동일(**편집본 시간축**, 쇼츠 0초 시작, 초)."""
+    if not isinstance(segs, list) or not segs:
+        raise EditOverrideError("title.segments 는 비어 있지 않은 배열이어야 합니다 "
+                                "(시간대별 제목을 안 쓰면 키 자체를 빼세요)")
+    if len(segs) > TITLE_MAX_SEGMENTS:
+        raise EditOverrideError(
+            f"title.segments 는 최대 {TITLE_MAX_SEGMENTS}개입니다 ({len(segs)}개)")
+    windows: list[tuple[float, float, int]] = []
+    for i, sg in enumerate(segs):
+        if not isinstance(sg, dict):
+            raise EditOverrideError(f"title.segments[{i}] 가 객체가 아닙니다")
+        unknown = [k for k in sg if k not in TITLE_SEGMENT_KEYS]
+        if unknown:
+            raise EditOverrideError(
+                f"title.segments[{i}]: 모르는 키 {unknown} — 계약은 "
+                f"{'/'.join(TITLE_SEGMENT_KEYS)} 뿐입니다 (세그먼트별 스타일은 후속)")
+        try:
+            s, e = float(sg["start_sec"]), float(sg["end_sec"])
+        except (KeyError, TypeError, ValueError) as ex:
+            raise EditOverrideError(
+                f"title.segments[{i}]: start_sec·end_sec 이 필요합니다 ({ex})") from ex
+        if s < 0:
+            raise EditOverrideError(f"title.segments[{i}]: start_sec 이 음수입니다 ({s})")
+        if e <= s:
+            raise EditOverrideError(
+                f"title.segments[{i}]: 구간이 뒤집혔거나 길이 0 입니다 ({s} → {e})")
+        if not str(sg.get("text", "")).strip():
+            raise EditOverrideError(
+                f"title.segments[{i}]: text 가 비어 있습니다 — 그 시간대에 제목을 끄려면 "
+                "그 창을 배열에서 빼세요 (창 밖 시간은 원래 제목 없음)")
+        windows.append((s, e, i))
+    windows.sort()
+    for (s1, e1, i1), (s2, e2, i2) in zip(windows, windows[1:]):
+        if s2 < e1 - 1e-9:
+            raise EditOverrideError(
+                f"title.segments[{i1}]·[{i2}] 창이 겹칩니다 ({s1:g}~{e1:g} vs "
+                f"{s2:g}~{e2:g}) — 제목은 한 벌 자리라 겹치면 포개집니다")
+
+
+def overrides_title_segments(ov: dict[str, Any] | None) -> list[dict[str, Any]] | None:
+    """오버라이드 → 시간대별 제목(E8) 세그먼트 목록. 키가 없으면 None. 순수.
+
+    {text, start_sec, end_sec} 로 정규화(숫자화)하고 시각순으로 정렬해 돌려준다 —
+    겹침은 검증에서 이미 거절됐으므로 정렬은 안전하다. text 는 top_title 과 같은
+    규약(줄바꿈 = 2줄 위계, title_color/title_color2 lookup)이라 그대로 통과한다.
+    좌표는 편집본 시간축 그대로다 — 배속(×1/S) 변환은 제목이 setpts 뒤에 얹히는
+    렌더러가 이미지 오버레이와 같은 지점에서 한다."""
+    segs = ((ov or {}).get("title") or {}).get("segments")
+    if not segs:
+        return None
+    out = [{"text": str(sg["text"]),
+            "start_sec": float(sg["start_sec"]),
+            "end_sec": float(sg["end_sec"])} for sg in segs]
+    out.sort(key=lambda x: (x["start_sec"], x["end_sec"]))
+    return out
 
 
 def _validate_rotate(where: str, value: Any) -> None:
