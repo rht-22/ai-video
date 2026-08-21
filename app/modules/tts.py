@@ -1,14 +1,60 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
+import time
 from pathlib import Path
 
 from app.modules.ffmpeg_utils import find_ffmpeg_command
 
 
-# Voice 프리셋 라벨 → (Edge TTS voice id, pitch).
-# 기본은 자연스러운 한국어 voice (ko_*) 4종, 트렌드 톤이 필요할 때만 multilingual (chat_*) 4종 사용.
+# ── E11 (2026-08-21): KR 내레이션 합성의 1순위 백엔드는 ElevenLabs ──────────────
+# ELEVENLABS_API_KEY 가 있으면 ElevenLabs, 없으면 edge-tts 폴백(stdout 에 명시 —
+# 조용한 대체 금지). API 호출 실패는 짧은 재시도 후 **즉시 실패**다: edge-tts 로
+# 조용히 넘어가면 같은 채널 목소리가 편마다 달라진다(fail-loud).
+#
+# voice/speed 의 **라벨 계약은 E11 이전과 동일**하다 — 편집실(edVoiceSel·edSpeedSel)·
+# edit_overrides/v2·체크포인트 cue 에 이미 실린 값이라, 라벨을 바꾸면 하위호환이 깨진다.
+# 라벨 전수 커버는 tests/test_e11_tts_elevenlabs.py 가 대조한다.
+
+# 라벨 → ElevenLabs premade voice_id. premade 라이브러리의 전 계정 공통 안정 id 다.
+# ElevenLabs 에는 pitch 파라미터가 없으므로 high/low 피치 변형은 목소리 자체를
+# 달리 골라 재현한다. 교체는 여기 한 곳 — 채널 취향이 갈리면 id 만 바꾼다.
+EL_VOICE_PRESETS: dict[str, str] = {
+    # ── 한국어 내레이션 4종 (multilingual 모델이 한국어로 말한다) ──
+    "ko_female":      "EXAVITQu4vr4xnSDxMaL",  # Sarah — 차분·명료한 여성 (기본)
+    "ko_female_high": "FGY2WhTYpPnrIDTdsKH5",  # Laura — 밝고 통통 튀는 여성
+    "ko_male":        "JBFqnCBsd6RMkjVDRZzb",  # George — 따뜻한 내레이션 남성
+    "ko_male_low":    "nPczCjzI2devNBz1zQrb",  # Brian — 깊고 묵직한 남성
+    # ── 트렌드 chat_* 4종 (구 edge multilingual 프리셋의 대응) ──
+    "chat_emma":      "cgSgspJ2msm6clMCkdW9",  # Jessica — 밝고 명료한 여성
+    "chat_brian":     "iP95p4xoKVk53GoZ742B",  # Chris — 친근한 캐주얼 남성
+    "chat_seraphina": "pFZP5JQG7iQjIQuC4Bku",  # Lily — 차분한 영국계 여성
+    "chat_florian":   "onwK4e9ZLuTAKqWW03F9",  # Daniel — 차분한 영국계 남성
+}
+
+# 라벨 → voice_settings.speed. 문서 허용 범위 0.7~1.2(1.0=기본, 전 모델·전 보이스).
+# edge-tts rate(fast/slow ±10%)는 체감이 약해 '속도가 안 먹힌다'로 보였다 —
+# ElevenLabs 는 스펙트럼 끝(0.7·1.2)이 뚜렷하고 fast/slow(0.85·1.1)도 귀로 구분된다.
+EL_SPEED: dict[str, float] = {
+    "very_slow": 0.7,
+    "slow":      0.85,
+    "normal":    1.0,
+    "fast":      1.1,
+    "very_fast": 1.2,
+}
+
+# 모델: 한국어 + voice_settings.speed 지원이 필수 조건. eleven_multilingual_v2 가
+# 품질 우선 기본(API 기본값이기도 하다). 내레이션은 편당 cue 2~5개 × 수십 자라
+# flash(단가 절반)와의 비용 차이가 미미해 품질을 택했다 — 단가가 문제되면 env 로
+# eleven_flash_v2_5 로 바꾼다(코드 배포 불필요).
+EL_MODEL_ID = os.environ.get("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
+EL_OUTPUT_FORMAT = "mp3_44100_128"
+_EL_RETRIES = 2      # 첫 시도 제외 재시도 횟수 — 429(쿼터·동시성)·5xx·네트워크만
+
+
+# Voice 프리셋 라벨 → (Edge TTS voice id, pitch). **폴백 경로 전용**(키 없는 개발 환경).
 VOICE_PRESETS: dict[str, tuple[str, str]] = {
     # ── 자연스러운 한국어 (우선 사용) ──
     "ko_female":      ("ko-KR-SunHiNeural",                  "+0Hz"),    # 기본 한국 여성
@@ -22,7 +68,7 @@ VOICE_PRESETS: dict[str, tuple[str, str]] = {
     "chat_florian":   ("de-DE-FlorianMultilingualNeural",    "+0Hz"),    # 차분한 유럽계 남성 (de)
 }
 
-# 속도 라벨 → Edge TTS rate 문자열.
+# 속도 라벨 → Edge TTS rate 문자열. **폴백 경로 전용**.
 SPEED_TO_RATE: dict[str, str] = {
     "very_slow": "-25%",
     "slow":      "-10%",
@@ -34,6 +80,36 @@ SPEED_TO_RATE: dict[str, str] = {
 DEFAULT_VOICE = "ko_female"
 DEFAULT_SPEED = "normal"
 
+_backend_announced = False
+
+
+def active_backend() -> str:
+    """이번 프로세스가 쓸 합성 백엔드 — run_log·체크포인트 기록용(부작용 없음).
+
+    elevenlabs > edge-tts > silence(개발 환경 최후 폴백) 순. 검수함에서 어느
+    백엔드로 나간 판인지 추적할 수 있어야 한다(E11 — 조용한 대체 금지 원칙)."""
+    if os.environ.get("ELEVENLABS_API_KEY"):
+        return "elevenlabs"
+    if _has_edge_tts():
+        return "edge-tts"
+    return "silence"
+
+
+def _announce_backend() -> str:
+    """백엔드를 stdout 에 프로세스당 1회 명시한다 — 키가 빠진 노드가 edge-tts 로
+    조용히 도는 것을 로그에서 바로 잡아내기 위한 것(E11 발주 규율)."""
+    global _backend_announced
+    backend = active_backend()
+    if not _backend_announced:
+        if backend == "elevenlabs":
+            print(f"[TTS] backend=elevenlabs model={EL_MODEL_ID}")
+        elif backend == "edge-tts":
+            print("[TTS] backend=edge-tts — ELEVENLABS_API_KEY 없음")
+        else:
+            print("[TTS] backend=silence — ELEVENLABS_API_KEY·edge_tts 둘 다 없음(개발 폴백)")
+        _backend_announced = True
+    return backend
+
 
 def synthesize_tts(
     text: str,
@@ -44,15 +120,17 @@ def synthesize_tts(
 ) -> Path:
     """텍스트를 mp3로 합성. voice/speed는 프리셋 라벨.
 
-    voice 라벨이 VOICE_PRESETS에 없으면 DEFAULT_VOICE로, speed 라벨이 SPEED_TO_RATE에
-    없으면 DEFAULT_SPEED로 폴백한다.
+    라벨이 프리셋에 없으면 기본값으로 폴백한다(종전 계약 유지 — 구 run 의
+    narrative_* 등 레거시 라벨이 체크포인트에 남아 있다).
     """
-    voice_id, pitch = VOICE_PRESETS.get(voice, VOICE_PRESETS[DEFAULT_VOICE])
-    rate = SPEED_TO_RATE.get(speed, SPEED_TO_RATE[DEFAULT_SPEED])
-
-    if _has_edge_tts():
-        return _synthesize_edge_tts(text, output_path, voice_id=voice_id, rate=rate, pitch=pitch)
-    return _synthesize_silence(output_path, duration_sec=1.0)
+    backend = _announce_backend()
+    if backend == "elevenlabs":
+        return _synthesize_elevenlabs(text, Path(output_path), voice=voice, speed=speed)
+    if backend == "edge-tts":
+        voice_id, pitch = VOICE_PRESETS.get(voice, VOICE_PRESETS[DEFAULT_VOICE])
+        rate = SPEED_TO_RATE.get(speed, SPEED_TO_RATE[DEFAULT_SPEED])
+        return _synthesize_edge_tts(text, Path(output_path), voice_id=voice_id, rate=rate, pitch=pitch)
+    return _synthesize_silence(Path(output_path), duration_sec=1.0)
 
 
 def get_audio_duration(path: Path) -> float:
@@ -122,6 +200,53 @@ def synthesize_tts_with_fit(
     return current_text, last_actual
 
 
+def _synthesize_elevenlabs(
+    text: str,
+    output_path: Path,
+    voice: str = DEFAULT_VOICE,
+    speed: str = DEFAULT_SPEED,
+) -> Path:
+    """ElevenLabs REST 합성. requests 는 config.py(폰트 다운로드)와 같은 기존 의존.
+
+    voice_settings 는 stability/similarity 를 표준값으로 **명시**한다 — 보이스별
+    저장 기본값에 기대면 premade 보이스가 교체·조정될 때 채널 톤이 소리 없이
+    변한다. 실패 정책: 429·5xx·네트워크만 재시도(_EL_RETRIES회, 2s·4s), 그 외
+    4xx(키·voice_id·요청 오류)는 재시도해도 안 낫는다 — 즉시 실패."""
+    import requests
+
+    voice_id = EL_VOICE_PRESETS.get(voice, EL_VOICE_PRESETS[DEFAULT_VOICE])
+    url = (f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+           f"?output_format={EL_OUTPUT_FORMAT}")
+    body = {
+        "text": text,
+        "model_id": EL_MODEL_ID,
+        "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.75,
+            "speed": EL_SPEED.get(speed, EL_SPEED[DEFAULT_SPEED]),
+        },
+    }
+    headers = {"xi-api-key": os.environ["ELEVENLABS_API_KEY"]}
+    last_err: Exception | None = None
+    for attempt in range(_EL_RETRIES + 1):
+        try:
+            resp = requests.post(url, json=body, headers=headers, timeout=60)
+        except requests.RequestException as e:     # 네트워크 — 재시도 대상
+            last_err = e
+        else:
+            if resp.status_code == 200:
+                output_path.write_bytes(resp.content)
+                return output_path
+            last_err = RuntimeError(f"ElevenLabs {resp.status_code}: {resp.text[:200]}")
+            if resp.status_code != 429 and resp.status_code < 500:
+                break                              # 4xx — 재시도 무의미, 즉시 실패
+        if attempt < _EL_RETRIES:
+            time.sleep(2 * (attempt + 1))
+    # edge-tts 로 조용히 넘어가지 않는다 — 같은 채널 목소리가 편마다 달라진다(E11).
+    raise RuntimeError(
+        f"ElevenLabs TTS 합성 실패(voice={voice}, speed={speed}, {len(text)}자) — {last_err}")
+
+
 def _has_edge_tts() -> bool:
     import importlib.util
 
@@ -141,14 +266,10 @@ def _synthesize_edge_tts(
         communicate = edge_tts.Communicate(text, voice_id, rate=rate, pitch=pitch)
         await communicate.save(str(output_path))
 
-    try:
-        asyncio.run(_run())
-    except Exception:
-        # 폴백: rate/pitch 없이 voice만 재시도 (드물게 SSML 충돌 등)
-        async def _run_plain() -> None:
-            communicate = edge_tts.Communicate(text, voice_id)
-            await communicate.save(str(output_path))
-        asyncio.run(_run_plain())
+    # E11: '실패하면 rate/pitch 빼고 재시도'하던 무성 폴백을 제거했다 — 속도·피치가
+    # 소리 없이 무시되는 유일한 지점이었고, 렌더는 성공하므로 아무도 모른다
+    # (2026-07-29 폰트 조용한 대체와 같은 계열). 실패는 실패로 드러낸다.
+    asyncio.run(_run())
     return output_path
 
 
