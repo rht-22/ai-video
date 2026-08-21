@@ -1242,12 +1242,16 @@ def _compute_subtitle_margin_v(
     - 밴드가 캔버스를 채우면 하단 끝에서 padding_px 위(padding 하한)
 
     aspect_ratio는 DesignConfig에, 캔버스 크기는 AppConfig에 있으므로 호출부에서 명시 전달.
-    E10 후속: 밴드 기하는 _video_band_bottom(video_width·video_y 반영)이 담당한다 —
-    캔버스 기준으로 두면 밴드를 줄이거나 올렸을 때 자막이 옛 밴드 위치에 남는다.
+    E10 후속 + 8/21 발주 검수 교정: 신 기하(밴드 하단 앵커 — video_width·video_y 반영)는
+    **video_width 가 명시된 경우에만** 적용한다. 미지정이면 종전 기하(꽉 찬 폭·세로 중앙
+    가정) 그대로 — video_y 만 쓰는 기존 채널(한 입 주막 video_y=440, 2026-08-19 실렌더
+    픽셀 튜닝)의 자막이 조용히 움직이면 안 된다. video_width 는 오케스트레이터
+    editor_e10 게이트 뒤에서만 들어오므로 '명시 = 신규 채널'이 곧 회귀 0 조건이다.
     """
     H = canvas_height
     bottom = _video_band_bottom(
-        design, canvas_width=canvas_width, canvas_height=canvas_height)
+        design, canvas_width=canvas_width, canvas_height=canvas_height,
+        legacy_center=getattr(design, "video_width", None) is None)
     return max(padding_px, H - bottom + padding_px)
 
 
@@ -1264,12 +1268,18 @@ def _compute_tts_margin_v(
     legacy_center) 대비 밴드 하단이 움직인 델타만큼 margin 을 함께 움직인다 —
     **밴드 하단으로부터의 오프셋이 상수**가 되는 변환이다. 메인 자막(항상 밴드 하단
     10px 위)과 달리 사용자 노브(tts_line_y_margin)를 유지해야 해서 절대 재계산이 아니라
-    델타로 따른다. video_width·video_y 미지정이면 델타 0 = 종전 값 그대로(회귀 0 —
-    aspect_ratio 만 쓰는 기존 채널 포함). 하단은 H 클램프(캔버스 밖 밴드 무의미),
-    결과는 0 하한 — build_tts_ass 가 음수 margin 을 '미지정'(480 폴백)으로 해석한다.
+    델타로 따른다. 하단은 H 클램프(캔버스 밖 밴드 무의미), 결과는 0 하한 —
+    build_tts_ass 가 음수 margin 을 '미지정'(480 폴백)으로 해석한다.
+
+    8/21 발주 검수 교정: 델타 앵커는 **video_width 가 명시된 경우에만**. 미지정이면
+    tts_line_y_margin 절대값 그대로(종전 동작) — video_y 만 쓰는 기존 채널(한 입 주막
+    tts 550 = 하단 y 1370, 사람이 실렌더로 픽셀 튜닝)의 TTS·로고 스택이 조용히
+    움직이면 안 된다. 메인 자막의 명시 조건과 동일한 게이트.
     """
     H = canvas_height
     base = int(getattr(design, "tts_line_y_margin", 580))
+    if getattr(design, "video_width", None) is None:
+        return max(0, base)
     legacy_bottom = min(H, _video_band_bottom(
         design, canvas_width=canvas_width, canvas_height=canvas_height,
         legacy_center=True))

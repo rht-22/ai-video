@@ -46,10 +46,11 @@ def _inputs(design: DesignConfig) -> RenderInputs:
 
 # ── 기본값 — 회귀 0 (아무 플래그도 안 준 기존 채널 전부) ──────────────────
 
-def test_default_video_width_is_full_canvas():
-    # 레거시 기본 800 이 살아나면 기존 채널 전부가 800px 로 줄어든다 — 1080 고정 가드.
-    assert DesignConfig().video_width == 1080
-    assert _design().video_width == 1080
+def test_default_video_width_is_unspecified():
+    # 기본 None = 미지정: 렌더는 꽉 찬 폭, 자막·TTS 는 종전 기하(8/21 검수 교정 —
+    # '명시 시에만 밴드 앵커'). 레거시 800 이 살아나면 기존 채널 전부 800px 로 줄어든다.
+    assert DesignConfig().video_width is None
+    assert _design().video_width is None
 
 
 def test_unspecified_keeps_legacy_filtergraph():
@@ -197,16 +198,18 @@ def test_subtitle_margin_non_numeric_width_falls_back():
     assert _compute_subtitle_margin_v(DesignConfig(video_width="wide")) == 430
 
 
-def test_subtitle_margin_follows_video_y():
+def test_subtitle_margin_video_y_gated_by_explicit_width():
     from app.pipeline import _compute_subtitle_margin_v
-    # 렌더러와 같은 규약: 지정 위치 그대로 — 밴드를 올리면 자막도 밴드 하단을 따라 올라온다
-    # 13:9, video_y=380: scaled_h=747→746, 하단 380+746=1126 → 1920-1126+10 = 804
+    # 8/21 검수 교정: 신 기하(video_y 반영)는 video_width **명시 시에만**. 미지정이면
+    # 종전(세로 중앙 가정) — video_y 만 쓰는 기존 채널의 자막이 움직이면 안 된다.
+    assert _compute_subtitle_margin_v(DesignConfig(aspect_ratio="13:9", video_y=380)) == 597
+    # 명시(1080 포함)하면 밴드 하단 앵커: 13:9 하단 380+746=1126 → 804
     # (렌더러 test_video_y_moves_stack_up 의 pad y=380·짝수보정 746 과 같은 밴드)
-    d = DesignConfig(aspect_ratio="13:9", video_y=380)
-    assert _compute_subtitle_margin_v(d) == 804
+    assert _compute_subtitle_margin_v(
+        DesignConfig(aspect_ratio="13:9", video_y=380, video_width=1080)) == 804
     # video_width 와 결합: 800×1:1, video_y=380 → 하단 1180 → 750
-    d = DesignConfig(aspect_ratio="1:1", video_width=800, video_y=380)
-    assert _compute_subtitle_margin_v(d) == 750
+    assert _compute_subtitle_margin_v(
+        DesignConfig(aspect_ratio="1:1", video_width=800, video_y=380)) == 750
 
 
 def test_subtitle_margin_video_y_clamped():
@@ -246,10 +249,32 @@ def test_tts_margin_follows_band_width():
     assert _compute_tts_margin_v(DesignConfig(aspect_ratio="9:16", video_width=800)) == 829
 
 
-def test_tts_margin_follows_video_y():
+def test_tts_margin_video_y_gated_by_explicit_width():
     from app.pipeline import _compute_tts_margin_v
-    # 13:9 + video_y=380: 종전 하단 587+746=1333 → 380+746=1126, 델타 207 → 787
-    assert _compute_tts_margin_v(DesignConfig(aspect_ratio="13:9", video_y=380)) == 787
+    # 미지정 = tts_line_y_margin 절대값 그대로(종전) — 메인 자막과 같은 게이트
+    assert _compute_tts_margin_v(DesignConfig(aspect_ratio="13:9", video_y=380)) == 580
+    # 명시 시 델타 앵커: 종전 하단 587+746=1333 → 380+746=1126, 델타 207 → 787
+    assert _compute_tts_margin_v(
+        DesignConfig(aspect_ratio="13:9", video_y=380, video_width=1080)) == 787
+
+
+def test_hanipjumak_shape_regression_guard():
+    from app.pipeline import _compute_subtitle_margin_v, _compute_tts_margin_v
+    # 운영 채널 '한 입 주막' 관제 형상(2026-08-19 사람이 실렌더로 픽셀 튜닝):
+    # 13:9 · video_y=440 · tts_line_y_margin=550 (TTS 하단 y=1370 = 영상 아래 밴드,
+    # 로고 1430 스택). video_width 미지정 → 승인된 출력이 1px 도 움직이면 안 된다.
+    d = DesignConfig(aspect_ratio="13:9", video_y=440, tts_line_y_margin=550)
+    assert _compute_subtitle_margin_v(d) == 597
+    assert _compute_tts_margin_v(d) == 550
+
+
+def test_hanipjumak_shape_opts_into_band_anchor():
+    from app.pipeline import _compute_subtitle_margin_v, _compute_tts_margin_v
+    # 같은 형상 + video_width=1080 명시 → 신 기하: 밴드 하단 440+746=1186
+    d = DesignConfig(aspect_ratio="13:9", video_y=440, tts_line_y_margin=550,
+                     video_width=1080)
+    assert _compute_subtitle_margin_v(d) == 744          # 1920-1186+10
+    assert _compute_tts_margin_v(d) == 697               # 550 + (1333-1186)
 
 
 def test_tts_margin_clamped_at_zero():

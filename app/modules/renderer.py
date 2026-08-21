@@ -935,7 +935,9 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     title_rotate = float(getattr(d, 'title_rotate', 0.0) or 0.0)
     if not (-180.0 <= title_rotate <= 180.0):
         raise ValueError(f"title_rotate 범위 밖: {title_rotate} (-180~180)")
-    # E10: 영상 밴드 가로 크기(캔버스 px). 1080 = 꽉 찬 폭(종전 동작). 비숫자·범위 밖은
+    # E10: 영상 밴드 가로 크기(캔버스 px). None = 미지정 = 꽉 찬 폭(종전 필터그래프와
+    # 바이트 동일). 명시 시(1080 포함) 자막·TTS margin 이 밴드 앵커로 전환되는 것은
+    # pipeline 쪽 몫이고, 렌더 기하는 명시 1080 과 미지정이 동일하다. 비숫자·범위 밖은
     # 같은 원칙으로 즉시 실패 — int(str(...)) 라 800.5 같은 소수도 조용히 절단되지 않는다.
     _vw_raw = getattr(d, 'video_width', None)
     try:
@@ -991,7 +993,7 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     # 줄별 폰트 크기 (title_sizes가 있으면 사용, 없으면 title_size로 통일)
     title_sizes = getattr(d, 'title_sizes', [d.title_size])
 
-    # [2] 비디오 레이아웃 설정 — E10: 밴드 폭 = video_width(기본 1080 = 캔버스 꽉 참).
+    # [2] 비디오 레이아웃 설정 — E10: 밴드 폭 = video_width(미지정 = 캔버스 꽉 참).
     # 화면비는 밴드 직사각형의 모양을, video_width 는 크기를 정한다(편집실 미리보기와 합의된 계약).
     scaled_w = video_width
 
