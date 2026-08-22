@@ -28,6 +28,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.modules.speech import SpeechSegment  # noqa: E402
 from app.modules.subtitle import parse_subtitle  # noqa: E402
 
+# 운영 노드는 키를 레포 .env 에 두고 dotenv 로 읽는다(gemini_client 와 같은 규약).
+# 이 스크립트는 gemini_client 를 import 하지 않으므로 여기서 직접 로드한다 —
+# 안 하면 키가 .env 에 멀쩡히 있는데도 "키 없음"으로 죽는다.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+except ImportError:
+    pass
+
 _PUNCT = re.compile(r"[\s.,!?…·\"'’“”\-—~()\[\]]+")
 
 
