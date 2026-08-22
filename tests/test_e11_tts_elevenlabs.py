@@ -153,4 +153,8 @@ def test_pipeline_stamps_tts_backend():
     src = (REPO / "app" / "pipeline.py").read_text(encoding="utf-8")
     assert '"step": "resources", "tts_backend": _tts_backend' in src
     assert '"tts_backend": _tts_backend,' in src
-    assert "from app.modules.tts import active_backend, synthesize_tts_with_fit" in src
+    assert "from app.modules.tts import active_backend" in src
+    # E12: cue 합성은 synthesize_cue_cached 를 거친다(유료 경로만 캐시).
+    # 그 함수가 tts.synthesize_tts_with_fit 을 그대로 부르므로 합성 계약은 종전과 같다.
+    assert "final_text, actual_sec = synthesize_cue_cached(" in src
+    assert "from app.modules.tts import is_elevenlabs_voice, synthesize_tts_with_fit" in src

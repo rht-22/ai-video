@@ -119,3 +119,37 @@
 - A/B 실측 도구: `python -m scripts.e11_transcribe_ab --video … --ref …`
   (한국어는 WER 아님 — **CER**). 회귀 0 대조는 `--diff JOB_A JOB_B`.
 - 회귀 가드: `tests/test_e11_transcribe_backend.py`.
+
+## 편집실 내레이션 목소리 계약 (E12, 2026-08-22)
+
+`app/modules/tts.py` · `pipeline.synthesize_cue_cached`.
+발주서: ves-orchestrator `docs/prompts/e12-editor-elevenlabs-voice.md`.
+
+```
+voice = "ko_female" | "ko_male" | "chat_*" | …   (지금 그대로)
+      | "elevenlabs:{voice_id}"                   (신설 — 그 id 로 바로 합성)
+```
+
+- **접두사가 붙은 값만 새 경로.** 나머지는 종전 코드 그대로다(백엔드 선택·프리셋
+  매핑·edge-tts 폴백 전부). 편집실 `voice` 는 `edit_overrides` 가 불투명 문자열로
+  통과시키고 `_normalize_storyline_tts_cues` 의 화이트리스트는 **LLM 산 cue 에만**
+  걸리므로, 접두사 값은 손실 없이 cue 까지 온다.
+- **엔진은 목소리 이름표를 들지 않는다.** 사람이 읽는 이름은 대시보드
+  (`ops_config.editor_tts_voices`)가 든다 — 계정마다 보이스 라이브러리가 달라
+  1:1 미러가 불가능한 어휘다. 엔진은 형태(영숫자 16~32자)만 재확인한다.
+- 모델 `eleven_multilingual_v2` 고정(`EL_MODEL_ID`). `eleven_v3` 는 `speed` 를
+  안 받아 편집실 속도 프리셋이 죽으므로 쓰지 않는다. `language_code` 는 이 모델에서
+  무시되므로 **보내지 않는다**.
+- speed 는 `EL_SPEED` 한 곳(E11 표 그대로): very_slow 0.7 · slow 0.85 · normal 1.0 ·
+  fast 1.1 · very_fast 1.2. ⚠ 편집실 길이 게이지가 가정하는 0.75/0.9/1/1.1/1.25 와
+  **양 끝단이 다르다** — very_fast 상한이 1.2(문서 허용 최대)라 edge-tts(+25%)만큼
+  안 벌어진다. 게이지 배율은 오케스트레이터에서 맞춘다.
+- **캐시(요금)**: `synthesize_cue_cached` 가 키 `sha1(문구·voice·speed·fit창)` 로
+  `<job>/tts_cache/{key}.mp3` 를 재사용한다 — 편집실 재렌더(`from_step=resources`)에서
+  한 줄만 고쳐도 전 cue 가 다시 도는 구조라 캐시가 없으면 요금이 그대로 곱해진다.
+  **유료 경로(접두사)만** 캐시한다 — edge-tts 는 아낄 요금이 없고, 캐시를 끼우면
+  fit 재작성(Flash 단축) 결과가 달라져 지금 도는 내레이션이 변한다(회귀 0 조건).
+- 실패 분류: 키 없음·voice_id 형태 오류·401·403·404(없는 voice_id) = permanent 즉시 실패 /
+  429·5xx·네트워크 = transient(2회 재시도). **어느 경우도 기본 목소리로 안 떨어진다.**
+- `checkpoint_resources.tts_cue_files` 모양은 그대로(오케스트레이터가 편집실 미리듣기로 올린다).
+- 회귀 가드: `tests/test_e12_editor_elevenlabs_voice.py`.

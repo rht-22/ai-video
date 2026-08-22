@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import shutil
 import time
 import uuid
 import subprocess
@@ -912,6 +914,65 @@ def transcribe_chunks(
                 continue
         out.append({"chunk_index": int(c.index), "segments": abs_segs})
     return out
+
+
+def _tts_cue_cache_key(text: str, voice: str, speed: str, target_sec: float) -> str:
+    """cue 합성 캐시 키 = (문구, voice, speed, fit 목표창). 넷 중 하나만 달라도 다른 소리다."""
+    raw = f"{text}\x00{voice}\x00{speed}\x00{round(float(target_sec), 2)}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def synthesize_cue_cached(
+    text: str,
+    output_path: Path,
+    *,
+    target_sec: float,
+    voice: str,
+    speed: str,
+    shorten_fn=None,
+    cache_dir: Path | None = None,
+) -> tuple[str, float]:
+    """TTS cue 합성 — **elevenlabs 유료 합성만** 캐시한다(E12).
+
+    편집실 재렌더는 `from_step=resources` 로 오므로 한 줄만 고쳐도 전 cue 가 다시 돈다.
+    캐시가 없으면 그 요금이 그대로 곱해진다. 캐시 키가 같으면 mp3 를 복사해 쓰고 API 를
+    아예 안 부른다(요금 0).
+
+    접두사 없는 종전 목소리는 **캐시를 타지 않는다** — 종전 호출을 그대로 통과시킨다.
+    edge-tts 는 공짜라 아낄 요금이 없고, 캐시를 끼우면 fit 재작성(Flash 단축)의 결과가
+    달라져 지금 도는 내레이션이 변한다(회귀 0 조건).
+    """
+    from app.modules.tts import is_elevenlabs_voice, synthesize_tts_with_fit
+
+    if not is_elevenlabs_voice(voice) or cache_dir is None:
+        return synthesize_tts_with_fit(
+            text, output_path, target_sec=target_sec,
+            voice=voice, speed=speed, shorten_fn=shorten_fn)
+
+    key = _tts_cue_cache_key(text, voice, speed, target_sec)
+    cached_mp3 = Path(cache_dir) / f"{key}.mp3"
+    cached_meta = Path(cache_dir) / f"{key}.json"
+    if cached_mp3.exists() and cached_meta.exists():
+        try:
+            meta = json.loads(cached_meta.read_text(encoding="utf-8"))
+            shutil.copyfile(cached_mp3, output_path)
+            print(f"  [TTS-cache] hit {key[:8]} — 재합성 없음(요금 0)")
+            return str(meta["text"]), float(meta["actual_sec"])
+        except (OSError, ValueError, KeyError) as e:
+            print(f"  [TTS-cache] 캐시 로드 실패({e}) — 재합성")
+
+    final_text, actual_sec = synthesize_tts_with_fit(
+        text, output_path, target_sec=target_sec,
+        voice=voice, speed=speed, shorten_fn=shorten_fn)
+    try:
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(output_path, cached_mp3)
+        cached_meta.write_text(
+            json.dumps({"text": final_text, "actual_sec": actual_sec},
+                       ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        print(f"  [TTS-cache] 캐시 저장 실패({e}) — 다음 렌더에서 재합성됨")
+    return final_text, actual_sec
 
 
 def _enforce_title_line_limit(text: str, max_chars: int = 20) -> str:
@@ -3569,7 +3630,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         # TTS 오디오 생성 (cue별 — voice/speed 적용)
         # cue 시간(end_sec - start_sec) 안에 들어가도록 fit. 초과 시 Flash로 텍스트 단축.
         print("  TTS 오디오 생성 중 (cue별, fit 적용)...")
-        from app.modules.tts import active_backend, synthesize_tts_with_fit
+        from app.modules.tts import active_backend
         _flash_for_shorten = locals().get("gemini") or load_gemini_client()
         _shorten = getattr(_flash_for_shorten, "shorten_text", None) if _flash_for_shorten else None
         tts_cue_files: list[dict[str, Any]] = []
@@ -3579,11 +3640,12 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             # 내레이션 오디오는 배속하지 않으므로 fit 목표가 곧 출력 시각의 창이어야 한다.
             target_sec = max(0.5, (float(cue.get("end_sec", 0.0))
                                    - float(cue.get("start_sec", 0.0))) / _speed)
-            final_text, actual_sec = synthesize_tts_with_fit(
+            final_text, actual_sec = synthesize_cue_cached(
                 cue["text"], tts_path, target_sec=target_sec,
                 voice=cue.get("voice", "narrative_female"),
                 speed=cue.get("speed", "normal"),
                 shorten_fn=_shorten,
+                cache_dir=output_dir / "tts_cache",
             )
             # fit 결과를 cue에 반영(자막 일관성 + 디버깅용)
             cue["text"] = final_text
@@ -3944,7 +4006,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 ]
 
                 # TTS 생성 (variant별 cue 사용) — fit 적용으로 cue 시간 안에 들어가게 합성
-                from app.modules.tts import synthesize_tts_with_fit
                 _g_v = locals().get("gemini") or load_gemini_client()
                 _shorten_v = getattr(_g_v, "shorten_text", None) if _g_v else None
                 var_cues = tts_cues_per_variant[var_idx] if var_idx < len(tts_cues_per_variant) else []
@@ -3956,11 +4017,12 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                         # E7-2: 정본과 동일 — fit 목표는 배속 후 출력 창 (e-s)/S
                         target_sec = max(0.5, (float(cue.get("end_sec", 0.0))
                                                - float(cue.get("start_sec", 0.0))) / _speed)
-                        final_text, actual_sec = synthesize_tts_with_fit(
+                        final_text, actual_sec = synthesize_cue_cached(
                             cue["text"], tts_out, target_sec=target_sec,
                             voice=cue.get("voice", "narrative_female"),
                             speed=cue.get("speed", "normal"),
                             shorten_fn=_shorten_v,
+                            cache_dir=output_dir / "tts_cache",
                         )
                         cue["text"] = final_text
                         cue["fit_actual_sec"] = actual_sec
