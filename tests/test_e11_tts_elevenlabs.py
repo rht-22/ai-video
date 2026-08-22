@@ -93,12 +93,16 @@ def test_elevenlabs_success_writes_mp3_and_sends_contract(monkeypatch, tmp_path)
     assert c["json"]["voice_settings"]["speed"] == tts.EL_SPEED["fast"]
 
 
-def test_unknown_labels_fall_back_to_defaults(monkeypatch, tmp_path):
-    """구 체크포인트의 레거시 라벨(narrative_* 등)은 기본값으로 — 종전 계약 유지."""
+def test_legacy_voice_label_maps_to_same_voice_as_before(monkeypatch, tmp_path):
+    """구 체크포인트의 레거시 라벨(narrative_female)은 **오늘과 같은 목소리**로.
+
+    E13 에서 모르는 라벨을 fail-loud 로 바꿨지만, 이 값은 pipeline 이 voice 없는 cue 에
+    넣는 기본 문자열이라 지금도 실려 온다 — 재개 산출이 달라지면 안 된다(회귀 0).
+    """
     monkeypatch.setenv("ELEVENLABS_API_KEY", "k")
     calls = _mock_post(monkeypatch, [(200, b"x")])
     tts._synthesize_elevenlabs("t", tmp_path / "o.mp3",
-                               voice="narrative_female", speed="warp9")
+                               voice="narrative_female", speed="normal")
     assert tts.EL_VOICE_PRESETS[tts.DEFAULT_VOICE] in calls[0]["url"]
     assert calls[0]["json"]["voice_settings"]["speed"] == 1.0
 

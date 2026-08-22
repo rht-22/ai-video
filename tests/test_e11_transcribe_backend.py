@@ -336,7 +336,9 @@ def test_request_body_matches_contract(_stt_env, monkeypatch):
     sent = calls[0]
     assert sent["url"] == "https://api.elevenlabs.io/v1/speech-to-text"
     assert sent["headers"]["xi-api-key"] == "sk_test"
-    data = sent["data"]
+    # E13: 폼은 dict 가 아니라 **(이름, 값) 열**이다 — keyterms 가 같은 이름으로
+    # 반복돼야 하므로 dict 로는 표현할 수 없다(자세한 이유는 build_form_fields).
+    data = dict(sent["data"])
     assert data["model_id"] == "scribe_v2"        # scribe_v1 은 폐기됨
     assert data["language_code"] == "kor"         # ISO-639-3
     assert data["tag_audio_events"] == "false"    # 기본 true — (laughter) 유입 차단
@@ -344,7 +346,8 @@ def test_request_body_matches_contract(_stt_env, monkeypatch):
     assert data["diarize"] == "false"
     # additional_formats 는 쓰지 않는다 — cue 규칙은 파이프라인이 정본
     assert "additional_formats" not in data
-    # keyterms 는 기본 off(요율 상승 + 폼 직렬화 미검증)
+    # keyterms 는 transcribe(keyterms=...) 로 넘긴 실행에만 실린다.
+    # 기본 on/off 와 직렬화 형태는 tests/test_e13_transcribe_polish.py 가 고정한다.
     assert "keyterms" not in data
     assert "file" in sent["files"]
 

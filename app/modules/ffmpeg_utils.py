@@ -144,20 +144,43 @@ def find_ffmpeg_command(cmd_name: str) -> str:
             if exe_path.exists() and os.access(exe_path, os.X_OK):
                 return str(exe_path)
     
-    # 찾지 못한 경우 에러 메시지
+    # 찾지 못한 경우 에러 메시지 — **실행 중인 OS 기준으로** 안내한다.
+    # 운영 노드 6대는 전부 macOS 인데 종전엔 윈도우 설치법만 떴다. 워커는 PATH 를
+    # 주입하므로 운영 영향은 없지만, 사람이 SSH 로 직접 돌릴 때마다 이 화면을 본다
+    # (비대화형 SSH 는 /opt/homebrew/bin 이 PATH 에 없어 여기까지 온다).
+    if sys.platform == "darwin":
+        how_to = (
+            "macOS 설치 방법:\n"
+            "  1. brew install ffmpeg\n"
+            "  2. 설치 경로(Apple Silicon: /opt/homebrew/bin, Intel: /usr/local/bin)가\n"
+            "     PATH 에 있는지 확인하세요.\n"
+            "  3. 비대화형 SSH 는 로그인 셸 PATH 를 안 받습니다 — 명령 앞에 다음을 붙이세요:\n"
+            "     export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH\n"
+        )
+    elif sys.platform == "win32":
+        how_to = (
+            "Windows 설치 방법:\n"
+            "  1. https://www.gyan.dev/ffmpeg/builds/ 에서 다운로드\n"
+            "  2. 압축 해제 후 bin 폴더를 PATH에 추가\n"
+            "  3. 또는 패키지 매니저 사용:\n"
+            "     - choco install ffmpeg (Chocolatey)\n"
+            "     - winget install ffmpeg (Windows Package Manager)\n"
+        )
+    else:
+        how_to = (
+            "Linux 설치 방법:\n"
+            "  1. sudo apt install ffmpeg (Debian·Ubuntu)\n"
+            "     또는 sudo dnf install ffmpeg (Fedora·RHEL)\n"
+            "  2. 설치 경로가 PATH 에 있는지 확인하세요.\n"
+        )
     error_msg = (
         f"\n{'='*60}\n"
         f"오류: '{cmd_name}' 명령을 찾을 수 없습니다.\n"
         f"{'='*60}\n"
         f"FFmpeg가 설치되어 있고 PATH에 추가되어 있는지 확인하세요.\n\n"
-        f"Windows 설치 방법:\n"
-        f"  1. https://www.gyan.dev/ffmpeg/builds/ 에서 다운로드\n"
-        f"  2. 압축 해제 후 bin 폴더를 PATH에 추가\n"
-        f"  3. 또는 패키지 매니저 사용:\n"
-        f"     - choco install ffmpeg (Chocolatey)\n"
-        f"     - winget install ffmpeg (Windows Package Manager)\n\n"
-        f"설치 후 새 터미널을 열고 'ffprobe -version' 명령으로 확인하세요.\n"
-        f"또는 FFmpeg bin 폴더를 시스템 PATH 환경 변수에 추가하세요.\n"
+        f"{how_to}\n"
+        f"설치 후 'ffprobe -version' 명령으로 확인하세요.\n"
+        f"경로를 직접 지정하려면 환경변수 FFMPEG_BIN·FFPROBE_BIN 을 쓰세요.\n"
         f"{'='*60}\n"
     )
     raise FileNotFoundError(error_msg)

@@ -81,6 +81,34 @@ SPEED_TO_RATE: dict[str, str] = {
 DEFAULT_VOICE = "ko_female"
 DEFAULT_SPEED = "normal"
 
+# ── E13 곁다리 (2026-08-22): 모르는 라벨은 조용히 기본값으로 안 떨어진다 ──────
+# E12 가 `elevenlabs:` 접두사 경로는 fail-loud 로 고쳤는데 **라벨 경로는 그대로**
+# fail-silent 였다(`EL_VOICE_PRESETS.get(voice, …DEFAULT_VOICE)`). 편집실 게이트
+# editor_tts_elevenlabs 가 켜져 voice_id 20종이 실제로 나가는 지금, 오타 하나가
+# 조용히 기본 목소리로 발행되면 사람은 바꿨다고 믿은 채 종전 소리를 듣는다.
+#
+# 다만 **레거시 라벨은 살려 둔다** — 구 체크포인트를 재개하면 pipeline 이 voice 없는
+# cue 에 넣는 기본 문자열 "narrative_female" 이 그대로 올라온다. 지금 그 값은
+# DEFAULT_VOICE 로 떨어지고 있으므로, 별칭도 **오늘과 똑같은 곳**을 가리켜야
+# 재개 산출이 안 바뀐다(회귀 0). 새 라벨은 여기 추가하지 말고 프리셋에 넣을 것.
+LEGACY_VOICE_ALIASES: dict[str, str] = {
+    "narrative_female": DEFAULT_VOICE,
+}
+
+
+def _resolve_label(kind: str, value: str | None, table: dict, default: str) -> str:
+    """프리셋 라벨 정규화 — 모르는 라벨이면 즉시 실패(조용한 기본값 폴백 금지)."""
+    label = str(value or default)
+    label = LEGACY_VOICE_ALIASES.get(label, label) if kind == "voice" else label
+    if label not in table:
+        raise RuntimeError(
+            f"모르는 {kind} 라벨입니다: {str(value)!r} — 계약은 "
+            f"{', '.join(sorted(table))} 뿐입니다"
+            + (f" (또는 '{EL_VOICE_PREFIX}{{voice_id}}')" if kind == "voice" else "")
+            + ". 기본값으로 조용히 떨어지지 않습니다 — 목소리·속도를 바꿨다고 믿은 채 "
+              "종전 소리로 발행되는 것을 막습니다.")
+    return label
+
 # ── E12 (2026-08-22): 편집실이 ElevenLabs voice_id 를 직접 고르는 어휘 ────────
 # voice = "ko_female" | "chat_*" | …        (지금 그대로 — 한 글자도 안 바뀐다)
 #       | "elevenlabs:{voice_id}"            (신설 — 그 id 로 바로 합성)
@@ -172,8 +200,9 @@ def synthesize_tts(
 ) -> Path:
     """텍스트를 mp3로 합성. voice/speed는 프리셋 라벨.
 
-    라벨이 프리셋에 없으면 기본값으로 폴백한다(종전 계약 유지 — 구 run 의
-    narrative_* 등 레거시 라벨이 체크포인트에 남아 있다).
+    E13: 프리셋에 없는 라벨은 **즉시 실패**한다(종전엔 조용히 기본값으로 떨어졌다).
+    구 체크포인트의 레거시 라벨은 LEGACY_VOICE_ALIASES 가 오늘과 같은 곳으로 보내
+    재개 산출을 유지한다.
     """
     # E12: 접두사가 붙은 목소리는 백엔드 선택을 건너뛴다 — 사람이 그 목소리를 고른 것이라
     # edge-tts 폴백은 답이 될 수 없다. 키가 없으면 여기서 실패한다(조용한 대체 금지).
@@ -186,8 +215,8 @@ def synthesize_tts(
     if backend == "elevenlabs":
         return _synthesize_elevenlabs(text, Path(output_path), voice=voice, speed=speed)
     if backend == "edge-tts":
-        voice_id, pitch = VOICE_PRESETS.get(voice, VOICE_PRESETS[DEFAULT_VOICE])
-        rate = SPEED_TO_RATE.get(speed, SPEED_TO_RATE[DEFAULT_SPEED])
+        voice_id, pitch = VOICE_PRESETS[_resolve_label("voice", voice, VOICE_PRESETS, DEFAULT_VOICE)]
+        rate = SPEED_TO_RATE[_resolve_label("speed", speed, SPEED_TO_RATE, DEFAULT_SPEED)]
         return _synthesize_edge_tts(text, Path(output_path), voice_id=voice_id, rate=rate, pitch=pitch)
     return _synthesize_silence(Path(output_path), duration_sec=1.0)
 
@@ -274,8 +303,10 @@ def _synthesize_elevenlabs(
     import requests
 
     # E12: 접두사면 편집실이 고른 voice_id 그대로, 아니면 종전 라벨 매핑(E11 계약).
+    # E13: 모르는 라벨은 여기서 즉시 실패한다(접두사 경로와 같은 규율).
     voice_id = (elevenlabs_voice_id(voice) if is_elevenlabs_voice(voice)
-                else EL_VOICE_PRESETS.get(voice, EL_VOICE_PRESETS[DEFAULT_VOICE]))
+                else EL_VOICE_PRESETS[_resolve_label("voice", voice, EL_VOICE_PRESETS,
+                                                     DEFAULT_VOICE)])
     url = (f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
            f"?output_format={EL_OUTPUT_FORMAT}")
     body = {
@@ -284,7 +315,7 @@ def _synthesize_elevenlabs(
         "voice_settings": {
             "stability": 0.5,
             "similarity_boost": 0.75,
-            "speed": EL_SPEED.get(speed, EL_SPEED[DEFAULT_SPEED]),
+            "speed": EL_SPEED[_resolve_label("speed", speed, EL_SPEED, DEFAULT_SPEED)],
         },
     }
     headers = {"xi-api-key": os.environ["ELEVENLABS_API_KEY"]}
