@@ -62,6 +62,25 @@ def _max_tokens_usage(response: Any) -> str | None:
     return "토큰 " + ", ".join(parts) if parts else "사용량 정보 없음"
 
 
+def _usage_counts(response: Any) -> dict[str, int] | None:
+    """응답의 토큰 사용량을 숫자로. 없으면 None.
+
+    _max_tokens_usage 는 사람이 읽는 한 줄을 만들고, 이쪽은 집계용 숫자를 만든다 —
+    폴백 사유를 run_log 에 남길 때 '추론이 예산을 얼마나 먹었나' 를 나중에 세려면
+    문자열이 아니라 수가 필요하다(잘림 비율·thinking_level 조정 근거).
+    """
+    usage = getattr(response, "usage_metadata", None)
+    if usage is None:
+        return None
+    out = {}
+    for key in ("prompt_token_count", "thoughts_token_count",
+                "candidates_token_count", "total_token_count"):
+        value = getattr(usage, key, None)
+        if isinstance(value, int):
+            out[key] = value
+    return out or None
+
+
 def _extract_json_from_markdown(text: str) -> str:
     """마크다운 코드 블록에서 JSON을 추출합니다."""
     text = text.strip()
@@ -1961,7 +1980,31 @@ class GeminiClient:
         # 하드 필터(장면+문구)·랭킹 편향·문체가 전부 여기 걸린다. editorial.py 가 정본.
         prompt += format_editorial_block(editorial, use_case="story")
 
+        # 폴백 사유 추적 — 폴백으로 떨어지면 그 사실과 이유가 산출물에 남아야 한다.
+        # 종전에는 selection_reason 문자열을 눈으로 읽어야만 폴백인 줄 알았고, 왜 실패했는지는
+        # 실행 노드의 stdout(mm-05 로컬 로그)에만 있었다 — 사후 추적이 불가능했다.
+        last_failure: dict[str, Any] = {}
+
+        def _note_failure(kind: str, message: str, *, attempt: int,
+                          response: Any = None, text: str | None = None) -> None:
+            last_failure.clear()
+            last_failure.update({
+                "kind": kind,
+                "error": message,
+                "attempt": attempt + 1,
+                "max_retries": self.config.max_retries,
+                "finish_reason": _finish_reason(response) if response is not None else None,
+                "response_chars": len(text) if text is not None else None,
+                # 앞머리만 — run_log 비대화 방지. 전문이 필요하면 잘림/파싱 실패 자체를 재현해야 한다.
+                "response_head": text[:300] if text else None,
+                "model": self.config.flash_model_name,
+                "thinking_level": self.config.story_thinking_level,
+                "usage": _usage_counts(response) if response is not None else None,
+            })
+
         for attempt in range(self.config.max_retries):
+            response = None
+            text: str | None = None
             try:
                 response = self.client.models.generate_content(
                     model=self.config.flash_model_name,
@@ -1975,15 +2018,40 @@ class GeminiClient:
                 )
 
                 if not response or not response.text:
+                    msg = "Gemini API가 빈 응답을 반환했습니다."
+                    _note_failure("empty_response", msg, attempt=attempt, response=response)
                     if attempt == self.config.max_retries - 1:
-                        raise RuntimeError("Gemini API가 빈 응답을 반환했습니다.")
+                        print(f"    [ERROR] {msg}")
+                        break
                     print(f"    [WARN] 빈 응답, 재시도 중... ({attempt + 1}/{self.config.max_retries})")
                     continue
 
                 text = response.text.strip()
                 if not text:
+                    msg = "Gemini API 응답이 빈 문자열입니다."
+                    _note_failure("empty_text", msg, attempt=attempt, response=response, text=text)
                     if attempt == self.config.max_retries - 1:
-                        raise RuntimeError("Gemini API 응답이 빈 문자열입니다.")
+                        print(f"    [ERROR] {msg}")
+                        break
+                    continue
+
+                # 잘린 응답을 그대로 파싱하면 원인이 엉뚱한 JSONDecodeError 로 둔갑한다 —
+                # 분석 경로(analyze_chunk)와 같은 방식으로 파싱 전에 걸러낸다(8/4 커밋 80b00aa 는
+                # 분석 경로 한 곳만 막았다). 잘림은 재시도로 살아나는 경우가 있고, 끝내 못 살리면
+                # '잘렸다' 는 사실이 폴백 사유(kind=max_tokens)로 남는다.
+                truncated = _max_tokens_usage(response)
+                if truncated is not None:
+                    msg = (
+                        f"Gemini 스토리 응답이 출력 한도에서 잘렸습니다(finish_reason=MAX_TOKENS) — "
+                        f"{truncated}. thinking_level={self.config.story_thinking_level} · "
+                        f"받은 길이 {len(text)}자. thinking 토큰이 같은 예산을 쓰므로 "
+                        f"thinking_level 을 낮추거나 출력량(storylines 개수·tts_cues)을 줄여야 합니다."
+                    )
+                    _note_failure("max_tokens", msg, attempt=attempt, response=response, text=text)
+                    if attempt == self.config.max_retries - 1:
+                        print(f"    [ERROR] {msg}")
+                        break
+                    print(f"    [WARN] {msg} 재시도 중... ({attempt + 1}/{self.config.max_retries})")
                     continue
 
                 json_text = _extract_json_from_markdown(text)
@@ -2012,21 +2080,29 @@ class GeminiClient:
                 result["ranked_storylines"] = sorted(
                     storylines, key=lambda s: s.get("composite_score", s.get("score", 0)), reverse=True
                 )
+                # 정상 경로도 표식을 남긴다 — 소비자가 키 유무가 아니라 값으로 판별할 수 있게.
+                result["fallback"] = False
                 return result
 
             except json.JSONDecodeError as json_err:
+                _note_failure("json_decode_error", f"{type(json_err).__name__}: {json_err}",
+                              attempt=attempt, response=response, text=text)
                 if attempt == self.config.max_retries - 1:
                     print(f"    [ERROR] JSON 파싱 실패: {json_err}")
                     break
                 print(f"    [WARN] JSON 파싱 실패, 재시도... ({attempt + 1}/{self.config.max_retries})")
                 time.sleep(2 ** attempt)
             except ValueError as val_err:
+                _note_failure("validation_error", f"{type(val_err).__name__}: {val_err}",
+                              attempt=attempt, response=response, text=text)
                 if attempt == self.config.max_retries - 1:
                     print(f"    [ERROR] 응답 검증 실패: {val_err}")
                     break
                 print(f"    [WARN] 응답 검증 실패, 재시도... ({attempt + 1}/{self.config.max_retries})")
                 time.sleep(2 ** attempt)
             except Exception as e:
+                _note_failure("exception", f"{type(e).__name__}: {e}",
+                              attempt=attempt, response=response, text=text)
                 if attempt == self.config.max_retries - 1:
                     print(f"    [ERROR] 스토리 구성 실패: {e}")
                     break
@@ -2034,7 +2110,15 @@ class GeminiClient:
 
         # 폴백: 최고 점수 moment를 highlight 클립으로 사용
         print("    [FALLBACK] Gemini 스토리 구성 실패 — 최고 점수 moment로 하이라이트 클립 생성")
-        return _build_fallback_story(all_candidates, work_title)
+        if last_failure:
+            print(
+                f"    [FALLBACK] 사유: kind={last_failure.get('kind')} · "
+                f"finish_reason={last_failure.get('finish_reason')} · "
+                f"응답 {last_failure.get('response_chars')}자 · "
+                f"{last_failure.get('attempt')}/{last_failure.get('max_retries')}회 시도 — "
+                f"{last_failure.get('error')}"
+            )
+        return _build_fallback_story(all_candidates, work_title, failure=last_failure or None)
 
     # ─────────────────────────────────────────
     # 텍스트 단축 (TTS fit 용도, Flash 모델)
@@ -2124,8 +2208,15 @@ class GeminiClient:
         return {"drops": []}
 
 
-def _build_fallback_story(all_candidates: list, work_title: str) -> dict[str, Any]:
-    """Gemini 스토리 구성 실패 시 상위 3-4개 moment를 조합하여 서사형 폴백 생성."""
+def _build_fallback_story(all_candidates: list, work_title: str,
+                          failure: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Gemini 스토리 구성 실패 시 상위 3-4개 moment를 조합하여 서사형 폴백 생성.
+
+    이 경로로 나온 산출물은 서로 무관한 장면이 이어붙고(시간축 [0, n/3, 2n/3, n-1] 샘플링)
+    제목이 '작품명 + 설명 앞 20자' 가 된다 — 검수 반려의 전형적인 모양이다. 그러니 폴백이라는
+    사실(`fallback`)과 그 사유(`fallback_reason`)를 반드시 반환값에 실어 보낸다. 호출부가
+    이 값을 run_log·checkpoint_story 에 남긴다.
+    """
     if not all_candidates:
         raise RuntimeError("후보 장면이 없어 폴백도 불가능합니다.")
 
@@ -2193,6 +2284,7 @@ def _build_fallback_story(all_candidates: list, work_title: str) -> dict[str, An
     best = sorted_candidates[0]
     fallback_storyline = {
         "storyline_index": 0,
+        "fallback": True,
         "shorts_type": "storytelling",
         "sequence_type": "여정몰입형",
         "topic": best.get("description", work_title)[:30],
@@ -2206,10 +2298,21 @@ def _build_fallback_story(all_candidates: list, work_title: str) -> dict[str, An
         "storyline": storyline_obj,
     }
 
+    reason = dict(failure) if failure else {"kind": "unknown", "error": "실패 정보 없음"}
+    selection_reason = "폴백: Gemini 응답 실패 — 상위 moment 자동 조합"
+    if failure:
+        selection_reason += (
+            f" (사유: {failure.get('kind')} · finish_reason={failure.get('finish_reason')}"
+            f" · {str(failure.get('error') or '')[:200]})"
+        )
+
     return {
         "storylines": [fallback_storyline],
         "selected_storyline_index": 0,
-        "selection_reason": "폴백: Gemini 응답 실패 — 상위 moment 자동 조합",
+        # 표식은 기계가 읽는다 — selection_reason 문자열을 눈으로 읽어야만 알던 상태를 끝낸다.
+        "fallback": True,
+        "fallback_reason": reason,
+        "selection_reason": selection_reason,
         "title_line1": work_title[:20],
         "title_line2": best.get("description", "")[:20],
         "title_txt": f"{work_title[:20]} {best.get('description', '')[:20]}",
