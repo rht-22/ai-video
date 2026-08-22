@@ -153,3 +153,59 @@ voice = "ko_female" | "ko_male" | "chat_*" | …   (지금 그대로)
   429·5xx·네트워크 = transient(2회 재시도). **어느 경우도 기본 목소리로 안 떨어진다.**
 - `checkpoint_resources.tts_cue_files` 모양은 그대로(오케스트레이터가 편집실 미리듣기로 올린다).
 - 회귀 가드: `tests/test_e12_editor_elevenlabs_voice.py`.
+
+## 전사 다듬기 계약 (E13, 2026-08-22)
+
+`app/modules/stt_elevenlabs.py` · `app/data/transcribe_normalize_ko.json`.
+발주서: ves-orchestrator `docs/prompts/e13-transcribe-polish.md`. E11 의 후속이고
+**손대는 범위는 `--transcribe-backend elevenlabs` 경로 안**이다 — 미지정·`default`
+실행은 전사 텍스트도 `subtitle_segments.json` 모양도 한 글자 안 바뀐다(회귀 0).
+`speech.py`·`merge_subtitle_segments` 는 안 건드렸다.
+
+- **keyterms 기본 on** — 내장 Whisper 가 `_build_whisper_prompt` 로 리서치 결과를 늘
+  받는데 Scribe 쪽만 꺼져 있어 두 백엔드가 비대칭 조건으로 붙고 있었다.
+  ⚠ 직렬화는 **같은 이름 폼 필드 반복**(`keyterms=A`, `keyterms=B`)이다. 배열 하나를
+  `json.dumps` 로 담으면 서버가 그 문자열 전체를 키텀 하나로 보고 400
+  `invalid_keyword_length` 를 준다(elevenlabs-python #819 의 v2.59.0 회귀와 같은 형태).
+  요청 형태를 만드는 곳은 `build_form_fields` 한 곳. 제한(50자·5단어·`<>{}[]\` 불가·
+  1000개)은 `_build_keyterms` 가 먼저 거른다 — 서버 400 은 permanent 라 리서치 결과에
+  긴 항목 하나가 섞였다고 전사 전체가 죽으면 안 된다.
+- **요율**: 기본 $0.22/오디오시간, keyterms 를 **실제로 실어 보낸 요청**만 $0.27.
+  켜 놓고 리서치가 비어 폼에 안 실린 청크는 기본 요율이다 — `usage_summary` 가 오디오
+  길이를 두 갈래로 나눠 센다(안 나누면 정산이 틀린다).
+- **언어 이탈 cue 차단** — `language_code` 요청 언어의 문자군 + 라틴 + 숫자·문장부호
+  밖 문자가 **cue 텍스트의 절반 이상**이면 그 cue 를 버린다(`謝 謝`). 한글 문장 안의
+  한자 주석은 비율이 낮아 통과한다. 문자군을 모르는 언어(`ja`·`zh` 등)는 판정 자체를
+  건너뛴다. **버린 줄은 전량 stdout·run_log 에 남는다.**
+  ⚠ logprob 임계로 줄을 버리지 않는다 — 실측 저확신 3건 중 2건이 멀쩡한 한국어였다.
+- **저확신 줄은 표시만** — 텍스트·시간 그대로, `subtitle_segments.json` 의 그 줄에만
+  `"low_confidence": true` 한 키. 표시가 없으면 파일은 종전과 바이트까지 같다.
+  좌표 변환은 자막이 쓴 것과 **같은 함수**(`remap_transcript_to_edited_timeline`)를 다시
+  태워 얻는다(`pipeline._flag_low_confidence_segments`) — 누적 오프셋 수식을 베끼면
+  언젠가 어긋난다. 구간은 `checkpoint_chunk_transcripts_meta.json` 에 원본 절대초로
+  남아 `--from-step resources` 재개에서도 표시가 유지된다. 대시보드 노출은 별건(ves 몫).
+- **표기 보정** — keyterms 로 못 잡는 일반 어휘(`CTO`·`IT업계`·`30년`)만 되돌린다.
+  사전은 코드가 아니라 `app/data/transcribe_normalize_ko.json` 한 곳. 규칙은 둘뿐이고
+  **둘 다 공백 토큰 완전 일치**다: (1) 토큰(열) 사전, (2) 십의 자리 수사(10~99)+단위.
+  부분 문자열 치환은 안 한다 — `아이티` 단독 치환은 Haiti·아이티오를 깨뜨리므로
+  `아이티 업계` 토큰 **열**로만 건다. 백·천·만은 '만 원'처럼 한글 표기가 정상이라 제외.
+  cue 를 다 묶은 **뒤** 적용한다(경계 규칙은 원문 기준 — cue 분할이 안 흔들린다).
+  바꾼 내역은 건별로 stdout·run_log 에 남는다.
+- env 스위치: `ELEVENLABS_STT_KEYTERMS`·`ELEVENLABS_STT_NORMALIZE` (기본 on, `off` 로 끔).
+- **E13-0 조사 결과(수정 대상 아님)**: 두 백엔드의 cue 수가 갈리는 주범은
+  `_SENTENCE_END`(`[.!?…]$` flush)다. Scribe 는 한국어에 문장부호를 찍어 주고 Whisper 는
+  거의 안 찍어서 같은 규칙이 Scribe 에서만 발동한다(가왕쇼 EP1 898→1468, 커리어데이
+  EP8 206→180). 한쪽이 일관되게 낫지 않고(가왕쇼에서 Whisper 는 24.7초 cue 를 냈다)
+  백엔드 선택은 채널 단위라 채널마다 자막 리듬이 다른 건 설계상 허용 범위다.
+- A/B 도구: `python -m scripts.e11_transcribe_ab --video … --keyterm SK텔레콤 …`
+  (기본 keyterms on/off 두 판). 회귀 0 대조는 `--diff JOB_A JOB_B`.
+- 회귀 가드: `tests/test_e13_transcribe_polish.py`.
+
+### 곁다리 2건 (같은 커밋)
+
+- `ffmpeg_utils.find_ffmpeg_command` 미검출 메시지가 **실행 중인 OS 기준**으로 바뀌었다
+  (운영 노드 6대는 macOS 인데 윈도우 설치법만 떴다). 비대화형 SSH 의 PATH 안내 포함.
+- `tts.py` 의 voice/speed **라벨**이 모르는 값이면 즉시 실패한다(`_resolve_label`).
+  E12 가 `elevenlabs:` 접두사 경로만 고쳤고 라벨 경로는 fail-silent 로 남아 있었다.
+  ⚠ 구 체크포인트가 싣는 `narrative_female`(pipeline 의 voice 없는 cue 기본값)은
+  `LEGACY_VOICE_ALIASES` 가 **오늘과 같은 목소리**로 보낸다 — 재개 산출이 달라지면 안 된다.

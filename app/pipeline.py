@@ -813,6 +813,7 @@ def transcribe_chunks(
     transcriber=None,
     backend: str | None = None,
     language: str = "ko",
+    low_confidence_out: list | None = None,
 ) -> list[dict]:
     """청크별 transcript segments 를 *원본 영상 절대시간* 기준으로 생성.
 
@@ -833,6 +834,11 @@ def transcribe_chunks(
                  반환 표현·청크 오프셋 규칙은 두 백엔드가 같다(downstream 은 백엔드를 모름).
         language: 전사 언어 코드(ISO-639-1). 내장 Whisper 는 종전대로 "ko" 고정이라
                   ElevenLabs 경로에만 전달된다.
+        low_confidence_out: E13-2b. 주면 elevenlabs 경로의 저확신 cue 구간을
+                  **원본 절대시간**으로 여기에 append 한다(내장 경로는 아무것도 안 넣는다 —
+                  Whisper 는 줄별 확신도를 안 준다). SpeechSegment(3필드)를 늘리지 않고
+                  옆으로 흘려보내는 통로다: 늘리면 remap·merge 가 재구성하며 필드를
+                  떨어뜨리고, 그 둘은 두 백엔드 공용이라 손대면 회귀 0 이 깨진다.
 
     Returns:
         [{"chunk_index": int, "segments": list[SpeechSegment]}, ...]
@@ -902,6 +908,17 @@ def transcribe_chunks(
             raw = []
         # chunk-relative → 절대시간 (split_video_chunk 가 PTS 0 정규화 했으므로 chunk.start_sec 가산)
         chunk_offset = float(getattr(c, "start_sec", 0.0))
+        # E13-2b: 저확신 구간도 **같은 오프셋**을 받는다 — 자막과 좌표계가 하나여야
+        # 나중에 어느 자막 줄이 저확신인지 겹침으로 판정할 수 있다.
+        if backend_name == "elevenlabs" and low_confidence_out is not None:
+            from app.modules.stt_elevenlabs import take_low_confidence_spans
+
+            for _sp in take_low_confidence_spans():
+                low_confidence_out.append({
+                    "start_sec": round(float(_sp["start_sec"]) + chunk_offset, 2),
+                    "end_sec": round(float(_sp["end_sec"]) + chunk_offset, 2),
+                    "logprob": _sp.get("logprob"),
+                })
         abs_segs: list = []
         for s in raw or []:
             try:
@@ -1400,6 +1417,72 @@ def _scale_segments_for_speed(segments: list, speed: float) -> list:
         ns.start_sec = float(s.start_sec) / speed
         ns.end_sec = float(s.end_sec) / speed
         out.append(ns)
+    return out
+
+
+def _flag_low_confidence_segments(
+    final_segments: list,
+    clips: list,
+    meta_path: Path,
+    *,
+    backend: str | None,
+) -> int:
+    """E13-2b — 저확신 전사 구간과 겹치는 자막 줄에 **표시 하나**를 얹는다. 반환: 표시한 줄 수.
+
+    텍스트도 시간도 안 바꾼다. 버리지도 않는다 — 실측 저확신 3건 중 2건이 멀쩡한
+    한국어였다(`아저씨 이때 좋아요.`). 임계로 자르면 실제 대사가 사라지므로, 편집실
+    자막 검수 화면에서 **사람이 먼저 볼 줄**로 표시만 하는 것이 이 기능의 전부다.
+
+    좌표 변환은 자막이 쓴 것과 **같은 함수**(remap_transcript_to_edited_timeline)를 다시
+    태워서 얻는다 — 누적 오프셋 수식을 여기에 베껴 두면 둘이 언젠가 어긋난다.
+    `tts_only_when_no_orig=False` 는 원본 오디오를 안 쓰는 클립에 clip.subtitle 이
+    끼어드는 것을 막는다(전사 구간이 아니다).
+
+    ⚠ elevenlabs 백엔드를 **명시한 실행에서만** 돈다. 미지정·default 실행은 사이드카
+    자체가 없어 한 줄도 표시되지 않고, 표시가 없으면 subtitle_segments.json 은 종전과
+    바이트까지 동일하다(회귀 0).
+    """
+    if backend != "elevenlabs" or not final_segments or not clips:
+        return 0
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    spans = meta.get("low_confidence_spans") or []
+    if not spans:
+        return 0
+
+    src: list[SpeechSegment] = []
+    for sp in spans:
+        try:
+            src.append(SpeechSegment(start_sec=float(sp["start_sec"]),
+                                     end_sec=float(sp["end_sec"]), text="lc"))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not src:
+        return 0
+    edited = remap_transcript_to_edited_timeline(clips, src, tts_only_when_no_orig=False)
+    if not edited:
+        return 0
+
+    flagged = 0
+    for seg in final_segments:
+        s0, s1 = float(seg.start_sec), float(seg.end_sec)
+        for sp in edited:
+            if min(s1, sp.end_sec) - max(s0, sp.start_sec) >= 0.05:
+                seg.low_confidence = True
+                flagged += 1
+                break
+    return flagged
+
+
+def _subtitle_segment_json(seg) -> dict[str, Any]:
+    """subtitle_segments.json 한 줄. **표시된 줄에만** low_confidence 키가 붙는다 —
+    무조건 붙이면 플래그 없는 채널의 파일까지 모양이 달라진다(회귀 0)."""
+    out: dict[str, Any] = {"start_sec": seg.start_sec, "end_sec": seg.end_sec,
+                           "text": seg.text}
+    if getattr(seg, "low_confidence", False):
+        out["low_confidence"] = True
     return out
 
 
@@ -2295,9 +2378,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             [ci.character_name for ci in cast_images if ci.character_name]
             + [ci.actor_name for ci in cast_images if ci.actor_name]
         )) if cast_images else []
+        _low_conf_spans: list[dict[str, Any]] = []
         chunk_transcripts = transcribe_chunks(
             chunks=chunks,
             srt_path=payload.srt_path,
+            low_confidence_out=_low_conf_spans,
             work_title=payload.work_title,
             character_names=_char_names,
             work_context=payload.work_context,
@@ -2328,15 +2413,26 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 # 분 단위 과금 — audio_duration_secs 가 나중 정산의 근거다.
                 from app.modules.stt_elevenlabs import usage_summary as _el_stt_usage
                 _tr_entry["elevenlabs_stt"] = _el_stt_usage()
-                print(f"  → [ElevenLabs STT] 요청 {_tr_entry['elevenlabs_stt']['requests']}건 · "
-                      f"오디오 {_tr_entry['elevenlabs_stt']['audio_duration_secs']:.1f}s · "
-                      f"추정 ${_tr_entry['elevenlabs_stt']['estimated_usd']:.5f}")
+                _u = _tr_entry["elevenlabs_stt"]
+                print(f"  → [ElevenLabs STT] 요청 {_u['requests']}건"
+                      f"(keyterms {_u['requests_with_keyterms']}건/{_u['keyterms_sent']}개) · "
+                      f"오디오 {_u['audio_duration_secs']:.1f}s · "
+                      f"추정 ${_u['estimated_usd']:.5f}")
+                if _u["dropped_language_escape"]:
+                    print(f"  → [ElevenLabs STT] 언어 이탈로 버린 줄 "
+                          f"{len(_u['dropped_language_escape'])}건 (run_log 에 전문 보존)")
+                if _u["normalized"]:
+                    print(f"  → [ElevenLabs STT] 표기 보정 "
+                          f"{sum(_u['normalized'].values())}건 {_u['normalized']}")
             run_log["steps"].append(_tr_entry)
+            # E13-2b: 저확신 구간은 자막 매핑 단계(한참 뒤)가 읽는다 — 사이드카에 남겨야
+            # `--from-step resources` 재개(전사 단계를 건너뛴다)에서도 표시가 유지된다.
+            _meta: dict[str, Any] = {"transcribe_backend": payload.transcribe_backend}
+            if _low_conf_spans:
+                _meta["low_confidence_spans"] = _low_conf_spans[:2000]
+                _meta["low_confidence_count"] = len(_low_conf_spans)
             checkpoint_chunk_tr_meta.write_text(
-                json.dumps({"transcribe_backend": payload.transcribe_backend},
-                           ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+                json.dumps(_meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # ═══════════════════════════════════════
     # [8/15] Gemini 분석 (바이럴 최적화)
@@ -3381,8 +3477,22 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 'text': seg.get('text', "") if isinstance(seg, dict) else seg.text,
             }
             final_segments.append(SimpleNamespace(**seg_dict))
+        # E13-2b: 저확신 전사 줄 표시(elevenlabs 명시 실행 전용 — 그 외엔 무조건 0건).
+        _lc_flagged = _flag_low_confidence_segments(
+            final_segments, clips, checkpoint_chunk_tr_meta,
+            backend=payload.transcribe_backend,
+        )
+        if _lc_flagged:
+            print(f"  [Scribe-확신도낮음] 자막 {_lc_flagged}줄에 표시 — 텍스트는 그대로 두고 "
+                  f"편집실 자막 검수에서 사람이 먼저 볼 줄로만 남긴다")
+            run_log["steps"].append({
+                "step": "subtitle_low_confidence",
+                "transcribe_backend": payload.transcribe_backend,
+                "flagged_lines": _lc_flagged,
+                "total_lines": len(final_segments),
+            })
         segments_cache_path.write_text(
-            json.dumps([{"start_sec": s.start_sec, "end_sec": s.end_sec, "text": s.text} for s in final_segments],
+            json.dumps([_subtitle_segment_json(s) for s in final_segments],
                        ensure_ascii=False, indent=2),
             encoding="utf-8"
         )
