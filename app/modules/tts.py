@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -80,6 +81,38 @@ SPEED_TO_RATE: dict[str, str] = {
 DEFAULT_VOICE = "ko_female"
 DEFAULT_SPEED = "normal"
 
+# ── E12 (2026-08-22): 편집실이 ElevenLabs voice_id 를 직접 고르는 어휘 ────────
+# voice = "ko_female" | "chat_*" | …        (지금 그대로 — 한 글자도 안 바뀐다)
+#       | "elevenlabs:{voice_id}"            (신설 — 그 id 로 바로 합성)
+#
+# **엔진은 이름표를 들지 않는다.** 사람이 읽는 이름("차분한 여성" 등)은 대시보드가 든다 —
+# 목록이 두 곳에 생기면 반드시 어긋난다(계정마다 보이스 라이브러리가 달라 1:1 미러가 불가능).
+# 형태는 오케스트레이터 RPC 가 먼저 거르고(영숫자 16~32자), 엔진은 같은 형태를 재확인만 한다.
+EL_VOICE_PREFIX = "elevenlabs:"
+_EL_VOICE_ID_RE = re.compile(r"^[A-Za-z0-9]{16,32}$")
+
+_prefixed_announced = False
+
+
+def is_elevenlabs_voice(voice: str | None) -> bool:
+    """편집실이 고른 ElevenLabs voice_id 인가 — 접두사 하나로만 갈린다."""
+    return str(voice or "").startswith(EL_VOICE_PREFIX)
+
+
+def elevenlabs_voice_id(voice: str) -> str:
+    """"elevenlabs:{id}" → id. 형태가 깨졌으면 즉시 실패(permanent).
+
+    조용히 기본 목소리로 떨어지지 않는다 — 사람은 바꿨다고 믿은 채 종전 소리로 발행된다.
+    """
+    vid = str(voice)[len(EL_VOICE_PREFIX):].strip()
+    if not _EL_VOICE_ID_RE.match(vid):
+        raise RuntimeError(
+            f"ElevenLabs voice_id 형태가 아닙니다: {vid!r} "
+            f"(영숫자 16~32자). 편집실 목소리 목록(ops_config.editor_tts_voices)의 "
+            f"값이 잘못 실렸는지 확인하세요.")
+    return vid
+
+
 _backend_announced = False
 
 
@@ -111,6 +144,25 @@ def _announce_backend() -> str:
     return backend
 
 
+def _require_elevenlabs_key(voice: str) -> None:
+    """접두사 목소리인데 키가 없으면 '무엇을 어디에 넣어야 하는지'까지 말하고 즉시 실패."""
+    if not os.environ.get("ELEVENLABS_API_KEY"):
+        raise RuntimeError(
+            f"편집실이 고른 목소리 {voice!r} 는 ElevenLabs 목소리인데 "
+            "ELEVENLABS_API_KEY 환경변수가 없습니다. ElevenLabs 대시보드에서 API 키를 "
+            "발급해 실행 노드의 ELEVENLABS_API_KEY 에 넣으세요 "
+            "(예: export ELEVENLABS_API_KEY=sk_...). edge-tts 기본 목소리로 조용히 "
+            "떨어지지 않습니다 — 목소리를 바꿨다고 믿은 채 종전 소리로 발행되는 것을 막습니다.")
+
+
+def _announce_prefixed_voice() -> None:
+    """접두사 경로를 프로세스당 1회 명시 — 어느 경로로 나간 판인지 로그에 남는다."""
+    global _prefixed_announced
+    if not _prefixed_announced:
+        print(f"[TTS] backend=elevenlabs model={EL_MODEL_ID} (편집실 지정 voice_id)")
+        _prefixed_announced = True
+
+
 def synthesize_tts(
     text: str,
     output_path: Path,
@@ -123,6 +175,13 @@ def synthesize_tts(
     라벨이 프리셋에 없으면 기본값으로 폴백한다(종전 계약 유지 — 구 run 의
     narrative_* 등 레거시 라벨이 체크포인트에 남아 있다).
     """
+    # E12: 접두사가 붙은 목소리는 백엔드 선택을 건너뛴다 — 사람이 그 목소리를 고른 것이라
+    # edge-tts 폴백은 답이 될 수 없다. 키가 없으면 여기서 실패한다(조용한 대체 금지).
+    if is_elevenlabs_voice(voice):
+        _require_elevenlabs_key(voice)
+        _announce_prefixed_voice()
+        return _synthesize_elevenlabs(text, Path(output_path), voice=voice, speed=speed)
+
     backend = _announce_backend()
     if backend == "elevenlabs":
         return _synthesize_elevenlabs(text, Path(output_path), voice=voice, speed=speed)
@@ -214,7 +273,9 @@ def _synthesize_elevenlabs(
     4xx(키·voice_id·요청 오류)는 재시도해도 안 낫는다 — 즉시 실패."""
     import requests
 
-    voice_id = EL_VOICE_PRESETS.get(voice, EL_VOICE_PRESETS[DEFAULT_VOICE])
+    # E12: 접두사면 편집실이 고른 voice_id 그대로, 아니면 종전 라벨 매핑(E11 계약).
+    voice_id = (elevenlabs_voice_id(voice) if is_elevenlabs_voice(voice)
+                else EL_VOICE_PRESETS.get(voice, EL_VOICE_PRESETS[DEFAULT_VOICE]))
     url = (f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
            f"?output_format={EL_OUTPUT_FORMAT}")
     body = {
