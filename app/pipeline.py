@@ -809,6 +809,8 @@ def transcribe_chunks(
     work_context: str | None = None,
     audio_workdir: Path,
     transcriber=None,
+    backend: str | None = None,
+    language: str = "ko",
 ) -> list[dict]:
     """청크별 transcript segments 를 *원본 영상 절대시간* 기준으로 생성.
 
@@ -822,14 +824,26 @@ def transcribe_chunks(
         audio_workdir: Whisper 분기에서 사용할 임시 작업 디렉토리 (현재는 직접 split_path 사용이라
                        파라미터만 받고 미사용 — DI 호환용)
         transcriber: SRT 없을 때 호출되는 콜러블 (Path → list[SpeechSegment]).
-                     None이면 app.modules.speech.extract_transcript 사용.
+                     None이면 backend 가 고른 백엔드 사용(기본: 내장 Whisper).
                      테스트에서 Whisper 의존 없이 fake injection 가능.
+        backend: E11 자막 전사 백엔드 — None·"default"=내장 Whisper(종전 그대로),
+                 "elevenlabs"=ElevenLabs Scribe STT. 분기는 *여기서 끝난다* —
+                 반환 표현·청크 오프셋 규칙은 두 백엔드가 같다(downstream 은 백엔드를 모름).
+        language: 전사 언어 코드(ISO-639-1). 내장 Whisper 는 종전대로 "ko" 고정이라
+                  ElevenLabs 경로에만 전달된다.
 
     Returns:
         [{"chunk_index": int, "segments": list[SpeechSegment]}, ...]
     """
-    # SRT 분기
+    backend_name = (backend or "default").strip().lower()
+
+    # SRT 분기 — 사람이 준 자막이 있으면 *전사 자체가 일어나지 않는다*. 백엔드 선택은
+    # 받아쓰기(STT) 엔진을 고르는 노브라 이 경우 할 일이 없다. 조용히 무시하지 않고
+    # 한 줄 남긴다 — 일레븐랩스로 바꿨는데 결과가 그대로인 이유가 로그에 있어야 한다.
     if srt_path is not None and Path(srt_path).exists():
+        if backend_name != "default":
+            print(f"  [transcribe] backend={backend_name} 지정됐지만 자막 파일이 있어 "
+                  f"SRT 를 그대로 씁니다({Path(srt_path).name}) — 전사 호출 없음")
         all_segments = parse_subtitle(srt_path)
         return [
             {
@@ -841,17 +855,32 @@ def transcribe_chunks(
             for c in chunks
         ]
 
-    # Whisper 분기
+    # STT 분기 (E11: 백엔드 선택 지점 — 여기서 콜러블 하나로 감싸고 분기는 끝난다)
     if transcriber is None:
-        from app.modules.speech import extract_transcript
+        if backend_name == "elevenlabs":
+            from app.modules.stt_elevenlabs import EL_STT_MODEL_ID, build_transcriber
 
-        def transcriber(audio_path: Path):
-            return extract_transcript(
-                audio_path,
+            # 키 없으면 여기서 즉시 실패한다(내장 전사로 조용히 안 떨어진다).
+            transcriber = build_transcriber(
+                language=language,
                 work_title=work_title,
                 character_names=character_names,
                 work_context=work_context,
             )
+            print(f"  [transcribe] backend=elevenlabs model={EL_STT_MODEL_ID}")
+        else:
+            from app.modules.speech import extract_transcript
+
+            if backend is not None:      # 명시적 default — 미지정과 결과는 같다
+                print("  [transcribe] backend=default (내장 Whisper)")
+
+            def transcriber(audio_path: Path):
+                return extract_transcript(
+                    audio_path,
+                    work_title=work_title,
+                    character_names=character_names,
+                    work_context=work_context,
+                )
 
     from app.modules.speech import SpeechSegment as _SS
     out: list[dict] = []
@@ -863,6 +892,10 @@ def transcribe_chunks(
         try:
             raw = transcriber(Path(sp))
         except Exception as e:
+            if backend_name == "elevenlabs":
+                # 유료 백엔드를 사람이 명시적으로 골랐다 — 빈 자막으로 조용히 발행하느니
+                # 크게 실패한다(E11 규율). 재시도 분류는 어댑터가 이미 끝냈다.
+                raise
             print(f"  [chunk_transcribe] chunk {c.index} Whisper 실패 ({e}) — 빈 결과로 진행")
             raw = []
         # chunk-relative → 절대시간 (split_video_chunk 가 PTS 0 정규화 했으므로 chunk.start_sec 가산)
@@ -1758,6 +1791,10 @@ class PipelineInput:
     # 관제 편집실이 고친 제목·구간 JSON 경로(edit_overrides/v1). None 이면 종전과 동일.
     # 이 값이 있으면 체크포인트보다 **사람 입력이 이긴다** — app/modules/edit_overrides.py.
     edit_overrides_path: Path | None = None
+    # E11(2026-08-22) 자막 전사 백엔드 — None(미지정)·"default"=내장 Whisper 경로 그대로,
+    # "elevenlabs"=ElevenLabs Scribe STT. 허용값 밖은 CLI argparse choices 가 이미 막는다.
+    # **미지정이면 파이프라인은 종전과 완전히 동일하다**(회귀 0 — auto_update 배포 조건).
+    transcribe_backend: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2164,6 +2201,22 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # (start_idx <= chunk_transcribe)는 gemini 가 뒤 단계라 False → 전사도 재실행 안 됨 → 빈 상태로
     # 떨어져 자막이 candidate.transcript 폴백(1줄/clip)으로 깨지는 버그가 있었다.
     _chunk_tr_invalidate = from_step in ("chunk", "character_index")
+    # E11: 백엔드를 바꿔 재개하면 이전 백엔드의 전사가 캐시에서 살아나면 안 된다 —
+    # 사람은 일레븐랩스로 바꿨다고 믿는데 종전 전사가 그대로 발행된다. 백엔드는
+    # 사이드카에만 적는다(플래그 미지정 실행은 파일을 쓰지도 읽지도 않는다 = 회귀 0).
+    checkpoint_chunk_tr_meta = output_dir / "checkpoint_chunk_transcripts_meta.json"
+    if payload.transcribe_backend is not None:
+        _prev_backend = None
+        if checkpoint_chunk_tr_meta.exists():
+            try:
+                _prev_backend = json.loads(
+                    checkpoint_chunk_tr_meta.read_text(encoding="utf-8")).get("transcribe_backend")
+            except Exception:
+                _prev_backend = None
+        if _prev_backend is not None and _prev_backend != payload.transcribe_backend:
+            print(f"\n[chunk_transcribe] 백엔드 변경 {_prev_backend} → "
+                  f"{payload.transcribe_backend} — 캐시 무효화 후 재전사")
+            _chunk_tr_invalidate = True
     if checkpoint_chunk_tr.exists() and not _chunk_tr_invalidate:
         try:
             _ctr_data = json.loads(checkpoint_chunk_tr.read_text(encoding="utf-8"))
@@ -2188,14 +2241,41 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             character_names=_char_names,
             work_context=payload.work_context,
             audio_workdir=output_dir,
+            backend=payload.transcribe_backend,
+            language=payload.language,
         )
         checkpoint_chunk_tr.write_text(
             json.dumps(_serialize_chunk_transcripts(chunk_transcripts), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         _total_segs = sum(len(ct.get("segments", [])) for ct in chunk_transcripts)
-        _branch = "SRT" if payload.srt_path else "Whisper"
+        _branch = ("SRT" if payload.srt_path else
+                   ("ElevenLabs" if payload.transcribe_backend == "elevenlabs" else "Whisper"))
         print(f"  → [{_branch}] {len(chunk_transcripts)}개 청크, 총 {_total_segs}개 segment (소요 시간: {time.time()-_ctr_start:.1f}초)")
+        # E11: 백엔드를 명시한 실행만 기록한다 — 미지정 실행은 run_log·산출 파일이
+        # 종전과 한 글자도 달라지지 않아야 한다(auto_update 배포 조건).
+        if payload.transcribe_backend is not None:
+            _tr_entry: dict[str, Any] = {
+                "step": "chunk_transcribe",
+                "transcribe_backend": payload.transcribe_backend,
+                "source": "srt" if payload.srt_path else "stt",
+                "chunks": len(chunk_transcripts),
+                "segments": _total_segs,
+                "elapsed_sec": round(time.time() - _ctr_start, 1),
+            }
+            if payload.transcribe_backend == "elevenlabs" and not payload.srt_path:
+                # 분 단위 과금 — audio_duration_secs 가 나중 정산의 근거다.
+                from app.modules.stt_elevenlabs import usage_summary as _el_stt_usage
+                _tr_entry["elevenlabs_stt"] = _el_stt_usage()
+                print(f"  → [ElevenLabs STT] 요청 {_tr_entry['elevenlabs_stt']['requests']}건 · "
+                      f"오디오 {_tr_entry['elevenlabs_stt']['audio_duration_secs']:.1f}s · "
+                      f"추정 ${_tr_entry['elevenlabs_stt']['estimated_usd']:.5f}")
+            run_log["steps"].append(_tr_entry)
+            checkpoint_chunk_tr_meta.write_text(
+                json.dumps({"transcribe_backend": payload.transcribe_backend},
+                           ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
 
     # ═══════════════════════════════════════
     # [8/15] Gemini 분석 (바이럴 최적화)
@@ -2237,7 +2317,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         }
         _total_segs = sum(len(v) for v in chunk_transcripts_by_idx.values())
         if _total_segs:
-            _branch = "SRT" if payload.srt_path else "Whisper"
+            _branch = ("SRT" if payload.srt_path else
+                       ("ElevenLabs" if payload.transcribe_backend == "elevenlabs" else "Whisper"))
             print(f"  - chunk_transcripts [{_branch}] {_total_segs}개 segment → analyze_chunk 입력")
 
         for idx, chunk in enumerate(chunks, 1):

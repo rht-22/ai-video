@@ -118,6 +118,15 @@ def build_parser() -> argparse.ArgumentParser:
                         help="무음 컷 프로파일 (A/B). aggressive=gap-단위·무음 적극 제거(벤치마크 가설). 미지정=config 기본(conservative).")
     create.add_argument("--length-profile", choices=["standard", "tight"], default=None,
                         help="길이 프로파일 (A/B). tight=목표 45s·상한 톨러런스 1.1(시장 ~46s). 미지정=config 기본(standard).")
+    # E11(2026-08-22) 자막 전사 백엔드 선택. 오케스트레이터 어댑터가 채널 design 키
+    # transcribe_backend 를 그대로 이 플래그로 넘긴다(ops_config.channel_transcribe 게이트 뒤).
+    # 미지정 = 종전 그대로(회귀 0). 허용값 밖은 choices 가 즉시 실패시킨다 — 조용히
+    # 기본값으로 떨어지면 사람은 일레븐랩스로 바꿨다고 믿은 채 종전 전사로 발행된다.
+    create.add_argument("--transcribe-backend", dest="transcribe_backend",
+                        choices=["default", "elevenlabs"], default=None,
+                        help="(선택) 대사 자막의 받아쓰기 백엔드. default=내장 전사(미지정과 동일), "
+                             "elevenlabs=ElevenLabs Scribe STT(ELEVENLABS_API_KEY 필요). "
+                             "자막 파일(--subtitle)이 있으면 전사 자체를 안 하므로 무관하다.")
     create.add_argument("--no-research", action="store_true",
                         help="작품 자동 리서치를 건너뜁니다")
     create.add_argument("--episode", type=int, default=None,
@@ -395,6 +404,15 @@ def main() -> None:
         # 긴 생성(~68분)을 시작하기 전에 렌더 단계가 쓸 ffmpeg 를 먼저 검증한다.
         ensure_ffmpeg_supported()
 
+        # E11: 전사 백엔드가 elevenlabs 인데 키가 없으면 68분을 태우기 전에 즉시 실패.
+        # (파이프라인 안에도 같은 검사가 있지만, 사람이 제일 빨리 알아야 하는 자리는 여기다.)
+        if getattr(args, "transcribe_backend", None) == "elevenlabs":
+            from app.modules.stt_elevenlabs import ElevenLabsSTTError, ensure_api_key
+            try:
+                ensure_api_key()
+            except ElevenLabsSTTError as e:
+                parser.error(str(e))
+
         # 이전 맥락 부여 테스트: --previous-context 또는 --previous-context-file 처리
         previous_episodes_context: str | None = None
         if getattr(args, "previous_context_file", None):
@@ -491,6 +509,7 @@ def main() -> None:
                 editorial_run=editorial_run,
                 edit_overrides_path=(Path(args.edit_overrides)
                                      if getattr(args, "edit_overrides", None) else None),
+                transcribe_backend=getattr(args, "transcribe_backend", None),
             ),
             from_step=args.from_step,
             job_id=args.job_id,
