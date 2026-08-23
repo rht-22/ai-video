@@ -1939,6 +1939,12 @@ class PipelineInput:
     # "elevenlabs"=ElevenLabs Scribe STT. 허용값 밖은 CLI argparse choices 가 이미 막는다.
     # **미지정이면 파이프라인은 종전과 완전히 동일하다**(회귀 0 — auto_update 배포 조건).
     transcribe_backend: str | None = None
+    # 이 실행에 명시된 --design-* 토큰(app.cli.design_cli_tokens). run_log 에 그대로 남겨
+    # **같은 디자인으로 다시 그려야 하는 재현 렌더**가 복원해 쓴다 — 현지화 L4 재렌더가
+    # 이것 없이 돌아 채널 화면비·제목 스타일이 통째로 엔진 기본값으로 떨어지고 있었다
+    # (2026-08-23 SHOTCONE 실측: aspect_ratio 13:9 가 완성본에서 1:1 로 나갔다).
+    # 비어 있으면 종전과 완전히 동일하다(회귀 0).
+    design_cli: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -2046,6 +2052,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print(f"  - Job ID: {job_id}")
         print(f"  - 출력 디렉토리: {output_dir}")
     run_log.setdefault("provenance", build_provenance(config))
+    # design_cli 는 setdefault 가 아니라 **매번 갱신**이다 — 재개(--from-step)에서 run_log 는
+    # 디스크에서 읽어오므로, setdefault 로 두면 편집실이 방금 바꾼 디자인 대신 첫 런의 값이
+    # 남아 재현 렌더가 낡은 디자인으로 그린다. 이 키는 '지금 이 렌더가 쓴 디자인'이다.
+    run_log["design_cli"] = list(payload.design_cli or ())
     print("[OK] 초기화 완료")
 
     # ═══════════════════════════════════════

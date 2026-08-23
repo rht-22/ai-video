@@ -271,6 +271,36 @@ _CLI_TO_DESIGN_FIELD = {
 }
 
 
+# 이 실행에 **명시된** --design-* 토큰 재구성 — 재현 렌더(현지화 L4 등)가 같은 디자인으로
+# 다시 그릴 수 있게 run_log 에 남기는 값이다. asdict(DesignConfig) 를 남기지 않는 이유:
+# 그건 기본값까지 전부 '명시된 값'으로 굳혀 버려서, video_width 처럼 **미지정과 명시를
+# 구분해 기하가 달라지는 키**(E10 게이트)를 재현 시점에 뒤집는다. 여기서는 사람이 실제로
+# 준 것만 남긴다. 순수 — 테스트 대상.
+_DESIGN_EXTRA_DESTS = ("no_reframe",)   # --design- 접두사가 아니지만 디자인인 스위치
+
+
+def design_cli_tokens(args) -> list[str]:
+    """argparse 결과 → 명시된 --design-* 토큰 목록. 순수.
+
+    dest 이름을 그대로 플래그로 되돌린다(`design_title_y` → `--design-title-y`) — 새
+    --design-* 인자가 늘어도 이 함수를 고칠 필요가 없다. store_true 는 켜진 것만,
+    값 인자는 None 이 아닌 것만 담는다(= _build_design_config 의 '명시' 판정과 같은 규칙).
+    """
+    ns = dict(args) if isinstance(args, dict) else vars(args)
+    tokens: list[str] = []
+    for dest in sorted(ns):
+        if not dest.startswith("design_") and dest not in _DESIGN_EXTRA_DESTS:
+            continue
+        value = ns[dest]
+        flag = "--" + dest.replace("_", "-")
+        if isinstance(value, bool):
+            if value:
+                tokens.append(flag)
+        elif value is not None:
+            tokens += [flag, str(value)]
+    return tokens
+
+
 def _build_design_config(args: argparse.Namespace) -> DesignConfig:
     """CLI의 --design-* 인자에서 DesignConfig를 생성합니다."""
     overrides: dict = {}
@@ -491,6 +521,7 @@ def main() -> None:
                 topic=args.topic,
                 outdir=_resolve_outdir(Path(args.outdir)),
                 design=_build_design_config(args),
+                design_cli=tuple(design_cli_tokens(args)),
                 previous_episodes_context=previous_episodes_context,
                 work_context=work_context,
                 srt_path=srt_path,
