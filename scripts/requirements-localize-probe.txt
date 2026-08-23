@@ -1,0 +1,39 @@
+# L-P0 실측용 후보 requirements — **배포용이 아니다.**
+#
+# 현지화 이관(ves-orchestrator docs/LOCALIZE_UNIFY.md)이 ai-video 본체 requirements 로
+# 들일 후보를 한곳에 모은 것이다. 노드에서 이 파일로 `deps_probe.py --install --smoke`
+# 를 돌려 ① 해석되는가 ② 얼마나 걸리는가 ③ 얼마나 큰가 ④ 진짜 import 되는가 를 잰다.
+# 실측 결과를 보고 나서야 진짜 requirements.txt 에 반영한다(P4).
+#
+#   cd /opt/ves/engines/ai-video
+#   .venv/bin/python -m scripts.deps_probe \
+#       --resolve scripts/requirements-localize-probe.txt --install --smoke
+#
+# ⚠ 일회용 venv 에 3~5GB 를 깐다. 끝나면 --workdir(기본 /tmp/deps_probe)를 지울 것.
+
+-r ../requirements.txt
+
+# ── 더빙 route C (지금 잔망루피가 실제로 도는 유일한 경로) ──────────────
+elevenlabs>=1.0
+demucs>=4.0                  # 보컬 분리 — torch 를 끌고 온다
+torch>=2.2
+torchaudio>=2.2
+psycopg2-binary>=2.9         # 원장 PG 이관(0077)
+pyyaml>=6.0
+srt>=3.5                     # 순수 파이썬(sdist) — 휠이 없어 --only-binary 해석에선 빠진다
+
+# ── OCR·인페인팅 route B/BC ────────────────────────────────────────────
+# ⚠ paddleocr 가 opencv-contrib-python 을 끌어온다 — ai-video 의 opencv-python 과
+#   같은 cv2 를 덮어쓴다(P0 보고 §2-3). --smoke 의 `cv2 실제 경로` 로 어느 쪽이
+#   이겼는지 확인할 것.
+paddleocr>=3.0
+paddlepaddle>=3.0            # ⚠ macOS arm64 이력 나쁨 — 2026-08-12 초기화 실패로
+                             #    잔망루피 하루 처리량이 0~1편이 됐다. 이 파일의 최대 질문.
+rapidocr-onnxruntime>=1.3    # 경량 폴백(paddle 이 죽으면 여기로 뒤집는다)
+scikit-image>=0.22           # 인페인팅 QA(SSIM/PSNR)
+
+# ── 넣지 않은 것 ────────────────────────────────────────────────────────
+# coqui-tts (XTTS)     — 가중치가 비상업 라이선스. 상업 채널 기본값에서 제외(§8-7)
+# simple-lama-inpainting — pillow 핀이 깨져 있어 --no-deps 설치가 필요하다(vlp README).
+#                          해석을 통째로 깨뜨리므로 실측에서 분리한다.
+# sttn / propainter    — 가중치 별도 + ProPainter 는 비상업 가능성(상업 게이트 유지)

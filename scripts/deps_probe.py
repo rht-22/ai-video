@@ -5,14 +5,16 @@
 (사용자 결정 1). 지금은 pip sync 가 깨져도 mm-06 하나만 멈추지만, 그 뒤로는
 **6대 전부**가 멈춘다. 그래서 옮기기 전에 숫자를 본다.
 
-    # ① 지금 venv 에 무엇이 얼마나 들어 있나 + 충돌 신호
-    python -m scripts.deps_probe
+    cd /opt/ves/engines/ai-video          # ⚠ -m 은 레포 루트에서만 된다
+    .venv/bin/python -m scripts.deps_probe                       # ① 현재 venv + 충돌 신호
+    .venv/bin/python -m scripts.deps_probe --resolve <req>       # ② 해석만(설치 안 함)
+    .venv/bin/python -m scripts.deps_probe --resolve <req> --install --smoke   # ③ 실측
 
-    # ② 후보 requirements 를 해석만 해 본다 (설치 안 함)
-    python -m scripts.deps_probe --resolve requirements-localize.txt
+이 파일은 **표준 라이브러리만** 쓴다 — 레포에 없는 노드에서도 파일 하나만 내려
+`python /tmp/deps_probe.py …` 로 그냥 돌릴 수 있다(그래서 `-m` 이 필수가 아니다).
 
-    # ③ 진짜로 재 본다 — 일회용 venv 에 설치하며 시간·용량 실측 (오래 걸린다)
-    python -m scripts.deps_probe --resolve requirements-localize.txt --install
+`--install` 은 일회용 venv 에 진짜로 깐다. 후보 requirements 면 **디스크 3~5GB·
+수십 분**이 든다(끝나면 --workdir 를 지우면 된다).
 
 ⚠ **리눅스에서 잰 값은 노드 값이 아니다.** pip 은 `--platform macosx_…` 를 줘도
 환경 마커(`platform_system`)는 *실행 중인* OS 로 평가한다 — 그래서 리눅스에서
@@ -138,11 +140,45 @@ def timed_install(req: Path, workdir: Path) -> dict:
             "packages": installed(py) if ok else {}}
 
 
+# 설치가 끝났다고 도는 게 아니다 — arm64 에서 import 자체가 죽는 이력이 있다
+# (paddleocr 초기화 실패로 2026-08-12 잔망루피 하루 처리량이 0~1편이 됐다).
+# 그래서 '깔렸다'가 아니라 '불러진다'까지 본다.
+SMOKE_IMPORTS = [
+    ("cv2", "얼굴검출(reframe)·프레임 처리"),
+    ("paddle", "인페인팅 route B 의 OCR 엔진 — arm64 이력 나쁨"),
+    ("paddleocr", "OCR 백엔드"),
+    ("rapidocr_onnxruntime", "OCR 경량 폴백"),
+    ("torch", "더빙(demucs)·인페인팅(LaMa) 공통 전제"),
+    ("torchaudio", "더빙 오디오 IO"),
+    ("demucs", "더빙 보컬 분리"),
+    ("faster_whisper", "전사"),
+    ("skimage", "인페인팅 QA(SSIM)"),
+]
+
+
+def smoke(py: str) -> list[dict]:
+    """import 되는가 + cv2 는 어느 배포판이 이겼는가. 실패해도 계속 — 전량을 본다."""
+    out = []
+    for mod, why in SMOKE_IMPORTS:
+        code = ("import %s as m; print(getattr(m,'__version__','?'));"
+                "print(getattr(m,'__file__','?'))" % mod)
+        r = subprocess.run([py, "-c", code], capture_output=True, text=True, timeout=300)
+        ok = r.returncode == 0
+        lines = (r.stdout or "").strip().splitlines()
+        out.append({"module": mod, "why": why, "ok": ok,
+                    "version": lines[0] if ok and lines else "",
+                    "path": lines[1] if ok and len(lines) > 1 else "",
+                    "error": "" if ok else ((r.stderr or "").strip().splitlines() or [""])[-1]})
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="의존성 실측 — 노드에서 돌린다")
     ap.add_argument("--resolve", help="후보 requirements 파일")
     ap.add_argument("--install", action="store_true",
                     help="일회용 venv 에 실제 설치해 시간·용량을 잰다(오래 걸린다)")
+    ap.add_argument("--smoke", action="store_true",
+                    help="설치 후 실제로 import 되는지까지 확인 (--install 과 함께)")
     ap.add_argument("--workdir", default="/tmp/deps_probe")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
@@ -191,6 +227,19 @@ def main() -> None:
                       f"디스크 {human(m['venv_bytes'])}")
                 print(f"  → updater PIP_TIMEOUT_SEC 는 이 값의 3배 이상으로 "
                       f"(캐시 없는 첫 설치·느린 회선 여유)")
+            if args.smoke and m["ok"]:
+                sm = smoke(str(Path(args.workdir) / "probe_venv" / "bin" / "python"))
+                result["smoke"] = sm
+                if not args.json:
+                    print("\n=== import 스모크 ===")
+                    for r in sm:
+                        mark = "OK " if r["ok"] else "!! "
+                        tail = (f"{r['version']}" if r["ok"] else f"{r['error']}")
+                        print(f"  {mark}{r['module']:<22} {str(tail)[:70]}")
+                    cv = [r for r in sm if r["module"] == "cv2" and r["ok"]]
+                    if cv:
+                        print(f"  · cv2 실제 경로: {cv[0]['path']}")
+                        print("    (opencv-python 과 contrib 가 같이 깔렸다면 나중에 깔린 쪽이다)")
 
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
