@@ -76,9 +76,27 @@ def delta_report(before: dict, after: dict) -> dict:
     a = {normalize(k): v for k, v in after.items()}
     return {
         "added": sorted(k for k in a if k not in b),
-        "removed": sorted(k for k in b if k not in a),
+        # ⚠ pip install -r 은 **지우지 않는다** — 이 목록은 '새 해석에 없는 것'이지
+        #    사라질 것이 아니다. 남아서 새 패키지와 섞이는 쪽이 오히려 문제다.
+        "absent": sorted(k for k in b if k not in a),
         "changed": sorted(f"{k}: {b[k]} → {a[k]}" for k in a if k in b and a[k] != b[k]),
+        "downgraded": sorted(f"{k}: {b[k]} → {a[k]}" for k in a
+                             if k in b and a[k] != b[k] and _older(a[k], b[k])),
     }
+
+
+def _ver_key(v: str) -> tuple:
+    """느슨한 버전 비교 키 — 숫자 조각만 본다(rc·post 는 무시). 순수."""
+    out = []
+    for part in str(v).replace("-", ".").split("."):
+        digits = "".join(c for c in part if c.isdigit())
+        out.append(int(digits) if digits else 0)
+    return tuple(out)
+
+
+def _older(a: str, b: str) -> bool:
+    """a 가 b 보다 낮은 버전인가(=다운그레이드). 순수 — 테스트 대상."""
+    return _ver_key(a) < _ver_key(b)
 
 
 def summarize_resolution(report: dict) -> dict:
@@ -105,9 +123,28 @@ def installed(py: str = sys.executable) -> dict:
     return {normalize(p["name"]): p["version"] for p in json.loads(r.stdout)}
 
 
-def venv_size(py: str = sys.executable) -> int:
-    root = Path(py).resolve().parent.parent
-    return sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
+def venv_root(py: str) -> Path:
+    """venv 루트 — **심볼릭 링크를 따라가면 안 된다.**
+
+    `.venv/bin/python` 은 보통 시스템 파이썬으로의 심볼릭 링크다. `resolve()` 하면
+    Homebrew Cellar 를 가리켜 venv 가 아니라 **파이썬 설치 크기**를 재게 된다
+    (노드 실측에서 124개 패키지 venv 가 82.5 MiB 로 나왔다 — tensorflow 휠 하나가
+    213 MiB 다). 순수 — 테스트 대상."""
+    return Path(py).parent.parent
+
+
+def venv_size(py: str | None = None) -> int:
+    """py 를 안 주면 **지금 도는 인터프리터의 venv**(sys.prefix) — 이쪽도 심볼릭
+    링크에 안 속는다."""
+    root = Path(sys.prefix) if py is None else venv_root(py)
+    total = 0
+    for f in root.rglob("*"):
+        try:
+            if f.is_file() and not f.is_symlink():
+                total += f.stat().st_size
+        except OSError:
+            continue                      # 권한·끊긴 링크는 건너뛴다
+    return total
 
 
 def resolve(req: Path, py: str = sys.executable) -> tuple[dict, Path | None]:
@@ -208,9 +245,17 @@ def main() -> None:
             if not args.json:
                 print(f"\n=== 해석 결과 — {req} ===")
                 print(f"  총 {len(after)}개 · 신규 {len(d['added'])} · "
-                      f"변경 {len(d['changed'])} · 제거 {len(d['removed'])}")
-                for c in d["changed"][:20]:
-                    print(f"  ⚠ 버전 변경: {c}")
+                      f"변경 {len(d['changed'])}(그중 다운그레이드 {len(d['downgraded'])}) · "
+                      f"해석에 없음 {len(d['absent'])}")
+                if d["downgraded"]:
+                    print("  ── 다운그레이드 (지금 도는 채널이 조용히 달라질 수 있는 자리) ──")
+                    for c in d["downgraded"]:
+                        print(f"  🛑 {c}")
+                ups = [c for c in d["changed"] if c not in d["downgraded"]]
+                for c in ups[:20]:
+                    print(f"  ⚠ 업그레이드: {c}")
+                if d["absent"]:
+                    print(f"  · 새 해석에 없는 것(pip 은 지우지 않는다): {', '.join(d['absent'])}")
                 nc = find_conflicts(after)
                 for g in nc:
                     print(f"  ⚠ 충돌 예상: {' + '.join(g)}")
