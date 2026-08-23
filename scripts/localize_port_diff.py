@@ -39,14 +39,94 @@ from app.localize import meta as M  # noqa: E402
 from app.localize import overrides as O  # noqa: E402
 from app.localize import rerender as R  # noqa: E402
 
+
+def _vlp_sha() -> str:
+    import subprocess
+    r = subprocess.run(["git", "-C", str(VLP), "rev-parse", "--short", "HEAD"],
+                       capture_output=True, text=True)
+    return r.stdout.strip() or "?"
+
+
+# vlp 쪽에 있어야 하는 기능들 — 없으면 **버전이 다른 것**이지 이식 결함이 아니다.
+# 이 확인이 없으면 낡은 체크아웃과 대조해 놓고 "이식이 틀렸다"고 읽게 된다(실제로 났다).
+REQUIRED_VLP_FEATURES = [
+    ("apply_overrides 줄 스타일 검증(8/20)", lambda: _raises(
+        lambda: lr.apply_overrides({"segments": [{"index": 0}]},
+                                   {"subs": {"0": {"style": {"fontsize": 1}}}}))),
+    ("build_telop_ass 줄 오버라이드(8/20)", lambda: _telop_applies_style()),
+    ("l3_apply 소프트 삭제(E6-0)", lambda: _l3_drops_unused()),
+]
+
+
+def _raises(fn) -> bool:
+    try:
+        fn()
+        return False
+    except Exception:                                     # noqa: BLE001
+        return True
+
+
+def _telop_applies_style() -> bool:
+    with tempfile.TemporaryDirectory() as t:
+        out = Path(t) / "x.ass"
+        lr.build_telop_ass([{"orig_index": 0, "start_sec": 1.0, "end_sec": 2.0, "text_ko": "가"}],
+                           {"telops": [{"index": 0, "use": True, "ja": "T",
+                                        "style": {"size": 64}}]}, "F", out)
+        return "\\fs64" in out.read_text(encoding="utf-8")
+
+
+def _l3_drops_unused() -> bool:
+    with tempfile.TemporaryDirectory() as t:
+        job = Path(t) / "j"; job.mkdir()
+        bk = job / "bk"; bk.mkdir()
+        od = job / "o"; od.mkdir()
+        (bk / "subtitle_segments.json").write_text(json.dumps(
+            [{"start_sec": 0.0, "end_sec": 1.0, "text": "a"},
+             {"start_sec": 2.0, "end_sec": 3.0, "text": "b"}]))
+        (bk / "checkpoint_story.json").write_text(json.dumps({"title_text": "T"}))
+        (bk / "edit_plan.json").write_text(json.dumps({"layout": {"top_title": "T"}}))
+        (bk / "checkpoint_resources.json").write_text(json.dumps({"tts_cue_files": []}))
+        lr.l3_apply(job, bk, {"top_title_ja": "T",
+                              "segments": [{"index": 0, "ja": "A", "use": False},
+                                           {"index": 1, "ja": "B"}],
+                              "tts_cues": [], "telops": []},
+                    [], {"display": "X"}, {"telop_font": "F"}, od)
+        return len(json.loads((job / "subtitle_segments.json").read_text())) == 1
+
+
+def _check_vlp_version() -> None:
+    missing = [name for name, probe in REQUIRED_VLP_FEATURES if not probe()]
+    print(f"[port_diff] vlp = {VLP} @ {_vlp_sha()}")
+    if missing:
+        print("\n🛑 이 vlp 체크아웃에 없는 기능이 있습니다 — **버전 차이**지 이식 결함이 아닙니다:")
+        for m in missing:
+            print(f"   - {m}")
+        print("   `git -C <vlp> pull` 로 main 을 맞춘 뒤 다시 돌리세요.")
+        print("   ⚠ 회귀 0 의 기준은 **플릿이 실제로 도는 sha** 입니다 —")
+        print("     SELECT last_seen_sha FROM deployments WHERE engine='localization';")
+        raise SystemExit(2)
+
+
+# brain 은 **양쪽을 같은 값으로 못박는다.** 두 모듈 모두 형제 디렉토리에서 BRAIN 을
+# 추론하는데, 이식본이 워크트리(/tmp/...)에서 돌면 서로 다른 brain 을 보게 되어
+# render_flags 폴백이 갈린다 — 로직 차이가 아니라 대조 환경의 차이다(실제로 났다).
+def _pin_brain(path: Path) -> None:
+    lr.BRAIN = path
+    R.BRAIN = path
+
+
+_check_vlp_version()
+
 fails = []
 def eq(name, a, b):
     if a != b:
         fails.append(f"{name}\n   원본: {a!r}\n   이식: {b!r}")
     print(f"  {'OK' if a == b else '!!'} {name}")
 
-# ── render_flags
+# ── render_flags (brain 을 양쪽 동일하게 고정한 뒤 비교)
 print("[render_flags]")
+_brain_tmp = tempfile.TemporaryDirectory()
+_pin_brain(Path(_brain_tmp.name) / "no-brain")
 cases = [
     {"provenance": {"config": {"app": {"silence_cut_profile": "aggressive",
       "target_duration_sec": 45, "max_duration_sec": 50, "max_duration_tolerance": 1.1}}}},
@@ -56,7 +136,17 @@ cases = [
     {},
 ]
 for i, rl in enumerate(cases):
-    eq(f"case{i}", lr.render_flags(rl), R.render_flags(rl))
+    eq(f"case{i}(brain 없음)", lr.render_flags(rl), R.render_flags(rl))
+
+# 폴백 경로도 같은 정책 파일로 양쪽 동일하게
+_policy = Path(_brain_tmp.name) / "brain"
+(_policy / "config").mkdir(parents=True, exist_ok=True)
+(_policy / "config" / "loop_policy.json").write_text(
+    '{"gen_flags_base": ["--silence-profile", "aggressive", "--length-profile", "tight"]}',
+    encoding="utf-8")
+_pin_brain(_policy)
+for i, rl in enumerate(cases):
+    eq(f"case{i}(policy 폴백)", lr.render_flags(rl), R.render_flags(rl))
 
 # ── _ass_escape / _fmt_ts
 print("[escape/ts]")
