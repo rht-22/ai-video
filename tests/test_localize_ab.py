@@ -188,3 +188,22 @@ def test_legacy_snapshot_without_marker_is_allowed_with_note():
 def test_equal_mtime_is_not_evidence():
     """같은 시각 = 갱신 없음. 경계에서 통과시키면 가드가 무의미해진다."""
     assert run_evidence(newest_mtime=200.0, snapshot_at=200.0)[0] is False
+
+
+def test_started_but_died_is_not_evidence():
+    """🛑 2회차 실측: L0 직후 state.json 이 써지므로 '시작'을 '완주'로 읽으면 안 된다.
+
+    성공 마커(metadata.json)만 본다 — 오케스트레이터가 성공 판정에 쓰는 것과 같은 파일."""
+    from scripts.localize_ab import _newest_output_mtime
+    import tempfile, os, time as _t
+    with tempfile.TemporaryDirectory() as t:
+        b = Path(t)
+        (b / "localize_ja").mkdir()
+        (b / "localize_ja" / "state.json").write_text("{}")      # 시작만 한 흔적
+        (b / "subtitle_segments.json").write_text("[]")
+        assert _newest_output_mtime(b) is None                   # 마커가 없으면 증거 없음
+        assert run_evidence(_newest_output_mtime(b), 1.0)[0] is False
+        marker = b / "localize_ja" / "metadata.json"
+        marker.write_text("{}")
+        os.utime(marker, (_t.time() + 10, _t.time() + 10))
+        assert run_evidence(_newest_output_mtime(b), 1.0)[0] is True

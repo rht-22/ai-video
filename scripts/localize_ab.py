@@ -153,10 +153,10 @@ def run_evidence(newest_mtime: float | None, snapshot_at: float | None) -> tuple
     if snapshot_at is None:
         return True, "스냅샷 시각 정보 없음 — 실행 여부를 확인할 수 없음(구 스냅샷)"
     if newest_mtime is None:
-        return False, "B 쪽 산출물이 없다"
+        return False, "B 쪽에 성공 마커(localize_*/metadata.json)가 없다"
     if newest_mtime <= snapshot_at:
-        return False, ("스냅샷 이후 B 쪽 산출물이 하나도 갱신되지 않았다 — "
-                       "현지화가 실제로 돌지 않았다(로그 위쪽의 실패 메시지를 확인하세요)")
+        return False, ("스냅샷 이후 성공 마커(localize_*/metadata.json)가 갱신되지 않았다 — "
+                       "현지화가 끝까지 돌지 않았다(로그 위쪽의 실패 메시지를 확인하세요)")
     return True, ""
 
 
@@ -253,10 +253,14 @@ def _snapshot_time(a: Path) -> float | None:
 
 
 def _newest_output_mtime(b: Path) -> float | None:
-    """B 의 산출물 중 가장 최근 수정 시각 — 렌더본·데이터 파일·메타를 본다."""
-    cands = [b / r for r in RENDER_FILES + DATA_FILES]
-    cands += list(b.glob("localize_*/metadata.json")) + list(b.glob("localize_*/state.json"))
-    times = [p.stat().st_mtime for p in cands if p.exists()]
+    """B 가 **끝까지 돌았다는** 증거의 시각 — 성공 마커(metadata.json)만 본다.
+
+    🛑 처음엔 state.json·데이터 파일까지 봤다가 가드가 뚫렸다(노드 실측 2회차).
+    runner 가 L0 직후 진행 기록을 남기므로, Gemini 키가 없어 **그 다음 줄에서 죽어도**
+    state.json 은 새로 써진다 — '시작했다'가 '돌았다'로 읽힌 것이다.
+    성공 마커는 L5 가 마지막에 쓰는 metadata.json 하나뿐이고, 그건 오케스트레이터가
+    성공 판정에 쓰는 것과 **같은 파일**이다(계약 §3-3)."""
+    times = [p.stat().st_mtime for p in b.glob("localize_*/metadata.json") if p.exists()]
     return max(times) if times else None
 
 
