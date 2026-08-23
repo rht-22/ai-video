@@ -576,6 +576,99 @@ def _is_hallucinated_text(text: str, *, repeat_threshold: int = 3, length_outlie
     return False
 
 
+# ── E14: 자막 읽기 속도 하한 ────────────────────────────────────────────────
+# 기준은 "몇 초 떠 있느냐"가 아니라 "읽을 수 있느냐"다. 0.72초짜리 18자(25자/초)는
+# min_duration_sec=0.6 을 넘기지만 아무도 못 읽는다 — 시간 하한만으로는 안 걸린다.
+#
+# 12자/초: 규격 원문(넷플릭스 한국어 TTSG 등)은 이 실행 환경의 egress 차단으로 열리지
+# 않아 2차 자료 + 실측으로 잡았다. 접근 가능한 한국어 자막 지침이 "한 줄 16~18자,
+# 1줄 1.5초 노출"을 권해 11~12자/초로 환산되고, 발주서가 적은 관례 대역(12~14)의
+# 읽기 쉬운 쪽 끝이다. 실렌더 45편 639줄 대조에서 12자/초는 11.9%(76줄)만 건드리고
+# 총 노출이 27.7초 느는 데 그쳐(편당 +0.6초) 길이 분포는 그대로다 — 개입을 더 줄이려면
+# 대역 안에서 13·14 로 **올리면**(= 같은 글자수에 필요한 시간이 준다) 된다.
+SUBTITLE_MIN_CHARS_PER_SEC = 12.0
+# 글자수와 무관한 절대 하한. 이보다 짧으면 내용과 상관없이 깜빡임이다(실측 0.07초 cue).
+# 크게 잡으면 안 된다 — 짧은 감탄사("박수!" 0.52초·3자)는 정상인데 절대 하한이 그보다
+# 크면 장면이 지나간 뒤에도 자막이 남는다. 3자면 12자/초로 0.25초라 0.4 가 실효 하한.
+SUBTITLE_MIN_EXPOSURE_SEC = 0.4
+
+
+def _enforce_min_exposure(
+    segs: list[SpeechSegment],
+    *,
+    min_chars_per_sec: float,
+    min_exposure_sec: float,
+    max_duration_sec: float,
+) -> list[SpeechSegment]:
+    """읽기 속도 하한에 못 미치는 cue 의 end_sec 만 늘린다.
+
+    - **start_sec 는 불가침** — 앞으로 당기면 소리보다 자막이 먼저 뜬다.
+    - 늘리는 자리는 **빈 구간뿐**이다. 다음 cue 와 이미 겹쳐 있는 쌍은 손대지 않고,
+      비어 있어도 다음 cue 시작까지만 늘린다(겹침을 새로 만들지 않는다).
+      merge 가 겹치는 cue 를 정상적으로 만들고 ASS 도 그대로 그린다는 실측 기록이
+      edit_overrides.py:236~ 에 있다 — 겹침은 고칠 대상이 아니라 있는 그대로의 데이터다.
+    - max_duration_sec(6초) 상한이 하한을 이긴다.
+    - 늘려도 하한에 못 미치면 **건별로 로그에 남긴다**(조용히 포기하지 않는다).
+
+    min_chars_per_sec·min_exposure_sec 를 0 으로 주면 이 단계는 아무 일도 하지 않는다.
+    """
+    if not segs:
+        return segs
+
+    eps = 1e-6
+    out = list(segs)
+    extended = 0
+    added_total = 0.0
+    unresolved: list[str] = []
+
+    for i, seg in enumerate(out):
+        n_chars = len(seg.text)
+        required = min_exposure_sec
+        if min_chars_per_sec > 0:
+            required = max(required, n_chars / min_chars_per_sec)
+        required = min(required, max_duration_sec)  # 6초 상한이 이긴다
+        if required <= 0:
+            continue
+        if (seg.end_sec - seg.start_sec) >= required - eps:
+            continue
+
+        want_end = seg.start_sec + required
+        next_start = out[i + 1].start_sec if i + 1 < len(out) else None
+        if next_start is None:
+            new_end, reason = want_end, ""
+        elif seg.end_sec > next_start + eps:
+            # 이미 겹친 쌍 — 손대지 않는다
+            new_end, reason = seg.end_sec, "다음 줄과 이미 겹쳐 있어 연장 안 함"
+        else:
+            new_end = min(want_end, next_start)
+            reason = "" if new_end >= want_end - eps else "다음 줄 시작에 막힘"
+
+        if new_end > seg.end_sec + eps:
+            added_total += new_end - seg.end_sec
+            extended += 1
+            out[i] = SpeechSegment(start_sec=seg.start_sec, end_sec=new_end, text=seg.text)
+
+        if (new_end - seg.start_sec) < required - eps:
+            got = new_end - seg.start_sec
+            cps = (n_chars / got) if got > eps else float("inf")
+            unresolved.append(
+                f"    [SubtitleFloor/미달] {seg.start_sec:.2f}~{new_end:.2f}s "
+                f"({got:.2f}s·{n_chars}자·{cps:.1f}자/초, 필요 {required:.2f}s) "
+                f"— {reason or '연장 불가'}: {seg.text[:24]!r}"
+            )
+
+    if extended or unresolved:
+        print(
+            f"  [SubtitleFloor] 읽기 속도 하한({min_chars_per_sec:g}자/초 · 최소 "
+            f"{min_exposure_sec:g}초) — {extended}줄 연장(+{added_total:.2f}초), "
+            f"미달 잔여 {len(unresolved)}줄"
+        )
+        for line in unresolved:
+            print(line)
+
+    return out
+
+
 def merge_subtitle_segments(
     segments: list[SpeechSegment],
     *,
@@ -583,6 +676,8 @@ def merge_subtitle_segments(
     max_total_chars: int = 44,
     max_duration_sec: float = 6.0,
     min_duration_sec: float = 0.6,
+    min_chars_per_sec: float = SUBTITLE_MIN_CHARS_PER_SEC,
+    min_exposure_sec: float = SUBTITLE_MIN_EXPOSURE_SEC,
 ) -> list[SpeechSegment]:
     """자막 이벤트 수를 줄여(렌더 부담 감소) 가독성을 개선합니다.
 
@@ -590,6 +685,11 @@ def merge_subtitle_segments(
     - 환각 텍스트(같은 어구 3회+ 반복 / 평균 5배+ 길이) 자동 제거
     - 동일 (start, end, text) 중복 제거
     - 시간 겹침 + 동일 텍스트 케이스에서 더 긴 구간 유지
+
+    마지막으로 읽기 속도 하한(E14)을 건다 — min_duration_sec 은 "짧으면 되도록 다음
+    것과 합쳐라"는 **병합 힌트**일 뿐(gap ≤ max_gap_sec 일 때만 발동) cue 를 늘려 주지
+    않아, 고립된 짧은 cue 가 그대로 화면에 나갔다. 하한은 병합이 다 끝난 뒤 end_sec 만
+    늘리는 후처리라 위 병합 결과 자체는 한 글자도 바뀌지 않는다(_enforce_min_exposure).
     """
     if not segments:
         return []
@@ -744,7 +844,14 @@ def merge_subtitle_segments(
             )
 
     merged.append(cur)
-    return merged
+
+    # E14: 읽기 속도 하한 — 병합이 끝난 결과에만 end_sec 를 늘린다(순수 후처리).
+    return _enforce_min_exposure(
+        merged,
+        min_chars_per_sec=min_chars_per_sec,
+        min_exposure_sec=min_exposure_sec,
+        max_duration_sec=max_duration_sec,
+    )
 
 
 # ── 편집실 자유 텍스트(edit_overrides/v3 texts, F-411) ─────────────────────

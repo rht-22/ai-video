@@ -209,3 +209,40 @@ voice = "ko_female" | "ko_male" | "chat_*" | …   (지금 그대로)
   E12 가 `elevenlabs:` 접두사 경로만 고쳤고 라벨 경로는 fail-silent 로 남아 있었다.
   ⚠ 구 체크포인트가 싣는 `narrative_female`(pipeline 의 voice 없는 cue 기본값)은
   `LEGACY_VOICE_ALIASES` 가 **오늘과 같은 목소리**로 보낸다 — 재개 산출이 달라지면 안 된다.
+
+## 자막 최소 노출 시간 계약 (E14, 2026-08-23)
+
+`app/modules/subtitle.py` — `_enforce_min_exposure` · `merge_subtitle_segments` 꼬리.
+발주서: ves-orchestrator `docs/prompts/e14-subtitle-min-exposure.md`.
+
+⚠ **E11·E13 과 달리 게이트가 없다.** `merge_subtitle_segments` 는 모든 생성이 지나는
+길이라(elevenlabs·whisper·SRT 파싱 전부) 여기 손대면 전 채널 자막 타이밍이 함께 움직인다.
+`deployments.auto_update=true` 라 main 머지 = 맥미니 6대 자동 갱신이다.
+
+- **하한은 시간이 아니라 읽기 속도다.** `min_duration_sec=0.6` 은 "짧으면 되도록 다음 것과
+  합쳐라"는 **병합 힌트**이고 `gap <= max_gap_sec` 일 때만 발동한다 — cue 를 늘려 주는
+  코드는 없었다. 그래서 고립된 0.07초 cue 도, 0.72초/18자(25자/초)도 그대로 나갔다.
+- 필요 노출 = `max(SUBTITLE_MIN_EXPOSURE_SEC 0.4, 글자수 / SUBTITLE_MIN_CHARS_PER_SEC 12)`,
+  `max_duration_sec`(6초) 상한이 이긴다. 12자/초는 규격 원문이 egress 차단이라 2차 자료
+  (한 줄 16~18자·1.5초 → 11~12자/초) + 실측으로 잡았고, 상수 하나만 고치면 바뀐다.
+  절대 하한 0.4 는 **감탄사를 살리려고 낮게** 잡았다 — `박수!`(0.52초·3자)는 정상이라
+  건드리면 안 된다(3자면 12자/초로 0.25초).
+- **늘리는 것은 `end_sec` 뿐이고 빈 구간으로만.** `start_sec` 를 당기면 소리보다 자막이
+  먼저 뜬다. 다음 cue 와 **이미 겹친 쌍은 손대지 않고**, 비어 있어도 다음 cue 시작까지만
+  늘린다 — 겹침은 고칠 대상이 아니라 있는 그대로의 데이터다(`edit_overrides.py:236~`
+  의 실측 기록: merge 가 겹치는 cue 를 만들고 ASS 도 그대로 그린다). 실측 45편에서
+  겹침쌍 188 → 188, 신규 0.
+- **늘려도 모자라면 건별로 stdout 에 남긴다**(`[SubtitleFloor/미달]` + 사유). 조용히
+  포기하면 '고쳤는데 왜 그대로지'가 된다. run_log 에는 안 쓴다 — merge 는 순수 함수다.
+- **편집실 경로는 범위 밖이다.** `edit_overrides` 자막은 재매핑 **뒤**에 `final_segments`
+  를 통째로 갈아끼우므로(`pipeline.py:3510~`) merge 를 지나지 않는다. 사람이 0.3초로
+  정했으면 그게 의도라 렌더 단계(`build_ass`)에 하한을 넣지 않았다.
+- **순수 후처리**라 병합 결과 자체(줄 수·start·텍스트)는 한 글자도 안 바뀐다. 그래서
+  저장된 실렌더 타임라인에 후처리만 다시 태우면 수정 전후 대조가 정확히 된다.
+- 실측(editor_baselines/assets 45편 639줄, 전부 whisper 경로): 76줄(11.9%) 연장, 총
+  +27.7초(편당 +0.62초), 길이 p50 2.87→3.02 · p90 5.51→5.51 · max 20.80→20.80,
+  0.4초 미만 14→2줄, 12자/초 초과 129→102줄.
+- 곁다리(E14-2): `stt_elevenlabs._CUE_MAX_CHARS` 주석이 실제(파이프라인은 40·config 값으로
+  다시 부른다)와 달랐다 — 값이 아니라 **주석**을 고쳤다(44 를 40 으로 맞추면 E11·E13 전사가
+  바뀐다).
+- 회귀 가드: `tests/test_e14_subtitle_min_exposure.py`.

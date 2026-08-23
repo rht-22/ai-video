@@ -213,10 +213,13 @@ class TestMergeSubtitleSegments:
             SpeechSegment(start_sec=1.1, end_sec=2.0, text="서 두 줄로 나뉘어야 한다"),  # 13자, 종결
         ]
         merged = merge_subtitle_segments(segs, max_gap_sec=0.5, max_total_chars=30)
-        # 종결되지 않은 cur 이라 1.3배 완화(=39자) 적용 → 한 segment 로 묶임 (총 31자)
+        # 종결되지 않은 cur 이라 1.3배 완화(=39자) 적용 → 한 segment 로 묶임 (총 30자)
         assert len(merged) == 1
         assert merged[0].start_sec == 0.0
-        assert merged[0].end_sec == 2.0
+        # E14(2026-08-23): end 는 2.0 → 2.5. 묶인 30자를 2.0초에 읽히면 15자/초라
+        # 읽기 속도 하한(12자/초)에 걸려 마지막 cue 가 0.5초 연장된다. **병합 자체는
+        # 그대로**(1건·start 0.0·같은 텍스트)이고 바뀐 것은 end 뿐이라는 게 요점이다.
+        assert merged[0].end_sec == 2.5
 
     def test_complete_sentence_does_not_overmerge(self) -> None:
         # 첫 segment 가 "다." 로 종결 → 다음과 합치면 한도 초과면 합치지 않음.

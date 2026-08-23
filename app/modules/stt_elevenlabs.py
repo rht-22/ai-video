@@ -104,7 +104,11 @@ _LANG_ISO3 = {"ko": "kor", "en": "eng", "ja": "jpn", "zh": "zho", "es": "spa", "
 # Whisper 경로: VAD min_silence 500ms 로 segment 를 끊고, 30자 넘는 segment 는 문장
 # 종결부호에서 재분할한다. Scribe 는 word 단위로만 오므로 같은 기준을 여기서 준다.
 _CUE_GAP_SEC = 0.5          # 단어 사이 공백이 이 이상이면 새 cue (Whisper VAD 500ms)
-_CUE_MAX_CHARS = 44         # merge_subtitle_segments 의 max_total_chars 와 동일
+_CUE_MAX_CHARS = 44         # merge_subtitle_segments 의 max_total_chars **기본값**과 동일.
+#                             파이프라인은 40(정본 경로)·config 계산값(variant 경로)으로 다시
+#                             부르므로 여기서 44 로 묶은 cue 를 merge 가 한 번 더 쪼갠다.
+#                             값을 40 으로 맞추지 않는 이유: E11·E13 이 이 수치로 낸 전사를
+#                             바꾸게 된다(회귀). 정본은 merge 쪽이고 여기는 상한일 뿐이다.
 _CUE_MAX_DURATION_SEC = 6.0  # merge_subtitle_segments 의 max_duration_sec 와 동일
 # ⚠ E13-0 조사 결과: 두 백엔드의 cue 수가 갈리는 주범은 이 규칙이다. Scribe 는 한국어에
 # 문장부호를 찍어 주고 Whisper 는 거의 안 찍어서, **같은 규칙이 Scribe 에서만 발동**한다
