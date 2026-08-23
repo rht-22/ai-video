@@ -1187,6 +1187,90 @@ RELATIONSHIP_EXTRACTION_PROMPT = """
 
 
 # ─────────────────────────────────────────────
+# E15 스타일 구성 (2026-08-23) — 스토리 구성 뒤 편 단위 연출 플랜
+# ─────────────────────────────────────────────
+# 기획: ves-orchestrator docs/prompts/e15-style-compose.md.
+# 계약·검증 정본은 app/modules/style_compose.py 다 — 이 프롬프트는 그 계약을 말로 옮긴
+# 것이고, 어긋나면 검증기가 거절한다(프롬프트가 아니라 검증기가 계약이다).
+# ⚠ 이름이 `_PROMPT` 로 끝나므로 provenance._prompt_versions() 가 자동으로 해시에 싣는다.
+STYLE_COMPOSITION_PROMPT = """너는 한국어 쇼츠의 **연출 감독**이다. 편집(어떤 장면을 쓸지·자막 문구·
+내레이션 문구)은 이미 끝났다. 너는 그 위에 **보이는 연출**만 얹는다.
+
+[절대 규칙]
+- 장면·구간·자막 문구·내레이션 문구를 **바꾸지 마라**. 네가 정하는 것은 '어떻게 보이는가' 뿐이다.
+- 모든 시각 좌표는 **원본 영상의 절대초**(source_time_sec)다. 아래 타임라인 표에 적힌
+  '원본' 값을 그대로 써라. 편집본 시각(0초 시작)을 쓰면 그 항목은 버려진다.
+- 아래 [타임라인]에 없는 시각을 쓰면 그 항목은 버려진다. 반드시 표 안의 구간에서 골라라.
+- **적을수록 좋다.** 한 편에 효과 텍스트는 2~5개면 충분하다. 매 장면에 넣지 마라 —
+  다 넣으면 아무것도 강조되지 않는다. 넣을 이유가 없으면 그 배열을 비워라.
+
+[연출 수단]
+1) texts — 화면에 얹는 짧은 글자(의성어·의태어·감탄·강조). 대사 자막이 아니다.
+   x,y 는 화면 비율(0~1, **글자 중심**), 캔버스는 세로 9:16 이다.
+   ⚠ 영상은 화면 가운데 띠에 있고 대사 자막은 아래쪽에 깔린다 — y 는 0.15~0.35(위) 또는
+     0.60~0.72(아래) 를 써라. y 0.8 이상은 대사 자막과 겹친다.
+   fx: none|pop|shake (pop=톡 튀어나옴, shake=흔들림). size 는 48~160 이 보통이다.
+2) subtitle_styles — **핵심 대사 한두 줄**만 크게/색으로 강조. 그 줄이 이 쇼츠의 승부처일 때만.
+3) images — 스티커. 아래 [스티커] 목록의 id 만 쓸 수 있다. 목록이 비어 있으면 쓰지 마라.
+4) title_segments — 시간대별 제목. 구간(from_anchor~to_anchor, 원본 절대초)에만 제목이 뜨고
+   **그 밖의 시간은 제목이 사라진다**. '중반부터 제목을 걷어내 화면을 비운다'가 이 기능의 절반이다.
+   창끼리 겹치면 안 된다. 안 쓸 거면 배열을 비워라(그러면 제목이 처음부터 끝까지 나온다).
+5) tts — 이미 정해진 내레이션의 **목소리·속도만** 장면 톤에 맞게 바꾼다. 문구는 못 바꾼다.
+6) design — 이 편 전체에 걸리는 것. 제목 기울임(title_rotate)·제목 배경 박스 정도만.
+
+[출력 형식 — 이 JSON 만, 설명 금지]
+{{
+  "schema": "style_plan/v1",
+  "texts": [
+    {{"text": "쿵!", "source_time_sec": 743.2, "duration_sec": 1.2,
+      "x": 0.7, "y": 0.25, "size": 96, "color": "#FFDD00",
+      "stroke": "dark", "fx": "pop", "rotate": -8, "reason": "왜 여기인지 한 줄"}}
+  ],
+  "subtitle_styles": [
+    {{"source_time_sec": 745.0, "style": {{"size": 78, "color": "#FF4444"}}, "reason": "한 줄"}}
+  ],
+  "images": [
+    {{"sticker": "목록의 id", "source_time_sec": 748.0, "duration_sec": 1.5,
+      "x": 0.55, "y": 0.30, "w": 0.2, "layer": 0, "rotate": 0, "reason": "한 줄"}}
+  ],
+  "title_segments": [
+    {{"text": "제목\\n둘째 줄", "from_anchor": 743.0, "to_anchor": 756.0}}
+  ],
+  "tts": [
+    {{"source_time_sec": 743.0, "voice": "ko_male_low", "speed": "slow", "reason": "한 줄"}}
+  ],
+  "design": {{"title_rotate": -3.0}},
+  "notes": "이 편의 연출 컨셉 한 줄"
+}}
+
+[값 규칙 — 어기면 그 항목이 버려지거나 전체가 거절된다]
+- texts: size 12~400 · color "#RRGGBB" · stroke dark|none|white · fx none|pop|shake ·
+  rotate -180~180(시계방향 양수) · font 는 {fonts} 중 하나(생략하면 기본) · text 60자 이내
+- subtitle_styles.style 은 **size 와 color 만** (위치·회전은 사람이 정한다). size {sub_lo}~{sub_hi}
+- images: x,y 는 좌상단, w 는 가로 비율(0~1) · layer 0=자막 아래, 1=자막 위
+- tts.voice: {voices}
+- tts.speed: {speeds}
+- design: {design_keys} (기울기는 -180~180, 박스는 none|round|rect)
+- 상한: 효과 텍스트 {max_texts}개 · 스티커 {max_images}개 · 자막 강조 {max_subs}개 · 제목 창 {max_titles}개
+
+[작품] {work_title}
+[제목] {title_text}
+
+[타임라인 — 이 구간들만 쓸 수 있다]
+{timeline_block}
+
+[대사 (원본 절대초)]
+{transcript_block}
+
+[내레이션 cue (원본 절대초 — 목소리·속도만 바꿀 수 있다)]
+{cues_block}
+
+[스티커]
+{stickers_block}
+"""
+
+
+# ─────────────────────────────────────────────
 # 프롬프트 입력 블록 빌더 (analyze_chunk / compose_story / plan_tts_cues 공용)
 # ─────────────────────────────────────────────
 # use_case 별로 경고문/헤더가 달라 한 함수에서 분기. PR-1(라운드 25) 정리.
@@ -1439,7 +1523,12 @@ def _normalize_storyline_tts_cues(
 @dataclass(frozen=True)
 class GeminiConfig:
     api_key: str
-    model_name: str = "gemini-3.5-flash"
+    # ⚠ model_name 은 **영상 분석 전용 슬롯**이다(모델 정책 2026-08-23): Pro 를 쓰는 호출은
+    # analyze_chunk 하나뿐이고, 나머지 텍스트-온리 호출은 전부 flash_model_name 을 쓴다.
+    # 기본값은 팩토리(load_gemini_client)의 env 기본값과 같아야 한다 — 종전 기본값은
+    # 금지 모델 'gemini-3.5-flash' 였다(팩토리가 늘 덮어써서 무해했지만, GeminiConfig 를
+    # 직접 만드는 코드·테스트는 그 값을 먹었다).
+    model_name: str = "gemini-3.1-pro-preview"
     flash_model_name: str = "gemini-3.6-flash"
     max_retries: int = 3
     # Google 공식 가이드(Gemini 3.x): temperature/top_p/top_k 같은 샘플링 매개변수는
@@ -1450,6 +1539,7 @@ class GeminiConfig:
     tts_cues_thinking_level: str = "medium"         # "minimal" | "low" | "medium" | "high"
     shorten_thinking_level: str = "medium"          # "minimal" | "low" | "medium" | "high"
     research_thinking_level: str = "medium"         # "minimal" | "low" | "medium" | "high"
+    style_thinking_level: str = "medium"            # "minimal" | "low" | "medium" | "high" (E15)
 
 
 
@@ -1462,7 +1552,8 @@ def _format_reject_note(reject_note, use_case: str = "analysis") -> str:
     note = (reject_note or "").strip()
     if not note:
         return ""
-    what = ("이번 분석에서" if use_case == "analysis" else "이번 스토리 구성에서")
+    what = {"analysis": "이번 분석에서",
+            "style": "이번 연출 구성에서"}.get(use_case, "이번 스토리 구성에서")
     return (
         "\n\n[재작업 지시 — 사람이 직전 결과를 반려했다]\n"
         f"반려 사유: {note}\n"
@@ -1843,7 +1934,13 @@ class GeminiClient:
     # 후보 장면 관계 그래프 추출
     # ─────────────────────────────────────────
     def extract_relationships(self, all_candidates: list) -> list[dict]:
-        """후보 장면들 사이의 관계 엣지를 Pro 모델로 추출한다 (텍스트 전용, 영상 업로드 없음)."""
+        """후보 장면들 사이의 관계 엣지를 Flash 모델로 추출한다 (텍스트 전용, 영상 업로드 없음).
+
+        ⚠ 2026-08-23 모델 정책(사용자 결정): **Pro 는 영상을 실제로 보는 호출
+        (analyze_chunk) 하나뿐**이고 나머지 텍스트-온리 호출은 전부 Flash 최신이다.
+        이 호출은 영상을 올리지 않고 analyze_chunk 가 이미 뽑아 둔 후보 설명·전사만
+        읽으므로 그 정책의 대상이다(전환 전에는 Pro 였다).
+        """
         slim_fields = (
             "chunk_index", "candidate_index", "start_sec", "end_sec",
             "description", "characters_in_scene",
@@ -1859,7 +1956,7 @@ class GeminiClient:
         for attempt in range(self.config.max_retries):
             try:
                 response = self.client.models.generate_content(
-                    model=self.config.model_name,
+                    model=self.config.flash_model_name,   # 모델 정책 2026-08-23 (Pro 는 영상 분석만)
                     contents=[prompt],
                     config=self.types.GenerateContentConfig(
                         response_mime_type="application/json",
@@ -2123,6 +2220,77 @@ class GeminiClient:
                 time.sleep(1)
         return {"drops": []}
 
+    def compose_style(
+        self,
+        *,
+        work_title: str,
+        title_text: str,
+        timeline: list[dict[str, Any]],
+        transcript_lines: list[dict[str, Any]],
+        tts_cues: list[dict[str, Any]],
+        sticker_catalog: str = "",
+        editorial: dict[str, Any] | None = None,
+        reject_note: str | None = None,
+    ) -> dict[str, Any] | None:
+        """E15 — 편 단위 연출 플랜(style_plan/v1)을 Flash 로 구성한다.
+
+        입력은 전부 **원본 절대초** 좌표다(timeline 이 원본↔편집 대응표를 싣는다) —
+        플랜의 좌표계와 같아야 LLM 이 표를 보고 그대로 베낄 수 있다.
+
+        반환: 파싱된 dict, 또는 None(끝내 못 받음). **여기서는 계약 검증을 하지 않는다** —
+        정본은 style_compose.validate_plan 이고, 호출부가 거기서 거절되면 재시도한다.
+        연출은 부가물이라 예외를 올리지 않는다(본편 발행을 막지 않는다 — 호출부가
+        '스타일 없이 진행'을 stdout·run_log 에 남긴다).
+        """
+        from app.modules import style_compose as _sc
+        from app.modules.edit_overrides import TEXT_FONTS
+
+        def _fmt(rows: list[dict[str, Any]], keys: tuple[str, ...], limit: int) -> str:
+            out = []
+            for r in rows[:limit]:
+                out.append(" · ".join(
+                    f"{k}={r[k]}" for k in keys if r.get(k) not in (None, "")))
+            return "\n".join(f"- {line}" for line in out) if out else "(없음)"
+
+        prompt = STYLE_COMPOSITION_PROMPT.format(
+            fonts="/".join(TEXT_FONTS),
+            sub_lo=f"{_sc.SUBTITLE_SIZE_RANGE[0]:g}", sub_hi=f"{_sc.SUBTITLE_SIZE_RANGE[1]:g}",
+            voices="/".join(_sc.STYLE_VOICES),
+            speeds="/".join(_sc.STYLE_SPEEDS),
+            design_keys=", ".join(_sc.STYLE_DESIGN_ALLOWED),
+            max_texts=_sc.MAX_TEXTS, max_images=_sc.MAX_IMAGES,
+            max_subs=_sc.MAX_SUBTITLE_STYLES, max_titles=_sc.MAX_TITLE_SEGMENTS,
+            work_title=work_title, title_text=(title_text or "").replace("\n", " / "),
+            timeline_block=_fmt(timeline,
+                                ("role", "source_start", "source_end", "edit_start"), 40),
+            transcript_block=_fmt(transcript_lines, ("source_sec", "text"), 120),
+            cues_block=_fmt(tts_cues, ("source_time_sec", "voice", "speed", "text"), 30),
+            stickers_block=sticker_catalog or "(번들된 스티커 없음 — images 는 비워라)",
+        )
+        prompt += _format_reject_note(reject_note, use_case="style")
+        prompt += format_editorial_block(editorial, use_case="story")
+
+        for attempt in range(2):
+            try:
+                response = self.client.models.generate_content(
+                    model=self.config.flash_model_name,
+                    contents=[prompt],
+                    config=self.types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        thinking_config=self.types.ThinkingConfig(
+                            thinking_level=self.config.style_thinking_level,
+                        ),
+                    ),
+                )
+                if response and response.text:
+                    result = json.loads(_extract_json_from_markdown(response.text.strip()))
+                    if isinstance(result, dict):
+                        return result
+            except Exception as e:
+                print(f"    [WARN] 스타일 구성 호출 실패({attempt + 1}/2): {e}")
+                time.sleep(1)
+        return None
+
 
 def _build_fallback_story(all_candidates: list, work_title: str) -> dict[str, Any]:
     """Gemini 스토리 구성 실패 시 상위 3-4개 moment를 조합하여 서사형 폴백 생성."""
@@ -2327,6 +2495,7 @@ def load_gemini_client() -> GeminiClient:
     tts_cues_thinking_level = os.getenv("GEMINI_TTS_CUES_THINKING_LEVEL", "medium")
     shorten_thinking_level = os.getenv("GEMINI_SHORTEN_THINKING_LEVEL", "medium")
     research_thinking_level = os.getenv("GEMINI_RESEARCH_THINKING_LEVEL", "medium")
+    style_thinking_level = os.getenv("GEMINI_STYLE_THINKING_LEVEL", "medium")
     return GeminiClient(GeminiConfig(
         api_key=api_key,
         model_name=model_name,
@@ -2338,6 +2507,7 @@ def load_gemini_client() -> GeminiClient:
         tts_cues_thinking_level=tts_cues_thinking_level,
         shorten_thinking_level=shorten_thinking_level,
         research_thinking_level=research_thinking_level,
+        style_thinking_level=style_thinking_level,
     ))
 
 

@@ -1244,6 +1244,7 @@ def _fit_storyline_to_duration(
 from app.modules.chunker import build_chunks, split_video_chunk
 from app.modules.editorial import filter_flagged_candidates, filter_log_entry
 from app.modules.edit_overrides import (
+    EditOverrideError,
     apply_overrides,
     load_edit_overrides,
     overrides_subtitles,
@@ -1483,6 +1484,12 @@ def _subtitle_segment_json(seg) -> dict[str, Any]:
                            "text": seg.text}
     if getattr(seg, "low_confidence", False):
         out["low_confidence"] = True
+    # E15: AI 가 얹은 줄 강조(style)도 같은 이유로 **있을 때만** 싣는다. 키 이름·모양은
+    # v3 그대로다(편집실 오버라이드 경로가 이미 이 파일에 style 을 저장한다 — 캐시 규약
+    # 'style 은 남는다'). 강조가 없으면 파일은 종전과 바이트까지 같다.
+    _style = getattr(seg, "style", None)
+    if _style:
+        out["style"] = dict(_style)
     return out
 
 
@@ -1939,6 +1946,15 @@ class PipelineInput:
     # "elevenlabs"=ElevenLabs Scribe STT. 허용값 밖은 CLI argparse choices 가 이미 막는다.
     # **미지정이면 파이프라인은 종전과 완전히 동일하다**(회귀 0 — auto_update 배포 조건).
     transcribe_backend: str | None = None
+    # E15(2026-08-23) 스타일 구성 — True 면 스토리 구성 뒤 AI 가 편 단위 연출(효과 텍스트·
+    # 자막 강조·스티커·시간대별 제목·회전·내레이션 톤)을 구성해 그대로 렌더한다.
+    # **False(기본)면 style 단계가 통째로 없다** — 체크포인트를 쓰지도 읽지도 않고
+    # 산출은 종전과 한 글자도 다르지 않다(회귀 0).
+    style_compose: bool = False
+    # 채널(CLI)이 **명시한** design 필드 이름들. AI 스타일 플랜이 덮어도 되는지 가리는 데만
+    # 쓴다(§5 우선순위: 편집실 > 채널 명시 > AI > 기본값). '기본값과 다른가'로 판정하면
+    # 채널이 기본값과 같은 값을 일부러 명시한 경우를 구분하지 못해 사람 결정이 덮인다.
+    design_explicit_fields: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -2150,9 +2166,14 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         "graph",            # 8  -> [9/13]
         "story",            # 9  -> [10/13]
         "silence_cut",      # 10 -> [11/13]
-        "resources",        # 11 -> [12/13]
-        "render",           # 12 -> [13/13]
-        "validate",         # 13 -> 종료
+        # E15(2026-08-23): AI 연출 구성. **--style-compose 를 준 실행에만 실제로 돈다** —
+        # 미지정이면 이 단계는 아무것도 하지 않고 체크포인트를 쓰지도 읽지도 않는다(회귀 0).
+        # 자리가 여기인 이유: 앵커 좌표의 기준인 최종 클립이 silence_cut·클램프·중복제거를
+        # 다 지나야 확정되고, TTS 톤은 resources 의 합성보다 앞서야 소리에 반영된다.
+        "style",            # 11
+        "resources",        # 12
+        "render",           # 13
+        "validate",         # 14 -> 종료
     ]
     # PR-5b: 매직 넘버 → step_idx 매핑. 모든 `start_idx <= N` 비교를 단계명 기반으로 전환.
     step_idx: dict[str, int] = {name: i for i, name in enumerate(step_order)}
@@ -3456,7 +3477,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 편집실이 구간을 바꿨으면 자막을 반드시 다시 매핑한다 — subtitle_segments.json 은
     # **편집본 타임라인 기준**(쇼츠 0초 시작)이라, 구간이 조금만 달라져도 캐시가 통째로
     # 어긋난 자막이 된다(2026-08-16).
-    _subtitle_invalidate = (from_step in ("gemini", "graph", "story", "silence_cut", "resources")
+    _subtitle_invalidate = (from_step in ("gemini", "graph", "story", "silence_cut", "style",
+                                          "resources")
                             or _edit_pinned)
     if not segments_cache_path.exists() or _subtitle_invalidate:
         print("  자막 타임라인 매핑 중...")
@@ -3589,6 +3611,203 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     tts_cues = tts_cues_per_variant[0] if tts_cues_per_variant else []
 
     # ═══════════════════════════════════════
+    # [style] AI 연출 구성 (E15, 2026-08-23)
+    # ═══════════════════════════════════════
+    # 기획: ves-orchestrator docs/prompts/e15-style-compose.md · 계약: app/modules/style_compose.py.
+    #
+    # **--style-compose 를 준 실행에만 돈다.** 미지정이면 이 블록은 통째로 건너뛰고
+    # checkpoint_style.json 을 쓰지도 읽지도 않는다 — 필터그래프·subtitle_segments.json·
+    # cue 가 종전과 한 글자도 다르지 않아야 한다(회귀 0, auto_update 6대 배포 조건).
+    #
+    # 왜 여기인가: 위 [tts cues] 블록 주석대로 클립 경계는 **여기서 이미 확정**이다.
+    # 연출은 그 위에 얹는 것이라 경계를 건드리지 않는다 — 그래서 이 블록은 좌표를 만들
+    # 뿐 clips 를 바꾸지 않는다(바꾸면 자막·cue 좌표가 전부 어긋난다).
+    _style_design_kwargs: dict[str, Any] = {}
+    _style_plan_applied: dict[str, Any] | None = None
+    checkpoint_style = output_dir / "checkpoint_style.json"
+    if payload.style_compose:
+        from app.modules import style_compose as _stylemod
+        print("\n[style] AI 연출 구성 중...")
+        _style_notes: list[str] = []
+        _style_plan: dict[str, Any] | None = None
+        # 재개(--from-step resources|render)에서는 **다시 호출하지 않는다** — 편집실
+        # 재렌더가 매번 다른 연출을 내면 사람이 승인한 화면이 재렌더마다 달라진다.
+        # 같은 이유로 체크포인트에는 '검증까지 끝난' 플랜을 저장한다.
+        if checkpoint_style.exists() and start_idx > step_idx["style"]:
+            try:
+                _style_plan = json.loads(checkpoint_style.read_text(encoding="utf-8"))
+                print(f"  [style] 체크포인트에서 연출 플랜 로드 — 재호출 없음")
+            except (OSError, ValueError) as _e:
+                print(f"  [style] 체크포인트 읽기 실패({_e}) — 연출 없이 진행")
+                _style_plan = None
+        elif start_idx <= step_idx["style"]:
+            _manifest = _stylemod.load_sticker_manifest(paths.app_root)
+            if not _manifest:
+                print("  [style] 번들된 스티커 없음 — 스티커 없이 구성한다"
+                      "(라이선스 확인된 자산만 번들하는 규율)")
+            # LLM 입력은 전부 **원본 절대초** 좌표다 — 플랜의 좌표계와 같아야 표를 보고
+            # 그대로 베낄 수 있다(편집본 좌표를 섞으면 앵커가 통째로 어긋난다).
+            _tl = [{"role": c.role, "source_start": round(c.start_sec, 1),
+                    "source_end": round(c.end_sec, 1),
+                    "edit_start": round(sum(x.end_sec - x.start_sec for x in clips[:i]), 1)}
+                   for i, c in enumerate(clips)]
+            _tr_lines = []
+            for _c_i, _c in enumerate(clips):
+                _base = sum(x.end_sec - x.start_sec for x in clips[:_c_i])
+                for _s in final_segments:
+                    _rel = float(_s.start_sec) - _base
+                    if 0 <= _rel <= (_c.end_sec - _c.start_sec):
+                        _tr_lines.append({"source_sec": round(_c.start_sec + _rel, 1),
+                                          "text": str(_s.text)[:60]})
+            try:
+                _gem_style = locals().get("gemini") or load_gemini_client()
+                _raw_plan = _gem_style.compose_style(
+                    work_title=payload.work_title, title_text=title_text,
+                    timeline=_tl, transcript_lines=_tr_lines,
+                    tts_cues=[{"source_time_sec": round(float(c.get("source_time_sec", 0.0)), 1),
+                               "voice": c.get("voice"), "speed": c.get("speed"),
+                               "text": str(c.get("text", ""))[:50]} for c in tts_cues],
+                    sticker_catalog=_stylemod.sticker_catalog_for_prompt(_manifest),
+                    editorial=payload.editorial, reject_note=payload.reject_note,
+                )
+            except Exception as _e:      # noqa: BLE001 — 연출은 부가물, 본편을 막지 않는다
+                print(f"  [style] 호출 실패({type(_e).__name__}: {_e}) — 연출 없이 진행")
+                _raw_plan = None
+            if _raw_plan is not None:
+                try:
+                    _style_plan, _style_notes = _stylemod.validate_plan(
+                        _raw_plan, manifest=_manifest, app_root=paths.app_root,
+                        run_dir=output_dir)
+                    checkpoint_style.write_text(
+                        json.dumps(_style_plan, ensure_ascii=False, indent=2), encoding="utf-8")
+                except _stylemod.StylePlanError as _e:
+                    # 계약 위반은 조용히 넘기지 않는다 — 프롬프트가 계약을 못 지킨 것이라
+                    # 사람이 알아야 고칠 수 있다. 다만 본편 발행은 막지 않는다.
+                    print(f"  [style] 플랜이 계약 위반 → 연출 없이 진행: {_e}")
+                    _style_plan = None
+                    _style_notes = [f"거절: {_e}"]
+            else:
+                _style_notes = ["LLM 응답 없음"]
+
+        if _style_plan:
+            _style_plan_applied = _style_plan
+            for _n in _style_notes:
+                print(f"  [style] {_n}")
+
+            # ── 1) 내레이션 톤 (resources 합성보다 앞) ────────────────────
+            # 편집실이 내레이션을 보냈으면 그 카테고리는 통째로 사람 것이다(§5).
+            if _style_plan.get("tts") and _tts_override is None:
+                _tone = {round(float(t["source_time_sec"]), 2): t for t in _style_plan["tts"]}
+                _n_tone = 0
+                for _cue_list in tts_cues_per_variant:
+                    for _cue in _cue_list:
+                        _k = round(float(_cue.get("source_time_sec", -1.0)), 2)
+                        _hit = _tone.get(_k) or next(
+                            (v for kk, v in _tone.items() if abs(kk - _k) <= 1.0), None)
+                        if not _hit:
+                            continue
+                        if _hit.get("voice"):
+                            _cue["voice"] = _hit["voice"]
+                        if _hit.get("speed"):
+                            _cue["speed"] = _hit["speed"]
+                        _n_tone += 1
+                if _n_tone:
+                    print(f"  [style] 내레이션 톤 {_n_tone}개 cue 적용")
+            elif _style_plan.get("tts"):
+                print("  [style] 내레이션은 편집실이 보낸 것이 이깁니다 — AI 톤 무시")
+
+            # ── 2) 자막 강조 ─────────────────────────────────────────────
+            if _style_plan.get("subtitle_styles") and _sub_override is None:
+                _n_sub, _sub_drop = _stylemod.apply_subtitle_styles(
+                    final_segments, _style_plan["subtitle_styles"], clips)
+                for _o in _sub_drop:
+                    print(f"  [style] 자막 강조 드롭(tts 고아 규칙과 동일): "
+                          f"source_time_sec={_o.get('source_time_sec')} {_o.get('why', '')}")
+                if _n_sub:
+                    # 강조가 캐시에 남아야 --from-step resources 재개에서도 유지된다.
+                    segments_cache_path.write_text(
+                        json.dumps([_subtitle_segment_json(s) for s in final_segments],
+                                   ensure_ascii=False, indent=2), encoding="utf-8")
+                    print(f"  [style] 자막 강조 {_n_sub}줄 적용")
+            elif _style_plan.get("subtitle_styles"):
+                print("  [style] 자막은 편집실이 보낸 것이 이깁니다 — AI 강조 무시")
+
+            # ── 3) 효과 텍스트·스티커 (편집실이 보냈으면 그 카테고리는 사람 것) ──
+            if _style_plan.get("texts") and not _text_overlays:
+                _placed, _drop = place_anchored_texts(_style_plan["texts"], clips)
+                for _o in _drop:
+                    print(f"  [style] 앵커 소재가 최종 타임라인에 없음 → 텍스트 드롭"
+                          f"(tts 고아 규칙과 동일): source_time_sec={_o.get('source_time_sec')} "
+                          f"{str(_o.get('text', ''))[:20]!r}")
+                _text_overlays = _placed
+                if _placed:
+                    print(f"  [style] 효과 텍스트 {len(_placed)}건 배치")
+            elif _style_plan.get("texts"):
+                print("  [style] 텍스트는 편집실이 보낸 것이 이깁니다 — AI 텍스트 무시")
+
+            if _style_plan.get("images") and not _image_overlays:
+                # 편집실 이미지와 **같은 함수**로 파일을 확인한다(경로 탈출·용량 상한).
+                # ⚠ 편집실 이미지는 파일이 없으면 크게 실패해야 맞다(어댑터 버그이고 사람이
+                # 올린 것이 증발하면 안 된다). 스티커는 반대다 — 체크포인트만 남고
+                # style_assets/ 가 사라진 재개(번들 복원 등)에서 연출 하나 때문에 본편
+                # 렌더가 죽으면 안 된다. 그래서 여기서만 잡아 연출을 접는다.
+                try:
+                    _resolved = resolve_image_files({"images": _style_plan["images"]}, output_dir)
+                except EditOverrideError as _e:
+                    print(f"  [style] 스티커 파일을 못 찾음 → 스티커 없이 진행: {_e}")
+                    _resolved = []
+                _placed_i, _drop_i = place_anchored_images(_resolved, clips)
+                for _o in _drop_i:
+                    print(f"  [style] 앵커 소재가 최종 타임라인에 없음 → 스티커 드롭"
+                          f"(tts 고아 규칙과 동일): source_time_sec={_o.get('source_time_sec')} "
+                          f"{Path(str(_o.get('file', ''))).name}")
+                _image_overlays = _placed_i
+                if _placed_i:
+                    print(f"  [style] 스티커 {len(_placed_i)}건 배치")
+            elif _style_plan.get("images"):
+                print("  [style] 이미지는 편집실이 보낸 것이 이깁니다 — AI 스티커 무시")
+
+            # ── 4) 시간대별 제목 (편집실 title.segments 가 이긴다) ─────────
+            if _style_plan.get("title_segments") and not _title_segments:
+                try:
+                    _segs, _seg_drop = _stylemod.title_segments_from_anchors(
+                        _style_plan["title_segments"], clips)
+                    for _o in _seg_drop:
+                        print(f"  [style] 제목 창 드롭: {_o.get('why', '앵커가 타임라인 밖')} "
+                              f"{str(_o.get('text', ''))[:20]!r}")
+                    if _segs:
+                        _title_segments = _segs
+                        print(f"  [style] 시간대별 제목 {len(_segs)}개 창 — 창 밖은 제목 없음")
+                except EditOverrideError as _e:
+                    print(f"  [style] 제목 창이 계약 위반 → 제목은 종전대로: {_e}")
+            elif _style_plan.get("title_segments"):
+                print("  [style] 제목은 편집실이 보낸 것이 이깁니다 — AI 제목 창 무시")
+
+            # ── 5) 디자인 (채널이 명시한 키는 AI 가 못 덮는다) ──────────────
+            _style_design_kwargs, _d_notes = _stylemod.design_overrides(
+                _style_plan.get("design"), payload.design_explicit_fields, payload.design)
+            for _n in _d_notes:
+                print(f"  [style] {_n}")
+            if _style_design_kwargs:
+                print(f"  [style] 디자인 {sorted(_style_design_kwargs)} 적용")
+
+        run_log["steps"].append({
+            "step": "style",
+            "plan": bool(_style_plan),
+            "texts": len((_style_plan or {}).get("texts") or []),
+            "images": len((_style_plan or {}).get("images") or []),
+            "subtitle_styles": len((_style_plan or {}).get("subtitle_styles") or []),
+            "title_segments": len((_style_plan or {}).get("title_segments") or []),
+            "tts_tone": len((_style_plan or {}).get("tts") or []),
+            "design": sorted((_style_plan or {}).get("design") or {}),
+            "notes": _style_notes,
+            "concept": (_style_plan or {}).get("notes"),
+            # 검수 카드가 '왜 이 연출인지'를 보여 준다(오케스트레이터 brain 이 읽는다).
+            "reasons": [str(t.get("reason") or "")
+                        for t in ((_style_plan or {}).get("texts") or []) if t.get("reason")],
+        })
+
+    # ═══════════════════════════════════════
     # [13/15] 리소스 생성 (크롭, TTS, 편집 계획)
     # ═══════════════════════════════════════
     checkpoint_resources = output_dir / "checkpoint_resources.json"
@@ -3617,7 +3836,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         if _resources_speed_stale:
             print(f"  [speed] 체크포인트 video_speed ≠ {_speed:g} — 리소스(TTS fit) 재생성")
     _resources_invalidate = (from_step in ("gemini", "graph", "story", "tts_plan",
-                                           "transcribe", "silence_cut", "resources")
+                                           "transcribe", "silence_cut", "style", "resources")
                              or _edit_pinned or _tts_override is not None
                              or _resources_speed_stale)
     # 라운드 9-fix: face_identifier를 resources 단계 *밖*에서도 안전하게 사용할 수 있도록 미리 None 초기화.
@@ -3954,6 +4173,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             payload.design,
             title_font=actual_font_path,
             subtitle_font=actual_subtitle_font_path,
+            # E15: AI 연출의 디자인 키(제목 기울기·박스 등). 채널이 명시한 키는 style 단계에서
+            # 이미 걸러졌다(design_overrides). 빈 dict 면 종전과 완전히 같은 호출이다.
+            **_style_design_kwargs,
         )
 
         # 자유 텍스트 ASS(F-411) — 항목이 있을 때만 파일을 만들고 렌더에 넘긴다. 배속은
