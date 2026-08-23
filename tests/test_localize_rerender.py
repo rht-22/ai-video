@@ -209,3 +209,40 @@ def test_telop_ass_header_is_unchanged(tmp_path):
     assert "PlayResX: 1080" in body and "PlayResY: 1920" in body
     assert ("Style: Telop,ArialUnicode,52,&H00FFFFFF,&H00000000,&H78000000,"
             "-1,0,3,5,0,2,70,70,720,1") in body
+
+
+# ───────── 폰트 프로비저닝 (노드 실측: SIP 플래그로 죽었다) ─────────
+
+def test_provision_fonts_copies_contents_only(monkeypatch, tmp_path):
+    """copy2 는 macOS 시스템 폰트의 SIP 플래그를 chflags 로 옮기려다
+    `PermissionError: Operation not permitted` 로 죽는다 — 내용만 복사해야 한다."""
+    src = tmp_path / "sys.ttf"
+    src.write_bytes(b"GLYPHS")
+    fonts = tmp_path / "assets" / "fonts"
+    monkeypatch.setattr(rerender, "SYSTEM_JP_FONT", src)
+    monkeypatch.setattr(rerender, "FONTS_DIR", fonts)
+
+    def no_copy2(*a, **k):                    # copy2 를 쓰면 테스트가 실패하도록
+        raise AssertionError("copy2 는 메타데이터까지 옮겨 SIP 플래그에서 죽는다")
+
+    monkeypatch.setattr(rerender.shutil, "copy2", no_copy2)
+    rerender._provision_fonts({"title_font": "ArialUnicode"})
+    assert (fonts / "ArialUnicode.ttf").read_bytes() == b"GLYPHS"
+
+
+def test_provision_fonts_skips_when_already_present(monkeypatch, tmp_path):
+    """운영 노드는 폰트가 이미 있어 이 경로를 안 탄다 — 그래서 여태 안 드러났다."""
+    fonts = tmp_path / "fonts"
+    fonts.mkdir()
+    (fonts / "ArialUnicode.ttf").write_bytes(b"OLD")
+    monkeypatch.setattr(rerender, "FONTS_DIR", fonts)
+    monkeypatch.setattr(rerender, "SYSTEM_JP_FONT", tmp_path / "does-not-exist.ttf")
+    rerender._provision_fonts({"title_font": "ArialUnicode"})    # 안 죽는다
+    assert (fonts / "ArialUnicode.ttf").read_bytes() == b"OLD"
+
+
+def test_provision_fonts_ignores_other_font_names(monkeypatch, tmp_path):
+    monkeypatch.setattr(rerender, "FONTS_DIR", tmp_path / "nope")
+    monkeypatch.setattr(rerender, "SYSTEM_JP_FONT", tmp_path / "nope.ttf")
+    rerender._provision_fonts({"title_font": "JalnanGothic"})     # 시스템 폰트를 안 찾는다
+    assert not (tmp_path / "nope").exists()

@@ -94,22 +94,31 @@ def render_argv(python: str, job: Path, work_display: str, video_path: str,
             "--max-shorts", "1", *gen_flags]
 
 
+SYSTEM_JP_FONT = Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf")
+
+
 def _provision_fonts(locale_cfg: dict):
     """일본어 폰트 자동 프로비저닝 — ArialUnicode 는 macOS 시스템 폰트(재배포 라이선스
     문제로 레포에 못 넣는다)라, 없으면 시스템 사본을 assets 로 복사한다.
-    전 워커 노드가 맥이라는 전제(ves-orchestrator MACHINE_SETUP)."""
-    sys_font = Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf")
+    전 워커 노드가 맥이라는 전제(ves-orchestrator MACHINE_SETUP).
+
+    ⚠ **`copy2` 가 아니라 `copyfile` 이다.** copy2 는 메타데이터까지 복사하는데,
+    macOS 시스템 폰트에는 SIP 플래그가 붙어 있어 `chflags` 가
+    `PermissionError: Operation not permitted` 로 죽는다(노드 실측). 우리가 원하는 건
+    글리프뿐이고 SIP 플래그는 오히려 안 따라와야 한다.
+    운영 노드는 폰트가 이미 있어(untracked) 이 경로를 안 타므로 여태 안 드러났다 —
+    **새 노드·새 체크아웃에서 처음 도는 순간 터진다.**"""
     for key in ("title_font", "subtitle_font", "telop_font"):
-        name = locale_cfg.get(key)
-        if name != "ArialUnicode":
+        if locale_cfg.get(key) != "ArialUnicode":
             continue
         dst = FONTS_DIR / "ArialUnicode.ttf"
         if not dst.exists():
-            if not sys_font.exists():
-                raise SystemExit(f"일본어 폰트 없음: {dst} — macOS 시스템 폰트({sys_font})도 없다")
+            if not SYSTEM_JP_FONT.exists():
+                raise SystemExit(
+                    f"일본어 폰트 없음: {dst} — macOS 시스템 폰트({SYSTEM_JP_FONT})도 없다")
             FONTS_DIR.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(sys_font, dst)
-            print(f"[L4] 폰트 프로비저닝: {sys_font.name} → {dst}")
+            shutil.copyfile(SYSTEM_JP_FONT, dst)     # 내용만 — 메타데이터는 복사하지 않는다
+            print(f"[L4] 폰트 프로비저닝: {SYSTEM_JP_FONT.name} → {dst}")
         break
 
 
