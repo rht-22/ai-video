@@ -10,7 +10,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.deps_probe import (  # noqa: E402
-    _older, delta_report, find_conflicts, human, normalize, summarize_resolution, venv_root,
+    _older, cv2_winner, delta_report, find_conflicts, human, normalize,
+    summarize_resolution, venv_root,
 )
 
 
@@ -108,3 +109,34 @@ def test_human_units():
     assert human(512).endswith("B")
     assert "MiB" in human(5 * 1024 ** 2)
     assert "GiB" in human(3 * 1024 ** 3)
+
+
+# ── cv2 승자 — delta_report 가 못 보는 어긋남 ───────────────────────────
+def test_cv2_winner_detects_contrib_shadowing_base():
+    """노드 실측: 해석표는 opencv-python 4.14 인데 런타임 cv2 는 4.10(contrib)이었다."""
+    resolved = {"opencv-python": "4.14.0.94", "opencv-contrib-python": "4.10.0.84"}
+    w = cv2_winner(resolved, "4.10.0")
+    assert w["winner"] == "opencv-contrib-python"
+    assert w["shadowed"] == "opencv-python"
+
+
+def test_cv2_winner_detects_base_winning():
+    resolved = {"opencv-python": "4.14.0.94", "opencv-contrib-python": "4.10.0.84"}
+    assert cv2_winner(resolved, "4.14.0")["winner"] == "opencv-python"
+
+
+def test_cv2_winner_none_when_only_one_installed():
+    assert cv2_winner({"opencv-python": "4.14.0.94"}, "4.14.0")["winner"] == "opencv-python"
+
+
+def test_cv2_winner_none_when_ambiguous_or_missing():
+    assert cv2_winner({}, "4.10.0") is None
+    assert cv2_winner({"opencv-python": "4.10.0.84",
+                       "opencv-contrib-python": "4.10.0.84"}, "4.10.0") is None
+    assert cv2_winner({"opencv-python": "4.14.0.94"}, "") is None
+
+
+# ── 부트스트랩은 신호가 아니다 ──────────────────────────────────────────
+def test_absent_ignores_bootstrap_packages():
+    d = delta_report({"pip": "25.0", "setuptools": "80.0", "real-thing": "1.0"}, {})
+    assert d["absent"] == ["real-thing"]

@@ -78,7 +78,7 @@ def delta_report(before: dict, after: dict) -> dict:
         "added": sorted(k for k in a if k not in b),
         # ⚠ pip install -r 은 **지우지 않는다** — 이 목록은 '새 해석에 없는 것'이지
         #    사라질 것이 아니다. 남아서 새 패키지와 섞이는 쪽이 오히려 문제다.
-        "absent": sorted(k for k in b if k not in a),
+        "absent": sorted(k for k in b if k not in a and k not in BOOTSTRAP),
         "changed": sorted(f"{k}: {b[k]} → {a[k]}" for k in a if k in b and a[k] != b[k]),
         "downgraded": sorted(f"{k}: {b[k]} → {a[k]}" for k in a
                              if k in b and a[k] != b[k] and _older(a[k], b[k])),
@@ -97,6 +97,36 @@ def _ver_key(v: str) -> tuple:
 def _older(a: str, b: str) -> bool:
     """a 가 b 보다 낮은 버전인가(=다운그레이드). 순수 — 테스트 대상."""
     return _ver_key(a) < _ver_key(b)
+
+
+# venv 를 만들면 늘 딸려 오는 부트스트랩 셋 — requirements 에 없는 게 정상이라
+# '새 해석에 없는 것' 목록에서 빼야 신호가 보인다.
+BOOTSTRAP = {"pip", "setuptools", "wheel"}
+
+
+def cv2_winner(resolved: dict, cv2_version: str):
+    """실제로 이긴 cv2 가 어느 배포판인가. 순수 — 테스트 대상.
+
+    `opencv-python` 과 `opencv-contrib-python` 은 **같은 `cv2` 패키지**를 배포한다.
+    한 venv 에 둘 다 들어오면 나중에 깔린 쪽이 앞의 것을 덮어쓰므로, 해석표에 적힌
+    opencv-python 버전과 **런타임 `cv2.__version__` 이 다를 수 있다.**
+    ⚠ 이 어긋남은 delta_report 가 못 잡는다 — 패키지 **이름**이 달라서 다운그레이드로
+    안 세어진다(노드 실측: 해석표 opencv-python 4.14, 실제 cv2 4.10 = contrib)."""
+    if not cv2_version:
+        return None
+    base = str(resolved.get("opencv-python") or "")
+    contrib = str(resolved.get("opencv-contrib-python") or "")
+    v = str(cv2_version)
+    hit = [name for name, ver in (("opencv-python", base),
+                                  ("opencv-contrib-python", contrib))
+           if ver and ver.startswith(v)]
+    if len(hit) == 1:
+        return {"winner": hit[0],
+                "shadowed": ("opencv-contrib-python" if hit[0] == "opencv-python"
+                             else "opencv-python"),
+                "cv2_version": v,
+                "resolved_base": base, "resolved_contrib": contrib}
+    return None
 
 
 def summarize_resolution(report: dict) -> dict:
@@ -159,21 +189,27 @@ def resolve(req: Path, py: str = sys.executable) -> tuple[dict, Path | None]:
     return summarize_resolution(json.loads(out.read_text())), out
 
 
-def timed_install(req: Path, workdir: Path) -> dict:
-    """일회용 venv 에 진짜 설치 — 시간·용량 실측. updater 의 타임아웃 상한을 정하는 근거."""
+def timed_install(req: Path, workdir: Path, *, cold: bool = False) -> dict:
+    """일회용 venv 에 진짜 설치 — 시간·용량 실측.
+
+    ⚠ **캐시가 더우면 시간은 의미가 없다.** 노드 첫 실측이 3.1 GiB 를 36초에 깔았는데,
+    그건 `--resolve` 와 기존 설치가 pip HTTP 캐시를 이미 채워 놨기 때문이다. updater 의
+    타임아웃 상한은 **새로 깐 노드**(캐시 빈 상태) 기준이어야 하므로 `cold=True` 로
+    `--no-cache-dir` 을 줘서 다시 잰다."""
     workdir.mkdir(parents=True, exist_ok=True)
     vpath = workdir / "probe_venv"
     print(f"[deps_probe] 일회용 venv 생성: {vpath}")
     venv.create(vpath, with_pip=True, clear=True)
     py = str(vpath / "bin" / "python")
     t0 = time.time()
-    r = _pip(py, "install", "-q", "-r", str(req), timeout=7200)
+    extra = ["--no-cache-dir"] if cold else []
+    r = _pip(py, "install", "-q", *extra, "-r", str(req), timeout=7200)
     elapsed = time.time() - t0
     ok = r.returncode == 0
     size = venv_size(py) if ok else 0
     if not ok:
         print(f"[deps_probe] 설치 실패({elapsed:.0f}s): {(r.stderr or r.stdout)[-800:]}")
-    return {"ok": ok, "seconds": round(elapsed, 1), "venv_bytes": size,
+    return {"ok": ok, "seconds": round(elapsed, 1), "venv_bytes": size, "cold": cold,
             "packages": installed(py) if ok else {}}
 
 
@@ -214,6 +250,8 @@ def main() -> None:
     ap.add_argument("--resolve", help="후보 requirements 파일")
     ap.add_argument("--install", action="store_true",
                     help="일회용 venv 에 실제 설치해 시간·용량을 잰다(오래 걸린다)")
+    ap.add_argument("--cold", action="store_true",
+                    help="pip 캐시를 쓰지 않고 설치한다 — 새 노드 기준 시간을 재려면 필수")
     ap.add_argument("--smoke", action="store_true",
                     help="설치 후 실제로 import 되는지까지 확인 (--install 과 함께)")
     ap.add_argument("--workdir", default="/tmp/deps_probe")
@@ -241,7 +279,7 @@ def main() -> None:
         after, _ = resolve(req)
         if after:
             d = delta_report(cur, after)
-            result["resolve"] = {"packages": len(after), **d}
+            result["resolve"] = {"packages": len(after), **d, "_versions": after}
             if not args.json:
                 print(f"\n=== 해석 결과 — {req} ===")
                 print(f"  총 {len(after)}개 · 신규 {len(d['added'])} · "
@@ -264,14 +302,19 @@ def main() -> None:
             result["resolve"] = {"error": "resolution_failed"}
 
         if args.install:
-            m = timed_install(req, Path(args.workdir))
+            m = timed_install(req, Path(args.workdir), cold=args.cold)
             result["install"] = {k: v for k, v in m.items() if k != "packages"}
             if not args.json:
                 print(f"\n=== 실제 설치 ===")
                 print(f"  {'성공' if m['ok'] else '실패'} · {m['seconds']:.0f}초 · "
-                      f"디스크 {human(m['venv_bytes'])}")
-                print(f"  → updater PIP_TIMEOUT_SEC 는 이 값의 3배 이상으로 "
-                      f"(캐시 없는 첫 설치·느린 회선 여유)")
+                      f"디스크 {human(m['venv_bytes'])} · "
+                      f"캐시 {'안 씀(cold)' if m['cold'] else '사용(warm)'}")
+                if m["cold"]:
+                    print(f"  → updater PIP_TIMEOUT_SEC 는 이 값의 3배 이상으로 "
+                          f"(느린 회선·부하 여유): 최소 {max(600, int(m['seconds'] * 3))}초")
+                else:
+                    print("  🛑 이 시간은 **캐시가 더운 값**이라 타임아웃 근거로 쓸 수 없다. "
+                          "새로 깐 노드는 수십 배 걸린다 — `--cold` 로 다시 잴 것")
             if args.smoke and m["ok"]:
                 sm = smoke(str(Path(args.workdir) / "probe_venv" / "bin" / "python"))
                 result["smoke"] = sm
@@ -283,8 +326,18 @@ def main() -> None:
                         print(f"  {mark}{r['module']:<22} {str(tail)[:70]}")
                     cv = [r for r in sm if r["module"] == "cv2" and r["ok"]]
                     if cv:
-                        print(f"  · cv2 실제 경로: {cv[0]['path']}")
-                        print("    (opencv-python 과 contrib 가 같이 깔렸다면 나중에 깔린 쪽이다)")
+                        w = cv2_winner(result.get("resolve", {}).get("_versions", {}),
+                                       cv[0]["version"])
+                        result["cv2"] = w or {"cv2_version": cv[0]["version"]}
+                        if w:
+                            print(f"\n  🛑 cv2 를 이긴 배포판: {w['winner']} "
+                                  f"(v{w['cv2_version']}) — {w['shadowed']} 가 덮였다")
+                            print(f"     해석표: opencv-python {w['resolved_base']} · "
+                                  f"contrib {w['resolved_contrib']}")
+                            print("     ⇒ requirements 에 한쪽만 남기거나 양쪽에 같은 상한을 "
+                                  "걸 것(둘은 같은 cv2 를 배포한다)")
+                        else:
+                            print(f"  · cv2 {cv[0]['version']} — {cv[0]['path']}")
 
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
