@@ -8,8 +8,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.localize_ab import (  # noqa: E402
-    diff_segments, frame_timestamps, json_equal, norm_json, pair_diff, verdict,
+    diff_segments, flatten_pairs, frame_timestamps, json_equal, norm_json, pair_diff, verdict,
 )
+
+# 실제 metadata.json 의 모양 — 리스트가 아니라 dict 다(노드 실측에서 이걸로 죽었다).
+REAL_PAIRS = {
+    "top_title": {"ko": "원제목", "ja": "元タイトル"},
+    "subs": [{"idx": 0, "start": 1.0, "end": 2.0, "ko": "안녕", "ja": "こんにちは"},
+             {"idx": 1, "start": 3.0, "end": 4.0, "ko": "잘가", "ja": "またね"}],
+    "tts": [{"idx": 0, "start": 0.0, "end": 5.0, "ko": "내레이션", "ja": "ナレ"}],
+    "telops": [{"idx": 0, "start": 2.0, "end": 3.0, "ko": "텔롭", "ja": "テロップ"}],
+}
 
 
 # ── 정규화 — 의미 없는 차이를 회귀로 잡지 않는다 ────────────────────────
@@ -115,3 +124,38 @@ def test_frame_timestamps_are_evenly_spaced():
 
 def test_frame_timestamps_empty_for_zero_duration():
     assert frame_timestamps(0.0) == []
+
+
+# ── ko_ja_pairs 는 dict 다 (노드 실측 크래시 회귀 가드) ────────────────
+def test_flatten_real_metadata_shape():
+    rows = flatten_pairs(REAL_PAIRS)
+    assert len(rows) == 5                       # top_title 1 + subs 2 + tts 1 + telops 1
+    assert {r["_sec"] for r in rows} == {"top_title", "subs", "tts", "telops"}
+
+
+def test_pair_diff_does_not_crash_on_dict_shape():
+    """종전엔 dict 를 순회해 키(문자열)가 나오고 .get 이 없어 죽었다."""
+    assert pair_diff(REAL_PAIRS, REAL_PAIRS) == []
+
+
+def test_pair_diff_dict_shape_flags_ko_change():
+    import copy
+    other = copy.deepcopy(REAL_PAIRS)
+    other["subs"][1]["ko"] = "다른 원문"
+    out = pair_diff(REAL_PAIRS, other)
+    assert out[0].startswith("⚠ ko 변경 1건")
+    assert any("subs:1" in s for s in out)
+
+
+def test_pair_diff_dict_shape_counts_ja_as_noise():
+    import copy
+    other = copy.deepcopy(REAL_PAIRS)
+    other["telops"][0]["ja"] = "別テロップ"
+    out = pair_diff(REAL_PAIRS, other)
+    assert out and all(not s.startswith("⚠") for s in out)
+
+
+def test_flatten_tolerates_legacy_list_and_junk():
+    assert flatten_pairs([{"ko": "a", "ja": "b"}]) == [{"ko": "a", "ja": "b"}]
+    assert flatten_pairs(None) == [] and flatten_pairs("x") == []
+    assert flatten_pairs({"subs": None, "top_title": None}) == []

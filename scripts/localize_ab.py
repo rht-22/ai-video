@@ -94,9 +94,32 @@ def diff_segments(a: list, b: list, *, limit: int = 8) -> list[str]:
     return out
 
 
-def pair_diff(a: list, b: list, *, limit: int = 8) -> list[str]:
+def flatten_pairs(pairs) -> list[dict]:
+    """`ko_ja_pairs` → 비교용 평평한 행 목록. 순수 — 테스트 대상.
+
+    ⚠ 실제 `metadata.json` 의 `ko_ja_pairs` 는 **리스트가 아니라 dict** 다
+    (`{top_title, subs[], tts[], telops[]}`). 리스트로 가정하면 dict 를 순회해
+    **키(문자열)** 가 나오고 `.get` 이 없어 죽는다(노드 실측에서 그렇게 죽었다).
+    옛 판(리스트)도 받아 준다."""
+    if isinstance(pairs, list):
+        return [r for r in pairs if isinstance(r, dict)]
+    if not isinstance(pairs, dict):
+        return []
+    rows: list[dict] = []
+    top = pairs.get("top_title")
+    if isinstance(top, dict):
+        rows.append({**top, "_sec": "top_title", "idx": 0})
+    for sec in ("subs", "tts", "telops"):
+        for r in pairs.get(sec) or []:
+            if isinstance(r, dict):
+                rows.append({**r, "_sec": sec})
+    return rows
+
+
+def pair_diff(a, b, *, limit: int = 8) -> list[str]:
     """ko_ja_pairs 대조 — 한국어(ko)가 달라지면 번역 이전 단계가 흔들린 것이라 중대하고,
     일본어(ja)만 달라지면 LLM 비결정성일 수 있다. 그래서 둘을 나눠 센다. 순수."""
+    a, b = flatten_pairs(a), flatten_pairs(b)
     out: list[str] = []
     if len(a) != len(b):
         out.append(f"쌍 수: {len(a)} → {len(b)}")
@@ -105,7 +128,9 @@ def pair_diff(a: list, b: list, *, limit: int = 8) -> list[str]:
         if (x or {}).get("ko") != (y or {}).get("ko"):
             ko_moved += 1
             if len(out) < limit:
-                out.append(f"[{i}] ko 변경: {str((x or {}).get('ko'))[:30]!r} → "
+                sec = (x or {}).get("_sec") or "?"
+                out.append(f"[{sec}:{(x or {}).get('idx', i)}] ko 변경: "
+                           f"{str((x or {}).get('ko'))[:30]!r} → "
                            f"{str((y or {}).get('ko'))[:30]!r}")
         if (x or {}).get("ja") != (y or {}).get("ja"):
             ja_moved += 1

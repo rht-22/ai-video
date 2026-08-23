@@ -61,15 +61,32 @@ def work_locale_cfg(locales: dict, work_title: str, locale: str) -> dict:
 
 
 def gemini_client():
-    """GEMINI_API_KEY 는 **환경변수 우선**(워커 /etc/ves/node.env), 없을 때만 brain .env 폴백.
-    워커 노드의 brain 체크아웃에는 .env 가 없다(시크릿은 git 밖) — 폴백만 있으면 즉사한다."""
+    """GEMINI_API_KEY 해석 — 세 곳을 순서대로 본다.
+
+    ① 프로세스 환경 (워커는 `/etc/ves/node.env` 를 실어 준다)
+    ② **이 레포의 `.env`** — ai-video 규약(`gemini_client.load_gemini_client` 과 동일)
+    ③ brain `.env` — vlp 가 쓰던 폴백. 워커의 brain 체크아웃엔 없을 수 있다(시크릿은 git 밖)
+
+    ⚠ ②가 이식 때 빠져 있었다. vlp 는 자기 레포에 키를 안 두고 brain 것만 봤는데,
+    ai-video 는 레포 `.env` 가 정본이라 **사람이 손으로 돌리면 키가 멀쩡히 있는데도
+    즉사**했다(노드 실측). 폴백을 늘리는 것뿐이라 성공하던 실행의 산출은 안 바뀐다."""
+    if not os.environ.get("GEMINI_API_KEY"):
+        env_path = REPO_ROOT / ".env"
+        if env_path.exists():
+            try:
+                from dotenv import load_dotenv
+                load_dotenv(env_path)
+            except ImportError:
+                pass
     if not os.environ.get("GEMINI_API_KEY") and (BRAIN / ".env").exists():
         sys.path.insert(0, str(BRAIN / "scripts"))
         from envload import load_env
         load_env(str(BRAIN / ".env"))
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
-        raise SystemExit("GEMINI_API_KEY 없음 — 워커는 /etc/ves/node.env, 로컬은 brain .env 확인")
+        raise SystemExit(
+            f"GEMINI_API_KEY 없음 — 확인한 곳: 프로세스 환경(워커는 /etc/ves/node.env) · "
+            f"{REPO_ROOT / '.env'} · {BRAIN / '.env'}")
     from google import genai
     return genai.Client(api_key=key)
 
