@@ -8,7 +8,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.localize_ab import (  # noqa: E402
-    diff_segments, flatten_pairs, frame_timestamps, json_equal, norm_json, pair_diff, verdict,
+    diff_segments, flatten_pairs, frame_timestamps, json_equal, norm_json, pair_diff,
+    run_evidence, verdict,
 )
 
 # 실제 metadata.json 의 모양 — 리스트가 아니라 dict 다(노드 실측에서 이걸로 죽었다).
@@ -159,3 +160,31 @@ def test_flatten_tolerates_legacy_list_and_junk():
     assert flatten_pairs([{"ko": "a", "ja": "b"}]) == [{"ko": "a", "ja": "b"}]
     assert flatten_pairs(None) == [] and flatten_pairs("x") == []
     assert flatten_pairs({"subs": None, "top_title": None}) == []
+
+
+# ── 거짓 합격 가드 (노드 실측: 아무것도 안 돌았는데 '회귀 0' 이 찍혔다) ──
+def test_no_run_is_not_a_pass():
+    """스냅샷 이후 B 가 안 갱신됐으면 대조 자체가 무의미하다."""
+    ok, why = run_evidence(newest_mtime=100.0, snapshot_at=200.0)
+    assert ok is False and "돌지 않았다" in why
+
+
+def test_run_after_snapshot_is_evidence():
+    ok, why = run_evidence(newest_mtime=300.0, snapshot_at=200.0)
+    assert ok is True and why == ""
+
+
+def test_missing_outputs_is_not_a_pass():
+    ok, why = run_evidence(newest_mtime=None, snapshot_at=200.0)
+    assert ok is False
+
+
+def test_legacy_snapshot_without_marker_is_allowed_with_note():
+    """마커 없는 옛 스냅샷은 막지 않되, 확인 불가라고 알린다."""
+    ok, why = run_evidence(newest_mtime=300.0, snapshot_at=None)
+    assert ok is True and why
+
+
+def test_equal_mtime_is_not_evidence():
+    """같은 시각 = 갱신 없음. 경계에서 통과시키면 가드가 무의미해진다."""
+    assert run_evidence(newest_mtime=200.0, snapshot_at=200.0)[0] is False

@@ -31,6 +31,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -46,6 +47,7 @@ META_FILE = "localize_ja/metadata.json"
 BACKUP_DIR = "localize_backup_ko"
 SNAPSHOT_FILES = RENDER_FILES + DATA_FILES + (META_FILE, "shorts_ko.mp4", "title.txt")
 
+SNAPSHOT_MARKER = "_snapshot_at.json"   # 스냅샷 시각 — '진짜 돌았는가' 판정의 기준
 FRAME_SAMPLES = 12          # 샘플 프레임 수 — 전 프레임 해시는 60초물에도 분 단위가 걸린다
 DUR_TOL_SEC = 0.05          # 길이 허용 오차. 인코더 재현성은 ms 단위로 흔들린다
 
@@ -141,6 +143,23 @@ def pair_diff(a, b, *, limit: int = 8) -> list[str]:
     return out
 
 
+def run_evidence(newest_mtime: float | None, snapshot_at: float | None) -> tuple[bool, str]:
+    """B 쪽에서 **실제로 현지화가 돌았는가**. 순수 — 테스트 대상.
+
+    🛑 이 가드가 없으면 이 도구는 거짓 합격을 낸다. 실제로 냈다(노드 실측):
+    현지화가 GEMINI_API_KEY 없음으로 즉사해 job 디렉토리가 그대로였는데, 스냅샷과
+    그 원본을 비교하니 전 항목 '동일'이 나오고 `판정: 회귀 0` 이 찍혔다.
+    아무것도 안 돈 것과 완벽하게 재현한 것은 **구별돼야 한다**."""
+    if snapshot_at is None:
+        return True, "스냅샷 시각 정보 없음 — 실행 여부를 확인할 수 없음(구 스냅샷)"
+    if newest_mtime is None:
+        return False, "B 쪽 산출물이 없다"
+    if newest_mtime <= snapshot_at:
+        return False, ("스냅샷 이후 B 쪽 산출물이 하나도 갱신되지 않았다 — "
+                       "현지화가 실제로 돌지 않았다(로그 위쪽의 실패 메시지를 확인하세요)")
+    return True, ""
+
+
 def verdict(findings: dict, *, strict: bool = False) -> tuple[bool, list[str]]:
     """항목별 결과 → 회귀 0 판정. 순수 — 테스트 대상.
 
@@ -220,11 +239,39 @@ def snapshot(job: Path, dest: Path) -> int:
     if bk.is_dir():
         shutil.copytree(bk, dest / BACKUP_DIR, dirs_exist_ok=True)
         n += len(list(bk.rglob("*")))
+    # 시각 마커 — compare 가 'B 가 이 시각 이후에 갱신됐는가'로 실행 여부를 판정한다
+    (dest / SNAPSHOT_MARKER).write_text(
+        json.dumps({"at": time.time(), "job": str(job)}), encoding="utf-8")
     return n
 
 
-def compare(a: Path, b: Path, *, strict: bool = False) -> tuple[bool, list[str], dict]:
+def _snapshot_time(a: Path) -> float | None:
+    try:
+        return float(json.loads((a / SNAPSHOT_MARKER).read_text(encoding="utf-8"))["at"])
+    except Exception:                                    # noqa: BLE001
+        return None
+
+
+def _newest_output_mtime(b: Path) -> float | None:
+    """B 의 산출물 중 가장 최근 수정 시각 — 렌더본·데이터 파일·메타를 본다."""
+    cands = [b / r for r in RENDER_FILES + DATA_FILES]
+    cands += list(b.glob("localize_*/metadata.json")) + list(b.glob("localize_*/state.json"))
+    times = [p.stat().st_mtime for p in cands if p.exists()]
+    return max(times) if times else None
+
+
+def compare(a: Path, b: Path, *, strict: bool = False,
+            allow_no_run: bool = False) -> tuple[bool, list[str], dict]:
+    ran, why = run_evidence(_newest_output_mtime(b), _snapshot_time(a))
+    if not ran and not allow_no_run:
+        raise SystemExit(
+            f"\n🛑 대조 중단 — {why}\n"
+            f"   스냅샷과 원본을 비교하면 당연히 전부 '동일'이 나온다. 그건 판정이 아니다.\n"
+            f"   현지화를 실제로 돌린 뒤 다시 대조하세요"
+            f"(정말 이 상태로 보려면 --allow-no-run).\n")
     findings: dict = {}
+    if why:
+        findings["_note"] = {"diff": False, "summary": why}
 
     # ① 렌더 — 길이·프레임
     for rel in RENDER_FILES:
@@ -292,6 +339,8 @@ def main() -> None:
     ap.add_argument("--b", help="대조(신 엔진) job 디렉토리")
     ap.add_argument("--snapshot", help="이 job 디렉토리의 산출을 --to 로 복사")
     ap.add_argument("--to", help="--snapshot 의 대상 경로")
+    ap.add_argument("--allow-no-run", action="store_true",
+                    help="B 쪽이 갱신되지 않았어도 대조를 진행한다(보통은 실수다)")
     ap.add_argument("--strict", action="store_true",
                     help="번역문 차이도 회귀로 본다 (고정 translation.json 을 쓴 경우에만 의미)")
     ap.add_argument("--json", action="store_true", help="결과를 JSON 으로")
@@ -307,7 +356,8 @@ def main() -> None:
     if not (args.a and args.b):
         ap.error("--a 와 --b 가 필요합니다 (또는 --snapshot)")
 
-    ok, lines, findings = compare(Path(args.a), Path(args.b), strict=args.strict)
+    ok, lines, findings = compare(Path(args.a), Path(args.b), strict=args.strict,
+                                  allow_no_run=args.allow_no_run)
     if args.json:
         print(json.dumps({"ok": ok, "findings": findings}, ensure_ascii=False, indent=2))
     else:
