@@ -3747,7 +3747,15 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
             if _style_plan.get("images") and not _image_overlays:
                 # 편집실 이미지와 **같은 함수**로 파일을 확인한다(경로 탈출·용량 상한).
-                _resolved = resolve_image_files({"images": _style_plan["images"]}, output_dir)
+                # ⚠ 편집실 이미지는 파일이 없으면 크게 실패해야 맞다(어댑터 버그이고 사람이
+                # 올린 것이 증발하면 안 된다). 스티커는 반대다 — 체크포인트만 남고
+                # style_assets/ 가 사라진 재개(번들 복원 등)에서 연출 하나 때문에 본편
+                # 렌더가 죽으면 안 된다. 그래서 여기서만 잡아 연출을 접는다.
+                try:
+                    _resolved = resolve_image_files({"images": _style_plan["images"]}, output_dir)
+                except EditOverrideError as _e:
+                    print(f"  [style] 스티커 파일을 못 찾음 → 스티커 없이 진행: {_e}")
+                    _resolved = []
                 _placed_i, _drop_i = place_anchored_images(_resolved, clips)
                 for _o in _drop_i:
                     print(f"  [style] 앵커 소재가 최종 타임라인에 없음 → 스티커 드롭"

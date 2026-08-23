@@ -107,6 +107,18 @@ def test_pipeline_block_guards_every_category_with_editor_override():
     assert "payload.design_explicit_fields" in block
 
 
+def test_missing_sticker_file_does_not_kill_the_render():
+    """체크포인트만 남고 style_assets/ 가 사라진 재개(번들 복원)에서 연출 하나 때문에
+    본편 렌더가 죽으면 안 된다 — 편집실 이미지(크게 실패해야 맞다)와 반대 방향이다."""
+    import inspect
+    from app import pipeline
+    src = inspect.getsource(pipeline.run_pipeline)
+    block = src.split("[style] AI 연출 구성 (E15", 1)[1].split("[13/15] 리소스 생성", 1)[0]
+    seg = block.split("resolve_image_files", 1)[0][-400:]
+    assert "try:" in seg                       # 감싸지 않으면 EditOverrideError 가 렌더를 죽인다
+    assert "스티커 없이 진행" in block
+
+
 def test_style_checkpoint_is_not_recalled_on_editor_rerender():
     """편집실 재렌더가 매번 다른 연출을 내면 사람이 승인한 화면이 재렌더마다 달라진다."""
     import inspect

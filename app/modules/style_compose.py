@@ -414,6 +414,11 @@ def title_segments_from_anchors(segs: list[dict[str, Any]],
     변환은 자막·이미지 앵커와 **같은 규칙**(담은 클립의 편집 오프셋 + 클립 내 상대시각)을
     쓴다 — 배치 함수(place_anchored_images)를 그대로 재사용해 수식을 베끼지 않는다.
     창 밖 앵커·0.1초 미만은 드롭(고아 규칙). 겹침·개수 상한은 E8 검증기가 본다.
+
+    ⚠ 창 길이는 `to_anchor - from_anchor`(원본 기준)를 **편집본 길이로 그대로** 쓴다 —
+    v3 images/texts 의 duration 규약과 같다. 두 앵커가 서로 다른 클립에 걸치고 그
+    사이가 잘려 나갔다면 창이 의도보다 길어질 수 있다(한 클립 안이면 정확하다).
+    길어진 창이 다음 창을 침범하면 아래 겹침 규칙이 뒤엣것을 버린다.
     """
     from app.modules.edit_overrides import place_anchored_images
 
