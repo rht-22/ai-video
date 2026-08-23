@@ -82,7 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[
             "init", "research", "probe", "proxy", "exclusion", "chunk",
             "skeleton", "character_index", "gemini", "graph", "story",
-            "tts_plan", "transcribe", "resources", "render", "validate",
+            "tts_plan", "transcribe", "style", "resources", "render", "validate",
         ],
         help="Start from specific step (requires --job-id)",
     )
@@ -127,6 +127,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="(선택) 대사 자막의 받아쓰기 백엔드. default=내장 전사(미지정과 동일), "
                              "elevenlabs=ElevenLabs Scribe STT(ELEVENLABS_API_KEY 필요). "
                              "자막 파일(--subtitle)이 있으면 전사 자체를 안 하므로 무관하다.")
+    create.add_argument(
+        "--style-compose", dest="style_compose", action="store_true",
+        help="(선택) 스토리 구성 뒤 AI 가 이 편의 연출(효과 텍스트·자막 강조·스티커·"
+             "시간대별 제목·제목 기울기·내레이션 톤)을 구성해 그대로 렌더한다. "
+             "미지정이면 그 단계 자체가 없다 — 산출은 종전과 완전히 동일하다. "
+             "편집실이 고친 항목은 AI 것을 이긴다(우선순위: 편집실 > 채널 > AI).")
     create.add_argument("--no-research", action="store_true",
                         help="작품 자동 리서치를 건너뜁니다")
     create.add_argument("--episode", type=int, default=None,
@@ -271,8 +277,15 @@ _CLI_TO_DESIGN_FIELD = {
 }
 
 
-def _build_design_config(args: argparse.Namespace) -> DesignConfig:
-    """CLI의 --design-* 인자에서 DesignConfig를 생성합니다."""
+def _build_design_config(args: argparse.Namespace,
+                         *, collect: set[str] | None = None) -> DesignConfig:
+    """CLI의 --design-* 인자에서 DesignConfig를 생성합니다.
+
+    collect: 주면 **실제로 명시된 DesignConfig 필드 이름**을 담아 돌려준다(E15).
+      AI 스타일 플랜이 그 키를 덮어도 되는지 가리는 유일한 근거다 — '기본값과 다른가'로
+      판정하면 채널이 기본값과 같은 값을 일부러 준 경우를 구분하지 못해 사람 결정이 덮인다.
+      DesignConfig 가 frozen 이라 값에 표식을 달 수 없어 out-파라미터로 받는다.
+    """
     overrides: dict = {}
     for cli_name, field_name in _CLI_TO_DESIGN_FIELD.items():
         value = getattr(args, cli_name, None)
@@ -390,6 +403,8 @@ def _build_design_config(args: argparse.Namespace) -> DesignConfig:
                 f"잘못된 비율 형식: '{ratio_str}'. W:H 형식을 사용하세요 (예: 16:9, 4:3, 1:1)"
             )
 
+    if collect is not None:
+        collect.update(overrides)
     return DesignConfig(**overrides)
 
 
@@ -484,13 +499,17 @@ def main() -> None:
         except ValueError as e:
             parser.error(str(e))
 
+        # E15: 채널이 **명시한** design 키를 함께 걷는다(AI 연출이 못 덮게 하는 근거).
+        _design_explicit: set[str] = set()
+        _design = _build_design_config(args, collect=_design_explicit)
+
         output = run_pipeline(
             PipelineInput(
                 video_path=video_path,
                 work_title=args.title,
                 topic=args.topic,
                 outdir=_resolve_outdir(Path(args.outdir)),
-                design=_build_design_config(args),
+                design=_design,
                 previous_episodes_context=previous_episodes_context,
                 work_context=work_context,
                 srt_path=srt_path,
@@ -510,6 +529,8 @@ def main() -> None:
                 edit_overrides_path=(Path(args.edit_overrides)
                                      if getattr(args, "edit_overrides", None) else None),
                 transcribe_backend=getattr(args, "transcribe_backend", None),
+                style_compose=bool(getattr(args, "style_compose", False)),
+                design_explicit_fields=frozenset(_design_explicit),
             ),
             from_step=args.from_step,
             job_id=args.job_id,
