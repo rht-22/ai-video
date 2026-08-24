@@ -303,7 +303,13 @@ def test_no_band_means_no_change(tmp_path):
 
 
 def test_pipeline_applies_avoidance_to_variants_too():
-    """variant 도 같은 띠를 피한다 — 원본 자막은 소재의 성질이다."""
+    """variant 도 같은 띠를 피한다 — 원본 자막은 소재의 성질이다.
+
+    대사 자막·TTS 자막 둘 다 정본(자막 있음 분기 + TTS 는 대사자막 0건 분기도)·variant 를
+    합쳐 부른다: 정의 1 + [정본 대사 1 · 정본 TTS(자막 있음 분기) 1 ·
+    정본 TTS(대사자막 0건 분기) 1] + [variant 대사 1 · variant TTS 1] = 6."""
     src = (Path(__file__).resolve().parents[1] / "app" / "pipeline.py").read_text(encoding="utf-8")
-    assert src.count("_avoid_burned_margin_v(") == 3      # 정의 1 + 정본 1 + variant 1
+    assert src.count("_avoid_burned_margin_v(") == 6
+    assert src.count('label="[TTS] "') == 3
+    assert src.count('label="[대사] "') == 2
     assert "_burned_band = _detect_burned_band_cached(" in src

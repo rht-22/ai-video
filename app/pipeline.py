@@ -1521,8 +1521,13 @@ def _avoid_burned_margin_v(
     config,
     title_text: str,
     font_size: int,
+    label: str = "",
 ) -> int:
-    """검출된 띠를 피한 margin_v. 띠가 없거나 피할 자리가 없으면 입력 그대로."""
+    """검출된 띠를 피한 margin_v. 띠가 없거나 피할 자리가 없으면 입력 그대로.
+
+    `label`: 로그 접두("[TTS] " 등) — 대사 자막·TTS 자막 둘 다 이 함수를 타므로
+    stdout 만 보고 어느 줄이 움직였는지 구분하려면 필요하다. 반환값·판정 로직에는
+    영향 없다(순수 로그용)."""
     if not band:
         return int(margin_v)
     from app.modules import subtitle_region as _sr
@@ -1539,7 +1544,7 @@ def _avoid_burned_margin_v(
         band_top=geom.top,
     )
     for n in notes:
-        print(f"  {n}")
+        print(f"  {label}{n}")
     return int(new_margin)
 
 
@@ -4258,7 +4263,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             # 블록 높이(겹치는지·얼마나 올릴지)를 잴 수 있다(프리셋마다 56~72px 로 다르다).
             _sub_margin_v2 = _avoid_burned_margin_v(
                 _sub_margin_v, _burned_band, design=payload.design, config=config,
-                title_text=title_text, font_size=sub_style.font_size)
+                title_text=title_text, font_size=sub_style.font_size, label="[대사] ")
             if _sub_margin_v2 != _sub_margin_v:
                 sub_style = replace(sub_style, margin_v=_sub_margin_v2)
                 _sub_margin_v = _sub_margin_v2
@@ -4286,14 +4291,22 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     text=str(_cue.get("text", "")),
                 ))
 
+            # E17-2: TTS(내레이션) 자막도 원본 자막과 겹치면 안 된다(대사 자막과 같은 이유·
+            # 같은 상한 — 제목 아래를 넘지 않는다). 밴드 앵커(E10) 뒤, 프리셋(TTS 는 채널
+            # tts_line_font_size 고정이라 여기서 이미 확정)이 있으니 바로 계산한다.
+            _tts_margin_v = _compute_tts_margin_v(
+                payload.design, canvas_width=config.canvas_width,
+                canvas_height=config.canvas_height)
+            _tts_margin_v = _avoid_burned_margin_v(
+                _tts_margin_v, _burned_band, design=payload.design, config=config,
+                title_text=title_text, font_size=payload.design.tts_line_font_size,
+                label="[TTS] ")
             tts_line_style = SubtitleStyle(
                 font_name=payload.design.subtitle_font,
                 font_size=payload.design.tts_line_font_size,
                 primary_color=payload.design.tts_line_color,
                 # E10 후속 3: 밴드(video_width·video_y)가 움직인 만큼 TTS 줄도 따라간다
-                margin_v=_compute_tts_margin_v(
-                    payload.design, canvas_width=config.canvas_width,
-                    canvas_height=config.canvas_height),
+                margin_v=_tts_margin_v,
             ) if tts_line_segs else None
 
             # TTS 활성 시간 범위 계산 (메인 자막 숨김용)
@@ -4339,14 +4352,20 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     start_sec=_cue_start, end_sec=_cue_end, text=str(_cue.get("text", "")),
                 ))
             if tts_line_segs:
+                # E17-2: 대사 자막이 0건이어도 TTS 는 독립적으로 나가므로 여기도 회피를 탄다.
+                _tts_margin_v = _compute_tts_margin_v(
+                    payload.design, canvas_width=config.canvas_width,
+                    canvas_height=config.canvas_height)
+                _tts_margin_v = _avoid_burned_margin_v(
+                    _tts_margin_v, _burned_band, design=payload.design, config=config,
+                    title_text=title_text, font_size=payload.design.tts_line_font_size,
+                    label="[TTS] ")
                 tts_line_style = SubtitleStyle(
                     font_name=payload.design.subtitle_font,
                     font_size=payload.design.tts_line_font_size,
                     primary_color=payload.design.tts_line_color,
                     # E10 후속 3: 정본 분기와 동일 — 밴드 이동을 TTS 줄이 따라간다
-                    margin_v=_compute_tts_margin_v(
-                        payload.design, canvas_width=config.canvas_width,
-                        canvas_height=config.canvas_height),
+                    margin_v=_tts_margin_v,
                 )
                 tts_subtitle_path = output_dir / "tts_subtitles.ass"
                 build_tts_ass(tts_line_segs, tts_subtitle_path, tts_line_style,
@@ -4596,7 +4615,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 # 어느 variant 를 뽑아도 같은 자리에 있다(재검출 없이 정본 값을 쓴다).
                 _var_margin_v2 = _avoid_burned_margin_v(
                     _var_margin_v, _burned_band, design=payload.design, config=config,
-                    title_text=var_title, font_size=sub_style.font_size)
+                    title_text=var_title, font_size=sub_style.font_size, label="[대사] ")
                 if _var_margin_v2 != _var_margin_v:
                     sub_style = replace(sub_style, margin_v=_var_margin_v2)
                 var_tts_ranges = [(s.start_sec, s.end_sec) for s in var_tts_segs] if var_tts_segs else None
@@ -4604,14 +4623,20 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 build_ass_from_segments(_scale_segments_for_speed(var_final_segs, _speed),
                                         var_sub_path, sub_style, tts_time_ranges=var_tts_ranges)
 
+                # E17-2: variant 의 TTS 자막도 같은 띠를 피한다(대사 자막과 같은 규약).
+                _var_tts_margin_v = _compute_tts_margin_v(
+                    payload.design, canvas_width=config.canvas_width,
+                    canvas_height=config.canvas_height)
+                _var_tts_margin_v = _avoid_burned_margin_v(
+                    _var_tts_margin_v, _burned_band, design=payload.design, config=config,
+                    title_text=var_title, font_size=payload.design.tts_line_font_size,
+                    label="[TTS] ")
                 var_tts_line_style = SubtitleStyle(
                     font_name=payload.design.subtitle_font,
                     font_size=payload.design.tts_line_font_size,
                     primary_color=payload.design.tts_line_color,
                     # E10 후속 3: variant 도 정본과 같은 밴드 앵커 (영상 1개당 동일 위치)
-                    margin_v=_compute_tts_margin_v(
-                        payload.design, canvas_width=config.canvas_width,
-                        canvas_height=config.canvas_height),
+                    margin_v=_var_tts_margin_v,
                 ) if var_tts_segs else None
 
                 var_tts_sub_final = None

@@ -122,9 +122,13 @@ def band_geometry(design: Any, *, canvas_width: int = 1080,
 
 
 def estimate_subtitle_height(font_size: int, *, lines: int = MAX_SUBTITLE_LINES) -> int:
-    """대사 자막 블록의 세로 크기(px) 추정 — 겹침 판정과 위 여백 계산에 쓴다.
+    """자막 블록의 세로 크기(px) 추정 — 대사·TTS 자막 둘 다 이걸로 겹침 판정·위 여백을 잰다
+    (TTS 는 `tts_line_font_size` 를 넣어 같은 함수를 다시 부른다 — E17-2 정정).
 
     **최대 줄 수 기준**이다(한 줄짜리에 맞추면 두 줄 자막이 원본 자막을 그대로 덮는다).
+    ⚠ **회전(`design.tts_rotate`)은 반영하지 않는다** — 기울면 바운딩 박스가 커지지만,
+    이 함수는 세로 폭 추정이 목적이라 축 정렬 높이만 잰다. 큰 각도로 기운 TTS 자막이
+    원본 자막과 아슬아슬하게 붙는 경우는 이 회피가 완전히 못 잡을 수 있다(드문 조합).
     """
     return max(1, int(round(float(font_size) * LINE_HEIGHT_RATIO * max(1, int(lines)))))
 

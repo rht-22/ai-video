@@ -12,7 +12,7 @@
 
 출력:
   · 행별 검출률 막대(위→아래) — 어디가 임계를 넘는지 눈으로 본다
-  · 판정된 띠(캔버스 y)와 그때 자막 margin_v 가 어떻게 바뀌는지
+  · 판정된 띠(캔버스 y)와 그때 **대사 자막·TTS 자막 각각의** margin_v 가 어떻게 바뀌는지
   · `--json` 이면 같은 내용을 기계가 읽을 형태로
 
 ⚠ 이 스크립트는 **읽기만 한다** — job 디렉토리도 체크포인트도 건드리지 않는다.
@@ -45,6 +45,7 @@ def main() -> int:
     ap.add_argument("--video-width", type=int, default=None, help="밴드 가로(px)")
     ap.add_argument("--video-y", type=int, default=None, help="밴드 상단 y(px)")
     ap.add_argument("--subtitle-size", type=int, default=65, help="대사 자막 글자 크기")
+    ap.add_argument("--tts-size", type=int, default=70, help="TTS(내레이션) 자막 글자 크기")
     ap.add_argument("--title", default="제목 한 줄\n두 번째 줄", help="제목(줄 수 계산용)")
     ap.add_argument("--min-ratio", type=float, default=sr.MIN_FRAME_HIT_RATIO,
                     help="띠로 인정할 프레임 검출률 임계(기본은 엔진 상수)")
@@ -60,6 +61,8 @@ def main() -> int:
         kwargs["video_y"] = args.video_y
     if args.subtitle_size:
         kwargs["subtitle_size"] = args.subtitle_size
+    if args.tts_size:
+        kwargs["tts_line_font_size"] = args.tts_size
     design = DesignConfig(**kwargs)
     geom = sr.band_geometry(design)
     clip = SimpleNamespace(role="main", start_sec=args.start, end_sec=args.end)
@@ -95,23 +98,36 @@ def main() -> int:
     bottom = int(geom.top + band_rows[1] * px)
     print(f"\n[판정] 원본 자막 띠 y={top}~{bottom} (높이 {bottom - top}px)")
 
-    from app.pipeline import _compute_subtitle_margin_v
+    from app.pipeline import _compute_subtitle_margin_v, _compute_tts_margin_v
+
+    title_bottom = sr.estimate_title_bottom(
+        design, geom, line_count=sr.estimate_title_line_count(args.title))
 
     base = _compute_subtitle_margin_v(design)
     new, notes = sr.avoid_margin_v(
         base, canvas_height=1920, burned_top=top, burned_bottom=bottom,
         subtitle_height=sr.estimate_subtitle_height(args.subtitle_size),
-        title_bottom=sr.estimate_title_bottom(
-            design, geom, line_count=sr.estimate_title_line_count(args.title)),
-        band_top=geom.top)
-    print(f"[자막] margin_v {base} → {new}"
+        title_bottom=title_bottom, band_top=geom.top)
+    print(f"[대사 자막] margin_v {base} → {new}"
           + ("" if new != base else "  (변화 없음)"))
     for n in notes:
         print(f"  {n}")
+
+    tts_base = _compute_tts_margin_v(design)
+    tts_new, tts_notes = sr.avoid_margin_v(
+        tts_base, canvas_height=1920, burned_top=top, burned_bottom=bottom,
+        subtitle_height=sr.estimate_subtitle_height(args.tts_size),
+        title_bottom=title_bottom, band_top=geom.top)
+    print(f"[TTS 자막] margin_v {tts_base} → {tts_new}"
+          + ("" if tts_new != tts_base else "  (변화 없음)"))
+    for n in tts_notes:
+        print(f"  {n}")
+
     if args.json:
         print(json.dumps({"band": {"top": top, "bottom": bottom},
                           "margin_v": {"before": base, "after": new},
-                          "notes": notes}, ensure_ascii=False))
+                          "tts_margin_v": {"before": tts_base, "after": tts_new},
+                          "notes": notes, "tts_notes": tts_notes}, ensure_ascii=False))
     return 0
 
 

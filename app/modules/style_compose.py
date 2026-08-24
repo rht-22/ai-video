@@ -60,23 +60,21 @@ SUBTITLE_SIZE_RANGE = (30.0, 140.0)
 #    클램프 앞으로 옮겨야 하는데, 그러면 앵커 좌표의 기준인 최종 클립이 아직 없다.
 #    → 배속은 채널 플래그로 남긴다.
 STYLE_DESIGN_ALLOWED = (
-    "tts_rotate",
+    "title_rotate", "tts_rotate",
     "title_box", "title_box2", "title_box_color", "title_box_color2",
     "title_bold", "title_bold2",
 )
-
-# ── AI 가 내도 버리는 디자인 키 (E17-1, 2026-08-24) ─────────────────────────
-# 사용자 지시("제목은 왠만하면 회전은 안되게"). 제목 기울기는 E15 가 AI 에게 열어 둔
-# 키였는데, 실제 산출에서 거의 매 편 -3~8° 가 붙어 채널 제목이 편마다 삐뚤어졌다.
-#
-# **없는 키로 만들지 않고 '버리는 키'로 둔 이유**: STYLE_DESIGN_ALLOWED 에서 빼기만
-# 하면 모르는 키 검사에 걸려 **플랜 전체가 거절**된다(연출이 통째로 사라진다). 프롬프트
-# 에서 지워도 LLM 은 관성으로 낸다 — 그 항목만 버리고 나머지 연출은 살린다.
-# 사람·채널의 `--design-title-rotate` 는 그대로다(사람이 보고 정한 값은 사람 것이다).
-# 다시 열려면 이 튜플을 비우고 STYLE_DESIGN_ALLOWED 에 이름을 되돌리면 된다.
-STYLE_DESIGN_DROPPED = ("title_rotate",)
 TITLE_BOX_KINDS = ("none", "round", "rect")
 ROTATE_RANGE_DEG = 180.0
+
+# ── 제목 기울기는 AI 에게 **좁은 범위만** 열려 있다 (E17-1, 2026-08-24) ────────
+# 사용자 지시("제목은 왠만하면 회전은 안되게 해주고" → 다시: "돌리는 거는 가능한데,
+# 안 돌리게 제약 정도로만 걸어줘"). 처음엔 title_rotate 를 통째로 막았지만, 그건
+# '가능하다'는 요구를 어긴다 — 그래서 **완전히 닫지 않고 범위만 좁힌다**.
+# tts_rotate 는 그대로 ±180°(design.tts_rotate 는 지시 대상이 아니다).
+# ⚠ 사람·채널의 `--design-title-rotate` 는 이 상한과 무관하다(-180~180 그대로) —
+#   좁히는 것은 **AI 산출**뿐이고, 사람이 보고 정한 값은 사람 것이다.
+AI_TITLE_ROTATE_RANGE_DEG = 15.0
 
 # ── TTS 라벨 ───────────────────────────────────────────────────────────────
 # 불변 계약(E11·E12)을 **한 곳에서** 가져온다 — 여기 문자열을 베끼면 tts.py 가 라벨을
@@ -334,14 +332,6 @@ def validate_plan(
     if design:
         if not isinstance(design, dict):
             raise StylePlanError("design 은 객체여야 합니다")
-        design = dict(design)
-        for _k in STYLE_DESIGN_DROPPED:
-            if _k in design:
-                _v = design.pop(_k)
-                # 0 은 '회전 없음'이라 버려도 화면이 같다 — 로그를 어지럽히지 않는다.
-                if _v not in (0, 0.0):
-                    notes.append(f"design.{_k}={_v} 는 AI 에게 닫힌 키라 버림 "
-                                 f"(제목 기울기는 사람·채널만 정한다)")
         bad = [k for k in design if k not in STYLE_DESIGN_ALLOWED]
         if bad:
             raise StylePlanError(
@@ -350,7 +340,16 @@ def validate_plan(
                 f"배속은 채널 정체성이라 AI 가 바꾸지 않습니다")
         norm_design: dict[str, Any] = {}
         for k, v in design.items():
-            if k in ("title_rotate", "tts_rotate"):
+            if k == "title_rotate":
+                deg = _num(v, f"design.{k}")
+                # 좁은 범위(±15°) — 완전히 막지는 않되 자제를 강제한다(위 상수 주석).
+                if not (-AI_TITLE_ROTATE_RANGE_DEG <= deg <= AI_TITLE_ROTATE_RANGE_DEG):
+                    raise StylePlanError(
+                        f"design.{k}: {deg:g} 가 AI 허용 범위 밖입니다 "
+                        f"(±{AI_TITLE_ROTATE_RANGE_DEG:g}° — 제목은 크게 기울이지 않습니다. "
+                        f"더 큰 각도는 채널·편집실이 --design-title-rotate 로 정합니다)")
+                norm_design[k] = deg
+            elif k == "tts_rotate":
                 deg = _num(v, f"design.{k}")
                 if not (-ROTATE_RANGE_DEG <= deg <= ROTATE_RANGE_DEG):
                     raise StylePlanError(

@@ -231,33 +231,44 @@ def test_design_rotate_range(tmp_path):
         _valid(_plan(design={"tts_rotate": 200}), tmp_path)
 
 
-def test_ai_title_rotate_is_dropped_not_rejected(tmp_path):
-    """E17-1 — 제목 기울기는 AI 에게 닫혔다. 그 항목만 버리고 나머지 연출은 살린다.
+def test_ai_title_rotate_allowed_within_narrow_range(tmp_path):
+    """E17-1(2차) — 제목 기울기는 **가능은 하되** AI 산출은 좁은 범위(±15°)로 제약된다.
 
-    통째 거절(모르는 키)로 두면 LLM 이 관성으로 하나 낼 때마다 그 편의 연출이 전부
-    사라진다. 사람·채널의 --design-title-rotate 는 이 규칙 밖이다.
+    처음엔 title_rotate 를 통째로 막았지만 사용자가 "돌리는 거는 가능한데, 안 돌리게
+    제약 정도로만 걸어줘"로 정정했다 — 그래서 완전히 닫지 않고 **범위만 좁힌다**.
+    사람·채널의 --design-title-rotate(-180~180)는 이 상한과 무관하다.
     """
-    assert "title_rotate" not in sc.STYLE_DESIGN_ALLOWED
-    assert "title_rotate" in sc.STYLE_DESIGN_DROPPED
+    assert "title_rotate" in sc.STYLE_DESIGN_ALLOWED
     out, notes = _valid(_plan(design={"title_rotate": -3, "title_box": "round"}), tmp_path)
-    assert "title_rotate" not in out["design"]
+    assert out["design"]["title_rotate"] == -3.0
     assert out["design"]["title_box"] == "round"
-    assert any("title_rotate" in n for n in notes)
+    assert not any("title_rotate" in n for n in notes)   # 범위 안이면 조용히 통과
 
 
-def test_ai_title_rotate_zero_is_dropped_quietly(tmp_path):
-    """0 은 화면이 같으니 로그를 어지럽히지 않는다(버리는 것은 같다)."""
-    out, notes = _valid(_plan(design={"title_rotate": 0, "title_bold": True}), tmp_path)
-    assert "title_rotate" not in out["design"]
-    assert not any("title_rotate" in n for n in notes)
+def test_ai_title_rotate_rejects_outside_narrow_range(tmp_path):
+    """±15° 밖은 그 항목만 조용히 버려지는 게 아니라 **플랜 자체가 거절**된다 —
+    tts_rotate 와 같은 검증 강도(범위 밖 값은 LLM 이 계약을 오해했다는 신호라
+    다른 항목도 의심해야 한다)."""
+    assert sc.AI_TITLE_ROTATE_RANGE_DEG == 15.0
+    with pytest.raises(sc.StylePlanError, match="AI 허용 범위"):
+        _valid(_plan(design={"title_rotate": 16}), tmp_path)
+    with pytest.raises(sc.StylePlanError):
+        _valid(_plan(design={"title_rotate": -180}), tmp_path)
+    # tts_rotate 는 그대로 ±180 — 이 지시는 제목에 대한 것이다
+    assert _valid(_plan(design={"tts_rotate": 90}), tmp_path)[0]["design"]["tts_rotate"] == 90.0
 
 
-def test_prompt_tells_the_model_not_to_tilt_the_title():
-    """프롬프트도 같은 말을 해야 한다 — 검증기만 고치면 매 편 버려지는 항목을 계속 낸다."""
+def test_prompt_tells_the_model_to_go_easy_on_title_rotation():
+    """프롬프트도 같은 제약을 말해야 한다 — 검증기만 좁히면 매 편 거절당하는 값을 계속 낸다."""
     from app.modules.gemini_client import STYLE_COMPOSITION_PROMPT as P
 
-    assert "제목은 기울이지 않는다" in P
-    assert "title_rotate" not in P.split("[출력 형식")[1].split("[값 규칙")[0]  # 예시에서 사라졌다
+    assert "웬만하면 기울이지 마라" in P
+    assert f"{sc.AI_TITLE_ROTATE_RANGE_DEG:g}" in P.format(
+        fonts="", sub_lo="", sub_hi="", voices="", speeds="",
+        title_rotate_max=f"{sc.AI_TITLE_ROTATE_RANGE_DEG:g}",
+        max_texts=0, max_images=0, max_subs=0, max_titles=0,
+        work_title="", title_text="",
+        timeline_block="", transcript_block="", cues_block="", stickers_block="")
 
 
 def test_hard_caps_truncate_and_report(tmp_path):
