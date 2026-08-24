@@ -439,15 +439,41 @@ video-localization-project `engine/*` + `src/process_video.py` 를 **충실히 �
   `overlay/render.py` 가 조립하고 `merge_subtitle_segments` 를 지나지 않는다 —
   잔망루피 자막 타이밍이 조용히 움직이면 안 되므로 **끄고 시작**하는 것이 계약이다.
   켜려면 A/B 로 확인한 뒤 별건으로 한다.
-- 회귀 가드: `tests/test_localize_overlay.py`(27건) + `scripts/overlay_port_diff.py`
-  (vlp 와 AST 대조 — 의도된 차이만 사유와 함께 통과. vlp 동결 시 함께 은퇴).
+- 회귀 가드: `tests/test_localize_overlay.py`(39건) + `scripts/overlay_port_diff.py`
+  (vlp 와 AST 대조 — **250개 함수·상수 동일**, 의도된 차이 7건만 사유와 함께 통과.
+  함수 안 임포트의 패키지 이름 변경은 정규화한다 — 안 하면 멀쩡한 이식이 전부
+  '예상 밖 차이'로 떠서 아무도 도구를 안 보게 된다. vlp 동결 시 함께 은퇴).
+
+### 더빙 (route C·BC 뒷단)
+
+`overlay/dub.py` + `refbank.py` + `precheck.py` — vlp `src/` 에서 함께 옮겼다.
+
+- **overlay 파이프라인이 이 단계를 부르지 않는다**(vlp 규약 그대로). 검수 게이트를 지난 뒤
+  `python -m app.localize.overlay.dub` 로 따로 돈다. 회귀 가드가 파이프라인의 임포트를
+  AST 로 훑어 **더빙을 부르지 않는 것**을 고정한다 — 부르면 게이트가 없어진다.
+- 페이싱·리타이밍 숫자(`pacing_plan` 상한 1.35 · `char_budget` 하한 · `atempo` 체인
+  분할)는 **잔망루피 목소리의 정체**라 한 개도 안 바꿨고 값으로 고정했다.
+- `refbank` 는 영상마다 '깨끗한 긴 대사'를 은행에 쌓고 그 영상 음향 프로필(F0·밝기)에
+  가장 가까운 항목을 고른다 — 짧은 대사의 self-ref 퇴화를 피하는 장치다.
+- ⚠ 계획 §3-4 는 ai-video `tts.py`(E11·E12 프리셋·캐시·실패 분류)를 정본으로 삼아
+  합치라고 한다. **합치기는 회귀 위험이라 아직 안 했다** — 충실 이식 → 회귀 0 확인 →
+  합치기 순서다(P1 이 그렇게 갔다).
+
+#### 🛑 이식 중 잡은 결함 3건 (회귀 가드가 잡았다)
+
+파일 단위 복사는 **함수 안 임포트**를 놓친다. `test_no_stale_vlp_imports_in_the_port`
+가 AST 로 훑어 셋을 잡았고, 셋 다 런타임에 죽는 것이었다:
+
+1. `dub.py` 의 `from engine import render` — 재배선 누락
+2. `dub.py` 가 self-ref 프로브를 **`-m src.dub`** 로 다시 부르던 것(모델 캐시 오염을
+   피하려 자기를 서브프로세스로 부른다). 이 레포에 없는 모듈이라 즉사한다 —
+   `_SELF_MODULE` 한 곳에서 만들도록 바꿨다.
+3. `src/refbank.py`·`src/precheck.py` 를 **아예 안 옮긴 것** — dub 이 지연 임포트로
+   쓰고 있어 문법 검사·임포트만으로는 안 드러났다.
+
+⇒ 지연 임포트가 많은 코드를 옮길 때는 **문법이 통과해도 이식이 끝난 게 아니다.**
 
 ### 🛑 아직 이식하지 않은 것 (P4 잔여)
-
-- **더빙 `src/dub.py`(1,469줄)** — route C·BC 의 뒷단. 이것이 없으면 C·BC 는 인페인팅까지만
-  되고 오디오가 한국어 그대로다. `runner.needs_dub` 이 그 사실을 로그로 남긴다.
-  ⚠ 계획 §3-4 는 ai-video `tts.py`(E11·E12 프리셋·캐시·실패 분류)를 정본으로 삼아
-  합치라고 한다 — 합치기는 회귀 위험이라 **충실 이식 → 회귀 0 확인 → 합치기** 순서다.
 - **`src/autopilot.py` 의 자동 선별·승인** — 폐기다(사용자 결정 2, 사람이 지시한다).
   아카이브·선별은 오케스트레이터가 진다(P3·P3b).
 - **실측 회귀 0**(계획 §8-3: 잔망루피 10편 CER·라우드니스·세그먼트 정렬) — 이 컨테이너에는

@@ -20,7 +20,7 @@
       → ffmpeg 재조립(무손실 FFV1 중간본 → 최종 인코딩) + 원본 오디오 merge → QA.
 
 [필수 게이트] 자동 게시 금지. review_report.md 로 사람 검수 후 통과.
-              Level C 더빙은 이 스크립트가 호출하지 않는다(게이트 통과 후 src/dub.py 별도).
+              Level C 더빙은 이 스크립트가 호출하지 않는다(게이트 통과 후 overlay/dub.py 별도).
 """
 from __future__ import annotations
 
@@ -164,7 +164,7 @@ def process_video(video: str, video_id: str, level: str, config: dict[str, Any],
     render_mode = opts.get("render_mode", "subtitle")
     if render_mode == "clean":
         render_out = {}
-        cuts = []      # BC: 뒤따르는 더빙 단계(src/dub.py)가 cuts 를 담당 — 이중 컷 방지
+        cuts = []      # BC: 뒤따르는 더빙 단계(overlay/dub.py)가 cuts 를 담당 — 이중 컷 방지
         log.info("clean 모드: 텍스트 재렌더·번역 생략 — 캡션 제거 프레임 그대로(BC: 더빙이 뒤따름)")
     else:
         translate_mod.translate(str(work / "detections.json"), config,
@@ -195,7 +195,8 @@ def process_video(video: str, video_id: str, level: str, config: dict[str, Any],
     log.warning("게이트: review_report.md 사람 검수 후 통과. 자동 게시 금지(auto_publish=%s).",
                 config.get("upload", {}).get("auto_publish", False))
     if level == "C":
-        log.info("Level C: 더빙은 게이트 통과 후 `python -m src.dub` 로 별도 실행.")
+        log.info("Level C: 더빙은 게이트 통과 후 "
+                 "`python -m app.localize.overlay.dub` 로 별도 실행.")
     result = {"final": str(final), "report": str(report), "translations_draft": True,
               "render": render_out}
     log.info("=== 처리 완료(초벌). 산출물: %s ===", result)

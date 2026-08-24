@@ -183,3 +183,108 @@ def test_every_expected_diff_carries_a_reason():
     for table in (EXPECTED_DIFFS, EXPECTED_CONST_DIFFS, EXPECTED_MISSING):
         for key, why in table.items():
             assert len(why) > 20, f"{key} 의 사유가 너무 짧다: {why!r}"
+
+
+# ── 더빙 (route C·BC 뒷단) ──────────────────────────────────────────────
+# ⚠ 아래 숫자들이 **잔망루피 목소리의 정체**다. 이식하며 한 개도 안 바꿨고, 바뀌면
+# 같은 채널 더빙이 편마다 달라진다 — 그래서 값으로 고정한다.
+from app.localize.overlay import dub  # noqa: E402
+
+
+def test_level_gate_rejects_non_dub_routes():
+    """route C 가 아닌데 더빙이 돌면 안 되는 편에 일본어 오디오가 얹힌다."""
+    dub.require_level_c("C")                       # 통과
+    with pytest.raises((SystemExit, ValueError, RuntimeError)):
+        dub.require_level_c("B")
+
+
+def test_atempo_splits_beyond_ffmpeg_limits():
+    """ffmpeg atempo 는 0.5~2.0 만 받는다 — 밖이면 체인으로 쪼개야 소리가 안 깨진다."""
+    assert dub.atempo_filters(1.0) == "atempo=1.0000"
+    chain = dub.atempo_filters(3.0)
+    assert chain.count("atempo=") >= 2
+    got = 1.0
+    for part in chain.split(","):
+        got *= float(part.split("=")[1])
+    assert abs(got - 3.0) < 1e-3                   # 쪼개도 총 배속은 같다
+
+
+def test_pacing_caps_speedup_and_reports_the_slot():
+    """페이싱 상한 1.35 — 넘겨서 밀어 넣으면 알아들을 수 없는 속도가 된다."""
+    speed, slot = dub.pacing_plan(3.0, 2.0)
+    assert speed == 1.35
+    assert abs(slot - 3.0 / 1.35) < 1e-6
+
+
+def test_pacing_does_not_slow_down_when_it_fits():
+    speed, _ = dub.pacing_plan(1.0, 5.0)
+    assert speed <= 1.0
+
+
+def test_char_budget_has_a_floor():
+    """짧은 슬롯이라고 0자로 만들면 그 대사가 통째로 사라진다."""
+    assert dub.char_budget(0.1) >= 8
+    assert dub.char_budget(10.0) > dub.char_budget(1.0)
+
+
+def test_korean_leak_detection():
+    """일본어 더빙에 한글이 남으면 그 편은 못 나간다 — 검출이 정본이다."""
+    assert dub.has_hangul("これは 한국어 です") is True
+    assert dub.has_hangul("これは日本語です") is False
+
+
+def test_stage_directions_are_stripped_before_synthesis():
+    """（もぐもぐ）같은 지문을 그대로 읽으면 성우가 괄호를 발음한다."""
+    assert "もぐもぐ" not in dub.strip_stage_directions("これ（もぐもぐ）です")
+
+
+def test_non_lexical_runs_collapse():
+    """끙끙끙끙·아지아지 같은 반복은 TTS 가 폭주하는 입력이다."""
+    assert len(dub.strip_non_lexical("끙끙끙끙끙")) < len("끙끙끙끙끙")
+
+
+def test_split_for_synth_loses_nothing():
+    """상한은 **소프트**다 — 마지막 토막이 상한을 조금 넘는다(24·24·24·28).
+
+    작은 꼬리 토막(4자)을 따로 만들지 않으려는 것이고 이식본이 그대로 따랐다.
+    지켜야 할 것은 상한이 아니라 **한 글자도 잃지 않는 것**이다."""
+    parts = dub.split_for_synth("あ" * 100, max_chars=24)
+    assert "".join(parts).replace(" ", "") == "あ" * 100
+    assert len(parts) > 1                              # 쪼개기는 한다
+
+
+def test_dub_is_not_called_by_the_overlay_pipeline():
+    """🛑 vlp 규약: 더빙은 검수 게이트 뒤 별도 단계다. 파이프라인이 부르면 게이트가 없어진다."""
+    import ast as _ast
+    tree = _ast.parse(Path("app/localize/overlay/pipeline.py").read_text())
+    called = {n.module for n in _ast.walk(tree) if isinstance(n, _ast.ImportFrom) and n.module}
+    called |= {a.name for n in _ast.walk(tree) if isinstance(n, _ast.Import) for a in n.names}
+    assert not any("dub" in m for m in called), f"파이프라인이 더빙을 임포트한다: {called}"
+
+
+def test_no_stale_vlp_imports_in_the_port():
+    """🛑 이 검사가 실제로 결함 둘을 잡았다(2026-08-24):
+
+      · dub.py 의 `from engine import render` — 재배선 누락, 런타임에 죽는다
+      · dub.py 가 self-ref 프로브를 `-m src.dub` 로 다시 부르던 것 — 이 레포엔 없는 모듈
+
+    문서의 '원본: …src/dub.py' 같은 출처 표기는 잡지 않는다 — **실행되는 것**만 본다."""
+    import ast as _ast
+    for f in sorted(Path("app/localize/overlay").glob("*.py")):
+        tree = _ast.parse(f.read_text())
+        for n in _ast.walk(tree):
+            if isinstance(n, _ast.ImportFrom) and (n.module or "").split(".")[0] in ("engine", "src"):
+                raise AssertionError(f"{f.name}: vlp 임포트가 남았다 — from {n.module}")
+            if isinstance(n, _ast.Import):
+                for a in n.names:
+                    assert a.name.split(".")[0] not in ("engine", "src"), \
+                        f"{f.name}: vlp 임포트가 남았다 — import {a.name}"
+            # 서브프로세스로 부르는 모듈 경로 (`-m src.dub`)
+            if isinstance(n, _ast.Constant) and isinstance(n.value, str) \
+                    and n.value.startswith(("src.", "engine.")):
+                raise AssertionError(f"{f.name}: 실행 경로에 vlp 모듈이 남았다 — {n.value!r}")
+
+
+def test_dub_keeps_its_own_entry_point():
+    """어댑터가 `-m src.dub` 로 부르던 것을 이 위치로 옮길 수 있어야 한다(P4 컷오버)."""
+    assert hasattr(dub, "main") and hasattr(dub, "_parse_args")

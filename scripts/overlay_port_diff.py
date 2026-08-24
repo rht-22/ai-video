@@ -38,6 +38,9 @@ PAIRS = [
     ("engine/qa_compare.py", "app/localize/overlay/qa_compare.py"),
     ("engine/llm.py",        "app/localize/overlay/llm.py"),
     ("src/process_video.py", "app/localize/overlay/pipeline.py"),
+    ("src/dub.py",           "app/localize/overlay/dub.py"),
+    ("src/refbank.py",       "app/localize/overlay/refbank.py"),
+    ("src/precheck.py",      "app/localize/overlay/precheck.py"),
 ]
 
 # 🛑 의도적으로 갈라진 것 — 사유가 없으면 여기 못 들어온다.
@@ -47,6 +50,13 @@ EXPECTED_DIFFS = {
         "gemini-pro-latest 는 사용 금지 모델이다. P1 이 localize_run Flash 를 바꾼 것과 같은 규약.",
     "common.load_config":
         "설정 기본 경로가 vlp 레포의 config/ 가 아니라 이 계층의 data/ 다.",
+    "pipeline.process_video":
+        "로그가 안내하는 더빙 실행 경로를 이식 위치로 고쳤다 — vlp 의 `python -m src.dub` 는 "
+        "이 레포에 없는 모듈이라 그대로 두면 사람을 없는 파일로 보낸다. 실행문은 같다.",
+    "dub.dub_from_video":
+        "self-ref 프로브가 자기 자신을 서브프로세스로 다시 부르는데(모델 캐시 오염 격리) "
+        "vlp 는 `src.dub` 를 박아 뒀다. 모듈 경로를 _SELF_MODULE 한 곳에서 만들도록 바꿨다 "
+        "— 안 고치면 이 레포에서 그 프로브가 즉사한다.",
 }
 # 모듈 수준 상수 중 갈라진 것
 EXPECTED_CONST_DIFFS = {
