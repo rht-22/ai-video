@@ -56,6 +56,11 @@ class DesignConfig:
     subtitle_y_margin: int = 380
     # 라운드 10: 자막 스타일 프리셋 (None / "auto" → 장르 기반 자동 선택)
     subtitle_style_preset: str | None = None
+    # E17-2(2026-08-24): 소스에 **이미 박힌 원본 자막**을 피해 대사 자막을 위로 올린다.
+    #   "auto"(기본) = 렌더 앞에서 밴드 아래쪽을 재서 띠가 잡히면 그만큼 올린다
+    #   "off"        = 재지 않는다(종전 위치 그대로 — 사람이 픽셀로 맞춘 채널의 탈출구)
+    # 올린 자막은 제목과도 안 겹친다(제목 아래가 상한). 못 찾으면 아무 일도 없다.
+    subtitle_avoid_burned: str = "auto"
 
     # TTS 자막 설정 (원본 자막과 별도 위치)
     tts_line_font_size: int = 70

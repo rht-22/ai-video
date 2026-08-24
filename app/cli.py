@@ -238,6 +238,17 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["auto", "hormozi", "kvar_yellow", "drama_cine", "thriller_mono", "y2k_pink", "kakao_bubble"],
         help="자막 스타일 프리셋. auto(기본)=장르 기반 자동 선택. 그 외=강제 적용.",
     )
+    # E17-2(2026-08-24, 사용자 요청): 소스에 이미 박힌 원본 자막 회피.
+    # 오케스트레이터 어댑터가 채널 design 키 subtitle_avoid_burned 를 그대로 넘긴다.
+    design.add_argument(
+        "--design-subtitle-avoid-burned",
+        dest="design_subtitle_avoid_burned",
+        type=str, default=None, choices=["auto", "off"],
+        help="소스에 이미 박힌 원본 자막을 피해 대사 자막을 올린다. auto(기본)=렌더 앞에서 "
+             "영상 밴드 아래쪽을 재서 자막 띠가 잡히면 그 위로 올린다(제목과도 안 겹친다). "
+             "off=재지 않는다(종전 위치 그대로 — 사람이 픽셀로 맞춘 채널의 탈출구). "
+             "띠를 못 찾으면 auto 여도 아무것도 안 바뀐다.",
+    )
 
     # ── localize (L 계열) — 완성된 job 을 다른 언어판으로 다시 그린다 ──────────
     # 발주서: ves-orchestrator docs/LOCALIZE_UNIFY.md. 생성 경로(create_shorts)와
@@ -284,6 +295,7 @@ _CLI_TO_DESIGN_FIELD = {
     "design_work_image_height": "work_image_height",
     "design_work_align": "work_image_align",
     "design_subtitle_style": "subtitle_style_preset",
+    "design_subtitle_avoid_burned": "subtitle_avoid_burned",
     "design_platform_text": "platform_text",
     "design_platform_x": "platform_x",
     "design_platform_y": "platform_y",

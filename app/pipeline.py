@@ -814,6 +814,7 @@ def transcribe_chunks(
     backend: str | None = None,
     language: str = "ko",
     low_confidence_out: list | None = None,
+    effective_backend_out: list | None = None,
 ) -> list[dict]:
     """청크별 transcript segments 를 *원본 영상 절대시간* 기준으로 생성.
 
@@ -839,6 +840,10 @@ def transcribe_chunks(
                   Whisper 는 줄별 확신도를 안 준다). SpeechSegment(3필드)를 늘리지 않고
                   옆으로 흘려보내는 통로다: 늘리면 remap·merge 가 재구성하며 필드를
                   떨어뜨리고, 그 둘은 두 백엔드 공용이라 손대면 회귀 0 이 깨진다.
+        effective_backend_out: E17. 주면 **실제로 쓴** 백엔드 이름을 순서대로 append 한다
+                  (마지막 값이 최종이다). 토큰 만료 폴백이 일어나면 ["elevenlabs",
+                  "default"] 가 되고, 호출부는 run_log·사이드카에 최종값을 적는다 —
+                  그래야 키를 갱신한 다음 실행이 캐시를 무효화하고 다시 전사한다.
 
     Returns:
         [{"chunk_index": int, "segments": list[SpeechSegment]}, ...]
@@ -863,6 +868,16 @@ def transcribe_chunks(
             for c in chunks
         ]
 
+    def _builtin_transcriber(audio_path: Path):
+        from app.modules.speech import extract_transcript
+
+        return extract_transcript(
+            audio_path,
+            work_title=work_title,
+            character_names=character_names,
+            work_context=work_context,
+        )
+
     # STT 분기 (E11: 백엔드 선택 지점 — 여기서 콜러블 하나로 감싸고 분기는 끝난다)
     if transcriber is None:
         if backend_name == "elevenlabs":
@@ -877,60 +892,80 @@ def transcribe_chunks(
             )
             print(f"  [transcribe] backend=elevenlabs model={EL_STT_MODEL_ID}")
         else:
-            from app.modules.speech import extract_transcript
-
             if backend is not None:      # 명시적 default — 미지정과 결과는 같다
                 print("  [transcribe] backend=default (내장 Whisper)")
-
-            def transcriber(audio_path: Path):
-                return extract_transcript(
-                    audio_path,
-                    work_title=work_title,
-                    character_names=character_names,
-                    work_context=work_context,
-                )
+            transcriber = _builtin_transcriber
 
     from app.modules.speech import SpeechSegment as _SS
-    out: list[dict] = []
-    for c in chunks:
-        sp = getattr(c, "split_path", None)
-        if sp is None or not Path(sp).exists():
-            out.append({"chunk_index": int(c.index), "segments": []})
-            continue
-        try:
-            raw = transcriber(Path(sp))
-        except Exception as e:
-            if backend_name == "elevenlabs":
-                # 유료 백엔드를 사람이 명시적으로 골랐다 — 빈 자막으로 조용히 발행하느니
-                # 크게 실패한다(E11 규율). 재시도 분류는 어댑터가 이미 끝냈다.
-                raise
-            print(f"  [chunk_transcribe] chunk {c.index} Whisper 실패 ({e}) — 빈 결과로 진행")
-            raw = []
-        # chunk-relative → 절대시간 (split_video_chunk 가 PTS 0 정규화 했으므로 chunk.start_sec 가산)
-        chunk_offset = float(getattr(c, "start_sec", 0.0))
-        # E13-2b: 저확신 구간도 **같은 오프셋**을 받는다 — 자막과 좌표계가 하나여야
-        # 나중에 어느 자막 줄이 저확신인지 겹침으로 판정할 수 있다.
-        if backend_name == "elevenlabs" and low_confidence_out is not None:
-            from app.modules.stt_elevenlabs import take_low_confidence_spans
 
-            for _sp in take_low_confidence_spans():
-                low_confidence_out.append({
-                    "start_sec": round(float(_sp["start_sec"]) + chunk_offset, 2),
-                    "end_sec": round(float(_sp["end_sec"]) + chunk_offset, 2),
-                    "logprob": _sp.get("logprob"),
-                })
-        abs_segs: list = []
-        for s in raw or []:
-            try:
-                abs_segs.append(_SS(
-                    start_sec=float(s.start_sec) + chunk_offset,
-                    end_sec=float(s.end_sec) + chunk_offset,
-                    text=str(getattr(s, "text", "") or ""),
-                ))
-            except (AttributeError, TypeError, ValueError):
+    def _run_all(tr, name: str) -> list[dict]:
+        """청크 전량을 한 백엔드로 돌린다 — 백엔드가 바뀌면 **처음부터** 다시 부른다."""
+        out: list[dict] = []
+        for c in chunks:
+            sp = getattr(c, "split_path", None)
+            if sp is None or not Path(sp).exists():
+                out.append({"chunk_index": int(c.index), "segments": []})
                 continue
-        out.append({"chunk_index": int(c.index), "segments": abs_segs})
-    return out
+            try:
+                raw = tr(Path(sp))
+            except Exception as e:
+                if name == "elevenlabs":
+                    # 유료 백엔드를 사람이 명시적으로 골랐다 — 빈 자막으로 조용히 발행하느니
+                    # 크게 실패한다(E11 규율). 재시도 분류는 어댑터가 이미 끝냈다.
+                    # E17: **인증 거절(ElevenLabsAuthError)** 만 바깥이 잡아 내장 전사로
+                    # 내려간다 — 여기서는 종류를 가리지 않고 그대로 올린다.
+                    raise
+                print(f"  [chunk_transcribe] chunk {c.index} Whisper 실패 ({e}) — 빈 결과로 진행")
+                raw = []
+            # chunk-relative → 절대시간 (split_video_chunk 가 PTS 0 정규화 했으므로 chunk.start_sec 가산)
+            chunk_offset = float(getattr(c, "start_sec", 0.0))
+            # E13-2b: 저확신 구간도 **같은 오프셋**을 받는다 — 자막과 좌표계가 하나여야
+            # 나중에 어느 자막 줄이 저확신인지 겹침으로 판정할 수 있다.
+            if name == "elevenlabs" and low_confidence_out is not None:
+                from app.modules.stt_elevenlabs import take_low_confidence_spans
+
+                for _sp in take_low_confidence_spans():
+                    low_confidence_out.append({
+                        "start_sec": round(float(_sp["start_sec"]) + chunk_offset, 2),
+                        "end_sec": round(float(_sp["end_sec"]) + chunk_offset, 2),
+                        "logprob": _sp.get("logprob"),
+                    })
+            abs_segs: list = []
+            for s_ in raw or []:
+                try:
+                    abs_segs.append(_SS(
+                        start_sec=float(s_.start_sec) + chunk_offset,
+                        end_sec=float(s_.end_sec) + chunk_offset,
+                        text=str(getattr(s_, "text", "") or ""),
+                    ))
+                except (AttributeError, TypeError, ValueError):
+                    continue
+            out.append({"chunk_index": int(c.index), "segments": abs_segs})
+        return out
+
+    if effective_backend_out is not None:
+        effective_backend_out.append(backend_name)
+    if backend_name != "elevenlabs":
+        return _run_all(transcriber, backend_name)
+
+    # E17(2026-08-24): 토큰 만료(401·403)면 **내장 전사로 처음부터 다시** 돌린다.
+    # 그 외 실패는 종전대로 크게 실패한다(유료 백엔드를 골랐는데 자막이 비면 안 된다).
+    # 청크마다 백엔드를 섞지 않는 이유는 ElevenLabsAuthError 주석에 있다 — 같은 소재에서
+    # cue 수가 백엔드별로 크게 갈려(E13-0 실측) 한 편 안에서 자막 리듬이 달라진다.
+    from app.modules.stt_elevenlabs import ElevenLabsAuthError
+
+    try:
+        return _run_all(transcriber, backend_name)
+    except ElevenLabsAuthError as e:
+        print(f"  [transcribe] ElevenLabs 토큰 거절 — {e}")
+        print("  [transcribe] 내장 전사(Whisper)로 전환해 청크 전량을 다시 전사합니다 "
+              "(토큰을 갱신하면 다음 실행부터 다시 ElevenLabs 로 돌아갑니다).")
+        if low_confidence_out is not None:
+            # 만료 전 청크가 남긴 저확신 구간은 이제 없는 전사의 좌표다 — 비운다.
+            del low_confidence_out[:]
+        if effective_backend_out is not None:
+            effective_backend_out.append("default")
+        return _run_all(_builtin_transcriber, "default")
 
 
 def _tts_cue_cache_key(text: str, voice: str, speed: str, target_sec: float) -> str:
@@ -959,7 +994,11 @@ def synthesize_cue_cached(
     edge-tts 는 공짜라 아낄 요금이 없고, 캐시를 끼우면 fit 재작성(Flash 단축)의 결과가
     달라져 지금 도는 내레이션이 변한다(회귀 0 조건).
     """
-    from app.modules.tts import is_elevenlabs_voice, synthesize_tts_with_fit
+    from app.modules.tts import (
+        elevenlabs_disabled,
+        is_elevenlabs_voice,
+        synthesize_tts_with_fit,
+    )
 
     if not is_elevenlabs_voice(voice) or cache_dir is None:
         return synthesize_tts_with_fit(
@@ -981,6 +1020,11 @@ def synthesize_cue_cached(
     final_text, actual_sec = synthesize_tts_with_fit(
         text, output_path, target_sec=target_sec,
         voice=voice, speed=speed, shorten_fn=shorten_fn)
+    if elevenlabs_disabled():
+        # E17: 토큰 만료로 기본 백엔드가 낸 소리다 — ElevenLabs 캐시 키에 넣으면 키를
+        # 갱신한 뒤에도 이 mp3 가 되살아나 '고쳤는데 왜 그대로지'가 된다.
+        print(f"  [TTS-cache] 저장 안 함 — 토큰 만료 폴백 산물({key[:8]})")
+        return final_text, actual_sec
     try:
         Path(cache_dir).mkdir(parents=True, exist_ok=True)
         shutil.copyfile(output_path, cached_mp3)
@@ -1400,6 +1444,108 @@ def _compute_tts_margin_v(
     band_bottom = min(H, _video_band_bottom(
         design, canvas_width=canvas_width, canvas_height=canvas_height))
     return max(0, base + (legacy_bottom - band_bottom))
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# E17-2 (2026-08-24) — 소스에 박힌 원본 자막 회피
+# ─────────────────────────────────────────────────────────────────────────
+# 사용자 지시: "영상에 원래 자막이 있으면 그 위치 피해서 자막이 들어가게 해줘.
+# 물론, 자막이 제목과도 겹치면 안되고."
+#
+# 판정·수식은 전부 `app/modules/subtitle_region.py` 에 있다(밴드 기하·행 점수·회피 계산).
+# 여기 두 함수는 그것을 파이프라인에 붙이는 배선일 뿐이다:
+#   · 검출은 **렌더 단계에서 한 번**만 하고 `checkpoint_burned_subtitle.json` 에 남긴다 —
+#     편집실 재렌더(`--from-step render|resources`)마다 다시 재면 같은 편의 자막 위치가
+#     실행마다 달라진다(E15 체크포인트 규약과 같은 이유).
+#   · 클립이 바뀌면(구간 재편집) 캐시는 무효다 — 표본을 뜬 화면 자체가 다른 화면이다.
+#   · 실패는 전부 '아무것도 안 함'이다. 이건 연출이 아니라 안전장치라 본편을 막지 않는다.
+def _burned_band_signature(clips: list) -> str:
+    """표본을 뜬 클립 구성 지문 — 구간이 바뀌면 캐시를 버린다."""
+    raw = ";".join(f"{float(getattr(c, 'start_sec', 0.0)):.3f}-{float(getattr(c, 'end_sec', 0.0)):.3f}"
+                   for c in clips or [])
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _detect_burned_band_cached(
+    payload,
+    config,
+    clips: list,
+    crop_map: dict,
+    output_dir: Path,
+) -> dict[str, Any] | None:
+    """원본 자막 띠(캔버스 y) — 없으면 None. 캐시 우선, 검출은 실행당 한 번."""
+    mode = str(getattr(payload.design, "subtitle_avoid_burned", "auto") or "auto").lower()
+    if mode != "auto":
+        return None
+    cache = Path(output_dir) / "checkpoint_burned_subtitle.json"
+    sig = _burned_band_signature(clips)
+    if cache.exists():
+        try:
+            data = json.loads(cache.read_text(encoding="utf-8"))
+            if data.get("clips_signature") == sig:
+                band = data.get("band")
+                if band:
+                    print(f"  [SubtitleAvoid] 검출 결과 재사용: y={band['top']}~{band['bottom']}")
+                return band
+        except (OSError, ValueError, KeyError):
+            pass
+    try:
+        from app.modules.subtitle_region import detect_burned_band
+
+        band = detect_burned_band(
+            Path(payload.video_path), clips, payload.design,
+            crop_map=crop_map,
+            canvas_width=config.canvas_width, canvas_height=config.canvas_height,
+        )
+    except Exception as e:                       # 검출은 본편을 막지 않는다
+        print(f"  [SubtitleAvoid] 검출 실패({e}) — 자막 위치는 종전 그대로입니다")
+        return None
+    try:
+        cache.write_text(json.dumps({"clips_signature": sig, "band": band},
+                                    ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+    if band:
+        print(f"  [SubtitleAvoid] 원본 자막 띠 검출: y={band['top']}~{band['bottom']} "
+              f"(표본 {band['frames']}프레임/{band['clips']}클립, 검출률 {band['hit_ratio']})")
+    else:
+        print("  [SubtitleAvoid] 원본 자막 띠 없음 — 자막 위치는 종전 그대로입니다")
+    return band
+
+
+def _avoid_burned_margin_v(
+    margin_v: int,
+    band: dict[str, Any] | None,
+    *,
+    design: DesignConfig,
+    config,
+    title_text: str,
+    font_size: int,
+    label: str = "",
+) -> int:
+    """검출된 띠를 피한 margin_v. 띠가 없거나 피할 자리가 없으면 입력 그대로.
+
+    `label`: 로그 접두("[TTS] " 등) — 대사 자막·TTS 자막 둘 다 이 함수를 타므로
+    stdout 만 보고 어느 줄이 움직였는지 구분하려면 필요하다. 반환값·판정 로직에는
+    영향 없다(순수 로그용)."""
+    if not band:
+        return int(margin_v)
+    from app.modules import subtitle_region as _sr
+
+    geom = _sr.band_geometry(design, canvas_width=config.canvas_width,
+                             canvas_height=config.canvas_height)
+    new_margin, notes = _sr.avoid_margin_v(
+        int(margin_v),
+        canvas_height=config.canvas_height,
+        burned_top=int(band["top"]), burned_bottom=int(band["bottom"]),
+        subtitle_height=_sr.estimate_subtitle_height(font_size),
+        title_bottom=_sr.estimate_title_bottom(
+            design, geom, line_count=_sr.estimate_title_line_count(title_text)),
+        band_top=geom.top,
+    )
+    for n in notes:
+        print(f"  {label}{n}")
+    return int(new_margin)
 
 
 def _scale_segments_for_speed(segments: list, speed: float) -> list:
@@ -2400,10 +2546,14 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             + [ci.actor_name for ci in cast_images if ci.actor_name]
         )) if cast_images else []
         _low_conf_spans: list[dict[str, Any]] = []
+        # E17: 토큰 만료로 내장 전사에 내려갔는지 — run_log·사이드카에 **실제로 쓴**
+        # 백엔드를 적어야 키를 갱신한 다음 실행이 캐시를 무효화하고 다시 전사한다.
+        _tr_backends: list[str] = []
         chunk_transcripts = transcribe_chunks(
             chunks=chunks,
             srt_path=payload.srt_path,
             low_confidence_out=_low_conf_spans,
+            effective_backend_out=_tr_backends,
             work_title=payload.work_title,
             character_names=_char_names,
             work_context=payload.work_context,
@@ -2411,44 +2561,56 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             backend=payload.transcribe_backend,
             language=payload.language,
         )
+        _tr_effective = _tr_backends[-1] if _tr_backends else payload.transcribe_backend
+        _tr_fell_back = (payload.transcribe_backend is not None
+                         and _tr_effective != (payload.transcribe_backend or "default"))
         checkpoint_chunk_tr.write_text(
             json.dumps(_serialize_chunk_transcripts(chunk_transcripts), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         _total_segs = sum(len(ct.get("segments", [])) for ct in chunk_transcripts)
         _branch = ("SRT" if payload.srt_path else
-                   ("ElevenLabs" if payload.transcribe_backend == "elevenlabs" else "Whisper"))
+                   ("ElevenLabs" if _tr_effective == "elevenlabs" else "Whisper"))
         print(f"  → [{_branch}] {len(chunk_transcripts)}개 청크, 총 {_total_segs}개 segment (소요 시간: {time.time()-_ctr_start:.1f}초)")
         # E11: 백엔드를 명시한 실행만 기록한다 — 미지정 실행은 run_log·산출 파일이
         # 종전과 한 글자도 달라지지 않아야 한다(auto_update 배포 조건).
         if payload.transcribe_backend is not None:
             _tr_entry: dict[str, Any] = {
                 "step": "chunk_transcribe",
-                "transcribe_backend": payload.transcribe_backend,
+                # E17: 요청값이 아니라 **실제로 쓴** 백엔드다(폴백이면 아래 두 키가 붙는다).
+                "transcribe_backend": _tr_effective,
                 "source": "srt" if payload.srt_path else "stt",
                 "chunks": len(chunk_transcripts),
                 "segments": _total_segs,
                 "elapsed_sec": round(time.time() - _ctr_start, 1),
             }
+            if _tr_fell_back:
+                _tr_entry["transcribe_backend_requested"] = payload.transcribe_backend
+                _tr_entry["transcribe_fallback_reason"] = "elevenlabs_auth_expired"
             if payload.transcribe_backend == "elevenlabs" and not payload.srt_path:
                 # 분 단위 과금 — audio_duration_secs 가 나중 정산의 근거다.
                 from app.modules.stt_elevenlabs import usage_summary as _el_stt_usage
-                _tr_entry["elevenlabs_stt"] = _el_stt_usage()
-                _u = _tr_entry["elevenlabs_stt"]
-                print(f"  → [ElevenLabs STT] 요청 {_u['requests']}건"
-                      f"(keyterms {_u['requests_with_keyterms']}건/{_u['keyterms_sent']}개) · "
-                      f"오디오 {_u['audio_duration_secs']:.1f}s · "
-                      f"추정 ${_u['estimated_usd']:.5f}")
-                if _u["dropped_language_escape"]:
-                    print(f"  → [ElevenLabs STT] 언어 이탈로 버린 줄 "
-                          f"{len(_u['dropped_language_escape'])}건 (run_log 에 전문 보존)")
-                if _u["normalized"]:
-                    print(f"  → [ElevenLabs STT] 표기 보정 "
-                          f"{sum(_u['normalized'].values())}건 {_u['normalized']}")
+                _u = _el_stt_usage()
+                # E17: 만료로 한 건도 못 보냈으면 0 짜리 정산 블록은 남기지 않는다
+                # (성공 요청이 있었다면 그만큼은 실제로 과금됐으니 그대로 남긴다).
+                if _u["requests"]:
+                    _tr_entry["elevenlabs_stt"] = _u
+                    print(f"  → [ElevenLabs STT] 요청 {_u['requests']}건"
+                          f"(keyterms {_u['requests_with_keyterms']}건/{_u['keyterms_sent']}개) · "
+                          f"오디오 {_u['audio_duration_secs']:.1f}s · "
+                          f"추정 ${_u['estimated_usd']:.5f}")
+                    if _u["dropped_language_escape"]:
+                        print(f"  → [ElevenLabs STT] 언어 이탈로 버린 줄 "
+                              f"{len(_u['dropped_language_escape'])}건 (run_log 에 전문 보존)")
+                    if _u["normalized"]:
+                        print(f"  → [ElevenLabs STT] 표기 보정 "
+                              f"{sum(_u['normalized'].values())}건 {_u['normalized']}")
             run_log["steps"].append(_tr_entry)
             # E13-2b: 저확신 구간은 자막 매핑 단계(한참 뒤)가 읽는다 — 사이드카에 남겨야
             # `--from-step resources` 재개(전사 단계를 건너뛴다)에서도 표시가 유지된다.
-            _meta: dict[str, Any] = {"transcribe_backend": payload.transcribe_backend}
+            # E17: 사이드카에도 **실제로 쓴** 백엔드를 적는다 — 토큰을 갱신한 다음 실행이
+            # 'default → elevenlabs' 변경으로 읽고 캐시를 무효화해 다시 전사한다.
+            _meta: dict[str, Any] = {"transcribe_backend": _tr_effective}
             if _low_conf_spans:
                 _meta["low_confidence_spans"] = _low_conf_spans[:2000]
                 _meta["low_confidence_count"] = len(_low_conf_spans)
@@ -3960,6 +4122,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         # cue 시간(end_sec - start_sec) 안에 들어가도록 fit. 초과 시 Flash로 텍스트 단축.
         print("  TTS 오디오 생성 중 (cue별, fit 적용)...")
         from app.modules.tts import active_backend
+        from app.modules.tts import elevenlabs_disabled as _tts_elevenlabs_disabled
         _flash_for_shorten = locals().get("gemini") or load_gemini_client()
         _shorten = getattr(_flash_for_shorten, "shorten_text", None) if _flash_for_shorten else None
         tts_cue_files: list[dict[str, Any]] = []
@@ -3991,8 +4154,16 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         # E11: 어느 TTS 백엔드로 합성됐는지 남긴다 — 키 없는 노드의 edge-tts 폴백을
         # 검수함·run_log 에서 추적할 수 있어야 한다(조용한 대체 금지 원칙).
         _tts_backend = active_backend()
-        run_log["steps"].append({"step": "resources", "tts_backend": _tts_backend,
-                                 "tts_cues": len(tts_cue_files)})
+        # E17: 키가 있는데도 edge-tts 로 나갔다면 토큰이 거절당한 것이다 — 사유를 남긴다
+        # (남기지 않으면 '이 편만 목소리가 다르다'의 원인을 검수함에서 찾을 수 없다).
+        _tts_fallback = _tts_elevenlabs_disabled()
+        _res_entry: dict[str, Any] = {"step": "resources", "tts_backend": _tts_backend,
+                                      "tts_cues": len(tts_cue_files)}
+        if _tts_fallback:
+            _res_entry["tts_fallback_reason"] = "elevenlabs_auth_expired"
+            _res_entry["tts_fallback_detail"] = _tts_fallback[:200]
+            print(f"  - [주의] ElevenLabs 토큰 거절로 기본 백엔드 합성: {_tts_fallback[:120]}")
+        run_log["steps"].append(_res_entry)
         checkpoint_resources.write_text(
             json.dumps({
                 "crop_map": {k: str(v) for k, v in crop_map.items()},
@@ -4042,9 +4213,26 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     output_video = output_dir / "shorts.mp4"
     subtitle_path = output_dir / "subtitles.ass"
 
+    # E17-2: 소스에 박힌 원본 자막 띠(캔버스 y) — 렌더 블록에서 한 번 재고 variant 도 같은
+    # 값을 쓴다(같은 소재의 같은 방송 자막이다). 검출은 `--design-subtitle-avoid-burned off`
+    # 로 끌 수 있고, 못 찾으면 None = 종전 자막 위치 그대로다.
+    _burned_band: dict[str, Any] | None = None
+
     if start_idx <= step_idx["render"] or from_step == "render" or not output_video.exists():
         # 자막 디자인 적용
         print("\n[14/15] 자막 디자인 적용 및 최종 렌더링 중...")
+
+        # 자막을 아예 안 그리는 채널(--no-subtitles)은 잴 것도 없다 — 표본 뜨는 시간만 든다.
+        if payload.show_subtitles:
+            _burned_band = _detect_burned_band_cached(payload, config, clips, crop_map, output_dir)
+        if _burned_band:
+            run_log["steps"].append({
+                "step": "subtitle_avoid_burned",
+                "band": {k: _burned_band[k] for k in ("top", "bottom")},
+                "frames": _burned_band.get("frames"),
+                "clips": _burned_band.get("clips"),
+                "hit_ratio": _burned_band.get("hit_ratio"),
+            })
 
         if not final_segments and segments_cache_path.exists():
             cached_data = json.loads(segments_cache_path.read_text(encoding="utf-8"))
@@ -4071,6 +4259,14 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             }
             sub_style, _applied_preset = select_subtitle_style(_genre_tag, _cli_override, _user_overrides)
             print(f"  [SubtitleStyle] genre_tag={_genre_tag!r} cli={_cli_override!r} → preset={_applied_preset}")
+            # E17-2: 원본 자막 회피는 **프리셋이 정해진 뒤**다 — 자막 글자 크기가 확정돼야
+            # 블록 높이(겹치는지·얼마나 올릴지)를 잴 수 있다(프리셋마다 56~72px 로 다르다).
+            _sub_margin_v2 = _avoid_burned_margin_v(
+                _sub_margin_v, _burned_band, design=payload.design, config=config,
+                title_text=title_text, font_size=sub_style.font_size, label="[대사] ")
+            if _sub_margin_v2 != _sub_margin_v:
+                sub_style = replace(sub_style, margin_v=_sub_margin_v2)
+                _sub_margin_v = _sub_margin_v2
 
             # TTS 자막 세그먼트 생성 — 라운드 12.2: end_sec을 *mp3 실제 길이* 기준으로 갱신.
             # 이전엔 cue 계획 시간 그대로 사용 → mp3가 cue 길이보다 짧으면(0.5~1s) 음성 끝난 후 자막
@@ -4095,14 +4291,22 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     text=str(_cue.get("text", "")),
                 ))
 
+            # E17-2: TTS(내레이션) 자막도 원본 자막과 겹치면 안 된다(대사 자막과 같은 이유·
+            # 같은 상한 — 제목 아래를 넘지 않는다). 밴드 앵커(E10) 뒤, 프리셋(TTS 는 채널
+            # tts_line_font_size 고정이라 여기서 이미 확정)이 있으니 바로 계산한다.
+            _tts_margin_v = _compute_tts_margin_v(
+                payload.design, canvas_width=config.canvas_width,
+                canvas_height=config.canvas_height)
+            _tts_margin_v = _avoid_burned_margin_v(
+                _tts_margin_v, _burned_band, design=payload.design, config=config,
+                title_text=title_text, font_size=payload.design.tts_line_font_size,
+                label="[TTS] ")
             tts_line_style = SubtitleStyle(
                 font_name=payload.design.subtitle_font,
                 font_size=payload.design.tts_line_font_size,
                 primary_color=payload.design.tts_line_color,
                 # E10 후속 3: 밴드(video_width·video_y)가 움직인 만큼 TTS 줄도 따라간다
-                margin_v=_compute_tts_margin_v(
-                    payload.design, canvas_width=config.canvas_width,
-                    canvas_height=config.canvas_height),
+                margin_v=_tts_margin_v,
             ) if tts_line_segs else None
 
             # TTS 활성 시간 범위 계산 (메인 자막 숨김용)
@@ -4148,14 +4352,20 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     start_sec=_cue_start, end_sec=_cue_end, text=str(_cue.get("text", "")),
                 ))
             if tts_line_segs:
+                # E17-2: 대사 자막이 0건이어도 TTS 는 독립적으로 나가므로 여기도 회피를 탄다.
+                _tts_margin_v = _compute_tts_margin_v(
+                    payload.design, canvas_width=config.canvas_width,
+                    canvas_height=config.canvas_height)
+                _tts_margin_v = _avoid_burned_margin_v(
+                    _tts_margin_v, _burned_band, design=payload.design, config=config,
+                    title_text=title_text, font_size=payload.design.tts_line_font_size,
+                    label="[TTS] ")
                 tts_line_style = SubtitleStyle(
                     font_name=payload.design.subtitle_font,
                     font_size=payload.design.tts_line_font_size,
                     primary_color=payload.design.tts_line_color,
                     # E10 후속 3: 정본 분기와 동일 — 밴드 이동을 TTS 줄이 따라간다
-                    margin_v=_compute_tts_margin_v(
-                        payload.design, canvas_width=config.canvas_width,
-                        canvas_height=config.canvas_height),
+                    margin_v=_tts_margin_v,
                 )
                 tts_subtitle_path = output_dir / "tts_subtitles.ass"
                 build_tts_ass(tts_line_segs, tts_subtitle_path, tts_line_style,
@@ -4401,19 +4611,32 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     "margin_v": _var_margin_v,
                 }
                 sub_style, _ = select_subtitle_style(_genre_tag, _cli_override, _var_user_overrides)
+                # E17-2: variant 도 같은 띠를 피한다 — 원본 자막은 소재의 성질이라
+                # 어느 variant 를 뽑아도 같은 자리에 있다(재검출 없이 정본 값을 쓴다).
+                _var_margin_v2 = _avoid_burned_margin_v(
+                    _var_margin_v, _burned_band, design=payload.design, config=config,
+                    title_text=var_title, font_size=sub_style.font_size, label="[대사] ")
+                if _var_margin_v2 != _var_margin_v:
+                    sub_style = replace(sub_style, margin_v=_var_margin_v2)
                 var_tts_ranges = [(s.start_sec, s.end_sec) for s in var_tts_segs] if var_tts_segs else None
                 # E7-2: 대사 자막도 출력 시각(×1/S) 사본으로 ASS 생성 (정본과 동일)
                 build_ass_from_segments(_scale_segments_for_speed(var_final_segs, _speed),
                                         var_sub_path, sub_style, tts_time_ranges=var_tts_ranges)
 
+                # E17-2: variant 의 TTS 자막도 같은 띠를 피한다(대사 자막과 같은 규약).
+                _var_tts_margin_v = _compute_tts_margin_v(
+                    payload.design, canvas_width=config.canvas_width,
+                    canvas_height=config.canvas_height)
+                _var_tts_margin_v = _avoid_burned_margin_v(
+                    _var_tts_margin_v, _burned_band, design=payload.design, config=config,
+                    title_text=var_title, font_size=payload.design.tts_line_font_size,
+                    label="[TTS] ")
                 var_tts_line_style = SubtitleStyle(
                     font_name=payload.design.subtitle_font,
                     font_size=payload.design.tts_line_font_size,
                     primary_color=payload.design.tts_line_color,
                     # E10 후속 3: variant 도 정본과 같은 밴드 앵커 (영상 1개당 동일 위치)
-                    margin_v=_compute_tts_margin_v(
-                        payload.design, canvas_width=config.canvas_width,
-                        canvas_height=config.canvas_height),
+                    margin_v=_var_tts_margin_v,
                 ) if var_tts_segs else None
 
                 var_tts_sub_final = None
