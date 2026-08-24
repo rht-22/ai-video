@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 
 from app.localize.apply import clamp_hallucination, has_user_timing
+from app.localize.style_texts import STYLE_PLAN_NAME, load_json_or_none, style_plan_strings
 
 MAX_PAIR_ITEMS = 40      # 검수 카드가 감당할 분량. 편집실은 별 테이블로 전량을 받는다(P6)
 
@@ -26,8 +27,9 @@ def build_ko_ja_pairs(backup: Path, out_dir: Path, translation: dict,
     · subs: end 는 클램프·오버라이드 반영 후의 **실표시 값**(apply 와 같은 함수를 쓴다).
     · tts: cue 의 계획 창(start/end).
     · telops: onscreen_refined.json(실렌더 목록) 기준, idx = orig_index.
+    · style_texts(E16): AI 연출 효과 문구, idx = translation.style_texts 의 index.
     실패는 조용히 비운다 — 대역은 검수 편의지 렌더 정본이 아니다. 순수(테스트 대상)."""
-    pairs = {"top_title": None, "subs": [], "tts": [], "telops": []}
+    pairs = {"top_title": None, "subs": [], "tts": [], "telops": [], "style_texts": []}
     try:
         ep = json.loads((backup / "edit_plan.json").read_text(encoding="utf-8"))
         ko = ((ep.get("layout") or {}).get("top_title") or "").strip()
@@ -82,6 +84,20 @@ def build_ko_ja_pairs(backup: Path, out_dir: Path, translation: dict,
             pairs["telops"].append(row)
     except Exception:                                     # noqa: BLE001
         pass
+    # E16: 화면 효과 문구 대역 — 검수자가 "쿵!" 이 무엇으로 바뀌었는지 카드에서 본다.
+    # 좌표(idx)는 translation.style_texts 의 index 와 같다(다른 목록과 같은 규약).
+    try:
+        plan = load_json_or_none(backup / STYLE_PLAN_NAME) or {}
+        ko_texts, _ = style_plan_strings(plan)
+        for i2, (ko, tr) in enumerate(
+                list(zip(ko_texts, translation.get("style_texts") or []))[:max_items]):
+            item = (plan.get("texts") or [])[i2]
+            pairs["style_texts"].append({
+                "idx": i2, "ko": ko, "ja": tr.get("ja") or "",
+                "start": item.get("source_time_sec"), "dur": item.get("duration_sec")})
+    except Exception:                                     # noqa: BLE001
+        pairs["style_texts"] = []
+
     return pairs
 
 

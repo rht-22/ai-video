@@ -16,6 +16,10 @@ import time
 from pathlib import Path
 
 from app.localize.spec import model_flash, model_pro
+from app.localize.style_texts import (
+    STYLE_PLAN_NAME, STYLE_TEXT_KEYS, editor_text_strings, ja_by_index,
+    load_json_or_none, style_plan_strings,
+)
 from app.localize.telop import only_broadcast_telops
 
 SCHEMA_TRANSLATE = {
@@ -36,6 +40,17 @@ SCHEMA_TRANSLATE = {
         "telops": {"type": "array", "items": {"type": "object", "properties": {
             "index": {"type": "integer"}, "use": {"type": "boolean"}, "ja": {"type": "string"}},
             "required": ["index", "use"]}},
+        # E16: 화면에 얹는 글자 — AI 연출(style_texts·style_titles)과 편집실 텍스트(editor_texts).
+        # required 아님: 연출이 없는 편은 이 키를 payload 에 아예 안 실어 프롬프트가 종전과 같다.
+        "style_texts": {"type": "array", "items": {"type": "object", "properties": {
+            "index": {"type": "integer"}, "ja": {"type": "string"}},
+            "required": ["index", "ja"]}},
+        "style_titles": {"type": "array", "items": {"type": "object", "properties": {
+            "index": {"type": "integer"}, "ja": {"type": "string"}},
+            "required": ["index", "ja"]}},
+        "editor_texts": {"type": "array", "items": {"type": "object", "properties": {
+            "index": {"type": "integer"}, "ja": {"type": "string"}},
+            "required": ["index", "ja"]}},
         "notes": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["segments", "tts_cues", "top_title_ja", "youtube_title_ja",
@@ -64,6 +79,12 @@ TRANSLATE_PROMPT = """당신은 한국 예능 쇼츠를 일본 시청자용으�
 7. **텔롭 번역(telops)**: kind 가 broadcast_telop 인 것만. 대사 자막(segments)이나 내레이션과
    내용이 중복되면 use=false. 나머지는 일본 예능 텔롭 문체로 짧게 번역(use=true).
 8. **용어집 준수(필수)**: {glossary}
+9. **화면 글자(style_texts·style_titles·editor_texts)** — *입력에 있을 때만*:
+   - style_texts / editor_texts = 영상 위에 크게 얹는 **효과 문구**(의성어·의태어·감탄·강조).
+     대사가 아니다. 직역하지 말고 **일본 쇼츠에서 실제로 쓰는 표기**로 (`쿵!`→`ドンッ！`,
+     `설마…`→`まさか…`). 화면 물건이라 **짧을수록 좋다 — 원문보다 길게 만들지 마라.**
+   - style_titles = 시간대별 상단 제목. top_title 과 같은 규약(2줄, **각 줄 전각 11자 이내**).
+   - 셋 다 **1:1 정렬 유지**(병합·삭제·순서 변경 금지). 각 문구는 줄바꿈 포함 **60자 이내**.
 
 출력은 아래 JSON 스키마만:
 {{
@@ -74,6 +95,9 @@ TRANSLATE_PROMPT = """당신은 한국 예능 쇼츠를 일본 시청자용으�
   "description_ja": "...",
   "hashtags_extra": ["#..."],
   "telops": [{{"index": 0, "use": true, "ja": "..."}}, ...],
+  "style_texts": [{{"index": 0, "ja": "..."}}, ...],
+  "style_titles": [{{"index": 0, "ja": "..."}}, ...],
+  "editor_texts": [{{"index": 0, "ja": "..."}}, ...],
   "notes": ["교정/특이사항 ..."]
 }}"""
 
@@ -93,6 +117,17 @@ def check_alignment(ko_segments: list, ko_cues: list, data: dict) -> None:
     if len(data["tts_cues"]) != len(ko_cues):
         raise RuntimeError(
             f"tts_cues 정렬 불일치: ko {len(ko_cues)} vs ja {len(data['tts_cues'])}")
+
+
+def check_style_alignment(built: dict, data: dict) -> None:
+    """E16 — 화면 글자도 1:1. 순수(테스트 대상).
+
+    어긋나면 다른 문구가 다른 자리에 박힌다(자막 정렬과 같은 규율). 한국어가 비어 있는
+    목록은 애초에 payload 에 안 실었으므로 응답도 안 본다 — 연출 없는 편은 no-op."""
+    for key in STYLE_TEXT_KEYS:
+        n = len(built.get(key) or [])
+        if n:
+            ja_by_index(data.get(key), n, key)
 
 
 def check_work_display(data: dict, work_display: str) -> None:
@@ -141,7 +176,20 @@ def build_payload(backup: Path, telop_data: list, work_title: str, wcfg: dict) -
         "tts_cues": [{"index": i, "ko": t} for i, t in enumerate(cues)],
         "telops": telops,
     }
-    return {"payload": payload, "segments": segments, "cues": cues}
+    # E16: 화면에 얹는 글자 — AI 연출(백업본)과 편집실 텍스트(job 정본).
+    # job 은 backup 의 부모다(l0_backup 이 job/localize_backup_ko 로 만든다).
+    # **빈 것은 payload 에 안 싣는다** — 연출 없는 편의 프롬프트가 종전과 한 글자도 달라지면
+    # 그 편의 자막 번역 결과까지 흔들린다(회귀 0).
+    job = backup.parent
+    style_texts_ko, style_titles_ko = style_plan_strings(
+        load_json_or_none(backup / STYLE_PLAN_NAME))
+    editor_texts_ko = editor_text_strings(load_json_or_none(job / "edit_overrides.json"))
+    screen = {"style_texts": style_texts_ko, "style_titles": style_titles_ko,
+              "editor_texts": editor_texts_ko}
+    for key, ko in screen.items():
+        if ko:
+            payload[key] = [{"index": i, "ko": t} for i, t in enumerate(ko)]
+    return {"payload": payload, "segments": segments, "cues": cues, **screen}
 
 
 def l1_translate(backup: Path, telop_data: list, work_title: str, wcfg: dict,
@@ -166,6 +214,7 @@ def l1_translate(backup: Path, telop_data: list, work_title: str, wcfg: dict,
     )
     data = json.loads(resp.text)
     check_alignment(built["segments"], built["cues"], data)
+    check_style_alignment(built, data)
     check_work_display(data, wcfg["display"])
     _fit_title(data, client)
     out_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
