@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "supabase-ro": {
+      "type": "http",
+      "url": "https://mcp.supabase.com/mcp?project_ref=fdidiqdhcyctdbogxkdu&read_only=true&features=database"
+    },
+    "laeebly-ro": {
+      "type": "http",
+      "url": "https://mcp.supabase.com/mcp?project_ref=mehvzxzajydffflqcuuk&read_only=true&features=database"
+    }
+  }
+}
