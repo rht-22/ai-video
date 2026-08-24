@@ -158,7 +158,15 @@ for t in ["a\nb", "{x}", "普通", "a{b}c\nd"]:
 for s in [0.0, 3661.5, 59.999, 123.456]:
     eq(f"ts {s}", lr._fmt_ts(s), A._fmt_ts(s))
 
-# ── build_telop_ass (바이트 동일성)
+# ── build_telop_ass (바이트 동일성 + 의도적 분기 1건)
+#
+# E18(2026-08-24)에 **세로 자리만** 갈렸다: vlp 는 모든 텔롭을 MarginV 720 고정으로
+# 그리는데, 이식본은 L2 가 뽑아 둔 `position` 이 bottom·middle 이면 위로 피한다
+# (원본 한국어 텔롭 위에 일본어가 얹혀 둘 다 못 읽는 화면이 실제로 나갔다).
+# 아래 대조 자료에는 position 이 없어 **회피가 발동하지 않는다** — 그래서 바이트
+# 동일성이 그대로 성립하고, 조립·이스케이프·타이밍 규칙이 안 변했음을 계속 증명한다.
+# (박스 색은 안 건드렸다 — 불투명으로 바꿔 봤지만 BorderStyle=3 의 박스는
+#  OutlineColour 로 그려져 프레임이 픽셀까지 같았다. apply.build_telop_ass 주석 참조.)
 print("[build_telop_ass]")
 refined = [{"orig_index": 0, "start_sec": 1.0, "end_sec": 2.0, "text_ko": "가"},
            {"orig_index": 1, "start_sec": 3.0, "end_sec": 4.0, "text_ko": "나"},

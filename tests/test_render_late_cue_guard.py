@@ -10,8 +10,9 @@ SHOTCONE 혜미리예채파 2화 실측:
 14.4초 늘렸다. 시청자는 정지 화면 위로 내레이션만 듣는다.
 
 상류(`pipeline._resolve_cue_anchors`)는 cue 를 영상 안에 가두는데(`end = min(...)`)
-이 cue 는 그 클램프를 우회했다. 이 파일이 지키는 것은 **렌더 직전의 안전망**이다 —
-어디서 새든 증상을 끊는다.
+**그 클램프는 정상 동작했다** — 기준이 된 영상 길이가 소스 밖 클립을 포함한 기획
+길이(51.0s)였을 뿐이다(아래 마지막 테스트가 숫자로 못박는다). 이 파일이 지키는 것은
+**렌더 직전의 안전망**이다 — 상류가 무엇을 놓치든 증상을 끊는다.
 
   ① 영상 밖에서 **시작하는** cue 만 버린다
   ② 영상 안에서 시작하면 끝이 넘쳐도 **안 건드린다**(사람이 의도한 소리다 — 별건)
@@ -103,3 +104,44 @@ def test_a_malformed_cue_is_kept_not_crashed():
     bad = {"path": "x.mp3", "cue": {"start_sec": None, "end_sec": 3.0}}
     kept, dropped = cues_within_video([bad], CLIPS)
     assert kept == [bad] and dropped == []
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 상류 규명 (2026-08-24) — cue 는 클램프를 **우회하지 않았다**
+# ═══════════════════════════════════════════════════════════════════
+def test_the_late_cue_came_from_the_planned_total_not_a_bypass():
+    """이 파일 위쪽이 '어디서 샜는지 모른다'고 적었던 그 cue 의 출처.
+
+    DB 실측(혜미리예채파_2b2b46c6, checkpoint_story/edit_plan):
+
+        최종 클립   [31.5, 56.5] · [200.0, 226.0]   ← 두 번째는 소스(189.99s) 밖
+        cue 앵커     source_time_sec=212.0, duration_sec=3.5
+
+    `_resolve_cue_anchors` 는 212.0 을 담는 조각 (200,226,base=25.0) 을 정확히 찾아
+    start = 25.0 + (212.0-200.0) = **37.0**, end = min(40.5, total 51.0) = 40.5 로
+    놓았다 — 관측값과 같다. 즉 클램프는 정상 동작했고, **기준이 된 total 51.0 이
+    소스 밖 클립을 포함한 기획 길이**였을 뿐이다. 실제 렌더는 25.025s 에서 끝난다.
+
+    ⇒ 원인은 소스 밖 클립 하나이고(상류에서 차단됨), 이 파일의 가드는 그와 무관하게
+      증상을 끊는 안전망이다. style_compose 와도 무관하다.
+    """
+    from app.modules.story_builder import StoryClip
+    from app.pipeline import _resolve_cue_anchors
+
+    def _clip(start, end, ci):
+        return StoryClip(role="x", start_sec=start, end_sec=end, subtitle="",
+                         use_original_audio=True, chunk_index=0, candidate_index=ci)
+
+    planned = [_clip(31.5, 56.5, 0), _clip(200.0, 226.0, 2)]
+    cue = {"text": "결국 0캐시로 전부 날려버렸다.", "source_time_sec": 212.0,
+           "duration_sec": 3.5, "chunk_index": 0, "candidate_index": 2}
+
+    resolved = _resolve_cue_anchors([cue], planned)
+    assert len(resolved) == 1
+    assert resolved[0]["start_sec"] == pytest.approx(37.0)
+    assert resolved[0]["end_sec"] == pytest.approx(40.5)
+
+    # 같은 cue 를 **실제로 렌더되는** 길이(25.025s)와 맞대면 이 파일의 가드가 잡는다.
+    kept, dropped = cues_within_video(
+        [{"path": "x.mp3", "cue": resolved[0]}], CLIPS)
+    assert kept == [] and len(dropped) == 1

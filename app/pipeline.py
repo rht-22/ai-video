@@ -3899,6 +3899,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                                "voice": c.get("voice"), "speed": c.get("speed"),
                                "text": str(c.get("text", ""))[:50]} for c in tts_cues],
                     sticker_catalog=_stylemod.sticker_catalog_for_prompt(_manifest),
+                    # 효과 텍스트 y 허용 구간 — 이 채널의 실제 밴드에서 계산한다(E18).
+                    # 프롬프트에 하드코딩된 구간(0.15~0.35)이 제목 자리와 겹쳐 있었다.
+                    text_y_range=_stylemod.text_y_range(payload.design),
                     editorial=payload.editorial, reject_note=payload.reject_note,
                 )
             except Exception as _e:      # noqa: BLE001 — 연출은 부가물, 본편을 막지 않는다
@@ -3965,7 +3968,17 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
             # ── 3) 효과 텍스트·스티커 (편집실이 보냈으면 그 카테고리는 사람 것) ──
             if _style_plan.get("texts") and not _text_overlays:
-                _placed, _drop = place_anchored_texts(_style_plan["texts"], clips)
+                # 밴드 밖(제목·자막 구역)으로 나간 텍스트는 **드롭이 아니라 클램프**다
+                # (2026-08-24 사용자 결정 — 연출을 살리고 위치만 당긴다).
+                # ⚠ 배치 **직전**에 건다: 체크포인트에서 되살아난 옛 플랜도 이 길을 지난다.
+                # 밴드 기하(aspect_ratio·video_width·video_y)는 AI 가 못 바꾸는 키라
+                # 채널 design 이 정본이다(STYLE_DESIGN_ALLOWED 에 없다).
+                _y_lo, _y_hi = _stylemod.text_y_range(payload.design)
+                _clamped, _clamp_notes = _stylemod.clamp_texts_to_band(
+                    _style_plan["texts"], _y_lo, _y_hi)
+                for _n in _clamp_notes:
+                    print(f"  [style] {_n}")
+                _placed, _drop = place_anchored_texts(_clamped, clips)
                 for _o in _drop:
                     print(f"  [style] 앵커 소재가 최종 타임라인에 없음 → 텍스트 드롭"
                           f"(tts 고아 규칙과 동일): source_time_sec={_o.get('source_time_sec')} "
@@ -4001,14 +4014,20 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             # ── 4) 시간대별 제목 (편집실 title.segments 가 이긴다) ─────────
             if _style_plan.get("title_segments") and not _title_segments:
                 try:
+                    # base_title 을 주면 창이 못 덮은 시간을 기본 제목으로 메운다 —
+                    # **AI 가 만든 창은 제목을 없애지 못한다**(2026-08-24 사용자 지시).
                     _segs, _seg_drop = _stylemod.title_segments_from_anchors(
-                        _style_plan["title_segments"], clips)
+                        _style_plan["title_segments"], clips, base_title=title_text)
                     for _o in _seg_drop:
+                        if _o.get("note"):
+                            print(f"  [style] {_o.get('why', '')}")
+                            continue
                         print(f"  [style] 제목 창 드롭: {_o.get('why', '앵커가 타임라인 밖')} "
                               f"{str(_o.get('text', ''))[:20]!r}")
                     if _segs:
                         _title_segments = _segs
-                        print(f"  [style] 시간대별 제목 {len(_segs)}개 창 — 창 밖은 제목 없음")
+                        print(f"  [style] 시간대별 제목 {len(_segs)}개 창 "
+                              f"— 빈 시간은 기본 제목으로 채웁니다")
                 except EditOverrideError as _e:
                     print(f"  [style] 제목 창이 계약 위반 → 제목은 종전대로: {_e}")
             elif _style_plan.get("title_segments"):

@@ -31,7 +31,8 @@ SCHEMA_EXTRACT = {
             "text_ko": {"type": "string"},
             "position": {"type": "string", "enum": ["top", "middle", "bottom"]},
             "kind": {"type": "string",
-                     "enum": ["broadcast_telop", "our_subtitle", "our_tts", "top_title", "other"]},
+                     "enum": ["broadcast_telop", "our_subtitle", "our_tts", "top_title",
+                              "our_style_text", "other"]},
         },
         "required": ["start_sec", "end_sec", "text_ko", "position", "kind"],
     },
@@ -51,7 +52,13 @@ EXTRACT_PROMPT = """이 영상은 한국 예능 프로그램의 쇼츠(세로 10
 - "our_subtitle": 우리가 넣은 대사 자막 (존재만 기록)
 - "our_tts": 우리가 넣은 하늘색 내레이션 자막 (존재만 기록)
 - "top_title": 최상단 검정 배경 위 흰/노랑 2줄 제목 (존재만 기록)
+- "our_style_text": 우리가 얹은 **연출 텍스트**. 짧은 감탄·의성어·강조 한두 마디를
+  굵은 색 글씨(노랑/빨강 등)로 화면 가운데쯤에 톡 얹어 놓은 것 (존재만 기록)
 - "other": 배경 간판·소품·로고 등
+
+⚠ 방송 텔롭과 우리 연출 텍스트를 헷갈리지 마세요. 방송 텔롭은 **문장**이고 원본 화면에
+박혀 있으며 흔히 여러 줄입니다. 우리 연출 텍스트는 "멘붕?!" "쿵!" 처럼 **한두 마디**이고
+원본 화면 위에 덧그려져 있습니다.
 
 각 항목: start_sec, end_sec (숫자), text_ko (원문 그대로), position ("top"/"middle"/"bottom"), kind.
 번역은 하지 마세요. JSON 배열만 출력하세요."""

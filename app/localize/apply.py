@@ -51,9 +51,52 @@ def _fmt_ts(sec: float) -> str:
     return f"{h}:{m:02d}:{s:05.2f}"
 
 
+# ── JP 텔롭 트랙의 세로 자리 (E18, 2026-08-24) ─────────────────────────────
+# 종전엔 **모든** 텔롭이 MarginV 720 고정이었다. 주석대로 우리 대사(430)·TTS(580)는
+# 피하지만 **원본에 박힌 한국어 텔롭은 고려하지 않는다** — y=1920−720=1200 은 13:9 밴드
+# (586~1334)의 82% 지점이라 하단 방송 텔롭과 정면으로 부딪친다(2026-08-24 SHOTCONE
+# 실측: 일본어 두 줄이 한국어 텔롭 위에 그대로 얹혀 둘 다 못 읽는 화면이 나갔다).
+#
+# L2 는 텔롭마다 `position`(top/middle/bottom)을 이미 뽑고 있는데 이 함수가 안 쓰고
+# 있었다. 그 값으로 **원본에서 먼 구역**을 고른다 — 새 검출 비용 0.
+#   · bottom·middle → HIGH(밴드 위쪽). y=1920−1120=800, 박스 위끝 ≈650 →
+#     제목 블록 아래끝(13:9 기준 566)에서 84px, 밴드 중앙(960)에서 160px 떨어진다.
+#   · top·미상      → 기본(720). 원본이 위에 있으면 아래가 비어 있고, 미상은 종전 그대로다.
+# ⚠ E17-2 의 번인 자막 회피는 이 트랙에 안 걸린다 — 그건 우리 대사·TTS 자막용이고,
+#   판정도 '편 내내 같은 자리' 규칙이라 몇 초씩만 뜨는 방송 텔롭을 못 잡는다(별건).
+TELOP_MARGIN_V = 720
+TELOP_MARGIN_V_HIGH = 1120
+TELOP_AVOID_POSITIONS = ("bottom", "middle")
+
+
+def telop_margin_v(telop: dict, style: dict, play_res_y: int = 1920) -> int:
+    """이 텔롭 줄의 이벤트 MarginV. 순수(테스트 대상).
+
+    우선순위: **사람 오버라이드(style.y) > 원본 회피 > 스타일 기본값**.
+    0 을 돌려주면 ASS 규약상 스타일 기본값(=TELOP_MARGIN_V)이 쓰인다 — 회피가 필요
+    없는 줄은 종전 출력과 **한 글자도 같다**."""
+    if style.get("y") is not None:
+        return style_margin_v(style, play_res_y)
+    if str(telop.get("position") or "").strip().lower() in TELOP_AVOID_POSITIONS:
+        return round(TELOP_MARGIN_V_HIGH * play_res_y / 1920)
+    return 0
+
+
 def build_telop_ass(telop_data: list, translation: dict, font: str, out_path: Path) -> int:
     """방송 텔롭의 일본어 병기 트랙. 대사(430)·TTS(580)와 겹치지 않게 MarginV 720 기본,
-    반투명 박스(BorderStyle=3)로 원본 텔롭과 시각적으로 구분한다.
+    박스(BorderStyle=3) 위에 그린다. 세로 자리는 `telop_margin_v` 가 원본 위치를
+    피해 고른다(위 상수 주석).
+
+    ⚠ **박스로 원본을 덮는 길은 없다 — 실측으로 닫힌 선택지다**(E18, 2026-08-24,
+      ffmpeg 6.1.1 실렌더). 두 가지를 재 봤다:
+      · BackColour 를 반투명(&H78......) → 불투명(&H00......)으로 바꿔도 **프레임이
+        픽셀까지 동일**했다. BorderStyle=3 의 박스는 **OutlineColour**(&H00000000,
+        이미 불투명)로 그려지고 BackColour 는 그림자 색인데 Shadow=0 이라 안 쓰인다.
+      · 박스 여백(Outline)을 5 → 12 → 24 로 넓혀도 박스 폭은 202 → 216 → 242px 인데
+        원본 텔롭은 840px 였다(잔존 51.7k → 46.2k / 63k). 여백은 마스크가 아니다.
+      ⇒ 겹침을 없애는 유일한 수단은 **자리를 옮기는 것**이다(`telop_margin_v`).
+        정말 덮어야 한다면 전폭 마스크 도형을 따로 그려야 하는데, 그건 텔롭이 뜰 때마다
+        영상 한 줄을 검게 지우는 것이라 사람이 결정할 일이다.
 
     (8/20) 검수 수정이 translation.telops 항목에 실은 줄 오버라이드 반영:
     · style {size,y,color,rotate} → 인라인 태그(\\fs·\\1c·\\frz — 계약 rotate 는 시계방향
@@ -73,7 +116,7 @@ def build_telop_ass(telop_data: list, translation: dict, font: str, out_path: Pa
         end = float(tr["end_sec"]) if tr.get("end_sec") is not None else float(t["end_sec"])
         style = tr.get("style") or {}
         tags = style_ass_tags(style, 1920) if style else ""
-        margin_v = style_margin_v(style, 1920) if style else 0
+        margin_v = telop_margin_v(t, style or {}, 1920)
         tag_block = f"{{{tags}}}" if tags else ""
         lines.append(f"Dialogue: 0,{_fmt_ts(start)},{_fmt_ts(end)},"
                      f"Telop,,0,0,{margin_v},, {tag_block}{_ass_escape(tr['ja'])}")
@@ -85,7 +128,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Telop,{font},52,&H00FFFFFF,&H00000000,&H78000000,-1,0,3,5,0,2,70,70,720,1
+Style: Telop,{font},52,&H00FFFFFF,&H00000000,&H78000000,-1,0,3,5,0,2,70,70,{TELOP_MARGIN_V},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

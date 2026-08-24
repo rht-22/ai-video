@@ -231,44 +231,56 @@ def test_design_rotate_range(tmp_path):
         _valid(_plan(design={"tts_rotate": 200}), tmp_path)
 
 
-def test_ai_title_rotate_allowed_within_narrow_range(tmp_path):
-    """E17-1(2차) — 제목 기울기는 **가능은 하되** AI 산출은 좁은 범위(±15°)로 제약된다.
+def test_ai_cannot_rotate_the_title_at_all(tmp_path):
+    """E18(3차) — 제목 기울기는 **AI 에게 닫혀 있다**.
 
-    처음엔 title_rotate 를 통째로 막았지만 사용자가 "돌리는 거는 가능한데, 안 돌리게
-    제약 정도로만 걸어줘"로 정정했다 — 그래서 완전히 닫지 않고 **범위만 좁힌다**.
-    사람·채널의 --design-title-rotate(-180~180)는 이 상한과 무관하다.
+    지시가 세 번 바뀐 키다: ① 통째로 차단 → ② ±15° 로 완화(E17-1) → ③ **다시 차단**
+    ("제목은 회전하지 않도록 되는지 확인해서 ai가 회전을 못하게 해야돼", 2026-08-24).
+    ②로 열어 둔 범위로도 매 편 기울어져 나와서 범위가 아니라 키를 닫았다.
     """
-    assert "title_rotate" in sc.STYLE_DESIGN_ALLOWED
+    assert "title_rotate" not in sc.STYLE_DESIGN_ALLOWED
     out, notes = _valid(_plan(design={"title_rotate": -3, "title_box": "round"}), tmp_path)
-    assert out["design"]["title_rotate"] == -3.0
-    assert out["design"]["title_box"] == "round"
-    assert not any("title_rotate" in n for n in notes)   # 범위 안이면 조용히 통과
+    assert "title_rotate" not in out["design"]          # 버려진다
+    assert out["design"]["title_box"] == "round"        # 나머지 키는 그대로 산다
+    assert any("title_rotate" in n for n in notes)      # 조용한 드롭 금지
 
 
-def test_ai_title_rotate_rejects_outside_narrow_range(tmp_path):
-    """±15° 밖은 그 항목만 조용히 버려지는 게 아니라 **플랜 자체가 거절**된다 —
-    tts_rotate 와 같은 검증 강도(범위 밖 값은 LLM 이 계약을 오해했다는 신호라
-    다른 항목도 의심해야 한다)."""
-    assert sc.AI_TITLE_ROTATE_RANGE_DEG == 15.0
-    with pytest.raises(sc.StylePlanError, match="AI 허용 범위"):
-        _valid(_plan(design={"title_rotate": 16}), tmp_path)
-    with pytest.raises(sc.StylePlanError):
-        _valid(_plan(design={"title_rotate": -180}), tmp_path)
-    # tts_rotate 는 그대로 ±180 — 이 지시는 제목에 대한 것이다
+def test_a_rotated_title_does_not_kill_the_whole_plan(tmp_path):
+    """닫는 방식이 '모르는 키'가 아니라 **드롭+메모**인 이유를 못박는다.
+
+    STYLE_DESIGN_ALLOWED 에서 빼기만 하면 unknown 검사가 플랜 **전체**를 거절한다 —
+    LLM 은 이 키를 계속 낼 테고, 그때마다 효과 텍스트·제목 창까지 통째로 날아간다."""
+    plan = _plan(design={"title_rotate": 30})
+    plan["texts"] = [{"text": "쿵!", "source_time_sec": 10.0, "duration_sec": 1.0,
+                      "x": 0.5, "y": 0.5}]
+    out, _ = _valid(plan, tmp_path)
+    assert len(out["texts"]) == 1                        # 플랜은 살아남는다
+    assert not out.get("design")                         # 기울기만 사라졌다
+    # tts_rotate 는 그대로 ±180 — 지시는 제목에 대한 것이다
     assert _valid(_plan(design={"tts_rotate": 90}), tmp_path)[0]["design"]["tts_rotate"] == 90.0
 
 
-def test_prompt_tells_the_model_to_go_easy_on_title_rotation():
-    """프롬프트도 같은 제약을 말해야 한다 — 검증기만 좁히면 매 편 거절당하는 값을 계속 낸다."""
+def test_an_old_checkpoint_cannot_resurrect_a_rotated_title():
+    """옛 체크포인트(E17-1 시절 ±15°)는 재검증 없이 재적용된다 — 마지막 관문에서 막는다."""
+    base = DesignConfig()
+    kw, notes = sc.design_overrides({"title_rotate": -12.0, "tts_rotate": 5.0}, set(), base)
+    assert kw == {"tts_rotate": 5.0}
+    assert any("title_rotate" in n for n in notes)
+
+
+def test_prompt_forbids_title_rotation_and_names_the_band_y_range():
+    """프롬프트도 같은 계약을 말해야 한다 — 검증기만 고치면 LLM 이 계속 같은 값을 낸다."""
     from app.modules.gemini_client import STYLE_COMPOSITION_PROMPT as P
 
-    assert "웬만하면 기울이지 마라" in P
-    assert f"{sc.AI_TITLE_ROTATE_RANGE_DEG:g}" in P.format(
+    assert "제목은 기울이지 않는다" in P
+    filled = P.format(
         fonts="", sub_lo="", sub_hi="", voices="", speeds="",
-        title_rotate_max=f"{sc.AI_TITLE_ROTATE_RANGE_DEG:g}",
+        text_y_lo="0.34", text_y_hi="0.66",
         max_texts=0, max_images=0, max_subs=0, max_titles=0,
         work_title="", title_text="",
         timeline_block="", transcript_block="", cues_block="", stickers_block="")
+    assert "0.34~0.66" in filled                 # 하드코딩 0.15~0.35 가 아니라 계산값
+    assert "0.15~0.35" not in filled
 
 
 def test_hard_caps_truncate_and_report(tmp_path):
@@ -345,10 +357,10 @@ def test_bundled_manifest_is_valid_json_and_empty():
 # ══════════════════════════════════════════════════════════════════════════
 def test_channel_explicit_design_key_beats_ai():
     base = DesignConfig()
-    kw, notes = sc.design_overrides({"title_rotate": -5.0}, {"title_rotate"}, base)
+    kw, notes = sc.design_overrides({"tts_rotate": -5.0}, {"tts_rotate"}, base)
     assert kw == {} and notes and "채널" in notes[0]
-    kw2, _ = sc.design_overrides({"title_rotate": -5.0}, set(), base)
-    assert kw2 == {"title_rotate": -5.0}
+    kw2, _ = sc.design_overrides({"tts_rotate": -5.0}, set(), base)
+    assert kw2 == {"tts_rotate": -5.0}
 
 
 def test_explicit_fields_are_collected_from_cli_not_guessed():
