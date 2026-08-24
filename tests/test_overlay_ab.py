@@ -162,3 +162,22 @@ def test_cer_uses_the_ported_function():
     import scripts.overlay_ab as m
     from app.localize.overlay.common import cer as ported
     assert m.cer is ported
+
+
+def test_cer_flags_short_references():
+    """⚠ CER 은 편집거리/참조길이다 — 참조가 1자면 1.0 을 쉽게 넘는다('L'→'エル' = 2.0).
+
+    실측(5b2NhVS2h_o)에서 평균 3.35 가 나왔는데 입력 18건이 거의 전부 기호·단일 문자였다.
+    숫자만 보여주면 '335% 틀렸다'로 읽힌다 — 짧은 참조 비중을 함께 내야 한다."""
+    # ⚠ 참조는 **구 번역문**(target)이지 원문(source)이 아니다 — CER 의 분모가 그것이다.
+    a = [("L", "L", True), ("그", "あの…", True)]
+    b = [("L", "エル", True), ("그", "その", True)]
+    got = target_cer(a, b)
+    assert got["short_ref"] == 1                 # 'L'(1자)만 짧다 — 'あの…' 는 3자
+    assert got["max"] == 2.0                     # 'L' → 'エル' = 편집거리 2 / 길이 1
+
+
+def test_long_references_report_no_short_warning():
+    a = [("안녕하세요 여러분", "皆さんこんにちは", True)]
+    b = [("안녕하세요 여러분", "みなさんこんにちは", True)]
+    assert target_cer(a, b)["short_ref"] == 0

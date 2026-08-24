@@ -79,8 +79,14 @@ def target_cer(a: list, b: list) -> dict:
     if not pairs:
         return {"n": 0, "mean": 0.0, "max": 0.0, "identical": 0}
     vals = [cer(x, y) for x, y in pairs]
+    # ⚠ CER 은 편집거리 / **참조 길이**다 — 참조가 1~2글자면 1.0 을 쉽게 넘는다
+    # ('L' → 'エル' 이면 2/1 = 2.0). 잔망루피 쇼츠처럼 화면 텍스트가 기호·단일 문자뿐인
+    # 소재에서는 평균이 3을 넘는 것이 정상이고, '335% 틀렸다'는 뜻이 **아니다**.
+    # 그래서 짧은 참조 비중을 함께 낸다 — 숫자만 보면 사람이 오독한다.
+    short = sum(1 for x, _ in pairs if len(x) <= 2)
     return {"n": len(vals), "mean": round(sum(vals) / len(vals), 4),
-            "max": round(max(vals), 4), "identical": sum(1 for v in vals if v == 0)}
+            "max": round(max(vals), 4), "identical": sum(1 for v in vals if v == 0),
+            "short_ref": short}
 
 
 def align_diff(a_events: list, b_events: list, tol: float = ALIGN_TOL_SEC) -> tuple:
@@ -197,8 +203,12 @@ def compare(a: pathlib.Path, b: pathlib.Path) -> tuple:
     c = target_cer(ea, eb)
     checks["번역문 CER"] = {
         "advisory": True,
-        "summary": (f"평균 {c['mean']} · 최대 {c['max']} · 동일 {c['identical']}/{c['n']}"
-                    " (LLM 비결정성 — 판정에서 뺀다)") if c["n"] else "비교할 항목 없음"}
+        "summary": (
+            f"평균 {c['mean']} · 최대 {c['max']} · 동일 {c['identical']}/{c['n']}"
+            + (f" · ⚠ 참조 2자 이하 {c['short_ref']}/{c['n']}건 — 짧은 참조에서 CER 은"
+               f" 1.0 을 넘는다('L'→'エル' = 2.0). 비율로 읽지 마라"
+               if c["short_ref"] else "")
+            + " (LLM 비결정성 — 판정에서 뺀다)") if c["n"] else "비교할 항목 없음"}
 
     # ③ 세그먼트 정렬 — 회귀 판정 대상
     al, worst = align_diff(events_of(_read_json(a / "ja_events.json")),
