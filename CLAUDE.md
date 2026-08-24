@@ -449,3 +449,90 @@ E16 이 둘 다 일본어로 바꾼다.
   (`_load_json_or_none`·`_ja_by_index`)이 **공개 이름**이다. 그 외에는 vlp 와 같은 코드다.
 - 회귀 가드: `tests/test_localize_style_texts.py`(19건) + `scripts/localize_port_diff.py`
   의 `[style_texts]` 절(원본과 산출 동일성 대조).
+
+## 원본 자막 회피 · 제목 회전 · 토큰 만료 폴백 (E17, 2026-08-24)
+
+사용자 지시 3건을 한 커밋으로 묶은 것이다.
+
+> "제목은 왠만하면 회전은 안되게 해주고, 영상에 원래 자막이 있으면 그 위치 피해서 자막이
+> 들어가게 해줘. 물론, 자막이 제목과도 겹치면 안되고. 그리고 일레븐랩스 토큰이 만료되면
+> 일레븐랩스 api 가 아니라 기본으로 사용되도록 해줘."
+
+### E17-1 제목 기울기는 AI 에게 닫혔다
+
+`style_compose.STYLE_DESIGN_DROPPED` · `gemini_client.STYLE_COMPOSITION_PROMPT`.
+
+- E15 가 AI 에게 열어 둔 `title_rotate` 를 **버리는 키**로 옮겼다. `STYLE_DESIGN_ALLOWED`
+  에서 빼기만 하면 모르는 키 검사에 걸려 **플랜 전체가 거절**된다(그 편의 연출이 통째로
+  사라진다) — 그래서 그 항목만 드롭하고 나머지는 살린다. 프롬프트에서도 지웠지만 LLM 은
+  관성으로 내므로 검증기 쪽이 정본이다. 0 은 화면이 같으니 메모도 안 남긴다.
+- **사람·채널의 `--design-title-rotate` 는 그대로다**(사람이 보고 정한 값은 사람 것이다).
+  `tts_rotate` 도 그대로 — 지시는 제목에 대한 것이다.
+- 다시 열려면 `STYLE_DESIGN_DROPPED` 를 비우고 `STYLE_DESIGN_ALLOWED` 에 이름을 되돌린다.
+- 구 `checkpoint_style.json` 은 재검증 없이 그대로 재적용된다 — 이미 승인된 화면은 안 바뀐다.
+
+### E17-2 소스에 박힌 원본 자막 회피
+
+`app/modules/subtitle_region.py` · `pipeline._detect_burned_band_cached` ·
+`_avoid_burned_margin_v` · `--design-subtitle-avoid-burned {auto|off}`.
+
+⚠ **E11·E15 와 달리 기본이 켜짐(auto)이다.** 지시가 '그렇게 되게 해 달라'였고, 검출이
+못 찾으면 아무것도 안 바뀌기 때문이다. 픽셀로 맞춘 채널의 탈출구는 `off` 한 값이다.
+
+- **좌표계는 캔버스다.** 검출도 렌더와 **같은 필터 체인**(crop_timeline → scale → crop)을
+  태운 프레임을 재므로, 나온 행이 곧 화면의 y 다. 소스 픽셀을 재서 환산하지 않는다 —
+  리프레임 크롭이 `t` 에 따라 움직여 언젠가 어긋난다(실측: 확대 크롭이 원본 자막을 아예
+  잘라내는 경우도 있고, 그때는 회피할 것도 없다).
+- 판정: 밴드를 480×270 회색조로 줄여 **행별 '밝은 획 경계' 개수**를 세고, 표본 프레임의
+  절반 이상에서 걸리는 행을 띠로 본다(원본 자막은 편 내내 같은 자리에 있고, 배경의 밝은
+  무늬는 장면이 바뀌면 사라진다). 밴드 **아래 절반만** 본다 — 위·가운데 텔롭은 우리 자막과
+  겹치지 않으므로 피할 이유가 없다.
+- 배치: **올리기만 한다**(아래는 로고·작품명 스택, 시작을 당기면 소리보다 자막이 먼저 뜬다).
+  상한은 **제목 블록 아래 + 14px** — 지시의 "제목과도 겹치면 안된다"가 이 클램프다. 다
+  못 피하면 제목을 우선하고 **모자란 양을 `[SubtitleAvoid/미달]` 로 남긴다**(조용한 포기 금지).
+- **회피는 프리셋이 정해진 뒤**에 계산한다 — 자막 글자 크기(장르 프리셋 56~72px)가 확정돼야
+  블록 높이를 잰다. 겹침 판정은 **2줄 기준**이다(`_wrap_for_ass(max_lines=2)`).
+- 검출은 **렌더 단계에서 한 번**이고 `checkpoint_burned_subtitle.json` 에 남는다 —
+  재렌더마다 다시 재면 승인된 자막 위치가 실행마다 달라진다(E15 체크포인트 규약과 같은 이유).
+  클립 구성이 바뀌면(구간 재편집) 캐시는 무효다. variant #2·#3 도 **같은 띠**를 쓴다(재검출
+  없음 — 원본 자막은 소재의 성질이다).
+- 실패는 전부 '아무것도 안 함'이다(ffmpeg 없음·표본 부족·예외). 연출이 아니라 안전장치라
+  본편 발행을 막지 않는다. 띠를 찾은 실행만 run_log `steps[{step:"subtitle_avoid_burned"}]`
+  에 남는다 — 못 찾은 실행의 run_log 는 종전과 같다.
+- ⚠ **밴드 기하는 `subtitle_region.band_geometry` 가 렌더러 [2] 순서를 따른다**(짝수 보정이
+  video_y 클램프 **뒤**). `pipeline._video_band_bottom` 은 보정이 앞이라 홀수 높이에서 1px
+  다르지만, 그 값으로 낸 자막 margin 이 이미 승인돼 있어(E10) 고치지 않았다 — 검출은 270행
+  해상도라 1px 은 판정에 영향이 없다. 회귀 가드가 두 값을 ±1 로 묶는다.
+- 임계값은 합성 프레임·규격 추정으로 잡은 **초기값**이다. 실소재로 다시 재는 자:
+  `python -m scripts.e17_burned_subtitle_probe --video … --start … --end …`
+  (행별 검출률 막대 + 판정된 띠 + margin_v 변화). 합성 실측(이 컨테이너 ffmpeg 6.1.1 —
+  운영 노드는 7.x, 둘 다 `SUPPORTED_FFMPEG_MAJORS`): 하단 번인 자막
+  1건 → y=1324~1376 검출, margin_v 430 → 610. testsrc2·SMPTE 바·난수 노이즈에서는 검출 0건.
+- 회귀 가드: `tests/test_e17_burned_subtitle.py`(28건).
+
+### E17-3 ElevenLabs 토큰 만료 → 기본 백엔드
+
+`tts._EL_AUTH_STATUSES`·`ElevenLabsAuthExpired` · `stt_elevenlabs.ElevenLabsAuthError` ·
+`pipeline.transcribe_chunks`.
+
+E11·E12 는 **모든** 실패를 fail-loud 로 막았다(조용한 목소리 교체 금지). 그 규율을 두고
+**401·403 만** 예외로 판다 — 재시도해도 안 낫고, 무인으로 도는 6대에서 키 하나가 만료되면
+그날 전 채널이 멈춘다.
+
+- TTS: 401·403 이면 **재시도 없이** `ElevenLabsAuthExpired` → 라벨 목소리는 edge-tts 로,
+  편집실 `elevenlabs:{id}` 목소리는 **기본 목소리**로 간다(그 계정 자산은 재현할 수 없다).
+  404·429·5xx·네트워크는 E11·E12 계약 그대로. **키가 없는 것은 만료가 아니다** — 접두사
+  목소리의 즉시 실패는 그대로다(설정 실수는 시작 전에 안다).
+- 판정은 프로세스 전역이고 **거절당한 그 키에 묶인다** — env 의 키가 바뀌면 다시 시도한다.
+  `active_backend()` 가 폴백을 반영하므로 run_log `steps[resources].tts_backend` ·
+  `checkpoint_resources.tts_backend` 가 실제 백엔드를 가리키고, 사유는 `tts_fallback_reason`.
+- **폴백 산물은 유료 캐시에 안 넣는다**(`synthesize_cue_cached`) — 넣으면 키를 갱신한 뒤에도
+  그 소리가 되살아난다.
+- 전사: 401·403 이면 내장 Whisper 로 **청크 전량을 다시** 전사한다(섞으면 한 편 안에서 자막
+  리듬이 갈린다 — E13-0 실측). run_log·`checkpoint_chunk_transcripts_meta.json` 은 **실제로
+  쓴** 백엔드를 적어, 키를 갱신한 다음 실행이 백엔드 변경으로 읽고 캐시를 무효화한다.
+  그 외 실패는 종전대로 크게 실패한다(유료 백엔드를 골랐는데 자막이 비면 안 된다).
+- ⚠ 프로세스 중간에 만료되면 그 앞 cue 는 ElevenLabs, 뒤는 edge-tts 다(한 편 안에서 목소리가
+  갈린다). 실행 전 만료가 보통이라 전량 폴백이 정상 경로고, 중간 만료는 로그로 드러난다.
+- 테스트 격리: 만료 판정이 전역이라 `tests/conftest.py` 가 매 테스트 앞뒤로 되돌린다.
+- 회귀 가드: `tests/test_e17_elevenlabs_fallback.py`(13건).

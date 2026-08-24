@@ -67,6 +67,9 @@ EL_STT_USD_PER_AUDIO_HOUR = float(os.environ.get("ELEVENLABS_STT_USD_PER_AUDIO_H
 EL_STT_KEYTERMS_USD_PER_AUDIO_HOUR = float(
     os.environ.get("ELEVENLABS_STT_KEYTERMS_USD_PER_AUDIO_HOUR", "0.27"))
 _EL_RETRIES = 2  # 첫 시도 제외 — 429·5xx·네트워크만
+# E17: 이 두 상태만 '토큰이 살아 있지 않다'로 읽는다(tts._EL_AUTH_STATUSES 와 같은 판정).
+# 400·404·422 는 요청이 잘못된 것이라 내려가 봐야 같은 자리에서 또 죽는다 — 종전대로 실패.
+EL_STT_AUTH_STATUSES = (401, 403)
 
 # 파일 파트 포맷. 기본은 wav 컨테이너 + file_format 미지정(=other, "all major formats").
 # `pcm_s16le_16` 은 *헤더 없는* 16k 모노 s16le 원본을 뜻하므로 RIFF 헤더가 붙은 wav 를
@@ -147,6 +150,17 @@ _NORMALIZE_DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "transc
 
 class ElevenLabsSTTError(RuntimeError):
     """Scribe 호출 실패. permanent(4xx) 는 재시도 없이, transient 는 재시도 후 올라온다."""
+
+
+class ElevenLabsAuthError(ElevenLabsSTTError):
+    """키 거절(401·403) — E17(2026-08-24).
+
+    E11 은 '유료 백엔드를 골랐는데 자막이 비면 안 된다'는 이유로 모든 실패를 크게 냈다.
+    그 규율은 그대로 두고 **인증 거절만** 갈라 낸다: 만료·해지·차단은 재시도해도 안 낫고,
+    그 편은 통째로 못 나간다. 호출부(`pipeline.transcribe_chunks`)가 이 예외만 잡아
+    내장 전사로 **처음부터 다시** 돌린다 — 청크마다 백엔드가 다르면 한 편 안에서 자막
+    리듬이 갈린다(E13-0 실측: 같은 소재에서 cue 수가 898 vs 1468).
+    """
 
 
 # ── 사용량/비용 집계 (run_log 기록용) ────────────────────────────────────────
@@ -663,7 +677,8 @@ def _post_speech_to_text(
 ) -> dict:
     """multipart POST + 실패 분류.
 
-    permanent(401·403·4xx = 키/인자 오류) → 재시도 없이 즉시 실패.
+    permanent(4xx = 키/인자 오류) → 재시도 없이 즉시 실패. 그중 401·403 은
+    ElevenLabsAuthError 로 따로 올라간다(E17 — 호출부가 내장 전사로 내려가는 유일한 경우).
     transient(429·5xx·네트워크) → 2회 재시도(2s·4s) 후 실패.
     어느 쪽이든 **내장 전사로 조용히 넘어가지 않는다** — 사람이 일레븐랩스로 바꿨다고
     믿은 채 종전 전사로 발행되는 것이 이 기능에서 제일 나쁜 실패다. keyterms 거절도
@@ -700,6 +715,11 @@ def _post_speech_to_text(
                     f"급하면 ELEVENLABS_STT_KEYTERMS=off 로 끄고 돌릴 수 있지만, "
                     f"그러면 내장 Whisper 의 initial_prompt 와 비대칭 조건이 됩니다 "
                     f"(고유명사가 음차로 뭉개집니다).")
+            if resp.status_code in EL_STT_AUTH_STATUSES:
+                # E17: 토큰 만료·해지·차단 — 재시도 무의미. 호출부가 내장 전사로 내려간다.
+                raise ElevenLabsAuthError(
+                    f"ElevenLabs STT {resp.status_code}(인증 거절): {resp.text[:200]} — "
+                    f"ELEVENLABS_API_KEY 가 만료·해지·차단됐습니다.")
             last_err = ElevenLabsSTTError(
                 f"ElevenLabs STT {resp.status_code}: {resp.text[:300]}")
             if resp.status_code != 429 and resp.status_code < 500:

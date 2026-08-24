@@ -226,9 +226,38 @@ def test_video_speed_is_not_ai_openable(tmp_path):
 
 
 def test_design_rotate_range(tmp_path):
-    assert _valid(_plan(design={"title_rotate": -3}), tmp_path)[0]["design"]["title_rotate"] == -3.0
+    assert _valid(_plan(design={"tts_rotate": -3}), tmp_path)[0]["design"]["tts_rotate"] == -3.0
     with pytest.raises(sc.StylePlanError):
-        _valid(_plan(design={"title_rotate": 200}), tmp_path)
+        _valid(_plan(design={"tts_rotate": 200}), tmp_path)
+
+
+def test_ai_title_rotate_is_dropped_not_rejected(tmp_path):
+    """E17-1 — 제목 기울기는 AI 에게 닫혔다. 그 항목만 버리고 나머지 연출은 살린다.
+
+    통째 거절(모르는 키)로 두면 LLM 이 관성으로 하나 낼 때마다 그 편의 연출이 전부
+    사라진다. 사람·채널의 --design-title-rotate 는 이 규칙 밖이다.
+    """
+    assert "title_rotate" not in sc.STYLE_DESIGN_ALLOWED
+    assert "title_rotate" in sc.STYLE_DESIGN_DROPPED
+    out, notes = _valid(_plan(design={"title_rotate": -3, "title_box": "round"}), tmp_path)
+    assert "title_rotate" not in out["design"]
+    assert out["design"]["title_box"] == "round"
+    assert any("title_rotate" in n for n in notes)
+
+
+def test_ai_title_rotate_zero_is_dropped_quietly(tmp_path):
+    """0 은 화면이 같으니 로그를 어지럽히지 않는다(버리는 것은 같다)."""
+    out, notes = _valid(_plan(design={"title_rotate": 0, "title_bold": True}), tmp_path)
+    assert "title_rotate" not in out["design"]
+    assert not any("title_rotate" in n for n in notes)
+
+
+def test_prompt_tells_the_model_not_to_tilt_the_title():
+    """프롬프트도 같은 말을 해야 한다 — 검증기만 고치면 매 편 버려지는 항목을 계속 낸다."""
+    from app.modules.gemini_client import STYLE_COMPOSITION_PROMPT as P
+
+    assert "제목은 기울이지 않는다" in P
+    assert "title_rotate" not in P.split("[출력 형식")[1].split("[값 규칙")[0]  # 예시에서 사라졌다
 
 
 def test_hard_caps_truncate_and_report(tmp_path):

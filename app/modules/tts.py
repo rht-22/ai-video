@@ -54,6 +54,61 @@ EL_MODEL_ID = os.environ.get("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
 EL_OUTPUT_FORMAT = "mp3_44100_128"
 _EL_RETRIES = 2      # 첫 시도 제외 재시도 횟수 — 429(쿼터·동시성)·5xx·네트워크만
 
+# ── E17 (2026-08-24): 토큰이 만료되면 기본 백엔드로 내려간다 ─────────────────────
+# 사용자 지시("일레븐랩스 토큰이 만료되면 일레븐랩스 api 가 아니라 기본으로 사용").
+#
+# E11·E12 는 **모든** ElevenLabs 실패를 fail-loud 로 막았다 — 조용한 목소리 교체가
+# '고쳤는데 왜 그대로지'의 원인이었기 때문이다. 그 규율은 그대로 두고 **인증 거절
+# (401·403)만** 예외로 판다. 근거 둘:
+#   · 재시도해도 안 낫는다(만료·해지·차단). 남은 선택지는 '발행 중단' 아니면 '기본 목소리'다.
+#   · 6대 노드가 무인으로 도는 구조라, 키 하나가 만료되면 그날 전 채널이 통째로 멈춘다.
+# ⚠ 조용히 내려가지 않는다 — stdout 한 줄 + run_log `steps[resources].tts_backend`
+#    (+ `tts_fallback_reason`)에 남는다. 키를 갱신하면 다음 실행부터 그대로 복귀한다.
+# ⚠ **키가 아예 없는 것**은 여기 해당하지 않는다(종전대로 즉시 실패) — 설정 실수는
+#    사람이 고쳐야 하고, 만료와 달리 시작 전에 알 수 있다.
+_EL_AUTH_STATUSES = (401, 403)
+
+
+class ElevenLabsAuthExpired(RuntimeError):
+    """ElevenLabs 가 키를 거절했다(401·403) — 재시도 대상이 아니고 기본 백엔드로 내려간다."""
+
+
+# 이번 프로세스에서 ElevenLabs 를 껐는가(사유 한 줄). 한 번 꺼지면 남은 cue 는 전부
+# 기본 백엔드로 간다 — cue 마다 다시 찔러 봐야 같은 401 이고, 그 사이 한 편 안에서
+# 목소리가 갈린다.
+_el_auth_failed: str | None = None
+# 거절당한 **그 키**. 키가 바뀌면(운영 노드가 env 를 갈고 재시작하지 않는 서버 경로) 판정을
+# 새로 한다 — 갱신한 키가 프로세스 수명 내내 안 쓰이면 그것도 '고쳤는데 왜 그대로지'다.
+_el_auth_failed_key: str | None = None
+
+
+def elevenlabs_disabled() -> str | None:
+    """만료로 ElevenLabs 를 끈 사유(안 껐으면 None). 캐시·기록 판단용(부작용 없음)."""
+    if _el_auth_failed is None:
+        return None
+    if os.environ.get("ELEVENLABS_API_KEY") != _el_auth_failed_key:
+        return None
+    return _el_auth_failed
+
+
+def _disable_elevenlabs(reason: str) -> None:
+    global _el_auth_failed, _el_auth_failed_key
+    if elevenlabs_disabled() is None:
+        _el_auth_failed = reason
+        _el_auth_failed_key = os.environ.get("ELEVENLABS_API_KEY")
+        print(f"[TTS] ElevenLabs 인증 거절 — {reason}\n"
+              f"      이번 실행의 남은 내레이션은 기본 백엔드로 합성합니다"
+              f"(토큰을 갱신하면 다음 실행부터 다시 ElevenLabs 로 돌아갑니다).")
+
+
+def reset_elevenlabs_state() -> None:
+    """테스트·재실행용 — 만료 판정과 1회 공지 플래그를 되돌린다."""
+    global _el_auth_failed, _el_auth_failed_key, _backend_announced, _prefixed_announced
+    _el_auth_failed = None
+    _el_auth_failed_key = None
+    _backend_announced = False
+    _prefixed_announced = False
+
 
 # Voice 프리셋 라벨 → (Edge TTS voice id, pitch). **폴백 경로 전용**(키 없는 개발 환경).
 VOICE_PRESETS: dict[str, tuple[str, str]] = {
@@ -148,8 +203,11 @@ def active_backend() -> str:
     """이번 프로세스가 쓸 합성 백엔드 — run_log·체크포인트 기록용(부작용 없음).
 
     elevenlabs > edge-tts > silence(개발 환경 최후 폴백) 순. 검수함에서 어느
-    백엔드로 나간 판인지 추적할 수 있어야 한다(E11 — 조용한 대체 금지 원칙)."""
-    if os.environ.get("ELEVENLABS_API_KEY"):
+    백엔드로 나간 판인지 추적할 수 있어야 한다(E11 — 조용한 대체 금지 원칙).
+
+    E17: 키가 있어도 이번 실행에서 **거절당했으면**(401·403) elevenlabs 가 아니다 —
+    run_log 의 tts_backend 가 실제 합성한 백엔드를 가리켜야 폴백이 추적된다."""
+    if os.environ.get("ELEVENLABS_API_KEY") and elevenlabs_disabled() is None:
         return "elevenlabs"
     if _has_edge_tts():
         return "edge-tts"
@@ -165,7 +223,9 @@ def _announce_backend() -> str:
         if backend == "elevenlabs":
             print(f"[TTS] backend=elevenlabs model={EL_MODEL_ID}")
         elif backend == "edge-tts":
-            print("[TTS] backend=edge-tts — ELEVENLABS_API_KEY 없음")
+            _why = elevenlabs_disabled()
+            print("[TTS] backend=edge-tts — "
+                  + (f"ElevenLabs 토큰 거절({_why})" if _why else "ELEVENLABS_API_KEY 없음"))
         else:
             print("[TTS] backend=silence — ELEVENLABS_API_KEY·edge_tts 둘 다 없음(개발 폴백)")
         _backend_announced = True
@@ -206,14 +266,26 @@ def synthesize_tts(
     """
     # E12: 접두사가 붙은 목소리는 백엔드 선택을 건너뛴다 — 사람이 그 목소리를 고른 것이라
     # edge-tts 폴백은 답이 될 수 없다. 키가 없으면 여기서 실패한다(조용한 대체 금지).
+    # E17: 단, **토큰이 거절당한 경우**는 기본 목소리로 내려간다 — 그 계정의 voice_id 는
+    # 재현할 수 없으므로 DEFAULT_VOICE 로 간다(무엇이 어떻게 바뀌었는지 로그에 남는다).
     if is_elevenlabs_voice(voice):
         _require_elevenlabs_key(voice)
-        _announce_prefixed_voice()
-        return _synthesize_elevenlabs(text, Path(output_path), voice=voice, speed=speed)
+        if elevenlabs_disabled() is None:
+            _announce_prefixed_voice()
+            try:
+                return _synthesize_elevenlabs(text, Path(output_path), voice=voice, speed=speed)
+            except ElevenLabsAuthExpired:
+                pass                      # _disable_elevenlabs 가 사유를 이미 남겼다
+        print(f"  [TTS] 편집실 지정 목소리 {voice} → 기본 목소리 {DEFAULT_VOICE} 로 대체"
+              f"(ElevenLabs 토큰 만료)")
+        voice = DEFAULT_VOICE
 
     backend = _announce_backend()
     if backend == "elevenlabs":
-        return _synthesize_elevenlabs(text, Path(output_path), voice=voice, speed=speed)
+        try:
+            return _synthesize_elevenlabs(text, Path(output_path), voice=voice, speed=speed)
+        except ElevenLabsAuthExpired:
+            backend = active_backend()    # 만료 직후 재판정 — edge-tts(없으면 silence)
     if backend == "edge-tts":
         voice_id, pitch = VOICE_PRESETS[_resolve_label("voice", voice, VOICE_PRESETS, DEFAULT_VOICE)]
         rate = SPEED_TO_RATE[_resolve_label("speed", speed, SPEED_TO_RATE, DEFAULT_SPEED)]
@@ -299,7 +371,9 @@ def _synthesize_elevenlabs(
     voice_settings 는 stability/similarity 를 표준값으로 **명시**한다 — 보이스별
     저장 기본값에 기대면 premade 보이스가 교체·조정될 때 채널 톤이 소리 없이
     변한다. 실패 정책: 429·5xx·네트워크만 재시도(_EL_RETRIES회, 2s·4s), 그 외
-    4xx(키·voice_id·요청 오류)는 재시도해도 안 낫는다 — 즉시 실패."""
+    4xx(키·voice_id·요청 오류)는 재시도해도 안 낫는다 — 즉시 실패.
+    E17: 그중 **401·403 만** `ElevenLabsAuthExpired` 로 따로 올린다 — 호출부가
+    기본 백엔드로 내려가는 유일한 경우다(그 외 실패는 종전대로 크게 실패한다)."""
     import requests
 
     # E12: 접두사면 편집실이 고른 voice_id 그대로, 아니면 종전 라벨 매핑(E11 계약).
@@ -329,6 +403,12 @@ def _synthesize_elevenlabs(
             if resp.status_code == 200:
                 output_path.write_bytes(resp.content)
                 return output_path
+            if resp.status_code in _EL_AUTH_STATUSES:
+                # E17: 키 만료·해지·차단 — 재시도해도 안 낫고, 이번 실행은 기본 백엔드로 간다.
+                _disable_elevenlabs(
+                    f"HTTP {resp.status_code} {resp.text[:160]}")
+                raise ElevenLabsAuthExpired(
+                    f"ElevenLabs {resp.status_code}: {resp.text[:200]}")
             last_err = RuntimeError(f"ElevenLabs {resp.status_code}: {resp.text[:200]}")
             if resp.status_code != 429 and resp.status_code < 500:
                 break                              # 4xx — 재시도 무의미, 즉시 실패

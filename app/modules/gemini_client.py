@@ -1216,7 +1216,9 @@ STYLE_COMPOSITION_PROMPT = """너는 한국어 쇼츠의 **연출 감독**이다
    **그 밖의 시간은 제목이 사라진다**. '중반부터 제목을 걷어내 화면을 비운다'가 이 기능의 절반이다.
    창끼리 겹치면 안 된다. 안 쓸 거면 배열을 비워라(그러면 제목이 처음부터 끝까지 나온다).
 5) tts — 이미 정해진 내레이션의 **목소리·속도만** 장면 톤에 맞게 바꾼다. 문구는 못 바꾼다.
-6) design — 이 편 전체에 걸리는 것. 제목 기울임(title_rotate)·제목 배경 박스 정도만.
+6) design — 이 편 전체에 걸리는 것. 제목 배경 박스·굵게 정도만.
+   ⚠ **제목은 기울이지 않는다**(title_rotate 금지 — 내도 버려진다). 제목 각도는 채널 정체성이라
+     사람이 정한다. 내레이션 자막 기울기(tts_rotate)만 필요할 때 쓴다.
 
 [출력 형식 — 이 JSON 만, 설명 금지]
 {{
@@ -1239,7 +1241,7 @@ STYLE_COMPOSITION_PROMPT = """너는 한국어 쇼츠의 **연출 감독**이다
   "tts": [
     {{"source_time_sec": 743.0, "voice": "ko_male_low", "speed": "slow", "reason": "한 줄"}}
   ],
-  "design": {{"title_rotate": -3.0}},
+  "design": {{"title_box": "round", "title_box_color": "#000000"}},
   "notes": "이 편의 연출 컨셉 한 줄"
 }}
 
@@ -1250,7 +1252,7 @@ STYLE_COMPOSITION_PROMPT = """너는 한국어 쇼츠의 **연출 감독**이다
 - images: x,y 는 좌상단, w 는 가로 비율(0~1) · layer 0=자막 아래, 1=자막 위
 - tts.voice: {voices}
 - tts.speed: {speeds}
-- design: {design_keys} (기울기는 -180~180, 박스는 none|round|rect)
+- design: {design_keys} (기울기는 -180~180, 박스는 none|round|rect) — **title_rotate 는 없다**
 - 상한: 효과 텍스트 {max_texts}개 · 스티커 {max_images}개 · 자막 강조 {max_subs}개 · 제목 창 {max_titles}개
 
 [작품] {work_title}

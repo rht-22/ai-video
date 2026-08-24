@@ -60,10 +60,21 @@ SUBTITLE_SIZE_RANGE = (30.0, 140.0)
 #    클램프 앞으로 옮겨야 하는데, 그러면 앵커 좌표의 기준인 최종 클립이 아직 없다.
 #    → 배속은 채널 플래그로 남긴다.
 STYLE_DESIGN_ALLOWED = (
-    "title_rotate", "tts_rotate",
+    "tts_rotate",
     "title_box", "title_box2", "title_box_color", "title_box_color2",
     "title_bold", "title_bold2",
 )
+
+# ── AI 가 내도 버리는 디자인 키 (E17-1, 2026-08-24) ─────────────────────────
+# 사용자 지시("제목은 왠만하면 회전은 안되게"). 제목 기울기는 E15 가 AI 에게 열어 둔
+# 키였는데, 실제 산출에서 거의 매 편 -3~8° 가 붙어 채널 제목이 편마다 삐뚤어졌다.
+#
+# **없는 키로 만들지 않고 '버리는 키'로 둔 이유**: STYLE_DESIGN_ALLOWED 에서 빼기만
+# 하면 모르는 키 검사에 걸려 **플랜 전체가 거절**된다(연출이 통째로 사라진다). 프롬프트
+# 에서 지워도 LLM 은 관성으로 낸다 — 그 항목만 버리고 나머지 연출은 살린다.
+# 사람·채널의 `--design-title-rotate` 는 그대로다(사람이 보고 정한 값은 사람 것이다).
+# 다시 열려면 이 튜플을 비우고 STYLE_DESIGN_ALLOWED 에 이름을 되돌리면 된다.
+STYLE_DESIGN_DROPPED = ("title_rotate",)
 TITLE_BOX_KINDS = ("none", "round", "rect")
 ROTATE_RANGE_DEG = 180.0
 
@@ -323,6 +334,14 @@ def validate_plan(
     if design:
         if not isinstance(design, dict):
             raise StylePlanError("design 은 객체여야 합니다")
+        design = dict(design)
+        for _k in STYLE_DESIGN_DROPPED:
+            if _k in design:
+                _v = design.pop(_k)
+                # 0 은 '회전 없음'이라 버려도 화면이 같다 — 로그를 어지럽히지 않는다.
+                if _v not in (0, 0.0):
+                    notes.append(f"design.{_k}={_v} 는 AI 에게 닫힌 키라 버림 "
+                                 f"(제목 기울기는 사람·채널만 정한다)")
         bad = [k for k in design if k not in STYLE_DESIGN_ALLOWED]
         if bad:
             raise StylePlanError(
