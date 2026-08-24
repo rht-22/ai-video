@@ -182,6 +182,37 @@ def _duration(path: Path) -> float:
          "-of", "default=nw=1:nk=1", str(path)], capture_output=True, text=True).stdout.strip())
 
 
+def _video_duration(path: Path) -> float:
+    """비디오 **스트림** 길이(컨테이너 길이가 아니라). 오디오 꼬리 판별용 — 실패하면 0.0."""
+    try:
+        return float(subprocess.run(
+            [find_ffmpeg_command("ffprobe"), "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=duration", "-of", "default=nw=1:nk=1", str(path)],
+            capture_output=True, text=True).stdout.strip())
+    except (OSError, ValueError):
+        return 0.0
+
+
+def cut_mismatch_hint(d_ko: float, d_ja: float, d_ja_video: float,
+                      tol: float = CUT_TOLERANCE_SEC) -> str:
+    """길이 불일치의 **원인 갈래**를 문장으로. 순수(테스트 대상).
+
+    두 원인은 조치가 완전히 다르다:
+    · 오디오 꼬리 — 비디오 스트림은 ko 와 같은데 컨테이너만 길다. 렌더가
+      `amix=duration=longest` 에 `-shortest` 없이 섞어서, 창을 넘긴 내레이션이 그대로
+      출력 길이를 늘린 것이다(L3t 가 창 밖 cue 를 잘라 막는다).
+    · 컷 재현 실패 — 비디오 스트림 자체가 다르다. gen_flags(A/B 노브)가 원 생성과
+      달라 클립 경계가 바뀐 것이다.
+    종전에는 둘 다 'gen_flags 재현 실패 의심'으로 뭉뚱그려서, 오디오가 원인일 때
+    엉뚱한 곳(노브·소스)을 뒤지게 했다."""
+    if d_ja_video > 0 and abs(d_ko - d_ja_video) <= tol:
+        return (f"비디오 스트림은 {d_ja_video:.3f}s 로 ko 와 일치한다 — **오디오 꼬리**다"
+                f"(창을 넘긴 내레이션 cue 가 출력을 늘렸다). L3t 의 '창 길이로 잘랐다' "
+                f"경고를 확인하라")
+    return (f"비디오 스트림도 {d_ja_video:.3f}s 로 다르다 — gen_flags 재현 실패 의심"
+            if d_ja_video > 0 else "gen_flags 재현 실패 의심")
+
+
 def l4_render(job: Path, wcfg: dict, locale_cfg: dict, out_dir: Path):
     _provision_fonts(locale_cfg)
     run_log = json.loads((job / "run_log.json").read_text(encoding="utf-8"))
@@ -237,7 +268,8 @@ def l4_render(job: Path, wcfg: dict, locale_cfg: dict, out_dir: Path):
     d_ko, d_ja = _duration(job / "shorts_ko.mp4"), _duration(rendered)
     if abs(d_ko - d_ja) > CUT_TOLERANCE_SEC:
         raise RuntimeError(
-            f"컷 길이 불일치: ko {d_ko:.3f}s vs ja {d_ja:.3f}s — gen_flags 재현 실패 의심")
+            f"컷 길이 불일치: ko {d_ko:.3f}s vs ja {d_ja:.3f}s — "
+            + cut_mismatch_hint(d_ko, d_ja, _video_duration(rendered)))
     print(f"[L4] 재렌더 완료 {time.time()-t0:.0f}s (길이 {d_ja:.3f}s = 원본 일치)")
 
     # 텔롭 병기 번인 (오디오 무손실 copy)
