@@ -249,6 +249,64 @@ def band_from_ratios(ratios: list[float], *,
     return max(ok, key=lambda r: r[1]) if ok else None
 
 
+# ── 구간별 판정 (E18-2, 2026-08-24) ─────────────────────────────────────────
+# 위 `band_from_ratios` 는 **편 전체 표본**에서 절반 이상 걸리는 행만 띠로 본다. 편 내내
+# 같은 자리에 있는 번인 대사 자막에는 맞지만 **몇 초씩만 뜨는 방송 텔롭은 못 잡는다** —
+# 2026-08-24 실측: SHOTCONE 혜미리예채파 2화는 E17 포함 sha 로 돌았는데 run_log 에
+# `subtitle_avoid_burned` 단계가 아예 없다(= 미검출). 화면에는 한국어 텔롭이 뚜렷했다.
+#
+# 그래서 표본을 **시각과 함께** 모아 두고, 자막 줄마다 **그 줄이 떠 있는 창 안에서만**
+# 다시 판정한다. 창이 짧으면 표본도 적으므로 임계는 같은 비율(절반)을 쓰되 최소 표본
+# 수를 따로 둔다.
+#
+# ⚠ 이 판정은 **전역 판정을 대체하지 않는다.** 전역 띠로 정한 margin 은 그대로 두고,
+#   창별로 더 올려야 하는 줄만 추가로 올린다(단조 개선) — 어떤 줄도 오늘보다 덜
+#   올라가지 않으므로, 이미 승인된 화면이 아래로 내려가는 일이 없다.
+TIMELINE_FPS = 2.0            # 구간별 표본 밀도(초당 프레임)
+MAX_TIMELINE_FRAMES = 240     # 편당 상한 — 넘치면 fps 를 낮춘다(긴 편에서 비용 폭주 방지)
+WINDOW_MIN_FRAMES = 2         # 창 하나를 판정하는 최소 표본. 1장이면 그 장면의 무늬가 자막이 된다
+
+
+def glyph_row_indices(frame: bytes, width: int, height: int) -> list[int]:
+    """프레임 → '글자 행'인 행 번호들. `row_edge_counts` 와 같은 기준. 순수.
+
+    체크포인트에 남기는 표현이라 프레임 바이트가 아니라 **행 번호 목록**으로 줄인다
+    (270행 중 보통 10~30개 — 재개할 때 다시 디코드하지 않아도 창별 재판정이 된다)."""
+    need = max(1, int(round(width * MIN_EDGE_RATIO)))
+    return [y for y, c in enumerate(row_edge_counts(frame, width, height)) if c >= need]
+
+
+def ratios_in_window(profiles: list, t0: float, t1: float, *,
+                     probe_h: int = PROBE_H,
+                     min_frames: int = WINDOW_MIN_FRAMES) -> list[float] | None:
+    """`[(시각, 글자행 목록)]` 중 [t0, t1] 안의 것만으로 행별 검출률. 표본이 모자라면 None.
+
+    순수 — 프레임 바이트가 없어도(체크포인트 재개) 창별 재판정이 된다."""
+    rows_lists = [rows for t, rows in profiles or [] if t0 <= float(t) <= t1]
+    if len(rows_lists) < max(1, int(min_frames)):
+        return None
+    hits = [0] * probe_h
+    for rows in rows_lists:
+        for y in rows:
+            if 0 <= int(y) < probe_h:
+                hits[int(y)] += 1
+    return [h / len(rows_lists) for h in hits]
+
+
+def band_in_window(profiles: list, t0: float, t1: float, geom: BandGeometry, *,
+                   probe_h: int = PROBE_H,
+                   min_frames: int = WINDOW_MIN_FRAMES) -> tuple[int, int] | None:
+    """그 시간창에서만 본 원본 자막 띠 → 캔버스 y (top, bottom). 없으면 None. 순수."""
+    ratios = ratios_in_window(profiles, t0, t1, probe_h=probe_h, min_frames=min_frames)
+    if ratios is None:
+        return None
+    rows = band_from_ratios(ratios)
+    if rows is None:
+        return None
+    px_per_row = geom.scaled_h / float(probe_h)
+    return (int(geom.top + rows[0] * px_per_row), int(geom.top + rows[1] * px_per_row))
+
+
 def avoid_margin_v(margin_v: int, *,
                    canvas_height: int,
                    burned_top: int,
@@ -401,3 +459,131 @@ def detect_burned_band(video_path: Path, clips: list, design: Any, *,
         "probe_rows": [top_row, bottom_row],
         "hit_ratio": round(max(ratios[top_row:bottom_row] or [0.0]), 3),
     }
+
+
+def sample_timeline_frames(video_path: Path, clip, geom: BandGeometry, *,
+                           crop_path: Path | None = None,
+                           fps: float = TIMELINE_FPS,
+                           probe_w: int = PROBE_W, probe_h: int = PROBE_H,
+                           timeout_sec: float = 180.0) -> list[tuple[float, bytes]]:
+    """클립 하나를 **일정 간격**으로 훑어 (클립 내 상대 시각, 프레임) 목록을 준다.
+
+    `sample_band_frames` 와 필터 체인·좌표계가 같다(렌더와 같은 체인) — 다른 것은
+    '몇 장'이 아니라 '초당 몇 장'이라는 점뿐이다. 상대 시각은 호출부가 클립 base 를
+    더해 편집본 절대 시각으로 만든다."""
+    start = float(getattr(clip, "start_sec", 0.0))
+    end = float(getattr(clip, "end_sec", start))
+    dur = max(0.1, end - start)
+    rate = max(0.1, float(fps))
+    vf = (f"fps={rate:.4f},{_crop_filter_for(crop_path)}"
+          f"scale={geom.scaled_w}:{geom.scaled_h}:force_original_aspect_ratio=increase,"
+          f"setsar=1,crop={geom.scaled_w}:{geom.scaled_h},"
+          f"scale={probe_w}:{probe_h},format=gray")
+    cmd = [find_ffmpeg_command("ffmpeg"), "-v", "error", "-nostdin",
+           "-ss", f"{start}", "-to", f"{end}", "-i", str(video_path),
+           "-an", "-sn", "-dn", "-vf", vf, "-f", "rawvideo", "-pix_fmt", "gray", "-"]
+    proc = subprocess.run(cmd, capture_output=True, timeout=timeout_sec)
+    raw = proc.stdout or b""
+    size = probe_w * probe_h
+    out: list[tuple[float, bytes]] = []
+    for i in range(0, len(raw) - size + 1, size):
+        # fps 필터의 n 번째 프레임은 n/rate 초 — 렌더가 쓰는 것과 같은 클립 내 좌표다.
+        out.append((len(out) / rate, raw[i:i + size]))
+    return out
+
+
+def detect_burned_profiles(video_path: Path, clips: list, design: Any, *,
+                           crop_map: dict | None = None,
+                           canvas_width: int = 1080, canvas_height: int = 1920,
+                           fps: float = TIMELINE_FPS,
+                           max_frames: int = MAX_TIMELINE_FRAMES,
+                           sampler=None) -> list[list]:
+    """편집본 타임라인 전체의 `[[시각, 글자행 목록], …]`. 실패는 빈 목록.
+
+    ⚠ 전역 판정(`detect_burned_band`)의 표본과 **따로** 뜬다. 전역 쪽 표본 구성을
+    건드리면 이미 승인된 채널의 자막 위치가 움직인다(E17-2 는 기본이 켜짐이라 전
+    채널이 그 값을 쓰고 있다). 비용은 늘지만 회귀 0 이 먼저다.
+
+    시각은 **편집본 절대초**(클립 base 누적 + 클립 내 상대초)다 — 자막 세그먼트와 같은
+    좌표계라야 창을 맞댈 수 있다.
+    """
+    if not clips:
+        return []
+    geom = band_geometry(design, canvas_width=canvas_width, canvas_height=canvas_height)
+    if geom.scaled_h <= 0:
+        return []
+    total = sum(max(0.0, float(getattr(c, "end_sec", 0.0)) - float(getattr(c, "start_sec", 0.0)))
+                for c in clips)
+    rate = float(fps)
+    if total > 0 and total * rate > max_frames:      # 긴 편에서 비용이 폭주하지 않게
+        rate = max(0.5, max_frames / total)
+    out: list[list] = []
+    base = 0.0
+    for i, clip in enumerate(clips):
+        dur = max(0.0, float(getattr(clip, "end_sec", 0.0)) - float(getattr(clip, "start_sec", 0.0)))
+        crop_path = crop_map.get(f"{getattr(clip, 'role', '')}_{i}") if crop_map else None
+        try:
+            got = (sampler(clip, crop_path, rate) if sampler else
+                   sample_timeline_frames(Path(video_path), clip, geom,
+                                          crop_path=crop_path, fps=rate))
+        except Exception as e:                       # 안전장치는 본편을 막지 않는다
+            print(f"  [SubtitleAvoid] 구간 표본 실패(clip {i}: {e}) — 이 클립은 건너뜁니다")
+            base += dur
+            continue
+        for rel, frame in got:
+            out.append([round(base + float(rel), 3),
+                        glyph_row_indices(frame, PROBE_W, PROBE_H)])
+        base += dur
+    return out
+
+
+def per_cue_margins(cues: list, profiles: list, geom: BandGeometry, *,
+                    base_margin_v: int,
+                    canvas_height: int,
+                    subtitle_height: int,
+                    title_bottom: int,
+                    gap: int = GAP_PX,
+                    min_frames: int = WINDOW_MIN_FRAMES) -> tuple[list[int | None], list[str]]:
+    """자막 줄마다 '그 줄이 떠 있는 동안'의 원본 자막을 피한 margin_v. 순수.
+
+    `cues`: start_sec/end_sec 를 가진 것들(편집본 절대초 — profiles 와 같은 좌표계).
+    반환: (줄별 margin 또는 None, 메모). None = 전역 margin 그대로 쓰라는 뜻이다.
+
+    **단조 개선 규율**: 전역 margin(`base_margin_v`)보다 **더 올려야 할 때만** 값을 준다.
+    창 판정이 전역보다 낮은 자리를 가리켜도 내리지 않는다 — 이미 승인된 화면이 아래로
+    내려가면 안 되고, 전역 띠는 편 내내 있는 것이라 창에서 안 잡혀도 여전히 거기 있다.
+    """
+    margins: list[int | None] = []
+    notes: list[str] = []
+    moved = 0
+    if not profiles:
+        return [None] * len(cues or []), notes
+    for cue in cues or []:
+        try:
+            t0, t1 = float(getattr(cue, "start_sec")), float(getattr(cue, "end_sec"))
+        except (TypeError, ValueError):
+            margins.append(None)
+            continue
+        rows = band_in_window(profiles, t0, t1, geom, min_frames=min_frames)
+        if rows is None:
+            margins.append(None)
+            continue
+        new_margin, _ = avoid_margin_v(
+            int(base_margin_v), canvas_height=canvas_height,
+            burned_top=rows[0], burned_bottom=rows[1],
+            subtitle_height=subtitle_height, title_bottom=title_bottom,
+            band_top=geom.top, gap=gap)
+        if int(new_margin) > int(base_margin_v):
+            margins.append(int(new_margin))
+            moved += 1
+            if len(notes) < 8:                     # 건별 기록, 다만 stdout 을 덮지 않게
+                notes.append(
+                    f"[SubtitleAvoid/구간] {t0:.2f}~{t1:.2f}초 — 그때만 뜬 원본 자막 "
+                    f"y={rows[0]}~{rows[1]} 회피 (margin_v {base_margin_v} → {new_margin})")
+        else:
+            margins.append(None)
+    if moved > len(notes):
+        notes.append(f"[SubtitleAvoid/구간] … 외 {moved - len(notes)}줄 더 이동")
+    if moved:
+        notes.append(f"[SubtitleAvoid/구간] 총 {moved}/{len(margins)}줄을 구간별로 더 올렸습니다")
+    return margins, notes

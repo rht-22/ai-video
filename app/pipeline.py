@@ -1499,6 +1499,11 @@ def _compute_tts_margin_v(
 #     실행마다 달라진다(E15 체크포인트 규약과 같은 이유).
 #   · 클립이 바뀌면(구간 재편집) 캐시는 무효다 — 표본을 뜬 화면 자체가 다른 화면이다.
 #   · 실패는 전부 '아무것도 안 함'이다. 이건 연출이 아니라 안전장치라 본편을 막지 않는다.
+# 구간별 표본 `[[편집본 시각, 글자행 목록], …]` — 검출 한 번, variant 까지 공유한다.
+# (전역 띠와 같은 체크포인트 파일에 남아 `--from-step render` 재개에서도 유지된다.)
+_BURNED_PROFILES: list[list] = []
+
+
 def _burned_band_signature(clips: list) -> str:
     """표본을 뜬 클립 구성 지문 — 구간이 바뀌면 캐시를 버린다."""
     raw = ";".join(f"{float(getattr(c, 'start_sec', 0.0)):.3f}-{float(getattr(c, 'end_sec', 0.0)):.3f}"
@@ -1514,6 +1519,9 @@ def _detect_burned_band_cached(
     output_dir: Path,
 ) -> dict[str, Any] | None:
     """원본 자막 띠(캔버스 y) — 없으면 None. 캐시 우선, 검출은 실행당 한 번."""
+    # ⚠ 모듈 수준 저장소라 한 프로세스에서 여러 편을 돌리면 앞 편 표본이 남는다 —
+    #   앞 편의 원본 자막 자리로 이 편 자막을 올리면 조용히 틀린다. 시작에서 비운다.
+    _BURNED_PROFILES[:] = []
     mode = str(getattr(payload.design, "subtitle_avoid_burned", "auto") or "auto").lower()
     if mode != "auto":
         return None
@@ -1524,8 +1532,11 @@ def _detect_burned_band_cached(
             data = json.loads(cache.read_text(encoding="utf-8"))
             if data.get("clips_signature") == sig:
                 band = data.get("band")
+                _BURNED_PROFILES[:] = list(data.get("profiles") or [])
                 if band:
                     print(f"  [SubtitleAvoid] 검출 결과 재사용: y={band['top']}~{band['bottom']}")
+                if _BURNED_PROFILES:
+                    print(f"  [SubtitleAvoid] 구간별 표본 재사용: {len(_BURNED_PROFILES)}프레임")
                 return band
         except (OSError, ValueError, KeyError):
             pass
@@ -1540,9 +1551,23 @@ def _detect_burned_band_cached(
     except Exception as e:                       # 검출은 본편을 막지 않는다
         print(f"  [SubtitleAvoid] 검출 실패({e}) — 자막 위치는 종전 그대로입니다")
         return None
+    # E18-2 — 구간별 재판정용 표본. 전역 판정과 **따로** 뜬다(전역 표본 구성을 건드리면
+    # 이미 승인된 채널의 자막이 움직인다). 실패는 빈 목록 = 구간 보정 없음.
     try:
-        cache.write_text(json.dumps({"clips_signature": sig, "band": band},
-                                    ensure_ascii=False, indent=2), encoding="utf-8")
+        from app.modules.subtitle_region import detect_burned_profiles
+
+        _BURNED_PROFILES[:] = detect_burned_profiles(
+            Path(payload.video_path), clips, payload.design, crop_map=crop_map,
+            canvas_width=config.canvas_width, canvas_height=config.canvas_height)
+        if _BURNED_PROFILES:
+            print(f"  [SubtitleAvoid] 구간별 표본 {len(_BURNED_PROFILES)}프레임 수집")
+    except Exception as e:
+        print(f"  [SubtitleAvoid] 구간별 표본 실패({e}) — 구간 보정 없이 진행합니다")
+        _BURNED_PROFILES[:] = []
+    try:
+        cache.write_text(json.dumps({"clips_signature": sig, "band": band,
+                                     "profiles": _BURNED_PROFILES},
+                                    ensure_ascii=False), encoding="utf-8")
     except OSError:
         pass
     if band:
@@ -1586,6 +1611,57 @@ def _avoid_burned_margin_v(
     for n in notes:
         print(f"  {label}{n}")
     return int(new_margin)
+
+
+def _avoid_burned_windowed(
+    segments: list,
+    base_margin_v: int,
+    *,
+    design: DesignConfig,
+    config,
+    title_text: str,
+    font_size: int,
+    label: str = "",
+) -> list:
+    """구간별 원본 자막 회피 — 줄마다 필요한 만큼만 더 올린 **사본**을 돌려준다 (E18-2).
+
+    E17-2 의 전역 판정은 '표본 프레임의 절반 이상에서 걸리는 행'만 띠로 봐서 **몇 초씩만
+    뜨는 방송 텔롭을 못 잡는다**(2026-08-24 실측: 한국어 텔롭이 뚜렷한 편의 run_log 에
+    `subtitle_avoid_burned` 단계가 아예 없었다). 여기서는 자막 줄이 떠 있는 **그 창 안의**
+    표본만으로 다시 판정한다.
+
+    ⚠ 결과는 줄 단위 스타일 `style["y"]` 로 얹는다 — 편집실(v3)이 쓰는 것과 **같은 통로**라
+      ASS 조립부를 새로 만들지 않는다. 사람이 y 를 정한 줄은 **건드리지 않는다**(사람이 이긴다).
+    ⚠ `final_segments` 자체는 바꾸지 않는다(사본만) — `subtitle_segments.json` 이 움직이면
+      편집실이 보는 자료와 오케스트레이터 왕복이 달라진다.
+    """
+    if not segments or not _BURNED_PROFILES:
+        return list(segments or [])
+    from app.modules import subtitle_region as _sr
+
+    geom = _sr.band_geometry(design, canvas_width=config.canvas_width,
+                             canvas_height=config.canvas_height)
+    margins, notes = _sr.per_cue_margins(
+        segments, _BURNED_PROFILES, geom,
+        base_margin_v=int(base_margin_v),
+        canvas_height=config.canvas_height,
+        subtitle_height=_sr.estimate_subtitle_height(font_size),
+        title_bottom=_sr.estimate_title_bottom(
+            design, geom, line_count=_sr.estimate_title_line_count(title_text)))
+    for n in notes:
+        print(f"  {label}{n}")
+    out = []
+    for seg, m in zip(segments, margins):
+        style = getattr(seg, "style", None)
+        if m is None or (isinstance(style, dict) and style.get("y") is not None):
+            out.append(seg)                       # 보정 불필요 · 사람이 정한 줄은 그대로
+            continue
+        ns = SimpleNamespace(**vars(seg))
+        merged = dict(style) if isinstance(style, dict) else {}
+        merged["y"] = round((config.canvas_height - int(m)) / float(config.canvas_height), 5)
+        ns.style = merged
+        out.append(ns)
+    return out
 
 
 def _scale_segments_for_speed(segments: list, speed: float) -> list:
@@ -4402,13 +4478,22 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
             # E7-2: 대사 자막도 출력 시각(×1/S)으로 사본만 변환해 ASS 를 만든다 —
             # segments_cache(소스 편집 타임라인, 편집실 원료)는 그대로 둔다.
-            build_ass_from_segments(_scale_segments_for_speed(final_segments, _speed),
+            # E18-2: 전역 띠로 정한 margin 위에, 줄마다 그 순간의 원본 자막을 다시 피한다.
+            # 사본만 만든다 — final_segments·subtitle_segments.json 은 안 움직인다.
+            _segs_for_ass = _avoid_burned_windowed(
+                final_segments, _sub_margin_v, design=payload.design, config=config,
+                title_text=title_text, font_size=sub_style.font_size, label="[대사] ")
+            build_ass_from_segments(_scale_segments_for_speed(_segs_for_ass, _speed),
                                     subtitle_path, sub_style, tts_time_ranges=tts_time_ranges)
             print(f"  [OK] 자막 파일 생성 완료: {subtitle_path}")
 
             tts_subtitle_path = output_dir / "tts_subtitles.ass"
             if tts_line_segs and tts_line_style:
-                build_tts_ass(tts_line_segs, tts_subtitle_path, tts_line_style,
+                build_tts_ass(_avoid_burned_windowed(
+                                  tts_line_segs, _tts_margin_v, design=payload.design,
+                                  config=config, title_text=title_text,
+                                  font_size=tts_line_style.font_size, label="[TTS] "),
+                              tts_subtitle_path, tts_line_style,
                               rotate_deg=getattr(payload.design, "tts_rotate", 0.0))
                 print(f"  [OK] TTS 자막 파일 생성 완료: {tts_subtitle_path}")
             else:
@@ -4456,7 +4541,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     margin_v=_tts_margin_v,
                 )
                 tts_subtitle_path = output_dir / "tts_subtitles.ass"
-                build_tts_ass(tts_line_segs, tts_subtitle_path, tts_line_style,
+                build_tts_ass(_avoid_burned_windowed(
+                                  tts_line_segs, _tts_margin_v, design=payload.design,
+                                  config=config, title_text=title_text,
+                                  font_size=tts_line_style.font_size, label="[TTS] "),
+                              tts_subtitle_path, tts_line_style,
                               rotate_deg=getattr(payload.design, "tts_rotate", 0.0))
                 print(f"  [OK] TTS 자막 파일 생성 완료 (대사자막 0건): {tts_subtitle_path}")
             else:
@@ -4708,6 +4797,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     sub_style = replace(sub_style, margin_v=_var_margin_v2)
                 var_tts_ranges = [(s.start_sec, s.end_sec) for s in var_tts_segs] if var_tts_segs else None
                 # E7-2: 대사 자막도 출력 시각(×1/S) 사본으로 ASS 생성 (정본과 동일)
+                var_final_segs = _avoid_burned_windowed(
+                    var_final_segs, _var_margin_v, design=payload.design, config=config,
+                    title_text=title_text, font_size=sub_style.font_size, label="[대사] ")
                 build_ass_from_segments(_scale_segments_for_speed(var_final_segs, _speed),
                                         var_sub_path, sub_style, tts_time_ranges=var_tts_ranges)
 
@@ -4729,6 +4821,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
                 var_tts_sub_final = None
                 if var_tts_segs and var_tts_line_style:
+                    var_tts_segs = _avoid_burned_windowed(
+                        var_tts_segs, _var_tts_margin_v, design=payload.design, config=config,
+                        title_text=title_text, font_size=var_tts_line_style.font_size,
+                        label="[TTS] ")
                     build_tts_ass(var_tts_segs, var_tts_sub_path, var_tts_line_style,
                                   rotate_deg=getattr(payload.design, "tts_rotate", 0.0))
                     var_tts_sub_final = var_tts_sub_path

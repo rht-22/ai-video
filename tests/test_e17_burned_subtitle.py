@@ -307,9 +307,14 @@ def test_pipeline_applies_avoidance_to_variants_too():
 
     대사 자막·TTS 자막 둘 다 정본(자막 있음 분기 + TTS 는 대사자막 0건 분기도)·variant 를
     합쳐 부른다: 정의 1 + [정본 대사 1 · 정본 TTS(자막 있음 분기) 1 ·
-    정본 TTS(대사자막 0건 분기) 1] + [variant 대사 1 · variant TTS 1] = 6."""
+    정본 TTS(대사자막 0건 분기) 1] + [variant 대사 1 · variant TTS 1] = 6.
+
+    E18-2 의 구간별 보정(`_avoid_burned_windowed`)은 **같은 자리마다 한 번 더** 붙는다.
+    다만 '대사 자막 0건' 분기에는 붙일 세그먼트가 없어 대사 쪽이 하나 적다:
+    정의 1 + [정본 대사 1 · 정본 TTS 2 · variant 대사 1 · variant TTS 1] = 6."""
     src = (Path(__file__).resolve().parents[1] / "app" / "pipeline.py").read_text(encoding="utf-8")
     assert src.count("_avoid_burned_margin_v(") == 6
-    assert src.count('label="[TTS] "') == 3
-    assert src.count('label="[대사] "') == 2
+    assert src.count("_avoid_burned_windowed(") == 6
+    assert src.count('label="[TTS] "') == 6      # 전역 3 + 구간 3
+    assert src.count('label="[대사] "') == 4     # 전역 2 + 구간 2
     assert "_burned_band = _detect_burned_band_cached(" in src

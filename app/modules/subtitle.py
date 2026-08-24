@@ -474,13 +474,23 @@ def build_tts_ass(
         if not text:
             continue
         joined = _wrap_for_ass(text, max_chars=15, max_lines=2)
+        # 줄별 세로 위치(E18-2 구간별 원본 자막 회피) — seg.style["y"] 가 있으면 그 줄만
+        # 이벤트 MarginV 로 올린다. 없으면 필드를 비워 종전과 **바이트 동일**이다.
+        # 대사 자막의 `_line_style_overrides` 와 같은 규약(y = 자막 하단, 하단=1).
+        eff_margin, margin_field = margin_v, ""
+        _y = (getattr(seg, "style", None) or {}).get("y") if isinstance(
+            getattr(seg, "style", None), dict) else None
+        if _y is not None:
+            eff_margin = max(1, int(round((1.0 - min(max(float(_y), 0.0), 1.0)) * ASS_PLAY_RES_Y)))
+            margin_field = str(eff_margin)
         tag = ""
         if float(rotate_deg) != 0.0:
             n_lines = joined.count("\\N") + 1
             blk_h = n_lines * style.font_size * _ASS_LINE_HEIGHT_FACTOR
-            org_y = int(round(ASS_PLAY_RES_Y - margin_v - blk_h / 2))
+            org_y = int(round(ASS_PLAY_RES_Y - eff_margin - blk_h / 2))
             tag = f"{{\\frz{-float(rotate_deg):g}\\org({ASS_PLAY_RES_X // 2},{org_y})}}"
-        events += f"Dialogue: 0,{_format_time(seg.start_sec)},{_format_time(seg.end_sec)},Default,,,,,, {tag}{joined}\n"
+        events += (f"Dialogue: 0,{_format_time(seg.start_sec)},{_format_time(seg.end_sec)},"
+                   f"Default,,,,{margin_field},, {tag}{joined}\n")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes((header + events).encode("utf-8-sig"))
 
