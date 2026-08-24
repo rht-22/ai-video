@@ -137,7 +137,15 @@ TEXT_KEYS = ("text", "source_time_sec", "duration_sec", "x", "y", "size", "color
              "stroke", "fx", "rotate", "font")
 TEXT_STROKES = ("dark", "none", "white")     # 테두리: 어둡게(기본)/없음/흰색
 TEXT_FX = ("none", "pop", "shake")           # 등장 효과: 없음(기본)/튀어나옴/흔들림
-TEXT_FONTS = ("Jalnan", "JalnanGothic", "mulmaru", "Griun")   # 번들 폰트 파일 stem
+# 번들 폰트 파일 stem + 현지화 폰트.
+# ⚠ `ArialUnicode` 는 **레포에 없다** — macOS 시스템 폰트라 재배포 라이선스 문제로 못 넣고,
+# 현지화(vlp `_provision_fonts` / app.localize)가 잡 시작 때 이 디렉토리로 복사한다.
+# 여기 허용값에 있어야 하는 이유(E16, 2026-08-24): JP 재렌더는 편집실 texts 를
+# `--edit-overrides` 로 다시 태우는데, 그 문구를 일본어로 바꾸면 폰트도 같이 바꿔야 한다 —
+# 번들 4종은 전부 한글 전용이라(mulmaru 만 가나가 있고 한자는 넷 다 없다, fontTools 실측)
+# 일본어가 두부(□)로 나간다. 화이트리스트에 없으면 그 재렌더가 통째로 거절된다.
+# KR 경로에서 이 값을 쓸 일은 없다(편집실 폰트 선택지는 번들 4종뿐).
+TEXT_FONTS = ("Jalnan", "JalnanGothic", "mulmaru", "Griun", "ArialUnicode")
 TEXT_SIZE_RANGE = (12, 400)                  # 캔버스(1080×1920) 기준 폰트 px
 TEXT_MAX_CHARS = 60                          # 한 오브젝트의 글자 수 상한(줄바꿈 포함)
 TEXT_DEFAULTS = {"size": 72, "color": "#FFFFFF", "stroke": "dark", "fx": "none",
