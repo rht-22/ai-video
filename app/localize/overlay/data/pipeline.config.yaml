@@ -1,0 +1,291 @@
+# loopy-jp — 파이프라인 설정 (단일 진실 소스)
+# 등급별 옵션 · 인페인트 모드 매핑 · 폰트 매핑 · JST 시간대.
+# 코드가 직접 읽는다. 키 추가/변경 시 engine/common.py:load_config 확인.
+
+project:
+  name: loopy-jp
+  channel: ジャンマンルーピー
+  timezone: Asia/Tokyo            # 업로드 스케줄·리포트 타임스탬프 기준(JST)
+
+paths:
+  source_dir: data/source
+  analytics_dir: data/analytics
+  outputs_dir: outputs
+  weights_dir: weights
+  fonts_dir: app/assets/fonts   # ai-video 폰트 위치(vlp 는 fonts/)
+  # ⚠ ai-video 이식(P4): vlp 는 레포의 config/ 였다. 여기서는 이 계층의 data/ 다.
+  persona: app/localize/overlay/data/persona.md
+  font_map: app/localize/overlay/data/font_map.yaml
+  glossary: app/localize/overlay/data/glossary.yaml   # 없으면 무시
+
+# 현지화 등급 (A=자막중심, B=번인재편집, C=더빙포함)
+levels:
+  A:
+    inpaint: false
+    render_mode: subtitle          # ASS/SRT 트랙만, 화면 텍스트 제거 안 함
+    dub: false
+  B:
+    inpaint: true
+    render_mode: replace           # 화면 텍스트 제거 후 일본어 재합성
+    inpaint_mode: auto             # auto → content_type 으로 결정
+    dub: false
+  C:
+    inpaint: true
+    render_mode: replace
+    inpaint_mode: auto
+    dub: true                      # 게이트 통과 후에만 src/dub.py 호출
+  BC:                              # 번인 캡션 + 대사(먹방류): 캡션 제거 후 더빙
+    inpaint: true
+    render_mode: clean             # 텍스트 재렌더 없음 — 더빙(burn_dub_subtitle)이 자막 담당
+    inpaint_mode: auto
+    dub: true
+  BJ:                              # 번인 유지 + 일본어 병기 (사용자 결정 2026-08-12)
+    inpaint: false                 #   한국어 화면 텍스트를 지우지 않는다 → LaMa 가중치 불필요·빠름
+    render_mode: bilingual         #   일본어를 한국어 자막과 겹치지 않는 위치에 얹는다
+    dub: false                     #   오디오는 원문 그대로 (ショトコン: 오디오 현지화 불필요)
+
+detect:
+  ocr_backend: paddleocr           # 한국어 소스 → paddleocr 권장(한글 인식 우수). rapidocr=경량 폴백
+                                   #   ※ 스타일화된 밈 폰트/「~뤂」는 여전히 ROI+사람 검수 보완 권장
+  languages: [korean, en]
+  sample_every: 15                 # N프레임마다 OCR (속도/정확도)
+  min_confidence: 0.5              # 이하 confidence 는 flagged=true
+  merge_iou: 0.6                   # 인접 프레임 동일 영역 병합 IoU 임계
+  roi: null                        # [x1,y1,x2,y2] 주면 OCR 대신 고정 ROI 사용
+  # paddleocr 3.x 성능(CPU): server det 는 1080p 에서 수백초/프레임 → mobile 권장.
+  paddle_det_model: PP-OCRv5_mobile_det
+  paddle_rec_model: korean_PP-OCRv5_mobile_rec
+  ocr_downscale_width: 960         # OCR 입력 가로 폭(0=원본). 축소해도 bbox 는 원본좌표로 환원
+
+mask:
+  dilate_px: 8                     # bbox 팽창(잔여 글자 테두리 제거)
+  temporal_window: 5               # 슬라이딩 윈도우 크기(프레임)
+  temporal_strategy: union         # union | vote
+  vote_ratio: 0.4                  # vote 전략에서 마스크로 칠 최소 비율
+
+inpaint:
+  default_backend: opencv          # opencv(무가중치 폴백) | lama | sttn | propainter
+  mode_by_content:
+    mukbang: sttn                  # 실사 음식+캐릭터
+    anime: lama                    # 애니 위주 컷
+    high_motion: propainter        # ⚠ 상업 라이선스 확인 필요
+    default: lama
+  neighbor_stride: 5               # 비디오 인페인팅 참조 프레임 간격
+  propainter_commercial_ack: false # true 로 명시 안 하면 propainter 차단(라이선스 가드)
+
+translate:
+  provider: gemini                 # gemini | anthropic (engine/llm.py 가 분기)
+  model: gemini-3.5-flash          # 대량 트랜스크리에이션 기본(최신 GA flash, thinking off)
+  hero_model: gemini-pro-latest    # hero 영상 등 고품질(최신 pro 추적, thinking 모드)
+  max_tokens: 16384                # source/target/notes/flagged × 항목수. batch_size 와 짝이다.
+  batch_size: 40                   # 한 번에 보낼 자막 항목 수(2026-08-12). 통짜로 보내면 긴
+                                   #   영상에서 응답이 잘려 JSON 이 안 닫힌다 — 실측: 혜미리예채파
+                                   #   5화가 19,380자에서 잘려 localize 가 죽었다. 0=통짜(종전).
+  use_deepl_draft: false           # true 면 DeepL 초벌 병용(TRANSLATE_API_KEY 필요)
+  deepl_endpoint: https://api-free.deepl.com/v2/translate
+
+render:
+  default_mode: replace            # replace(번인 교체) | subtitle(트랙) | bilingual(한+일 병기)
+  backcheck:                       # 자가개선: 번인 프레임 OCR 재인식 → 잘림/폰트깨짐 검출(2026-07-21)
+    enabled: true
+    frames: 6                      # 검사 프레임 샘플 수(비용 가드, 균등 간격)
+    rec_model: PP-OCRv5_mobile_rec # 일본어 지원 기본 rec(detect 의 한국어 rec 과 별도)
+    max_cer: 0.30                  # 기대 텍스트 대비 초과면 실패(불일치)로 집계
+  stroke_width: 3                  # 외곽선(가독성)
+  line_max_chars: 16               # 자막 1줄 권장 글자 수(persona 와 일치)
+  safe_margin_ratio: 0.05
+  overlay_position: above          # bilingual 모드: 한국어 자막 위(above)/아래(below)에 일본어
+
+qa:
+  psnr_warn_below: 30.0
+  ssim_warn_below: 0.90
+  motion_flag_threshold: 0.35      # 프레임 차분 비율 이상이면 고움직임 플래그
+  sidebyside: true
+
+qa_compare:                        # 원본-결과 프레임 쌍 LLM 비전 비교(engine/qa_compare.py)
+  pairs: 3                         # 비교 시점 수(도입/중간/말미)
+  scale_w: 540                     # 프레임 축소 폭(토큰 절약)
+  # ⚠ 반드시 '원본 쌍' 비교로 쓸 것 — 결과 단독 검사는 원본 연출(상단 경계 클로즈업)을
+  #   잘림으로 오탐한다(맥6 실측 2026-08-05: 13편 중 7편 오탐 → 쌍 비교 후 0)
+
+encode:
+  intermediate_codec: ffv1         # 무손실 중간본
+  final_codec: libx264             # libx264 | libx265 | libsvtav1
+  final_crf: 18
+  pixel_format: yuv420p
+
+upload:
+  timezone: Asia/Tokyo
+  default_time: "19:00"            # JST 권장 게시 시간(측정 후 튜닝)
+  auto_publish: false              # ⚠ 항상 false — '공개 결정'은 사람(approve)이 한다
+  api_upload: true                 # approve 후 업로드·예약(private+publishAt)을 API 로 자동 실행
+                                   # (2026-07-08 실측: 감사 없이 동작 확인. 결정≠실행 — 결정은 여전히 사람)
+  category_id: "24"                # YouTube 카테고리(24=Entertainment)
+  made_for_kids: false             # ⚠ 정책 결정 반영 필요(COPPA) — 잔망루피=성인 밈 타깃 전제
+
+dub:                               # Level C 한정. 게이트 통과 후에만.
+  tts_backend: elevenlabs          # IVC 클론 보이스(2026-08-13 전환, 사용자 결정) | gptsovits | xtts
+                                   # 롤백 = 이 키를 gptsovits 로 되돌리면 끝(코드 변경 불필요)
+  voice_id: XCUaBo3FxL00wvRju0PX   # 'Zanmang Loopy JA' — 분리 보컬 발화 170초로 IVC 생성(2026-08-05).
+                                   # 재생성: python -m src.voice_clone ensure --reference <ref>
+  # 아래 설정은 맥6 청취 비교(A/B/C, 2026-08-05)에서 채택된 값.
+  eleven_voice_settings:
+    stability: 0.35
+    similarity_boost: 1.0
+    style: 0.6
+    use_speaker_boost: true
+  language: ja                     # 기본 합성 언어(세그별 영어 대사는 자동 감지해 en 유지)
+  asr_vad_filter: false            # VAD 는 짧은 발화 드롭+타이밍뭉갬(2026-07-08 '요음!' 누락) → off.
+                                   # 음악 오검출은 아래 할루시네이션 필터가 차단(no_speech/logprob)
+  asr_max_no_speech: 0.5           # 할루시네이션 필터: no_speech_prob 초과 세그 제외
+  asr_min_logprob: -1.2            # 할루시네이션 필터: avg_logprob 미만 세그 제외
+  # 음악-only 쇼츠는 강제 ko 인식이 '구독과 좋아요' 류 문구를 지어내며 위 두 필터를
+  # 통과한다(2026-07-13 cvE0wNNrju4 실측: no_speech 0.372, logprob -1.052 로 통과,
+  # 자동 언어감지는 ja 0.948) → precheck 가 route C 로 오판. 아래 게이트가 차단.
+  asr_lang_gate: true              # precheck: 강제 ko 인식 전 자동 언어감지 게이트
+  asr_expected_lang: ko            # 이 언어가 아니면서
+  asr_foreign_min_prob: 0.8        # 확률 ≥ 이 값이면 대사 0 처리(낮으면 세그 필터에 위임)
+  asr_max_span_frac: 0.9           # 클립 duration 의 이 비율 초과를 덮는 단일 세그 =
+                                   # 할루시네이션 제외(같은 사례: 1세그가 클립 전체를 덮음)
+  burn_dub_subtitle: true          # 화면 한국어 자막 없을 때: 더빙 일본어 오디오 자막 번인
+  dialogue_only: false             # true=실제 대사만 더빙, 씹는소리/감탄(리액션)은 원본 유지(ASMR용)
+  speaker_wav: null                # xtts 클로닝용 캐릭터 음성 샘플(또렷한 음성 6~30초) 경로
+  asr_model: medium                # faster-whisper(영상→더빙 받아쓰기): base|small|medium (medium=인트로 등 누락↓)
+  backcheck:                       # 자가개선: 합성음 ASR 재인식 → 발음 정확도 검증(2026-07-21)
+    enabled: true
+    asr_model: medium              # 재인식 모델(미지정 시 dub.asr_model). 실측: 스모크 문장 CER 0
+    max_cer: 0.30                  # 카나 독음 기준 문자 오류율 — 초과 시 재합성
+    retries: 2                     # 재합성 상한(최저 CER 후보 채택)
+    fail_cer: 0.50                 # 재시도 후에도 초과면 실패 세그로 기록 → QA hold 근거
+  bg_volume: 1.0                   # 배경(보컬 제거된 BGM) 볼륨 — 원레벨 보존, 리미터가 피크 제어
+  voice_volume: 1.1                # 더빙 보이스 볼륨(limiter 가 피크 제한)
+  fit_to_timing: true              # 합성 음성을 자막 슬롯 길이에 맞게 time-stretch(싱크)
+  max_speedup: 1.35                # 자연 페이싱 상한 — 1.6은 '말이 빠르다'(2026-07-09 사용자 피드백)
+  dub_chars_per_sec: 4.5           # 더빙 번역 길이 예산(자/초) — 루피 보이스 실측 4.2~5.6, 여유있게 4.5
+  voice_norm_peak: 0.9             # 어셈블된 보이스 트랙 피크 정규화(헤드룸 확보)
+  loudnorm: false                  # ASMR 다이내믹 보존 → EBU R128 정규화 끔
+  brighten:                        # 더빙 밝기 보정(음색 일치 + 자음 또렷함/단어 정확도)
+    enabled: true
+    max_gain_db: 4.0               # 상한 4dB: 음색 보존(#2) + 자음 또렷함(#3) 중간값(2026-07-08 사용자 피드백)
+    shelf_hz: 2500                 # 전반 밝기 하이쉘프 주파수
+    presence_hz: 3500              # 자음 명료도 프레즌스 피킹
+    step_db: 2.0                   # 적응 스텝(목표 centroid 도달까지)
+  limiter: true                    # 최종 믹스 피크만 제한(브릭월) → 합산 클리핑(째짐) 방지
+  peak_limit: 0.97                 # 리미터 상한(0~1)
+  remove_original_vocals: true     # 원본 한국어 목소리 제거(Demucs) 후 더빙 — 안 끄면 한·일 음성 겹침
+                                   # (2026-07-08 실측: false 상태로 게시본에 한국어 잔존 — 사용자 검수 발견)
+  demucs_model: htdemucs           # 보컬 분리 모델
+  gptsovits:                       # 루피 음색 클로닝(GPT-SoVITS v2). 환경/모델 영구 위치.
+    self_ref: true                 # 영상 자체 목소리를 레퍼런스로(음색 정확) — 실패 시 아래 은행 폴백
+    repo_dir: outputs/GPT-SoVITS   # 소스 체크아웃(상대→프로젝트 루트). /tmp 정리 회피용 영구 위치
+    model_dir: GPT_SoVITS/pretrained_models/gsv-v2final-pretrained
+    gpt_ckpt: s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt
+    sovits_ckpt: s2G2333k.pth      # v2 유지 — v4는 전용 GPT(s1v3.ckpt) 부재로 부조합, 컨트롤 A/B 상
+                                   # 발음 이득 없음(2026-07-09). v4 재시도시 s1v3 확보 후 ../gsv-v4-pretrained/s2Gv4.pth
+    # 은행 레퍼런스 = 루피 자연 문장 4.1s(adobe 콜라보 보컬분리, f0=405Hz).
+    # ⚠ 단어 반복 루프 ref('루피 루피')는 합성이 확률적 무음 퇴화(실측 2/8만 정상) —
+    # GPT-SoVITS 는 자연 발화 문장 ref 필요(실측 3/3 안정, 2026-07-08).
+    ref_wav: outputs/ref_bank/loopy_adobe1.wav
+    prompt_text: 생성형 채우기를 누르고 프롬프트만 입력하면
+    prompt_lang: ko                # 레퍼런스(루피) 음성 언어
+    aux_refs:                      # 멀티레퍼런스(동일 화자 → 음색 안정)
+      - outputs/ref_bank/loopy_adobe2.wav
+    top_k: 20                      # GPT-SoVITS 기본값 — 낮추면(5) 반복루프 할루시네이션(2026-07-08 실측)
+    top_p: 1.0                     # 피치 안정은 낮은 temp 아니라 pitch_match_tries 후보선택이 담당
+    temperature: 1.0
+    retry_tries: 6                 # 환각(비정상 장발화) 시 재합성 횟수
+    pitch_match_tries: 3           # 후보 N개 중 원본 프로필(F0+밝기) 최근접(1=끔). 5는 세그당 ~10분으로 과함
+    synth_max_chars: 24            # 이 길이 넘는 문장은 구두점 단위 청크 합성(긴 나열 할루시네이션 방지)
+  refbank:                         # 레퍼런스 음성 은행(자동 축적 + 영상별 최적 매칭)
+    dir: outputs/ref_bank          # 클립 + 사이드카(.json) 저장 위치
+    min_ref_dur: 3.0               # 은행 축적·레퍼런스 최소 길이(초, 자연 문장)
+    max_ref_dur: 10.0              # 최대(GPT-SoVITS 상한)
+    min_hangul: 6                  # 축적 최소 한글 글자 수(단어 조각 배제)
+    max_per_source: 4              # 소스 영상당 최대 축적 클립
+    brightness_weight: 0.7         # 매칭 거리에서 음색 밝기 비중(피치=1.0 기준)
+    aux_count: 1                   # 선택된 ref 와 같은 소스에서 aux 로 붙일 개수
+    min_synth_level: 0.05          # 합성 피크 하한 — 무음성 실패 합성 기각(증폭 잡음 방지)
+    max_synth_dur: 12.0            # 이 길이 초과면 환각으로 보고 재시도
+  xtts_model: tts_models/multilingual/multi-dataset/xtts_v2
+  #  ⚠ XTTS-v2 가중치 라이선스 = Coqui Public Model License(비상업). 상업 사용 전 확인.
+  # ⚠ voice_id 는 이 블록 위쪽(tts_backend 바로 아래)에 하나만 둔다. 여기 있던
+  #   `voice_id: null` 을 지웠다 — YAML 중복 키는 뒤엣것이 이겨서, 2026-08-13 elevenlabs
+  #   전환 커밋이 넣은 IVC voice_id 를 이 null 이 덮고 있었다. 그대로 두면 첫 합성에서
+  #   dub.py: `ValueError: elevenlabs 백엔드: voice_id 필요` 로 죽는다.
+  tts_model: eleven_multilingual_v2
+
+select:
+  # data/analytics CSV 컬럼 매핑 (실제 헤더에 맞게 수정)
+  columns:
+    video_id: video_id
+    title: title
+    views: views
+    retention: average_view_percentage
+    jp_share: jp_view_share        # 일본 시청 비중 (0~1 또는 0~100)
+  weights:
+    jp_share: 0.5                  # 일본 시청 비중 최우선
+    retention: 0.3
+    views: 0.2
+  level_keywords:                  # 제목 키워드 → 등급 추정
+    A: [먹방, asmr, mukbang, dance, 댄스, 릴스, eating, 디저트]
+    B: [개그, 짤, 밈, meme, 꼬깔, 자막, 챌린지]
+    C: [vlog, 브이로그, 일상, 대사, 더빙]
+
+autopilot:                         # Phase 1: 후보 선별 봇 — 업로드 없음(리포트까지만)
+  channel_handle: "@zanmangloopy"  # 원 채널 핸들
+  scout_backend: auto              # auto(키 있으면 api) | api | ytdlp(보조·저빈도만)
+  ledger_path: outputs/autopilot.db
+  max_scan: 0                      # 스캔 상한(0=전체 — 채널 전량도 API ~46유닛)
+  max_score_per_run: 30            # 1회 실행당 스코어링 편수(LLM 비용 가드)
+  require_llm: true                # LLM 전면 실패 시 실행 중단(열화 점수 고착 방지). false=정량만
+  comment_sample: 100              # 댓글 언어분석 표본(YOUTUBE_API_KEY 필요, 없으면 생략)
+  min_duration: 3                  # 초 — 미만 제외
+  no_dialogue_fallback: BJ         # 대사가 없어 더빙이 성립하지 않으면 이 등급으로 내린다
+                                   #   (2026-08-12: 버리지 말고 자막이라도 입혀 내보낸다).
+                                   #   비우면 종전대로 그 영상은 실패 처리.
+  force_route: C                   # 라우트 강제(2026-08-12 사용자 결정: 잔망루피는 전량 더빙).
+                                   #   설정 시 precheck 의 라우트 판정을 건너뛴다 — paddleocr
+                                   #   초기화 실패로 하루 0편이던 원인 제거. 비우면 자동 판정.
+  max_duration: 183                # 초 — Shorts 상한(3분, 2024-10 확대 기준)
+  weights:                         # 신호 가중치(없는 신호는 재정규화로 흡수)
+    views: 0.20                    # 조회수(log 정규화)
+    like_ratio: 0.15               # 좋아요율(5% 상한)
+    jp_comments: 0.35              # 댓글 일본어(가나) 비율 — 일본 반응 최우선
+    llm_jp_fit: 0.30               # LLM 일본 적합도(언어 의존 패널티 포함)
+  report_top_n: 10
+  # --- Phase 2: 처리~승인 (업로드 클릭은 사람 — API 감사 전) ---
+  max_process_per_run: 3           # 1회 실행당 현지화 편수
+  download_dir: data/source/auto   # 원본 자동 다운로드 위치
+  content_type: anime              # process_video 인페인트 모드(캐릭터 애니메이션)
+  inpaint_backend: lama            # LaMa(Apache-2.0) — opencv 폴백은 번짐 심함(2026-07-10 실측)
+  dub_python: .venv/bin/python     # 더빙 인터프리터(8/14 이사): GSV 은퇴 후 elevenlabs·
+                                   # demucs·faster-whisper 전부 메인 venv(pip sync 관리)로 —
+                                   # .venv-gsv 는 pip sync 밖이라 의존이 늘 새는 함정이었다
+  precheck:                        # 레벨 실측 판별(제목 추정 대체)
+    frames: 8                      # 샘플 프레임 수
+    min_conf: 0.75                 # 번인 텍스트 인정 신뢰도(OCR 노이즈 필터)
+    min_hangul: 2                  # 번인 인정 최소 한글 글자 수
+    min_persist: 2                 # 번인 인정 최소 등장 프레임 수
+  qa_gate:                         # 자동 QA 게이트(hold 도 승인 큐로 가되 표기)
+    max_flag_ratio: 0.5            # 검수필요 프레임 비율 상한
+    min_ssim: 0.85                 # 평균 SSIM 하한
+    max_dub_cer_avg: 0.30          # 더빙 백체크 평균 CER 상한(C/BC) — 초과 또는 실패 세그 있으면 hold
+    min_render_match: 0.8          # 렌더 백체크 일치율 하한(B/BC) — 미달이면 hold(잘림/폰트깨짐 의심)
+  # --- Phase 3: 완전 자동(2026-07-14 사용자 결정) — 선별·승인·업로드까지 무인 ---
+  # 남은 안전판: 업로드는 비공개+19:00 JST 예약 공개 → 공개 전까지 Slack 보고 취소/수정 가능.
+  auto_select:
+    enabled: true
+    per_day: 1                     # 하루 자동 선택 편수(공개 슬롯도 하루 1편 페이스)
+    min_score: 0.45                # 미만이면 자동 선택 안 함 — 후보 고갈 시 사람에게 알림만
+  auto_approve:
+    enabled: false                 # 관제 검수함이 승인 게이트다(사용자 결정 8/12: "승인하면
+                                   # 올라가게") — 켜면 사람 승인 전에 업로드·예약까지 가버려
+                                   # 검수함 카드가 장식이 된다(8/14 실측: 401 이 아니었으면
+                                   # 「볼살 뀨~」가 검수 없이 예약 공개될 뻔했다)
+    require_qa_pass: true          # (재활성 시) qa=hold 는 자동 승인 제외 — pass 만 업로드
+
+# ── 원장 백엔드 (B안 2단계 ②, 2026-08-14) ─────────────────────────────
+# sqlite(기본): mm-06 로컬 파일이 정본 — 지금 상태.
+# postgres: 중앙(loopy.*) — ves 0036 적용·미러 대조 검증 후 이 값만 바꾸면 전환된다.
+ledger:
+  backend: sqlite
