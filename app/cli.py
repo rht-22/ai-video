@@ -163,7 +163,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="자막/TTS 자막 폰트명 (기본: 장르 프리셋 폰트). 일본어 등 프리셋 폰트에 없는 글리프가 필요할 때 지정")
     design.add_argument("--design-title-size", type=int, default=None,
                         help="제목 폰트 크기 (1줄 기준). 기본 [70,90]의 줄 간 비율을 유지한 채 "
-                             "전체를 스케일한다 — 90/70 배율로 2줄 크기가 함께 커진다")
+                             "전체를 스케일한다 — 90/70 배율로 2줄 크기가 함께 커진다. "
+                             "2줄만 따로 정하려면 --design-title-size2")
+    design.add_argument("--design-title-size2", type=int, default=None,
+                        help="제목 2번째 줄 폰트 크기 (기본: 1줄 크기 × 90/70). 주면 위 비율 "
+                             "스케일을 무시하고 2줄만 이 값으로 그린다 — 편집실 제목 줄별 크기")
     design.add_argument("--design-title-color", type=str, default=None, help="제목 1번째 줄 색상 (기본: white)")
     design.add_argument("--design-title-color2", type=str, default=None, help="제목 2번째 줄 색상 (기본: #FFFF00)")
     # 제목 줄별 배경 박스·굵게(2026-08-21) — 값은 렌더러의 title_boxes/title_box_colors/title_bolds
@@ -359,11 +363,18 @@ def _build_design_config(args: argparse.Namespace,
     # 패턴: 기본 [70,90]에서 시작하되, 지정 값을 1줄 기준으로 삼아 **줄 간 비율을 유지한
     # 채** 전체를 스케일한다(90/70 배율). 편집실 제목 드래그 = 블록 전체 확대/축소라
     # 두 줄의 위계(후킹 줄이 더 크다)가 유지돼야 한다 — 계약: docs/edit_overrides_v3.md.
+    # 2줄 크기 단독 지정(--design-title-size2)은 그 비율 스케일을 **덮는다** — 사람이
+    # 편집실에서 '2줄만 키우기'를 누른 것이 위계 규약보다 우선이다(줄별 색·박스와 같은
+    # 조립 패턴: 기본값에서 시작해 지정한 줄만 치환).
     title_size = getattr(args, "design_title_size", None)
-    if title_size:
+    title_size2 = getattr(args, "design_title_size2", None)
+    if title_size or title_size2:
         base_sizes = list(DesignConfig().title_sizes)
-        overrides["title_sizes"] = [
-            max(1, round(sz * title_size / base_sizes[0])) for sz in base_sizes]
+        sizes = ([max(1, round(sz * title_size / base_sizes[0])) for sz in base_sizes]
+                 if title_size else list(base_sizes))
+        if title_size2:
+            sizes[1] = max(1, int(title_size2))
+        overrides["title_sizes"] = sizes
 
     # 자막/TTS 색상은 ASS 형식(&HAABBGGRR) — 사용자가 #RRGGBB로 줘도 받도록 정규화.
     # (제목·작품명 색은 ffmpeg drawtext라 hex를 그대로 쓰므로 변환하지 않는다)

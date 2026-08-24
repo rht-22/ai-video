@@ -179,8 +179,13 @@ edit_overrides 스키마가 아니라 **`--design-*` 플래그 계약**이다(�
   (`title_sizes` [70,90] 기본)에 반영되지 않았다. 이제 cli 가 title_color→title_colors
   와 같은 패턴으로 `title_sizes` 를 조립한다. **N 은 1줄 기준이고, 줄 간 비율을 유지한
   채 전체를 스케일한다**(2줄 = N×90/70 반올림). 편집실 드래그 = 제목 블록 전체
-  확대/축소라 두 줄의 위계(후킹 줄이 더 크다)를 유지하는 쪽을 택했다 — 동일 크기를
-  원하면 후속에서 `--design-title-size2` 를 추가하는 것이 자연스럽다.
+  확대/축소라 두 줄의 위계(후킹 줄이 더 크다)를 유지하는 쪽을 택했다.
+- **`--design-title-size2 N`** (2026-08-24 신설): 2줄만 따로 정한다. 주면 위 비율
+  스케일을 덮고 `title_sizes[1] = N` 이 된다(`--design-title-size` 없이 단독으로 줘도
+  된다 — 그때 1줄은 기본 70). 줄별 색(`--design-title-color2`)·배경 박스와 같은 조립
+  패턴이다: 기본값에서 시작해 **지정한 줄만 치환**. 편집실이 제목 줄별로 A−/A＋ 를
+  주기 위한 엔진 파트(사용자 요청 2026-08-24) — 오케스트레이터 어댑터
+  `CHANNEL_DESIGN_FLAGS` 에 `title_size2` 키 추가 + brain 미러 + DB `v_allowed` 동반.
 - **`--design-title-y-fixed`** (불리언, 기본 false) 신설: 종전엔 동적 배치(영상 위
   20px)가 항상 이기고 `title_y` 는 여백 부족 폴백으로만 쓰였다. 참이면 동적 배치 대신
   `title_y` 를 그대로 쓴다(`DesignConfig.title_y_fixed`). 기본 false 라 기존 채널 전부

@@ -53,6 +53,27 @@ def test_title_size_reaches_drawn_font_sizes():
     assert "fontsize=70" not in fg and "fontsize=90" not in fg
 
 
+def test_title_size2_overrides_second_line_only():
+    """2줄 단독 지정(2026-08-24, 편집실 줄별 A−/A＋) — 비율 스케일을 덮고 그 줄만 바뀐다.
+    1줄은 손대지 않는다(줄별 색·박스와 같은 '지정한 줄만 치환' 조립)."""
+    d = _design("--design-title-size2", "120")
+    assert d.title_sizes == [70, 120]
+    assert d.title_size == 70            # 줄바꿈 계산용 단일 필드는 1줄 기준 그대로
+
+
+def test_title_size_and_size2_together():
+    """둘 다 주면 1줄은 지정값, 2줄은 비율이 아니라 지정값 — 사람이 고른 값이 이긴다."""
+    d = _design("--design-title-size", "50", "--design-title-size2", "50")
+    assert d.title_sizes == [50, 50]
+
+
+def test_title_size2_reaches_drawn_font_sizes():
+    """회귀 방어: title_sizes[1] 이 실제 fontsize 로 나간다."""
+    fg = _build_filtergraph(_inputs(_design("--design-title-size2", "120")), 1, 0)
+    assert "fontsize=70" in fg and "fontsize=120" in fg
+    assert "fontsize=90" not in fg
+
+
 def test_title_size_unspecified_keeps_defaults():
     d = _design()
     assert d.title_sizes == [70, 90]
