@@ -193,30 +193,38 @@ def _video_duration(path: Path) -> float:
         return 0.0
 
 
-def cut_mismatch_hint(d_ko_video: float, d_ja_video: float,
-                      tol: float = CUT_TOLERANCE_SEC) -> str:
-    """길이 불일치의 **원인 갈래**를 문장으로. 순수(테스트 대상).
+def cut_reproduced(v_ko: float, v_ja: float, d_ko: float, d_ja: float,
+                   tol: float = CUT_TOLERANCE_SEC) -> tuple[bool, str]:
+    """컷이 재현됐는가 + 사람이 읽을 요약. 순수(테스트 대상).
 
-    두 원인은 조치가 완전히 다르다:
-    · 오디오 꼬리 — **비디오 스트림끼리는 같은데** 컨테이너만 다르다. 렌더가
-      `amix=duration=longest` 에 `-shortest` 없이 섞어서 오디오가 영상보다 길어진 것이다.
-    · 컷 재현 실패 — 비디오 스트림 **자체가** 다르다. gen_flags(A/B 노브)가 원 생성과
-      달라 클립 경계가 바뀐 것이다.
+    **비디오 스트림끼리** 비교한다. 이 검사의 의도는 '컷(클립 경계)이 재현됐는가'인데,
+    컨테이너 길이는 오디오가 좌우한다 — 렌더가 `amix=duration=longest` 를 `-shortest`
+    없이 섞어서 오디오가 영상보다 길면 컨테이너만 늘어난다. 그래서 컨테이너를 재면
+    **컷과 무관한 오디오 꼬리 차이로 편을 죽인다.**
 
-    ⚠ **반드시 스트림끼리 비교한다.** 첫 판(2026-08-24)은 ko 의 **컨테이너** 길이와 ja 의
-    **비디오 스트림** 길이를 맞대는 단위 착오가 있었다 — 두 파일 모두 오디오 꼬리를 갖고
-    있으면 늘 '컷 재현 실패'로 오판한다(실제로 그렇게 나왔다: ko 컨테이너 39.400 vs ja
-    스트림 25.025 → 컷이 멀쩡해도 다르다고 읽혔다).
-    두 값을 **모두 문장에 적는다** — 판정이 틀려도 사람이 원본 숫자로 되짚을 수 있어야 한다."""
-    if d_ko_video <= 0 or d_ja_video <= 0:
-        return (f"비디오 스트림 길이를 못 읽었다(ko {d_ko_video:.3f}s · ja {d_ja_video:.3f}s) "
-                f"— 원인 판별 불가, gen_flags 재현 실패 의심")
-    both = f"비디오 스트림 ko {d_ko_video:.3f}s · ja {d_ja_video:.3f}s"
-    if abs(d_ko_video - d_ja_video) <= tol:
-        return (f"{both} 로 **일치한다 — 컷은 재현됐고 차이는 오디오뿐**이다"
-                f"(렌더가 `-shortest` 없이 amix=longest 로 섞는다). L3t 의 '창 길이로 잘랐다' "
-                f"경고와 cue fit_trimmed 를 확인하라")
-    return f"{both} 로 **다르다 — gen_flags 재현 실패 의심**(클립 경계가 바뀌었다)"
+    2026-08-24 SHOTCONE 혜미리예채파 2화 실측이 그 경우였다:
+        비디오 스트림  ko 25.025s · ja 25.025s   ← 컷은 완벽히 재현됨
+        컨테이너      ko 39.400s · ja 39.900s   ← 0.5초 차이로 3회 dead
+    KO 완성본에도 이미 14.4초 오디오 꼬리가 있었다(아무도 몰랐다 — KR 은 이 검사가 없다).
+    0.5초를 이유로 발행을 막는 것은 앞뒤가 맞지 않는다. **오디오 꼬리 자체는 별건**이고,
+    여기서는 통과시키되 stdout 에 남겨 보이게 한다.
+
+    ⚠ 스트림 길이를 못 읽으면(0.0) 검사를 **건너뛰지 않고 컨테이너로 폴백**한다 —
+    가드가 조용히 사라지는 것이 오판보다 나쁘다."""
+    if v_ko <= 0 or v_ja <= 0:
+        ok = abs(d_ko - d_ja) <= tol
+        return ok, (f"비디오 스트림 길이를 못 읽어(ko {v_ko:.3f}s · ja {v_ja:.3f}s) "
+                    f"컨테이너로 폴백: ko {d_ko:.3f}s vs ja {d_ja:.3f}s"
+                    + ("" if ok else " — 불일치(gen_flags 재현 실패 의심)"))
+    both = f"비디오 스트림 ko {v_ko:.3f}s · ja {v_ja:.3f}s"
+    if abs(v_ko - v_ja) > tol:
+        return False, f"{both} 로 **다르다 — gen_flags 재현 실패 의심**(클립 경계가 바뀌었다)"
+    tail = ""
+    if abs(d_ko - d_ja) > tol:
+        # 컷은 맞는데 컨테이너가 다르다 = 오디오 꼬리. 통과시키되 조용히 넘기지 않는다.
+        tail = (f" · ⚠️ 컨테이너는 ko {d_ko:.3f}s vs ja {d_ja:.3f}s 로 다르다 — **오디오 꼬리**"
+                f"(렌더가 `-shortest` 없이 amix=longest 로 섞는다). 컷과 무관하므로 통과시킨다")
+    return True, f"{both} 로 일치 — 컷 재현 확인{tail}"
 
 
 def l4_render(job: Path, wcfg: dict, locale_cfg: dict, out_dir: Path):
@@ -270,14 +278,14 @@ def l4_render(job: Path, wcfg: dict, locale_cfg: dict, out_dir: Path):
     if r.returncode != 0:
         raise RuntimeError(f"재렌더 실패 rc={r.returncode} — {out_dir/'rerender.log'} 확인")
     rendered = job / "shorts.mp4"
-    # 컷 재현 검증 — 원본과 길이가 다르면 자막 싱크가 깨진 것 (SPIKE §설계수정-2)
-    d_ko, d_ja = _duration(job / "shorts_ko.mp4"), _duration(rendered)
-    if abs(d_ko - d_ja) > CUT_TOLERANCE_SEC:
-        raise RuntimeError(
-            f"컨테이너 길이 불일치: ko {d_ko:.3f}s vs ja {d_ja:.3f}s — "
-            + cut_mismatch_hint(_video_duration(job / "shorts_ko.mp4"),
-                                _video_duration(rendered)))
-    print(f"[L4] 재렌더 완료 {time.time()-t0:.0f}s (길이 {d_ja:.3f}s = 원본 일치)")
+    ko_video = job / "shorts_ko.mp4"
+    # 컷 재현 검증 — 원본과 컷이 다르면 자막 싱크가 깨진 것 (SPIKE §설계수정-2).
+    # **비디오 스트림끼리** 잰다 — 컨테이너는 오디오가 좌우한다(cut_reproduced 독스트링).
+    ok, detail = cut_reproduced(_video_duration(ko_video), _video_duration(rendered),
+                                _duration(ko_video), _duration(rendered))
+    if not ok:
+        raise RuntimeError(f"컷 재현 실패: {detail}")
+    print(f"[L4] 재렌더 완료 {time.time()-t0:.0f}s — {detail}")
 
     # 텔롭 병기 번인 (오디오 무손실 copy)
     telop_ass = out_dir / "telops.ass"
