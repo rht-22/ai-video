@@ -1503,6 +1503,12 @@ def _compute_tts_margin_v(
 # (전역 띠와 같은 체크포인트 파일에 남아 `--from-step render` 재개에서도 유지된다.)
 _BURNED_PROFILES: list[list] = []
 
+# 구간별로 실제로 올린 줄 수 — run_log 감사 기록용 (E18 후속, 2026-08-24).
+# 이 보정은 종전에 stdout 에만 남아서 **돌았는지 안 돌았는지 나중에 알 수가 없었다**
+# (검증 런에서 실제로 막혔다: `subtitle_avoid_burned` 단계가 없으면 '띠를 못 찾은 것'인지
+# '구간 판정 자체가 안 돈 것'인지 구분이 안 된다). 판정이 돌았다는 사실과 결과를 남긴다.
+_BURNED_WINDOW_MOVES: list[dict] = []
+
 
 def _burned_band_signature(clips: list) -> str:
     """표본을 뜬 클립 구성 지문 — 구간이 바뀌면 캐시를 버린다."""
@@ -1522,6 +1528,7 @@ def _detect_burned_band_cached(
     # ⚠ 모듈 수준 저장소라 한 프로세스에서 여러 편을 돌리면 앞 편 표본이 남는다 —
     #   앞 편의 원본 자막 자리로 이 편 자막을 올리면 조용히 틀린다. 시작에서 비운다.
     _BURNED_PROFILES[:] = []
+    _BURNED_WINDOW_MOVES[:] = []
     mode = str(getattr(payload.design, "subtitle_avoid_burned", "auto") or "auto").lower()
     if mode != "auto":
         return None
@@ -1650,6 +1657,11 @@ def _avoid_burned_windowed(
             design, geom, line_count=_sr.estimate_title_line_count(title_text)))
     for n in notes:
         print(f"  {label}{n}")
+    _moved = sum(1 for m in margins if m is not None)
+    if _moved:
+        _BURNED_WINDOW_MOVES.append(
+            {"track": (label.strip() or "자막").strip("[] "), "moved": _moved,
+             "lines": len(margins), "base_margin_v": int(base_margin_v)})
     out = []
     for seg, m in zip(segments, margins):
         style = getattr(seg, "style", None)
@@ -3931,6 +3943,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 뿐 clips 를 바꾸지 않는다(바꾸면 자막·cue 좌표가 전부 어긋난다).
     _style_design_kwargs: dict[str, Any] = {}
     _style_plan_applied: dict[str, Any] | None = None
+    _text_clamp: dict[str, Any] | None = None      # 효과 텍스트 밴드 클램프 기록(E18-2)
     checkpoint_style = output_dir / "checkpoint_style.json"
     if payload.style_compose:
         from app.modules import style_compose as _stylemod
@@ -4054,6 +4067,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     _style_plan["texts"], _y_lo, _y_hi)
                 for _n in _clamp_notes:
                     print(f"  [style] {_n}")
+                # 몇 건을 당겼는지 run_log 에 남긴다 — stdout 에만 있으면 나중에
+                # '클램프가 돌긴 했나'를 확인할 길이 없다(검증에서 실제로 막혔다).
+                _text_clamp = {"clamped": len(_clamp_notes), "of": len(_clamped),
+                               "y_range": [round(_y_lo, 4), round(_y_hi, 4)]}
                 _placed, _drop = place_anchored_texts(_clamped, clips)
                 for _o in _drop:
                     print(f"  [style] 앵커 소재가 최종 타임라인에 없음 → 텍스트 드롭"
@@ -4131,6 +4148,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             # 검수 카드가 '왜 이 연출인지'를 보여 준다(오케스트레이터 brain 이 읽는다).
             "reasons": [str(t.get("reason") or "")
                         for t in ((_style_plan or {}).get("texts") or []) if t.get("reason")],
+            # E18-2 — 밴드 밖으로 나간 효과 텍스트를 몇 건 당겼는지. 배치가 안 돌았으면 None.
+            "text_clamp": _text_clamp,
         })
 
     # ═══════════════════════════════════════
@@ -4381,6 +4400,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 값을 쓴다(같은 소재의 같은 방송 자막이다). 검출은 `--design-subtitle-avoid-burned off`
     # 로 끌 수 있고, 못 찾으면 None = 종전 자막 위치 그대로다.
     _burned_band: dict[str, Any] | None = None
+    _avoid_log: dict[str, Any] | None = None
 
     if start_idx <= step_idx["render"] or from_step == "render" or not output_video.exists():
         # 자막 디자인 적용
@@ -4389,14 +4409,22 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         # 자막을 아예 안 그리는 채널(--no-subtitles)은 잴 것도 없다 — 표본 뜨는 시간만 든다.
         if payload.show_subtitles:
             _burned_band = _detect_burned_band_cached(payload, config, clips, crop_map, output_dir)
-        if _burned_band:
-            run_log["steps"].append({
+        # ⚠ 종전엔 **띠를 찾은 실행만** 남겼다. 그러면 단계가 없을 때 '띠가 없었다'인지
+        #   '판정 자체가 안 돌았다'인지 구분이 안 된다 — 실제로 검증에서 막혔다.
+        #   판정이 돌았으면(자막 있는 채널 · auto) 결과가 비어도 남긴다.
+        #   `off` 채널·`--no-subtitles` 는 표본을 아예 안 뜨므로 종전과 같이 아무것도 안 남는다.
+        if payload.show_subtitles and (_burned_band or _BURNED_PROFILES):
+            _avoid_log = {
                 "step": "subtitle_avoid_burned",
-                "band": {k: _burned_band[k] for k in ("top", "bottom")},
-                "frames": _burned_band.get("frames"),
-                "clips": _burned_band.get("clips"),
-                "hit_ratio": _burned_band.get("hit_ratio"),
-            })
+                "band": ({k: _burned_band[k] for k in ("top", "bottom")}
+                         if _burned_band else None),
+                "frames": (_burned_band or {}).get("frames"),
+                "clips": (_burned_band or {}).get("clips"),
+                "hit_ratio": (_burned_band or {}).get("hit_ratio"),
+                # 구간별 재판정(E18-6)이 쓴 표본 수 — 0 이면 구간 보정이 아예 불가능했다는 뜻.
+                "profile_frames": len(_BURNED_PROFILES),
+            }
+            run_log["steps"].append(_avoid_log)
 
         if not final_segments and segments_cache_path.exists():
             cached_data = json.loads(segments_cache_path.read_text(encoding="utf-8"))
@@ -4941,6 +4969,12 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             slim_steps.append(s)
         slim["steps"] = slim_steps
         return slim
+
+    # 구간별 보정(E18-6)은 대사·TTS·variant ASS 를 조립하면서 일어난다 — 위 단계 기록
+    # 시점보다 뒤다. 같은 dict 를 들고 있다가 여기서 채운다(별도 단계를 만들면 사람이
+    # 두 곳을 맞춰 봐야 한다).
+    if _avoid_log is not None and _BURNED_WINDOW_MOVES:
+        _avoid_log["windowed"] = list(_BURNED_WINDOW_MOVES)
 
     run_log_serializable = _make_json_serializable(_slim_run_log(run_log))
     run_log_path = output_dir / "run_log.json"

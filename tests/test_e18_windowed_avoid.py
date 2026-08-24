@@ -216,3 +216,55 @@ def test_profiles_do_not_leak_between_episodes(tmp_path, capsys):
                               video_path=Path("x.mp4"))
     assert pipeline._detect_burned_band_cached(payload, _Cfg(), [], {}, tmp_path) is None
     assert pipeline._BURNED_PROFILES == []
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 감사 기록 — 돌았는지 나중에 확인할 수 있어야 한다 (2026-08-24 후속)
+# ══════════════════════════════════════════════════════════════════════════
+# 검증 런에서 실제로 막혔다: `subtitle_avoid_burned` 단계가 없을 때 '띠가 없었다'인지
+# '구간 판정 자체가 안 돌았다'인지 구분할 방법이 없었고, 효과 텍스트 클램프는 stdout
+# 에만 남아 DB 로는 확인이 불가능했다. 그래서 셋을 run_log 에 남긴다.
+def test_windowed_moves_are_recorded_for_the_run_log():
+    prof = _profiles([(t / 2, True) for t in range(0, 20)])
+    pipeline._BURNED_WINDOW_MOVES[:] = []
+    try:
+        _run_windowed([_cue(1.0, 5.0), _cue(6.0, 8.0)], prof)
+        assert len(pipeline._BURNED_WINDOW_MOVES) == 1
+        rec = pipeline._BURNED_WINDOW_MOVES[0]
+        assert rec["moved"] == 2 and rec["lines"] == 2 and rec["base_margin_v"] == 430
+    finally:
+        pipeline._BURNED_WINDOW_MOVES[:] = []
+
+
+def test_nothing_moved_records_nothing():
+    """회귀 0 — 보정이 없던 실행의 run_log 는 종전과 같아야 한다."""
+    pipeline._BURNED_WINDOW_MOVES[:] = []
+    try:
+        _run_windowed([_cue(1.0, 5.0)], [])
+        assert pipeline._BURNED_WINDOW_MOVES == []
+    finally:
+        pipeline._BURNED_WINDOW_MOVES[:] = []
+
+
+def test_the_move_log_is_cleared_per_episode(tmp_path):
+    """앞 편 기록이 남으면 이 편 run_log 가 거짓말을 한다(표본과 같은 규율)."""
+    pipeline._BURNED_WINDOW_MOVES[:] = [{"track": "이전 편", "moved": 9}]
+    payload = SimpleNamespace(design=DesignConfig(subtitle_avoid_burned="off"),
+                              video_path=Path("x.mp4"))
+    pipeline._detect_burned_band_cached(payload, _Cfg(), [], {}, tmp_path)
+    assert pipeline._BURNED_WINDOW_MOVES == []
+
+
+def test_pipeline_records_that_the_judgement_ran_even_with_no_band():
+    """띠를 못 찾아도 판정이 돌았다는 사실과 표본 수는 남긴다."""
+    src = (Path(__file__).resolve().parents[1] / "app" / "pipeline.py").read_text(encoding="utf-8")
+    assert 'if payload.show_subtitles and (_burned_band or _BURNED_PROFILES):' in src
+    assert '"profile_frames": len(_BURNED_PROFILES),' in src
+    # 구간 결과는 ASS 조립 뒤에 채워진다 — 같은 dict 를 들고 있다가 마지막에 붙인다.
+    assert '_avoid_log["windowed"] = list(_BURNED_WINDOW_MOVES)' in src
+
+
+def test_pipeline_records_the_text_clamp_in_the_style_step():
+    src = (Path(__file__).resolve().parents[1] / "app" / "pipeline.py").read_text(encoding="utf-8")
+    assert '"text_clamp": _text_clamp,' in src
+    assert '_text_clamp = {"clamped": len(_clamp_notes), "of": len(_clamped),' in src
