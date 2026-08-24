@@ -2807,7 +2807,12 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 인용 대사가 전사에서 확실히 다른 위치에 있을 때만 버린다.
     if chunk_transcripts:
         _before = len(all_candidates)
-        all_candidates, _ts_notes = timestamp_check.filter_candidates(all_candidates, chunk_transcripts)
+        # source_duration_sec: 소스 밖 후보를 **스토리가 고르기 전에** 뺀다 — 여기서
+        # 빼야 다른 성한 후보로 대신 만든다. 나중에 clips_beyond_source 가 잡으면 그 편은
+        # 통째로 실패한다(2026-08-24 §소스 밖 클립 검증).
+        all_candidates, _ts_notes = timestamp_check.filter_candidates(
+            all_candidates, chunk_transcripts,
+            source_duration_sec=float(getattr(media_info, "duration_sec", 0.0) or 0.0))
         for _n in _ts_notes:
             print(f"  [WARN] 타임스탬프 불일치 → 후보 제외: {_n}")
         if len(all_candidates) != _before:
