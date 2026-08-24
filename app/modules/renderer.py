@@ -729,6 +729,23 @@ def render_short(inputs: RenderInputs) -> list[str]:
     work_file.write_bytes((inputs.work_title + "\n").encode("utf-8-sig"))
 
     inputs = replace(inputs, title_textfile=title_file, work_title_textfile=work_file)
+
+    # 안전망: 영상이 끝난 뒤 시작하는 cue 는 싣지 않는다(cues_within_video 독스트링).
+    # ⚠ **여기서 한 번만** 거른다 — 아래 _build_input_args 와 _build_audio_filter 가
+    # 같은 목록을 봐야 cue 입력 인덱스(num_clip_inputs + ci)가 어긋나지 않는다.
+    _kept_cues, _late_cues = cues_within_video(
+        inputs.tts_cue_files, inputs.clips,
+        float(getattr(inputs.design, "video_speed", 1.0) or 1.0))
+    if _late_cues:
+        _out_dur = video_out_duration(
+            inputs.clips, float(getattr(inputs.design, "video_speed", 1.0) or 1.0))
+        for _cf in _late_cues:
+            _c = _cf.get("cue") or {}
+            print(f"  [cue-late] 영상({_out_dur:.2f}s) 밖에서 시작 → 드롭: "
+                  f"start={_c.get('start_sec')} end={_c.get('end_sec')} "
+                  f"{str(_c.get('text', ''))[:24]!r}")
+        inputs = replace(inputs, tts_cue_files=_kept_cues)
+
     num_cue_inputs = len(inputs.tts_cue_files or [])
     filter_script = _build_filtergraph(inputs, num_clip_inputs=len(inputs.clips), num_cue_inputs=num_cue_inputs)
     filter_path = inputs.output_path.with_suffix(".filter.txt")
@@ -1668,6 +1685,48 @@ def _apply_loudnorm(audio_filter: str, target_lufs: float | None) -> str:
         return audio_filter
     return (audio_filter.replace("[aout]", "[apremix]")
             + f";[apremix]loudnorm=I={target_lufs}:TP=-1.5:LRA=11[aout]")
+
+
+def video_out_duration(clips, speed: float = 1.0) -> float:
+    """출력 영상 길이(초) = 클립 길이 합 ÷ 배속. 순수(테스트 대상).
+
+    `concat` 이 내는 길이와 같다 — 2026-08-24 실측으로 확인했다(클립 구간이 소스 끝을
+    넘겨도 비디오·오디오가 함께 짧아지므로 이 합이 그대로 출력 길이다)."""
+    total = sum(max(0.0, float(c.end_sec) - float(c.start_sec)) for c in (clips or []))
+    return total / speed if speed > 0 else total
+
+
+def cues_within_video(cue_files, clips, speed: float = 1.0, epsilon: float = 0.05):
+    """**영상이 끝난 뒤 시작하는** TTS cue 를 걸러낸다. 순수(테스트 대상).
+
+    Returns: (실을 cue 목록, 버린 cue 목록)
+
+    렌더는 `amix=duration=longest` 를 `-shortest` 없이 섞으므로, 영상 밖에 놓인 cue 는
+    **출력 컨테이너를 그만큼 늘린다** — 화면은 이미 끝났는데 정지 화면 위로 내레이션만
+    흐르는 꼬리가 된다(2026-08-24 SHOTCONE 혜미리예채파 2화 실측: 비디오 25.025s ·
+    컨테이너 39.400s, cue 창이 37.0~40.5s 였다. 25초 이후 비디오 패킷이 아예 없다).
+
+    상류(`pipeline._resolve_cue_anchors`)는 `end = min(start+duration, total)` 로 cue 를
+    영상 안에 가두므로 정상 경로에서는 여기 걸릴 것이 없다 — **이건 그 클램프를 우회한
+    cue 를 렌더 직전에 막는 안전망**이다. 어디서 새는지와 무관하게 증상을 끊는다.
+
+    ⚠ **영상 밖에서 시작하는 것만 버린다.** 영상 안에서 시작해 끝만 넘치는 cue 는
+    화면 위에서 들리기 시작하므로 사람이 의도한 소리다 — 건드리지 않는다(별건).
+    클립 정보가 없으면(길이 0) 아무것도 버리지 않는다 — 가드가 오작동해 멀쩡한
+    내레이션을 지우는 것이 꼬리보다 나쁘다."""
+    out_dur = video_out_duration(clips, speed)
+    if out_dur <= 0:
+        return list(cue_files or []), []
+    kept, dropped = [], []
+    for cf in (cue_files or []):
+        cue = cf.get("cue") or {}
+        try:
+            start_out = float(cue.get("start_sec", 0.0)) / (speed if speed > 0 else 1.0)
+        except (TypeError, ValueError):
+            kept.append(cf)
+            continue
+        (dropped if start_out >= out_dur - epsilon else kept).append(cf)
+    return kept, dropped
 
 
 def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, num_cue_inputs: int) -> str:
