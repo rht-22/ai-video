@@ -172,6 +172,22 @@ def _transcreate_one(texts: list[str], config: dict[str, Any], hero: bool = Fals
         entries.append(TranslationEntry(source=t, target=target,
                                         notes=r.get("notes", ""),
                                         flagged=bool(r.get("flagged", not target))))
+    # 🛑 **전부 비었으면 크게 실패한다.** 위 루프는 응답에서 못 찾은 항목을 빈 문자열로
+    # 채우는데, 전부 못 찾으면 '번역이 전부 빈 채로' 렌더까지 조용히 간다.
+    #
+    # 2026-08-24 mm-06 실측이 정확히 그랬다: JSON 은 정상이었지만 source 키가 하나도 안
+    # 맞아 18/18 이 빈 문자열이 됐고, 로그에는 'flagged 18' 만 찍힌 채 파이프라인이 끝까지
+    # 돌아 **이벤트 0개짜리 자막**을 만들었다. 사람이 완성본을 볼 때까지 아무도 모른다.
+    # 유료 호출을 하고 빈 결과를 내는 것은 실패지 결과가 아니다(무성 폴백 금지 규율).
+    #
+    # ⚠ 부분 누락은 그대로 둔다 — 한두 항목은 flagged 로 검수에서 잡힌다. 여기서 막는
+    # 것은 '한 건도 못 붙인' 경우뿐이다.
+    if texts and not any(e.target for e in entries):
+        raise RuntimeError(
+            f"트랜스크리에이션이 한 건도 안 붙었다(model={model}, 입력 {len(texts)}건 · "
+            f"응답 행 {len(rows)}건) — 빈 번역으로 진행하지 않는다.\n"
+            f"  응답의 source 키: {[r.get('source') for r in rows[:5]]}\n"
+            f"  입력 텍스트:      {texts[:5]}")
     return entries
 
 

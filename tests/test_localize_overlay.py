@@ -314,3 +314,31 @@ def test_repo_body_uses_the_same_vocabulary():
     tree = _ast.parse(Path("app/modules/gemini_client.py").read_text())
     kwargs = {kw.arg for n in _ast.walk(tree) if isinstance(n, _ast.Call) for kw in n.keywords}
     assert "thinking_level" in kwargs and "thinking_budget" not in kwargs
+
+
+def test_unreadable_translation_response_fails_loudly(monkeypatch):
+    """🛑 2026-08-24 mm-06 실측: 18/18 이 빈 문자열이 됐는데 파이프라인이 끝까지 돌았다.
+
+    vlp 는 못 찾은 항목을 빈 문자열로 채우고 진행한다. 전부 못 찾으면 '번역이 전부 빈'
+    자막이 조용히 렌더까지 간다 — 유료 호출을 하고 빈 결과를 내는 것은 실패지 결과가 아니다."""
+    from app.localize.overlay import llm, translate as tr
+    # ⚠ 실런에서 응답은 **정상 JSON 이었다** — source 키가 하나도 안 맞았을 뿐이다
+    # (parse_llm_json 은 쓰레기에는 예외를 던지므로 그 경로가 아니었다).
+    monkeypatch.setattr(llm, "complete", lambda *a, **k:
+                        '[{"source": "다른것", "target": "ダミー"}]')
+    monkeypatch.setattr(tr, "load_persona", lambda c: "p")
+    monkeypatch.setattr(tr, "load_glossary", lambda c: {})
+    with pytest.raises(RuntimeError, match="한 건도 안 붙었다"):
+        tr._transcreate_one(["안녕", "잘가"], {"translate": {}})
+
+
+def test_partial_miss_is_still_tolerated(monkeypatch):
+    """부분 누락은 그대로 둔다 — 한두 항목은 flagged 로 검수에서 잡힌다."""
+    from app.localize.overlay import llm, translate as tr
+    monkeypatch.setattr(llm, "complete", lambda *a, **k:
+                        '[{"source": "안녕", "target": "こんにちは"}]')
+    monkeypatch.setattr(tr, "load_persona", lambda c: "p")
+    monkeypatch.setattr(tr, "load_glossary", lambda c: {})
+    got = tr._transcreate_one(["안녕", "빠진것"], {"translate": {}})
+    assert got[0].target == "こんにちは"
+    assert got[1].target == "" and got[1].flagged is True
