@@ -27,7 +27,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.localize import narration  # noqa: E402
-from app.localize.rerender import cut_mismatch_hint  # noqa: E402
+from app.localize.rerender import cut_reproduced  # noqa: E402
 
 _FFMPEG = shutil.which("ffmpeg")
 needs_ffmpeg = pytest.mark.skipif(_FFMPEG is None, reason="ffmpeg 없음")
@@ -108,34 +108,55 @@ def test_trim_failure_keeps_the_original_and_does_not_raise(tmp_path, capsys):
     assert not (tmp_path / "cue.trim.mp3").exists()
 
 
-# ── L4 실패 메시지: 두 원인을 구분한다 ─────────────────────────────────────
-def test_hint_says_audio_only_when_the_two_video_streams_match():
-    """비디오 스트림끼리 같으면 컷은 재현된 것 — 차이는 오디오뿐이다."""
-    msg = cut_mismatch_hint(25.025, 25.025)
-    assert "일치한다" in msg and "오디오" in msg
-    assert "gen_flags" not in msg
+# ── L4 컷 검증: 비디오 스트림끼리 비교한다 (2026-08-24 사용자 결정) ────────
+def test_the_real_incident_now_passes():
+    """실제로 난 사고의 숫자 — 스트림은 같고 컨테이너만 0.5초 다르다.
+
+    컷은 완벽히 재현됐으므로 **통과**해야 한다. KO 완성본에도 이미 14.4초 오디오
+    꼬리가 있었다(KR 은 이 검사가 없어 아무도 몰랐다) — 0.5초를 이유로 발행을 막는
+    것은 앞뒤가 맞지 않는다."""
+    ok, detail = cut_reproduced(25.025, 25.025, 39.400, 39.900)
+    assert ok
+    assert "컷 재현 확인" in detail
 
 
-def test_hint_names_gen_flags_when_the_video_streams_differ():
-    msg = cut_mismatch_hint(49.700, 53.300)
-    assert "gen_flags 재현 실패" in msg
-    assert "일치한다" not in msg
+def test_an_audio_tail_is_reported_even_though_it_passes():
+    """통과시키되 조용히 넘기지 않는다 — 안 보이면 '고쳤는데 왜 그대로지'가 된다."""
+    _, detail = cut_reproduced(25.025, 25.025, 39.400, 39.900)
+    assert "오디오 꼬리" in detail and "39.400" in detail and "39.900" in detail
 
 
-def test_hint_never_compares_a_container_against_a_stream():
-    """⚠ 첫 판의 실제 결함 — ko **컨테이너**(39.400)와 ja **스트림**(25.025)을 맞대는
-    단위 착오. 두 파일 다 오디오 꼬리가 있으면 컷이 멀쩡해도 늘 '재현 실패'로 오판했다.
-    스트림끼리 넘기면 같은 상황이 '오디오뿐'으로 읽혀야 한다."""
-    assert "gen_flags" not in cut_mismatch_hint(25.025, 25.025)
+def test_a_clean_run_says_nothing_about_audio():
+    """컨테이너까지 같으면 꼬리 문구가 안 붙는다(경고가 늘 붙으면 무뎌진다)."""
+    ok, detail = cut_reproduced(25.025, 25.025, 25.100, 25.100)
+    assert ok and "오디오 꼬리" not in detail
 
 
-def test_hint_always_prints_both_numbers_so_a_human_can_recheck():
-    """판정이 틀려도 원본 숫자로 되짚을 수 있어야 한다(이번 사고의 교훈)."""
-    for msg in (cut_mismatch_hint(25.025, 25.025), cut_mismatch_hint(25.025, 39.900)):
-        assert "25.025" in msg and "ko" in msg and "ja" in msg
+def test_a_real_cut_mismatch_still_fails():
+    """가드가 사라지면 안 된다 — 스트림이 다르면 자막 싱크가 깨진 것이다."""
+    ok, detail = cut_reproduced(49.700, 53.300, 49.700, 53.300)
+    assert not ok
+    assert "gen_flags 재현 실패" in detail
 
 
-def test_hint_degrades_gracefully_when_a_stream_duration_is_unknown():
-    """ffprobe 가 스트림 길이를 못 주면(0.0) 판별 불가라고 말한다 — 단정하지 않는다."""
-    msg = cut_mismatch_hint(0.0, 25.025)
-    assert "판별 불가" in msg and "못 읽었다" in msg
+def test_container_is_never_compared_against_a_stream():
+    """⚠ 회귀 가드 — ko **컨테이너**(39.400)와 ja **스트림**(25.025)을 맞대던 단위 착오.
+    그 착오가 있으면 이 입력이 실패로 읽힌다."""
+    ok, _ = cut_reproduced(25.025, 25.025, 39.400, 39.900)
+    assert ok, "컨테이너와 스트림을 맞대고 있다"
+
+
+def test_both_numbers_are_always_printed_so_a_human_can_recheck():
+    for _, detail in (cut_reproduced(25.025, 25.025, 39.400, 39.900),
+                      cut_reproduced(49.700, 53.300, 49.700, 53.300)):
+        assert "ko" in detail and "ja" in detail
+
+
+def test_unreadable_stream_falls_back_to_the_container_check():
+    """가드가 조용히 사라지는 것이 오판보다 나쁘다 — 폴백하고 그 사실을 말한다."""
+    ok, detail = cut_reproduced(0.0, 25.025, 39.400, 39.900)
+    assert not ok
+    assert "폴백" in detail and "못 읽어" in detail
+
+    ok2, detail2 = cut_reproduced(0.0, 0.0, 39.400, 39.410)
+    assert ok2 and "폴백" in detail2
