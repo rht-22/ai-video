@@ -46,14 +46,29 @@ VLP_ROOT=$R/video-localization-project $AIV -m scripts.overlay_port_diff --verbo
 
 ## 2. 기준(구 엔진) 산출물 고르기
 
-autopilot 이 이미 처리한 영상의 `outputs/<video_id>` 가 기준이다.
+autopilot 이 이미 처리한 영상의 `outputs/<video_id>` 가 기준이다. **자격이 되는 것만**
+뽑는다 — `translations.json`·`ja_events.json` 이 둘 다 있어야 CER·정렬을 잰다.
+
+⚠ 아래 블록에 주석을 넣지 마라. 노드 zsh 는 `interactive_comments` 가 꺼져 있어
+`#` 가 glob 문자로 읽힌다(이 세션에서 실제로 `unknown file attribute` 로 죽었다).
 
 ```zsh
-ls -t $R/video-localization-project/outputs | head -20
+O=$R/video-localization-project/outputs
+for d in $O/*(/); do
+  b=${d:t}
+  [ -f $d/translations.json ] && [ -f $d/ja_events.json ] && \
+    echo "$b  ev=$(grep -c '"start"' $d/ja_events.json)  final=$([ -f $d/final_draft.mp4 ] && echo Y || echo -)"
+done
 ```
 
-⚠ **`translations.json` 과 `ja_events.json` 이 둘 다 있는 것**을 고른다 — 없으면 CER·정렬을
-못 잰다. route C 편이면 `final_draft.mp4` 도 있어야 라우드니스를 잰다.
+`ev` 는 자막 이벤트 수다 — **10건 이상**인 편이 대조로서 의미가 있다(2~3건짜리는
+어긋나도 안 드러난다). `final=Y` 인 편이라야 라우드니스·길이까지 잰다.
+
+원본 mp4 는 여기 있다:
+
+```zsh
+ls $R/video-localization-project/data/source | head
+```
 
 ## 3. 같은 소재로 신 엔진 실행
 
