@@ -419,6 +419,36 @@ vlp `1da2a16`·`2f338e3`(147줄)을 따라 이식했다. 이것이 없으면 **�
   `l0_backup` 만 다른데 P1 에서 하드코딩 대신 계약 상수(`SOURCE_VIDEO_BACKUP`·
   `RENDER_OUTPUT`)를 쓰기로 한 차이이고 값은 같다.
 
+### 내레이션 창 계약 (L3t, 2026-08-24)
+
+`app/localize/narration.py` — `_trim_to_window` · `trim_args`.
+
+**창을 넘긴 일본어 내레이션이 편 전체를 죽이고 있었다.** SHOTCONE 혜미리예채파 2화가
+3회 연속 **같은 숫자**로 dead 였다: `컷 길이 불일치: ko 39.400s vs ja 39.900s`.
+
+- 기전(실측 확인): 렌더는 `amix=inputs=N:duration=longest` 로 섞는데 ffmpeg 에
+  **`-shortest` 가 없다**(`renderer._build_audio_filter` · `render_video` 의 argv).
+  그래서 마지막 cue 오디오가 창을 넘으면 **컨테이너가 영상 트랙보다 길어진다**
+  (합성 2.0s 영상 + 2.5s cue → 출력 2.5s). 그 초과분을 L4 컷 대조(허용 0.05초)가
+  잡아 편을 통째로 실패시킨다.
+- **비대칭이 정체였다** — 한국어는 `synthesize_cue_cached` 가 fit 재작성(Flash 단축)으로
+  창을 지키는데, 일본어 재합성만 rate 3단계(+0/+15/+30%)를 다 쓰고도 안 맞으면
+  **경고만 찍고 넘어갔다**. 이제 창 길이로 자른다(끝에 페이드 — 창의 10%·0.15초 중 짧은 쪽).
+- **자르는 쪽을 골랐다**: 내레이션 끝 일부를 잃지만 편 전체가 발행되지 못하는 것보다 낫다.
+  대신 **건별로 크게 남긴다**(stdout `[L3t] ⚠️ … 창 길이로 잘랐다` + cue `fit_trimmed:true`)
+  — 검수에서 짚을 근거다. 창에 드는 cue 는 **파일을 아예 안 건드린다**(회귀 0).
+- 잘라내기가 실패하면 원본을 유지하고 죽지 않는다(내레이션을 잃는 것이 더 나쁘다).
+- ⚠ **렌더에 `-shortest` 를 넣는 것은 고려했다가 버렸다** — 전 채널 KR 렌더까지
+  오디오 꼬리를 자르게 되고 `auto_update=true` 라 맥미니 6대에 즉시 나간다. 원인은
+  현지화 재합성 쪽이므로 그쪽에서 막는다.
+- ⚠ **vlp 원본에도 같은 버그가 있다**(`localize_run.l3t_tts` — 경고만 찍는 그 코드).
+  이식본이 의도적으로 갈라진 지점이라 `localize_port_diff` 대조 대상이 아니다
+  (그 스크립트는 render_flags·ass·pairs·l3_apply 만 본다).
+- 곁다리: L4 실패 메시지가 **원인 갈래를 구분한다**(`rerender.cut_mismatch_hint`) —
+  비디오 스트림이 ko 와 같으면 '오디오 꼬리', 다르면 'gen_flags 재현 실패'. 종전에는
+  둘 다 후자로 뭉뚱그려 엉뚱한 곳(노브·소스)을 뒤지게 했다.
+- 회귀 가드: `tests/test_localize_narration_window.py`(10건 — 실제 ffmpeg 으로 자름 확인).
+
 ### 화면 글자 현지화 계약 (E16, 2026-08-24)
 
 `app/localize/style_texts.py` — vlp `0757b68` 이식. 발주서: ves-orchestrator
