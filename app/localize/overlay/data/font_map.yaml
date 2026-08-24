@@ -1,0 +1,20 @@
+# 한국어 폰트 → 일본어 폰트 매핑.
+# render.py 가 detect 단계 스타일(굵기/크기/serif 여부)로 적절한 일본어 폰트를 고른다.
+# 파일은 paths.fonts_dir 기준 상대경로 또는 절대경로.
+# ⚠ 상업 채널: 폰트 라이선스(임베딩·방송 사용) 반드시 확인. Noto Sans/Serif JP 는 OFL(상업 가능).
+
+default: NotoSansJP-Bold.otf        # 룰 매칭 실패 시
+fallback: NotoSansJP-Regular.otf    # default 파일도 없을 때
+
+# 위에서부터 첫 매칭 사용. match 의 각 조건(weight/style/size_min/size_max)은 모두 선택.
+# 실파일 = noto-cjk 공식 JP 서브셋 OTF(OFL, 2026-07-23 배치) — fonts/README.md 참고.
+rules:
+  - name: heavy-caption             # 굵은 밈 자막
+    match: { weight: bold }
+    jp_font: NotoSansJP-Black.otf
+  - name: title-serif               # 제목/감성 컷
+    match: { style: serif }
+    jp_font: NotoSerifJP-Bold.otf
+  - name: small-body
+    match: { size_max: 28 }
+    jp_font: NotoSansJP-Medium.otf

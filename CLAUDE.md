@@ -393,6 +393,94 @@ video-localization-project `scripts/localize_run.py`(917줄)를 **충실히 이�
 - 회귀 가드: `tests/test_localize_rerender.py`·`tests/test_localize_pairs.py`(40건) +
   `scripts/localize_port_diff.py`(원본과 **바이트 동일성** 대조 — vlp 동결 시 함께 은퇴).
 
+## overlay 현지화 계층 (L-P4, 2026-08-24)
+
+`app/localize/overlay/` — 발주서: ves-orchestrator `docs/LOCALIZE_UNIFY.md` §3-2.
+video-localization-project `engine/*` + `src/process_video.py` 를 **충실히 이식**했다.
+
+⚠ **rerender(`app/localize/`)와 입력이 다르다.** 헷갈리면 엉뚱한 것을 고친다.
+
+| | rerender | overlay |
+|---|---|---|
+| 입력 | ai-video job 디렉토리(체크포인트) | **외부 완성본 mp4 한 개** |
+| 화면 속 한글 | 애초에 안 그린다 | 인페인팅으로 지우거나 · 병기하거나 · 그대로 |
+| 컷 재현 | gen_flags 복원(프레임 단위) | 해당 없음(원본 시간축) |
+| 채널 | 혜미리예채파 · 잔망루피 롱폼 | **잔망루피 쇼츠** |
+
+- 진입점은 `python -m app.cli localize --mode overlay --video <mp4> --video-id <id>
+  [--route B]` 다. **`--mode` 미지정 = rerender**(종전 그대로 · 회귀 0).
+  `--video`/`--video-id` 를 rerender 에 주거나 그 반대면 **즉시 실패**한다 — 모드마다
+  필수 인자가 달라 조용히 섞이면 rerender 가 엉뚱한 경로를 job 으로 읽는다.
+- **route 정본은 `data/pipeline.config.yaml` 의 `levels`** 다. 구 '등급'을 이름만
+  강등한 것이라 값이 그대로다(A·B·BJ·C·BC). `overlay/__init__.ROUTES` 와 config 가
+  갈리면 CLI 가 통과시킨 route 를 엔진이 거절하므로 **테스트가 둘을 묶는다**.
+- **더빙(route C·BC)은 이 계층이 하지 않는다** — vlp 규약 그대로다(`process_video`
+  머리말). 검수 게이트를 지난 뒤 별도 단계가 맡고, `runner.needs_dub` 이 뒤따를 단계가
+  있는지 알린다. ⚠ 이 값은 오케스트레이터 어댑터의 `needs_dub` 과 **같아야 한다** —
+  갈리면 더빙이 빠진 편이 더빙된 줄 알고 발행된다(2026-08-12 에 실제로 난 사고).
+- **무거운 의존을 requirements 에 안 넣었다.** OCR(rapidocr·paddleocr·easyocr)과
+  인페인트(opencv·lama·sttn·propainter)가 **전부 지연 임포트 + 폴백**이라 임포트만으로는
+  아무것도 안 끌려온다(회귀 가드가 서브프로세스로 실측한다). 백엔드 선택은 config 몫이고
+  없는 백엔드는 다음 후보로 넘어간다(`detect._FALLBACK_ORDER`).
+- 🛑 **`propainter` 라이선스 게이트를 그대로 옮겼다** — S-Lab 비상업 라이선스라
+  `inpaint.propainter_commercial_ack=true` 없으면 차단이다(회귀 0 계약 §8-7).
+  ack 이 있으면 그 다음 벽(가중치 미연동)에 닿는다 — 테스트가 두 벽을 구분해 고정한다.
+- ⚠ **이식하며 의도적으로 바꾼 것 셋**(그 외 162개 함수·상수는 vlp 와 AST 동일):
+  ① **모델** — `overlay/llm.resolve_model` 이 이 레포 모델 규칙을 강제한다.
+     vlp config 의 `gemini-3.5-flash`·`gemini-pro-latest` 는 **사용 금지 모델**이라
+     config 값을 읽지 않고 env 기본값(`GEMINI_FLASH_MODEL_NAME`·`GEMINI_MODEL_NAME`)을
+     따른다. P1 이 `localize_run` Flash 를 바꾼 것과 같은 규약이다.
+     `LLM_MODEL` env 로 못박는 vlp 규약은 유지했다.
+  ② **경로 기준** — `common.PROJECT_ROOT` 가 ai-video 레포 루트이고, config 의
+     상대경로(persona·font_map·glossary·fonts_dir)를 ai-video 위치로 다시 적었다.
+  ③ **진입점** — vlp 의 `_parse_args`/`main` 은 안 옮겼다. 이 레포의 진입점은
+     `app.cli` 하나다(rerender 가 세운 규약).
+- ⚠ **E14 자막 노출 하한은 이 경로에 없다**(회귀 0 계약 §8-8). overlay 자막은
+  `overlay/render.py` 가 조립하고 `merge_subtitle_segments` 를 지나지 않는다 —
+  잔망루피 자막 타이밍이 조용히 움직이면 안 되므로 **끄고 시작**하는 것이 계약이다.
+  켜려면 A/B 로 확인한 뒤 별건으로 한다.
+- 회귀 가드: `tests/test_localize_overlay.py`(39건) + `scripts/overlay_port_diff.py`
+  (vlp 와 AST 대조 — **250개 함수·상수 동일**, 의도된 차이 7건만 사유와 함께 통과.
+  함수 안 임포트의 패키지 이름 변경은 정규화한다 — 안 하면 멀쩡한 이식이 전부
+  '예상 밖 차이'로 떠서 아무도 도구를 안 보게 된다. vlp 동결 시 함께 은퇴).
+
+### 더빙 (route C·BC 뒷단)
+
+`overlay/dub.py` + `refbank.py` + `precheck.py` — vlp `src/` 에서 함께 옮겼다.
+
+- **overlay 파이프라인이 이 단계를 부르지 않는다**(vlp 규약 그대로). 검수 게이트를 지난 뒤
+  `python -m app.localize.overlay.dub` 로 따로 돈다. 회귀 가드가 파이프라인의 임포트를
+  AST 로 훑어 **더빙을 부르지 않는 것**을 고정한다 — 부르면 게이트가 없어진다.
+- 페이싱·리타이밍 숫자(`pacing_plan` 상한 1.35 · `char_budget` 하한 · `atempo` 체인
+  분할)는 **잔망루피 목소리의 정체**라 한 개도 안 바꿨고 값으로 고정했다.
+- `refbank` 는 영상마다 '깨끗한 긴 대사'를 은행에 쌓고 그 영상 음향 프로필(F0·밝기)에
+  가장 가까운 항목을 고른다 — 짧은 대사의 self-ref 퇴화를 피하는 장치다.
+- ⚠ 계획 §3-4 는 ai-video `tts.py`(E11·E12 프리셋·캐시·실패 분류)를 정본으로 삼아
+  합치라고 한다. **합치기는 회귀 위험이라 아직 안 했다** — 충실 이식 → 회귀 0 확인 →
+  합치기 순서다(P1 이 그렇게 갔다).
+
+#### 🛑 이식 중 잡은 결함 3건 (회귀 가드가 잡았다)
+
+파일 단위 복사는 **함수 안 임포트**를 놓친다. `test_no_stale_vlp_imports_in_the_port`
+가 AST 로 훑어 셋을 잡았고, 셋 다 런타임에 죽는 것이었다:
+
+1. `dub.py` 의 `from engine import render` — 재배선 누락
+2. `dub.py` 가 self-ref 프로브를 **`-m src.dub`** 로 다시 부르던 것(모델 캐시 오염을
+   피하려 자기를 서브프로세스로 부른다). 이 레포에 없는 모듈이라 즉사한다 —
+   `_SELF_MODULE` 한 곳에서 만들도록 바꿨다.
+3. `src/refbank.py`·`src/precheck.py` 를 **아예 안 옮긴 것** — dub 이 지연 임포트로
+   쓰고 있어 문법 검사·임포트만으로는 안 드러났다.
+
+⇒ 지연 임포트가 많은 코드를 옮길 때는 **문법이 통과해도 이식이 끝난 게 아니다.**
+
+### 🛑 아직 이식하지 않은 것 (P4 잔여)
+- **`src/autopilot.py` 의 자동 선별·승인** — 폐기다(사용자 결정 2, 사람이 지시한다).
+  아카이브·선별은 오케스트레이터가 진다(P3·P3b).
+- **실측 회귀 0**(계획 §8-3: 잔망루피 10편 CER·라우드니스·세그먼트 정렬) — 이 컨테이너에는
+  소재도 OCR 백엔드도 없다. ⚠ 그리고 **VES 를 통한 overlay 잡은 3건뿐이고 마지막이
+  8/13, C·BC 는 한 번도 안 돌았다** — 대조 기준은 job_queue 가 아니라 mm-06 의 autopilot
+  산출물이다. 실측은 그 노드에서 해야 한다.
+
 ### 편집실 재렌더 계약 (L-P2b, 2026-08-24)
 
 vlp `1da2a16`·`2f338e3`(147줄)을 따라 이식했다. 이것이 없으면 **사람이 편집실에서 고친

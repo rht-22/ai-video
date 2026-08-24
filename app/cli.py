@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from app.config import DesignConfig, get_logo_path, to_ass_color
+from app.localize.overlay import ROUTES as OVERLAY_ROUTES
 from app.modules.editorial import merge_editorial, parse_editorial
 from app.modules.ffmpeg_utils import ensure_ffmpeg_supported
 from app.pipeline import PipelineInput, run_pipeline
@@ -259,7 +260,10 @@ def build_parser() -> argparse.ArgumentParser:
     # **완전히 분리된 서브커맨드**라 이 플래그를 안 쓰는 실행은 종전과 한 바이트도 같다.
     loc = subparsers.add_parser(
         "localize", help="완성된 job 디렉토리를 현지화한다 (rerender 모드)")
-    loc.add_argument("--job-dir", required=True, help="ai-video job 디렉토리")
+    # ⚠ overlay 모드는 --video 를 받으므로 required 가 아니다. 대신 디스패치에서
+    # 모드별로 즉시 실패시킨다(모드마다 필수 인자가 다르다).
+    loc.add_argument("--job-dir", dest="job_dir", default=None,
+                     help="rerender: ai-video job 디렉토리")
     loc.add_argument("--locale", default="ja",
                      help="대상 로케일 (app/localize/data/locales.json 의 키)")
     loc.add_argument("--overrides", default=None,
@@ -267,6 +271,23 @@ def build_parser() -> argparse.ArgumentParser:
                           "L3+ 를 고친 텍스트로 재실행")
     loc.add_argument("--skip-render", action="store_true",
                      help="L4 재렌더 생략(번역까지만 — 프롬프트·용어집 점검용)")
+    # ── overlay (L-P4) — 완성본 mp4 한 개를 현지화한다 (잔망루피 쇼츠) ──────
+    # ⚠ rerender 와 **입력이 다르다**: --job-dir 대신 --video/--video-id.
+    # 허용값 밖은 choices 로 즉시 실패한다 — 조용히 기본값으로 떨어지면 사람은
+    # 일본어판을 만든 줄 알고 한국어판을 발행한다(§3-3).
+    loc.add_argument("--mode", choices=("rerender", "overlay"), default=None,
+                     help="현지화 모드 (미지정 = rerender — 종전 그대로)")
+    loc.add_argument("--video", default=None, help="overlay: 원본 완성본 mp4")
+    loc.add_argument("--video-id", dest="video_id", default=None,
+                     help="overlay: 산출 디렉토리 이름이 되는 식별자")
+    loc.add_argument("--route", choices=OVERLAY_ROUTES, default="B",
+                     help="overlay: A(자막) B(지우고 재합성) BJ(병기) C(더빙) BC(더빙+clean)")
+    loc.add_argument("--content-type", dest="content_type", default=None,
+                     help="overlay: mukbang|anime|high_motion (인페인트 모드 선택)")
+    loc.add_argument("--inpaint-backend", dest="inpaint_backend", default=None,
+                     help="overlay: 인페인트 백엔드 강제 (opencv|lama|sttn|propainter)")
+    loc.add_argument("--subtitle-area", dest="subtitle_area", nargs=4, type=int,
+                     metavar=("X1", "Y1", "X2", "Y2"), help="overlay: OCR ROI")
     loc.add_argument("--rebuild", action="store_true",
                      help="편집실 재렌더용 — 한국어 백업·번역/텔롭 캐시를 지금 job 디렉토리 "
                           "상태로 갱신하고 L1·L2 를 다시 돌린다. 이것 없이 재실행하면 사람이 "
@@ -458,6 +479,26 @@ def main() -> None:
         # 렌더가 자막·텔롭을 번인하므로 ffmpeg 를 먼저 검증한다(create_shorts 와 같은 이유).
         if not args.skip_render:
             ensure_ffmpeg_supported()
+        # overlay(L-P4): 입력이 job 디렉토리가 아니라 완성본 mp4 한 개다.
+        # 두 모드가 요구하는 인자가 다르므로 **여기서 즉시 실패**시킨다 — 빠진 채로
+        # 들어가면 rerender 가 엉뚱한 경로를 job 으로 읽는다.
+        if args.mode == "overlay":
+            missing = [n for n, v in (("--video", args.video),
+                                      ("--video-id", args.video_id)) if not v]
+            if missing:
+                raise SystemExit(f"overlay 모드에는 {' · '.join(missing)} 가 필요합니다")
+            from app.localize.overlay.runner import run_overlay
+            roi = tuple(args.subtitle_area) if args.subtitle_area else None
+            out = run_overlay(args.video, args.video_id, route=args.route,
+                              locale=args.locale, content_type=args.content_type,
+                              roi=roi, backend=args.inpaint_backend)
+            print(f"[localize] overlay 완료: {out.get('final')}")
+            return
+        if args.video or args.video_id:
+            raise SystemExit("--video/--video-id 는 --mode overlay 전용입니다 "
+                             "(rerender 는 --job-dir 를 받습니다)")
+        if not args.job_dir:
+            raise SystemExit("rerender 모드에는 --job-dir 가 필요합니다")
         marker = run_localize(args.job_dir, args.locale,
                               overrides_path=args.overrides,
                               skip_render=args.skip_render,
