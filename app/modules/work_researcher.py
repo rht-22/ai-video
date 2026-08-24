@@ -204,12 +204,19 @@ def _build_episode_cast_prompt(work_title: str, episode: int) -> str:
 
 
 def _search_with_grounding(gemini_client: Any, prompt: str, use_grounding: bool = True) -> Any:
-    """Google Search grounding으로 Gemini 호출. 미지원 시 일반 호출로 폴백."""
+    """Google Search grounding으로 Gemini 호출. 미지원 시 일반 호출로 폴백.
+
+    ⚠ 모델 정책(2026-08-23, 사용자 결정): **Pro 는 영상을 실제로 보는 호출
+    (analyze_chunk) 하나뿐**이고 나머지는 Flash 최신이다. 리서치는 영상을 올리지 않는
+    텍스트+검색 호출이라 그 대상이다(전환 전에는 Pro 였다). 세 갈래(그라운딩 켬/끔/
+    폴백) 전부 같은 모델을 써야 한다 — 하나만 남기면 폴백에서 조용히 모델이 바뀐다.
+    """
+    model_name = gemini_client.config.flash_model_name
     thinking_level = getattr(gemini_client.config, "research_thinking_level", "medium")
     thinking_config = gemini_client.types.ThinkingConfig(thinking_level=thinking_level)
     if not use_grounding:
         return gemini_client.client.models.generate_content(
-            model=gemini_client.config.model_name,
+            model=model_name,
             contents=[prompt],
             config=gemini_client.types.GenerateContentConfig(
                 thinking_config=thinking_config,
@@ -217,7 +224,7 @@ def _search_with_grounding(gemini_client: Any, prompt: str, use_grounding: bool 
         )
     try:
         return gemini_client.client.models.generate_content(
-            model=gemini_client.config.model_name,
+            model=model_name,
             contents=[prompt],
             config=gemini_client.types.GenerateContentConfig(
                 tools=[gemini_client.types.Tool(
@@ -229,7 +236,7 @@ def _search_with_grounding(gemini_client: Any, prompt: str, use_grounding: bool 
     except (TypeError, AttributeError):
         print("  [WARN] Google Search grounding 미지원 — 일반 Gemini 호출로 폴백")
         return gemini_client.client.models.generate_content(
-            model=gemini_client.config.model_name,
+            model=model_name,
             contents=[prompt],
             config=gemini_client.types.GenerateContentConfig(
                 thinking_config=thinking_config,

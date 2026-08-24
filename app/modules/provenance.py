@@ -95,6 +95,20 @@ def build_provenance(config: AppConfig, design=None) -> dict:
         "models": {
             "pro": os.getenv("GEMINI_MODEL_NAME", "gemini-3.1-pro-preview"),
             "flash": os.getenv("GEMINI_FLASH_MODEL_NAME", "gemini-3.6-flash"),
+            # 역할 → 슬롯 (모델 정책 2026-08-23, 사용자 결정): **Pro 는 영상을 실제로
+            # 보는 호출 하나뿐**이고 나머지 텍스트-온리 호출은 전부 Flash 최신이다.
+            # 두 슬롯(pro/flash) 이름만으로는 '어느 호출이 무엇을 썼는가'가 안 남아
+            # 전환 전후 산출물을 구분할 수 없었다 — 그래서 역할 표를 함께 남긴다.
+            "roles": {
+                "analyze_chunk": "pro",          # 청크 영상 분석 — Pro 를 쓰는 유일한 호출
+                "extract_relationships": "flash",  # 2026-08-23 Pro→Flash
+                "research": "flash",               # 2026-08-23 Pro→Flash (그라운딩 검색)
+                "screen": "flash",
+                "story": "flash",
+                "shorten": "flash",
+                "beat_drops": "flash",
+                "style": "flash",                  # E15 스타일 구성
+            },
         },
         "config": {"app": asdict(config), "design": (asdict(design) if design is not None else None)},
         "prompt_set_hash": _sha256("".join(sorted(pv.values()))),

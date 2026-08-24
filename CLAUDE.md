@@ -4,22 +4,41 @@
 
 이 프로젝트에서 Gemini API 모델은 반드시 아래 두 가지만 사용한다:
 
-| 역할 | 모델명 |
-|------|--------|
-| 정밀 분석 (Pro) | `gemini-3.1-pro-preview` |
-| 스크리닝/스토리 구성 (Flash) | `gemini-3.6-flash` |
+| 슬롯 | 모델명 | 쓰는 곳 |
+|------|--------|---------|
+| Pro (`GEMINI_MODEL_NAME`) | `gemini-3.1-pro-preview` | **영상 분석 하나뿐** — `analyze_chunk()` |
+| Flash (`GEMINI_FLASH_MODEL_NAME`) | `gemini-3.6-flash` | **그 외 전부** |
 
 `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-3.1-flash-preview` 등 다른 모델은 사용 금지.  
-환경변수(`GEMINI_MODEL_NAME`, `GEMINI_FLASH_MODEL_NAME`)와 코드 기본값 모두 위 두 모델로 고정.
+환경변수와 코드 기본값 모두 위 두 모델로 고정.
 
-> Flash 는 2026-08-03 에 `gemini-3-flash-preview` → `gemini-3.6-flash` 로 올렸다(사용자 지시).
-> `models.list()` 로 존재를 확인하고 바꿨다. **이 머신 로컬 변경이며 아직 푸시하지 않았다** —
-> 다른 4대는 여전히 `gemini-3-flash-preview` 로 돈다.
+### 모델 사용 정책 (2026-08-23, 사용자 결정)
+
+**Pro 는 영상을 실제로 보는 호출에만 쓴다.** 텍스트-온리 호출은 전부 Flash 최신이다.
+
+| 호출 | 단계 | 슬롯 |
+|------|------|------|
+| `analyze_chunk` — 청크 영상 분석 | gemini | **Pro (유일)** |
+| `extract_relationships` — 후보 관계 추출 | graph | Flash *(← Pro, 8/23 전환)* |
+| `research_work`/`_search_with_grounding` — 작품 리서치 | research | Flash *(← Pro, 8/23 전환)* |
+| `analyze_video_intent`·`compose_story_with_context`·`shorten_text`·`choose_beat_drops` | story 계열 | Flash |
+| `compose_style` — E15 스타일 구성 | style | Flash |
+
+- 리서치는 **세 갈래(그라운딩 켬/끔/폴백) 전부** 같은 모델이어야 한다 — 하나만 고치면
+  폴백에서 조용히 모델이 바뀐다(`work_researcher._search_with_grounding` 의 `model_name` 지역변수).
+- `GeminiConfig.model_name` 기본값이 금지 모델(`gemini-3.5-flash`)이던 것을 팩토리 env
+  기본값과 같게 고쳤다 — 팩토리가 늘 덮어써서 무해했지만, `GeminiConfig` 를 직접 만드는
+  코드·테스트는 그 값을 먹었다.
+- 어느 호출이 어느 슬롯을 썼는지는 run_log `provenance.models.roles` 에 남는다. 두 슬롯
+  이름(pro/flash)만으로는 전환 전후 산출물을 구분할 수 없어서 역할 표를 함께 남긴다.
+- 회귀 가드: `tests/test_e15_style_compose.py` (`model=self.config.model_name` 은 코드
+  전체에 **한 번만** 나와야 한다).
 
 ## 아키텍처 개요
 
 - **Pro 모델** (`gemini-3.1-pro-preview`): 청크별 영상 분석 (Agent 2, `analyze_chunk()`)
-- **Flash 모델** (`gemini-3-flash-preview`): 스크리닝 및 스토리 구성 (Agent 1/3, `screen_candidates()`, `compose_story()`)
+- **Flash 모델** (`gemini-3.6-flash`): 그 외 전 호출 — 스크리닝·스토리 구성·관계 추출·
+  리서치·제목 단축·비트 컷·스타일 구성
 - **청크 분할**: 프록시(480p)를 청크별로 물리적 분할 후 각각 독립 업로드 → 10fps 유지 가능
 
 ## 영상 밴드 레이아웃 계약 (E10, 2026-08-21)
@@ -247,6 +266,94 @@ voice = "ko_female" | "ko_male" | "chat_*" | …   (지금 그대로)
   바뀐다).
 - 회귀 가드: `tests/test_e14_subtitle_min_exposure.py`.
 
+## 스타일 구성 단계 계약 (E15, 2026-08-23)
+
+`app/modules/style_compose.py` · `pipeline.run_pipeline` 의 `[style]` 블록 ·
+`gemini_client.compose_style`. 기획: ves-orchestrator `docs/prompts/e15-style-compose.md`.
+
+스토리 구성이 끝난 편에 **연출 레이어**를 얹는다 — 효과 텍스트·자막 강조·스티커·
+시간대별 제목·제목 기울기·내레이션 톤. 편집(장면·문구)은 안 건드린다.
+
+- **게이트**: `--style-compose` — **미지정이면 단계가 통째로 없다**(회귀 0).
+  체크포인트를 쓰지도 읽지도 않고 필터그래프·`subtitle_segments.json`·cue 가 종전과
+  같다. 오케스트레이터는 채널 design 스위치 `style_compose` 를 이 플래그로 넘긴다
+  (ves 0075 · ops_config `channel_style` 게이트).
+- **자리**: `silence_cut → 【style】 → resources`. 앵커 좌표의 기준인 최종 클립이
+  snap·클램프·중복제거까지 끝나야 확정되고(그 블록 주석: "이후 어떤 단계도 클립 경계를
+  바꾸지 않는다"), TTS 톤은 resources 의 합성보다 앞서야 소리에 반영된다.
+  **이 블록은 clips 를 바꾸지 않는다** — 바꾸면 자막·cue 좌표가 전부 어긋난다.
+- **어휘는 전부 v3 재사용**: `texts`·`images` 는 `edit_overrides.validate_overrides`
+  (v3 스탬프 문서를 만들어 통과시킨다)가 검증하고, 배치는 `place_anchored_*`,
+  제목 창은 `validate_title_segments` 가 본다. 별도 검증기를 만들지 않았다 —
+  사람 손과 AI 손이 다른 코드로 그려지면 언젠가 한쪽만 고쳐진다.
+- **우선순위(파이프라인 블록이 강제)**: 편집실 오버라이드 > 채널 design **명시** 키 >
+  AI 플랜 > 기본값. 편집실이 어떤 카테고리를 보내면 그 카테고리의 AI 항목은 **전량
+  진다**(항목 병합 안 함 — 사람이 지운 연출이 살아 돌아오면 안 된다).
+  채널 명시 여부는 `PipelineInput.design_explicit_fields`(cli 가 걷어 넘긴다)로 본다 —
+  '기본값과 다른가'로 판정하면 채널이 기본값과 같은 값을 일부러 준 경우를 놓친다.
+- **AI 에게만 좁은 규칙**(v3 보다 좁다):
+  - 자막 강조는 `size`·`color` **둘만**(v3 는 y·rotate 도 있다). 위치·회전은 자막
+    가독성을 직접 깨뜨려 사람 전용으로 남겼다 — `STYLE_SUBTITLE_KEYS` 한 줄로 연다.
+    size 는 30~140 상한(v3 는 상한 없음 — 사람은 보고 정한다).
+  - ⚠ **`video_speed` 는 안 연다.** 배속은 렌더 효과가 아니라 **길이 예산**이다:
+    `_speed` 가 스토리 길이 클램프·확장 상한에 ×S 로 곱해지는데(pipeline 3389·3417~3427)
+    style 은 그 클램프가 **끝난 뒤** 돈다. 여기서 바꾸면 40~60초 정책이 적용된 편의
+    출력 길이만 조용히 달라진다(기획서 §4 가 열려고 했던 것을 코드 실측으로 뒤집었다).
+  - voice/speed 는 불변 라벨만(`tts.py` 의 `VOICE_PRESETS`·`SPEED_TO_RATE` 에서 직접
+    가져온다). `elevenlabs:` 접두사는 계정 종속이라 AI 산출에 금지(E12 — 사람이 고른다).
+  - 하드캡: 텍스트 8 · 스티커 4 · 자막 강조 10 · 제목 창 5. 넘으면 앞에서부터 자르고
+    **반드시 기록**한다(조용한 절단 금지).
+- **스티커**: AI 는 `assets/stickers/manifest.json` 의 **id 만** 고른다(엔진이 AI 에게
+  파일 경로를 열지 않는 규율 — 편집실 이미지도 오케스트레이터가 run_dir 로 내려놓는다).
+  고른 파일은 `<run_dir>/style_assets/` 로 복사돼 v3 images 계약을 그대로 탄다.
+  **목록이 비어 있는 것이 정상 상태다** — 권리사 콘텐츠 위에 얹는 자산이라 상용 가능
+  라이선스가 확인된 파일만 번들한다. 없는 id 는 그 항목만 드롭 + 로그.
+- **실패는 크게 남기고 본편은 막지 않는다**: 계약 위반·호출 실패면 `[style]` 로 사유를
+  stdout 에 남기고 **연출 없이 진행**한다(연출은 부가물이라 발행을 막지 않는다).
+  드롭된 앵커는 tts 고아 규칙과 같은 형식으로 건별 기록.
+- **재개**: `checkpoint_style.json` 에 검증까지 끝난 플랜을 저장하고, 편집실 재렌더
+  (`--from-step resources|render`)는 **재호출 없이 그대로 재적용**한다 — 재렌더마다
+  다른 연출이 나오면 사람이 승인한 화면이 달라진다. `--from-step style` 은 재구성.
+  자막 강조는 `subtitle_segments.json` 에 v3 와 **같은 style 키**로 저장돼 재개에서도
+  유지된다(강조가 없으면 파일은 종전과 바이트까지 같다).
+- **첫 variant 한정**(다른 오버라이드와 같은 규약): variant #2·#3 의 `RenderInputs` 는
+  `image_overlays`·`title_segments`·`text_subtitle_path` 를 애초에 받지 않는다(기존 구멍).
+  variant 확대는 그 렌더 경로를 함께 넓혀야 하는 별건.
+- **JP(현지화) 채널은 켜지 않는다** — 연출 텍스트가 한국어로 번인돼 vlp 가 못 지운다
+  (기획서 §9-1). 공유 함수 시그니처·`subtitle_segments.json`/`edit_plan.json` 모양은
+  이번 변경에서 넓히기만 하고 바꾸지 않았다(vlp 세션 동시 작업 회피).
+- 회귀 가드: `tests/test_e15_style_compose.py`.
+
+### 실렌더 실측 (2026-08-23, 합성 180s 소스 · ffmpeg 6.1.1)
+
+F-408/410 과 같은 방식(합성 소스 + 손으로 적은 플랜 — 측정 대상은 '플랜 → 배치 →
+렌더'이지 LLM 문장력이 아니다). 편집 타임라인 원본 100~120s + 150~165s → 출력 35s,
+플랜은 효과 텍스트 2 · 스티커 1(회전 15°) · 자막 강조 1 · 제목 창 2 · title_rotate −3°.
+
+- **앵커 변환**: 원본 105s → 편집 5.0s, 107s → 7.0s(스티커 창 7.000~9.000),
+  155s → 25.0s(2번째 클립 base 20 + 5). 제목 창 원본 100~112 → `between(t,0,12)`,
+  150~160 → `between(t,20,30)`. 전부 수계산과 일치, 드롭 0.
+- **회전 중심 보존**(F-410 규약): 스티커 w=0.22 → 238×178, 15° 바운딩 박스 276×234,
+  `overlay=575:548` — 회전 전 중심 (713,665) 그대로. 수계산과 픽셀 단위 일치.
+- **자막 강조**: `{\fs88\1c&H4444FF&}` (size 88 · #FF4444 의 BGR). 강조 없는 줄은
+  태그 자체가 없어 off 판과 같은 줄이다.
+- **효과 텍스트**: `\an5\pos(778,461)\fs110\frz8` + pop(`\fscx30→110→100`),
+  둘째는 shake(`\frz6→-6→3→0`). **rotate −8 계약 → ASS `\frz8`** — 부호 반전이
+  엔진 책임이라는 F-410 규약대로 나갔다.
+- **시간대별 제목**: 두 창 **사이**(t=13s) 프레임의 제목 영역 글자 픽셀이 **0**
+  (off 판은 31,682) — '창 밖 = 제목 없음'이 실제로 화면에서 확인됐다.
+- **스티커 알파**: 회전 박스 안 빨강 픽셀 13,339(off 11) — png 반투명이 회전 뒤에도
+  배경과 블렌드된다.
+- **회귀 0 (핵심)**: pre-E15 코드(7f7c052)와 이 판의 **플래그 미지정** 실행을 같은
+  입력으로 렌더 → 필터그래프 문자열 동일(경로 정규화 후) · `subtitles.ass` sha256
+  동일 · 디코드 프레임 3지점 픽셀 **완전 동일**(bbox None).
+- **렌더 시간**: 3회 중앙값 off 11.87s · on 12.60s → **+0.73s(+6.2%)**. F-408 이
+  기준으로 삼은 멈춤 임계 30초 대비 여유.
+- ⚠ 이 컨테이너 조건: ffmpeg **6.1.1**(운영 노드는 7.x — 둘 다 `SUPPORTED_FFMPEG_MAJORS`),
+  `GEMINI_API_KEY` 없음 → **LLM 호출 경로(compose_style)는 실측 밖**이다. 프롬프트
+  `.format()` 은 단위 테스트가 가짜 클라이언트로 덮는다. 실물 1편 on/off A/B(기획서 §12)는
+  키·소스가 있는 노드에서 별도로 해야 한다.
+
 ## 현지화 계층 계약 (L-P1, 2026-08-23)
 
 `app/localize/` — 발주서: ves-orchestrator `docs/LOCALIZE_UNIFY.md`.
@@ -283,3 +390,20 @@ video-localization-project `scripts/localize_run.py`(917줄)를 **충실히 이�
      읽는 곳이 없어 산출에 영향이 없다.
 - 회귀 가드: `tests/test_localize_rerender.py`·`tests/test_localize_pairs.py`(40건) +
   `scripts/localize_port_diff.py`(원본과 **바이트 동일성** 대조 — vlp 동결 시 함께 은퇴).
+
+### 🛑 이식이 vlp 를 따라잡지 못한 것 (2026-08-24 · 컷오버 차단 사유)
+
+이식 기준은 vlp `66056fe` 인데, 그 뒤 vlp 가 `5f8c3e3` 으로 **147줄**을 얹었다
+(`1da2a16` 편집실 재렌더가 일본어판까지 살아오게 · `2f338e3` 디자인 복원 출처 이원화).
+
+- **`--rebuild`** — 한국어 백업·번역 캐시를 지금 job 상태로 갱신하고 L1·L2 를 다시 돈다.
+  이것이 없어서 **편집실에서 고친 한국어 자막·제목·구간이 일본어판에 한 글자도 반영되지
+  않았다**(SHOTCONE 실측: 새 검수 카드의 `ko_ja_pairs` 가 직전 카드와 바이트 단위 동일).
+- **디자인 복원**(`design_cli.json` · `[L4] 디자인 복원`) — 없으면 화면비가 안 살아온다.
+- **편집실 겹치기 승계** — 이미지·텍스트 오버레이가 일본어판에 안 따라온다.
+
+⚠ **이것이 끝나기 전에는 `ops_config.localize_engine` 을 `ai-video` 로 켜면 안 된다.**
+켜면 vlp `1da2a16` 이 고친 버그가 그대로 되살아난다. 오케스트레이터가
+`localize.AIVIDEO_HAS_REBUILD=False` 로 한 겹 더 막아 두었다(rebuild 요청 잡만 vlp 로
+우회하고 결과에 `vlp(rebuild-fallback)` 로 남긴다) — **이식이 끝나면 그 상수를 True 로
+바꾸고 우회 분기를 지운다.**
