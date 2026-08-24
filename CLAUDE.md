@@ -748,9 +748,16 @@ E16 이 둘 다 일본어로 바꾼다.
 `style_compose.py` · `gemini_client.STYLE_COMPOSITION_PROMPT` · `localize/apply.py` ·
 `localize/telop.py`. 완성본 프레임 4장을 보고 사용자가 짚은 4건 + 조사 중 나온 1건.
 
-⚠ **SHOTCONE 얘기가 아니다.** `channels_mirror` 실측 — 21개 채널 중 20개가
-`style_compose: true` 이고, 키가 없는 HANIPJUMAK 도 전역 게이트(`ops_config.channel_style
-= on`)로 style 단계를 탄다(가왕쇼 런이 그 채널이다). 아래 1·2는 **전 채널 문제**다.
+⚠ **SHOTCONE 얘기가 아니다.** 실측 — **21개 채널 전부** `style_compose: true` 다
+(가왕쇼 런이 그중 하나다). 아래 1·2는 **전 채널 문제**다.
+
+⚠ **켜는 것은 채널 design 키 하나다.** `ops_config.channel_style` 은 *배포 게이트*(허용)일
+뿐이고, 실제 `--style-compose` 는 `design.style_compose` 가 참일 때만 붙는다
+(`adapters/aivideo.py` 의 `design_for_job` — **키가 없으면 꺼짐**).
+⚠ **`channel_design_overrides` 는 통째 교체다** — 대시보드에서 디자인을 저장할 때
+`style_compose` 를 같이 안 실으면 그 채널의 AI 연출이 **조용히 꺼진다.** 2026-08-24
+11:04 HANIPJUMAK 이 그렇게 꺼졌고(00:00 런은 연출을 탔는데 12:59 런은 안 탔다), 키만
+병합해 되살렸다. 채널 설정을 손으로 고친 뒤에는 이 키가 살아 있는지 확인할 것.
 다행히 연출이 실제로 들어간 4편은 전부 미발행이고, 발행된 3편은 AI 플랜이 비어 있었다
 (`texts 0 · title_segments 0`) — 결함이 나간 적은 없다.
 
