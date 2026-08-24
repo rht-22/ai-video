@@ -113,3 +113,60 @@ def test_filter_candidates_accepts_object_chunks():
     chunk = SimpleNamespace(segments=[SpeechSegment(start_sec=518.9, end_sec=524.2, text=LINE)])
     assert filter_candidates([_cand(515.0, 530.0)], [chunk])[0] != []
     assert filter_candidates([_cand(830.0, 887.0)], [chunk])[0] == []
+
+
+# ── 소스 밖 후보 (2026-08-24) ────────────────────────────────────────────
+# 이 모듈 독스트링이 이미 기록한 현상이다: "같은 응답의 다른 후보는 933~997 을
+# 주장했는데 소스는 875초까지뿐이었다". 종전 판정은 **인용 대사가 전사의 다른 곳에서
+# 발견될 때만** 걸렀으므로, 대사 없는 장면이면 범위 밖이어도 통과했다.
+# 실측: 185개 런 중 5건 · 4개 채널 · 18~26.6초 소실(클립 하나가 통째로 증발).
+from app.modules.timestamp_check import bounds_problem  # noqa: E402
+
+
+def test_bounds_drops_a_candidate_that_starts_past_the_source():
+    """혜미리예채파 2화 — 소스 189.99s 인데 후보가 200~226s. 렌더하면 프레임 0개."""
+    act = bounds_problem(_cand(200.0, 226.0), 189.9898)
+    assert act is not None and act[0] == "drop"
+    assert "소스" in act[1]
+
+
+def test_bounds_clamps_a_candidate_that_only_overruns_the_end():
+    """시작이 안이면 끝만 당긴다 — 쓸 수 있는 소재를 버리지 않는다."""
+    act = bounds_problem(_cand(170.0, 200.0), 190.0)
+    assert act is not None and act[0] == "clamp"
+
+
+def test_bounds_passes_a_normal_candidate():
+    assert bounds_problem(_cand(100.0, 150.0), 190.0) is None
+    assert bounds_problem(_cand(100.0, 190.0), 190.0) is None
+
+
+def test_bounds_drops_when_too_little_is_left():
+    """소스 끝에 1초도 안 남으면 클램프해도 쓸 수 없다."""
+    assert bounds_problem(_cand(189.5, 200.0), 190.0)[0] == "drop"
+
+
+def test_bounds_does_not_judge_without_a_source_duration():
+    """소스 길이를 모르면 판정하지 않는다 — 오판으로 멀쩡한 후보를 버리지 않는다."""
+    assert bounds_problem(_cand(200.0, 226.0), 0.0) is None
+    assert bounds_problem(_cand(200.0, 226.0), None) is None
+
+
+def test_filter_without_source_duration_is_unchanged():
+    """회귀 0 — 인자를 안 주면 종전과 완전히 같다."""
+    cands = [_cand(200.0, 226.0)]
+    assert filter_candidates(cands, [])[0] == cands
+
+
+def test_filter_drops_out_of_range_even_with_no_transcript():
+    """전사가 없어도 경계 검사는 돈다 — 대사 없는 편이 그대로 반쪽이 되면 안 된다."""
+    keep, notes = filter_candidates([_cand(200.0, 226.0)], [], source_duration_sec=190.0)
+    assert keep == [] and len(notes) == 1
+
+
+def test_filter_clamps_end_without_mutating_the_input():
+    """순수 — 넘겨받은 후보 dict 를 건드리지 않는다."""
+    c = _cand(170.0, 200.0)
+    keep, _ = filter_candidates([c], [], source_duration_sec=190.0)
+    assert keep[0]["end_sec"] == 190.0
+    assert c["end_sec"] == 200.0

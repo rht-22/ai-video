@@ -127,23 +127,81 @@ def candidate_problem(candidate: dict, segments: list[dict], *,
     return None
 
 
+MIN_USABLE_SEC = 1.0      # 소스 끝에 이만큼도 안 남는 후보는 쓸 수 없다(클램프해도 무의미)
+
+
+def bounds_problem(candidate: dict, source_duration_sec: float) -> tuple[str, str] | None:
+    """후보가 **소스 영상 밖**인가 → (조치, 사유) 또는 None. 순수(테스트 대상).
+
+    조치는 둘이다:
+      · `"drop"`  — 시작이 소스 끝을 넘거나 남는 분량이 1초 미만. 렌더하면 **프레임도
+        오디오도 0개**라 그 클립이 통째로 사라진다.
+      · `"clamp"` — 시작은 안이고 끝만 넘친다. 끝을 소스 길이로 당긴다(내용을 더하지
+        않으므로 안전하고, 쓸 수 있는 소재를 버리지 않는다).
+
+    ⚠ 이 모듈 맨 위 독스트링이 이미 같은 현상을 기록하고 있다 — "같은 응답의 다른
+    후보는 933~997 을 주장했는데 소스는 875초까지뿐이었다". 그런데 종전 판정은
+    **인용 대사가 전사의 다른 곳에서 발견될 때만** 후보를 걸렀다. 대사 없는 장면이면
+    범위 밖이어도 그대로 통과해, 스토리가 그 후보를 골라 반쪽짜리 쇼츠가 됐다
+    (2026-08-24 실측: 185개 런 중 5건 · 4개 채널 · 18~26.6초 소실)."""
+    src = float(source_duration_sec or 0.0)
+    if src <= 0:
+        return None                      # 소스 길이를 모르면 판정하지 않는다
+    try:
+        start, end = float(candidate.get("start_sec")), float(candidate.get("end_sec"))
+    except (TypeError, ValueError):
+        return None                      # 값 자체의 문제는 renderer.sanitize_clips 담당
+    if start >= src - MIN_USABLE_SEC:
+        return ("drop", f"후보 구간 [{start:.1f}, {end:.1f}] 이 소스({src:.1f}초) 밖입니다 "
+                        f"— 렌더하면 이 클립이 통째로 사라집니다")
+    if end > src:
+        return ("clamp", f"후보 끝 {end:.1f} 이 소스({src:.1f}초)를 넘어 {src:.1f} 로 당깁니다")
+    return None
+
+
 def filter_candidates(candidates: list[dict], transcripts: list[dict],
-                      *, tolerance_sec: float = TOLERANCE_SEC) -> tuple[list[dict], list[str]]:
+                      *, tolerance_sec: float = TOLERANCE_SEC,
+                      source_duration_sec: float | None = None) -> tuple[list[dict], list[str]]:
     """시간축이 어긋난 후보를 걸러 (살아남은 후보, 사유 메모). 순수.
 
     전사는 청크별로 오지만 **후보와 같은 절대 시간축**이라 전부 합쳐서 본다 — 청크 경계
-    근처의 대사가 옆 청크 전사에만 있는 경우를 놓치지 않기 위해서다."""
+    근처의 대사가 옆 청크 전사에만 있는 경우를 놓치지 않기 위해서다.
+
+    `source_duration_sec` 를 주면 **소스 밖 후보**를 먼저 처리한다(bounds_problem).
+    미지정이면 종전과 동일하게 동작한다(회귀 0). 여기서 거르는 것이 중요한 이유:
+    스토리가 후보를 **고르기 전에** 빼야 다른 성한 후보로 대신 만든다 — 나중에
+    `pipeline.clips_beyond_source` 가 잡으면 그 편은 통째로 실패한다."""
     segments: list = []
     for ct in transcripts or []:
         # 청크 묶음도 dict·객체 두 모양이 가능하다 — 세그먼트와 같은 이유(체크포인트 JSON ↔
         # 파이프라인 메모리). 여기서 막지 않으면 위에서 고친 것과 똑같은 자리에서 생성이 죽는다.
         segs = ct.get("segments") if isinstance(ct, dict) else getattr(ct, "segments", None)
         segments.extend(segs or [])
-    if not segments:
-        return list(candidates or []), []
 
-    keep, notes = [], []
+    # ① 소스 밖 후보 — **전사 유무와 무관**하므로 아래 조기 반환보다 앞에서 처리한다.
+    #    (전사가 비었다고 이걸 건너뛰면 대사 없는 편이 그대로 반쪽이 된다.)
+    bounded, notes = [], []
     for c in candidates or []:
+        act = bounds_problem(c, source_duration_sec) if source_duration_sec else None
+        if act is None:
+            bounded.append(c)
+            continue
+        action, why = act
+        tag = f"청크{c.get('chunk_index')}/후보{c.get('candidate_index')}: {why}"
+        if action == "drop":
+            notes.append(tag)
+        else:                                    # clamp — 원본을 건드리지 않고 사본을 넣는다
+            c2 = dict(c)
+            c2["end_sec"] = float(source_duration_sec)
+            bounded.append(c2)
+            notes.append(tag)
+
+    # ② 시간축이 어긋난 후보 — 전사가 있어야만 판정할 수 있다
+    if not segments:
+        return bounded, notes
+
+    keep = []
+    for c in bounded:
         prob = candidate_problem(c, segments, tolerance_sec=tolerance_sec)
         if prob:
             notes.append(f"청크{c.get('chunk_index')}/후보{c.get('candidate_index')}: {prob}")
