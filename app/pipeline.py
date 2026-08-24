@@ -626,6 +626,46 @@ def _filter_candidates_by_chunk_intro_credits(
 
 _MIN_CUE_TAIL = 0.5  # 앵커 소재가 잘려나갔을 때 클립 끝에서 확보할 최소 여유
 
+# 소스 밖으로 나가 실제로 렌더되지 않는 분량이 이보다 크면 실패시킨다.
+# 1.0s: 끝 경계가 소스 길이와 소수점에서 어긋나는 정상 케이스(실측 0~0.2s)는 통과시키고,
+# 클립이 통째로/대부분 증발하는 경우만 잡는다.
+CLIP_LOST_TOLERANCE_SEC = 1.0
+
+
+def clips_beyond_source(clips, source_duration_sec: float,
+                        tolerance: float = CLIP_LOST_TOLERANCE_SEC) -> list[dict]:
+    """소스 영상 밖이라 **실제로 렌더되지 않는** 클립을 찾는다. 순수(테스트 대상).
+
+    ⚠ **왜 필요한가**: 렌더는 클립마다 `-ss start -to end -i <소스>` 로 읽는데, 구간이
+    소스 끝을 넘으면 그만큼 **조용히 짧아지고**, 시작 자체가 소스 밖이면 **프레임도
+    오디오도 0개**가 나온다. concat 은 남은 클립만 이어 붙이므로 **반쪽짜리 쇼츠가
+    아무 경고 없이 발행된다.**
+
+    2026-08-24 실측(185개 런 중 5건, 4개 채널): 전부 클립 2개짜리에서 하나가 통째로
+    증발해 18~26.6초(기획 분량의 절반 가까이)를 잃었다. 예: 혜미리예채파 2화 —
+    소스 189.99s 인데 payoff 클립이 200.0~226.0s. 내레이션은 "결국 0캐시로 전부
+    날려버렸다"고 말하는데 **그 장면이 화면에 없다.**
+
+    Gemini 가 소스 길이 밖 타임스탬프를 만들어내는 것이 원인이고, 파이프라인 어디에도
+    클립 경계를 소스 길이와 대조하는 코드가 없었다.
+
+    Returns: 소실이 tolerance 를 넘는 클립별 dict
+             (index·start·end·planned·rendered·lost) — 비어 있으면 정상."""
+    src = float(source_duration_sec or 0.0)
+    if src <= 0:
+        return []                      # 소스 길이를 모르면 판정하지 않는다(오판 금지)
+    out: list[dict] = []
+    for i, c in enumerate(clips or []):
+        start = float(getattr(c, "start_sec", 0.0))
+        end = float(getattr(c, "end_sec", 0.0))
+        planned = max(0.0, end - start)
+        rendered = max(0.0, min(end, src) - start)
+        lost = planned - rendered
+        if lost > tolerance:
+            out.append({"index": i, "start": start, "end": end,
+                        "planned": planned, "rendered": rendered, "lost": lost})
+    return out
+
 
 def _resolve_cue_anchors(
     cues: list[dict],
@@ -3633,6 +3673,30 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
     if all_storyline_variants:
         clips = list(all_storyline_variants[0][0])
+
+    # ═══════════════════════════════════════
+    # [clip-bounds] 소스 밖 클립 검증 (2026-08-24, 사용자 결정: 크게 실패시킨다)
+    # ═══════════════════════════════════════
+    # 소스 밖 구간은 렌더에서 아무것도 내놓지 않아 **반쪽짜리 쇼츠가 조용히 발행된다**
+    # (clips_beyond_source 독스트링에 실측·기전). 조용한 절반 발행이 실패보다 나쁘므로
+    # 여기서 멈춘다 — 여기는 클램프·dedup 이 끝나 클립이 확정된 지점이고, 아직 TTS 합성·
+    # 렌더 같은 비싼 단계를 시작하기 전이다.
+    #
+    # **실제로 렌더될 variant 만** 본다 — 안 쓰는 variant 때문에 편을 죽이지 않는다.
+    _src_dur = float(getattr(media_info, "duration_sec", 0.0) or 0.0)
+    _oob_lines: list[str] = []
+    for _vi, (_vc, _vt, _vs) in enumerate(all_storyline_variants[:max(1, max_shorts)]):
+        for _b in clips_beyond_source(_vc, _src_dur):
+            _oob_lines.append(
+                f"  variant#{_vi}({_vt[:16]}) clip{_b['index']}: "
+                f"{_b['start']:.1f}~{_b['end']:.1f}s → 실제 렌더 {_b['rendered']:.1f}s "
+                f"(소실 {_b['lost']:.1f}s)")
+    if _oob_lines:
+        raise ValueError(
+            f"소스 밖 클립 — 소스는 {_src_dur:.1f}초인데 그 밖을 가리키는 구간이 있습니다. "
+            f"그대로 렌더하면 해당 클립이 통째로/대부분 빠진 **반쪽짜리 쇼츠**가 됩니다.\n"
+            + "\n".join(_oob_lines)
+            + "\n  → 스토리 재생성이 필요합니다(같은 입력으로 재시도하면 같은 결과입니다).")
 
     # 자막 데이터 생성 (transcript_text → 편집 타임라인 매핑)
     final_segments = []
