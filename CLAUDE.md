@@ -319,9 +319,10 @@ voice = "ko_female" | "ko_male" | "chat_*" | …   (지금 그대로)
 - **첫 variant 한정**(다른 오버라이드와 같은 규약): variant #2·#3 의 `RenderInputs` 는
   `image_overlays`·`title_segments`·`text_subtitle_path` 를 애초에 받지 않는다(기존 구멍).
   variant 확대는 그 렌더 경로를 함께 넓혀야 하는 별건.
-- **JP(현지화) 채널은 켜지 않는다** — 연출 텍스트가 한국어로 번인돼 vlp 가 못 지운다
-  (기획서 §9-1). 공유 함수 시그니처·`subtitle_segments.json`/`edit_plan.json` 모양은
-  이번 변경에서 넓히기만 하고 바꾸지 않았다(vlp 세션 동시 작업 회피).
+- ~~**JP(현지화) 채널은 켜지 않는다**~~ — 기획 시점(8/23)에는 연출 텍스트가 한국어로
+  번인돼 현지화가 못 지운다고 봤다. **E16(8/24)이 그 구멍을 메웠다** — 아래 §E16 참조.
+  공유 함수 시그니처·`subtitle_segments.json`/`edit_plan.json` 모양은 E15 에서 넓히기만
+  하고 바꾸지 않았다(vlp 세션 동시 작업 회피).
 - 회귀 가드: `tests/test_e15_style_compose.py`.
 
 ### 실렌더 실측 (2026-08-23, 합성 180s 소스 · ffmpeg 6.1.1)
@@ -417,3 +418,34 @@ vlp `1da2a16`·`2f338e3`(147줄)을 따라 이식했다. 이것이 없으면 **�
 - 기계 대조: 새로 옮긴 함수 5개 중 4개가 vlp 와 **AST 동일**, 상수 2개도 동일.
   `l0_backup` 만 다른데 P1 에서 하드코딩 대신 계약 상수(`SOURCE_VIDEO_BACKUP`·
   `RENDER_OUTPUT`)를 쓰기로 한 차이이고 값은 같다.
+
+### 화면 글자 현지화 계약 (E16, 2026-08-24)
+
+`app/localize/style_texts.py` — vlp `0757b68` 이식. 발주서: ves-orchestrator
+`docs/prompts/e16-jp-style-texts.md`.
+
+JP 재렌더는 화면에 얹는 **한국어 글자**를 그대로 번인했다. 소스는 둘이다 —
+E15 AI 연출(`checkpoint_style.json` 의 `texts[]`·`title_segments[]`)과 편집실 텍스트
+(`edit_overrides.json` 의 `texts[]` — `visual_only_overrides` 가 넘기는 그 배열).
+E16 이 둘 다 일본어로 바꾼다.
+
+- **손대는 것은 문구와 폰트뿐이다.** 좌표·크기·색·`fx`·`rotate` 는 연출 의도라 불변이고,
+  스티커(`images`)·자막 강조(`subtitle_styles`)는 언어 중립이라 아예 안 본다(자막 강조는
+  L3 가 이미 일본어로 바꾼 줄에 얹히므로 지금도 정상 동작한다).
+- **폰트**: 번들 4종은 전부 한글 전용이다 — `mulmaru` 만 가나가 있고 **한자는 넷 다 없다**
+  (fontTools 실측). 그대로 두면 일본어가 두부(□)로 나간다. `locale_cfg.telop_font`
+  (ArialUnicode)로 바꾼다. 편집실 texts 는 렌더에서 화이트리스트를 타므로
+  `edit_overrides.TEXT_FONTS` 에 같은 이름이 있어야 한다(짝 변경 `c80da45`).
+- **멱등의 핵심은 `BACKUP_FILES` 의 `checkpoint_style.json`** 이다. L3 는 언제나 한국어
+  백업을 읽어 일본어를 만드는데, 백업에 없으면 두 번째 L3 가 **이미 일본어인 문구를 다시
+  번역**한다.
+- **1:1 정렬** — `index` 가 좌표다. 개수·범위가 어긋나면 즉시 실패(`ja_by_index`).
+  조용히 넘어가면 다른 문구가 다른 자리에 박힌다(자막 정렬과 같은 규율).
+- **회귀 0**: 연출이 없는 편은 세 목록을 payload 에 **아예 안 싣는다** — 프롬프트가 한
+  글자만 달라져도 그 편의 자막 번역까지 흔들린다. `style_compose` 를 안 켠 채널은
+  `checkpoint_style.json` 이 없고 `l0_backup` 이 없는 파일을 건너뛰므로 경로 전체가 no-op.
+- 검수 카드는 `ko_ja_pairs.style_texts` 로 대역을 본다(`쿵!` 이 무엇이 됐는지).
+- ⚠ 이식본은 함수가 L1·L3·L4·L5 에 걸쳐 쓰이므로 vlp 의 비공개 이름
+  (`_load_json_or_none`·`_ja_by_index`)이 **공개 이름**이다. 그 외에는 vlp 와 같은 코드다.
+- 회귀 가드: `tests/test_localize_style_texts.py`(19건) + `scripts/localize_port_diff.py`
+  의 `[style_texts]` 절(원본과 산출 동일성 대조).

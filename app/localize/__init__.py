@@ -30,6 +30,11 @@ RENDER_OUTPUT = "shorts.mp4"
 BACKUP_FILES = [
     "subtitle_segments.json", "edit_plan.json", "checkpoint_story.json",
     "checkpoint_resources.json", "title.txt", "work_title.txt",
+    # E16: E15 스타일 구성(AI 연출)의 플랜. **반드시 백업한다** — L3 는 항상 한국어
+    # 백업을 읽어 일본어를 만드는데(멱등), 여기 없으면 두 번째 L3 가 이미 일본어인
+    # 문구를 다시 번역한다. 그 채널이 style_compose 를 안 켰으면 파일이 없고,
+    # l0_backup 은 없는 파일을 건너뛴다 — 그때는 E16 경로 전체가 no-op 이다(회귀 0).
+    "checkpoint_style.json",
 ]
 
 __all__ = ["BACKUP_DIR_FMT", "OUT_DIR_FMT", "META_NAME", "SOURCE_VIDEO_BACKUP",

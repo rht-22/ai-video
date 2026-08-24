@@ -11,6 +11,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from app.localize.style_texts import (
+    STYLE_PLAN_NAME, apply_style_translation, load_json_or_none, style_plan_strings,
+)
 from app.localize.styles import style_ass_tags, style_margin_v
 
 # ASR 환각성 초장 구간 방어 — 짧은 대사가 10초 넘게 떠 있으면 어색하다(파일럿 _74 실측 22s).
@@ -148,6 +151,18 @@ def l3_apply(job: Path, backup: Path, translation: dict, telop_data: list,
         c["cue"]["text"] = tr["ja"]
     (job / "checkpoint_resources.json").write_text(
         json.dumps(resources, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # E16: AI 연출(style_plan) 문구 — 백업본에서 읽어 일본어로 바꿔 job 에 쓴다(다른 파일과 같은 규약).
+    # 파일이 없으면(style_compose 안 켠 채널·구 런) 아무것도 하지 않는다.
+    style_plan = load_json_or_none(backup / STYLE_PLAN_NAME)
+    if style_plan is not None:
+        t_ko, s_ko = style_plan_strings(style_plan)
+        applied = apply_style_translation(style_plan, translation,
+                                          font=locale_cfg.get("telop_font"))
+        (job / STYLE_PLAN_NAME).write_text(
+            json.dumps(applied, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[L3] 연출 텍스트 {len(t_ko)}건 · 제목 창 {len(s_ko)}건 일본어 적용"
+              f"{' (폰트 ' + locale_cfg['telop_font'] + ')' if t_ko else ''}")
 
     n = build_telop_ass(telop_data, translation, locale_cfg["telop_font"], out_dir / "telops.ass")
     print(f"[L3] 적용 완료 — 대사 {len(segments)}건 · 텔롭 병기 {n}건 (telops.ass)")

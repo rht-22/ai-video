@@ -34,10 +34,12 @@ lr = importlib.util.module_from_spec(_spec)
 sys.modules["localize_run"] = lr
 _spec.loader.exec_module(lr)
 
+from app.localize import BACKUP_FILES  # noqa: E402
 from app.localize import apply as A  # noqa: E402
 from app.localize import meta as M  # noqa: E402
 from app.localize import overrides as O  # noqa: E402
 from app.localize import rerender as R  # noqa: E402
+from app.localize import style_texts as ST  # noqa: E402
 
 
 def _vlp_sha() -> str:
@@ -55,6 +57,7 @@ REQUIRED_VLP_FEATURES = [
                                    {"subs": {"0": {"style": {"fontsize": 1}}}}))),
     ("build_telop_ass 줄 오버라이드(8/20)", lambda: _telop_applies_style()),
     ("l3_apply 소프트 삭제(E6-0)", lambda: _l3_drops_unused()),
+    ("E16 화면 글자 현지화(8/24)", lambda: hasattr(lr, "apply_style_translation")),
 ]
 
 
@@ -203,6 +206,62 @@ for i, ov in enumerate([{"subs": {"0": {"style": {"fontsize": 1}}}},
     except Exception as e: eb = type(e).__name__
     eq(f"raise{i}", ea, eb)
 
+# ── E16 화면 글자 (style_texts·style_titles·editor_texts)
+print("[style_texts]")
+_PLAN = {"schema": "style_plan/v1",
+         "texts": [{"text": "쿵!", "source_time_sec": 105.0, "duration_sec": 1.2,
+                    "x": 0.7, "y": 0.25, "size": 110, "color": "#FFDD00",
+                    "stroke": "dark", "fx": "pop", "rotate": -8, "font": "Jalnan"},
+                   {"text": "설마…", "source_time_sec": 155.0, "duration_sec": 1.5,
+                    "x": 0.3, "y": 0.66, "size": 78, "font": "Jalnan"}],
+         "title_segments": [{"text": "반전 주의", "from_anchor": 150.0, "to_anchor": 160.0}],
+         "images": [{"file": "style_assets/a.png", "source_time_sec": 107.0,
+                     "duration_sec": 2.0, "x": 0.5, "y": 0.3, "w": 0.2}],
+         "subtitle_styles": [{"source_time_sec": 106.0,
+                              "style": {"size": 88, "color": "#FF4444"}}]}
+_TR16 = {"style_texts": [{"index": 0, "ja": "ドンッ！"}, {"index": 1, "ja": "まさか…"}],
+         "style_titles": [{"index": 0, "ja": "どんでん返し注意"}],
+         "editor_texts": [{"index": 0, "ja": "エモい"}]}
+_VIS = {"schema": "edit_overrides/v3",
+        "texts": [{"text": "감동", "x": 0.5, "y": 0.5, "size": 72}],
+        "images": [{"file": "a.png"}]}
+eq("STYLE_PLAN_NAME", lr.STYLE_PLAN_NAME, ST.STYLE_PLAN_NAME)
+STYLE_PLAN_NAME_ = ST.STYLE_PLAN_NAME   # 위 eq 가 두 이름이 같음을 확인한 뒤 아래 픽스처가 쓴다
+eq("BACKUP_FILES", lr.BACKUP_FILES, BACKUP_FILES)
+for name, plan in (("plan", _PLAN), ("none", None), ("empty", {}),
+                   ("images만", {"images": [1]})):
+    eq(f"style_plan_strings {name}", lr.style_plan_strings(plan), ST.style_plan_strings(plan))
+for name, ov in (("v3", _VIS), ("none", None), ("images만", {"images": []})):
+    eq(f"editor_text_strings {name}", lr.editor_text_strings(ov), ST.editor_text_strings(ov))
+# 인덱스 순서가 뒤섞인 응답 — index 가 좌표다
+_shuffled = [{"index": 1, "ja": "B"}, {"index": 0, "ja": "A"}]
+eq("ja_by_index 뒤섞임", lr._ja_by_index(_shuffled, 2, "x"), ST.ja_by_index(_shuffled, 2, "x"))
+for name, font in (("폰트 지정", "ArialUnicode"), ("폰트 미지정", None)):
+    eq(f"apply_style_translation {name}",
+       json.dumps(lr.apply_style_translation(_PLAN, _TR16, font=font),
+                  ensure_ascii=False, sort_keys=True),
+       json.dumps(ST.apply_style_translation(_PLAN, _TR16, font=font),
+                  ensure_ascii=False, sort_keys=True))
+    eq(f"apply_editor_text_translation {name}",
+       json.dumps(lr.apply_editor_text_translation(_VIS, _TR16, font=font),
+                  ensure_ascii=False, sort_keys=True),
+       json.dumps(ST.apply_editor_text_translation(_VIS, _TR16, font=font),
+                  ensure_ascii=False, sort_keys=True))
+eq("연출 없음 no-op",
+   json.dumps(lr.apply_style_translation({}, {}), sort_keys=True),
+   json.dumps(ST.apply_style_translation({}, {}), sort_keys=True))
+# 정렬 위반 — 조용히 넘어가면 다른 문구가 다른 자리에 박힌다
+for i, bad in enumerate([{"style_texts": [{"index": 0, "ja": "a"}]},
+                         {"style_texts": []},
+                         {},
+                         {"style_texts": [{"index": 0, "ja": "a"}, {"index": 5, "ja": "b"}]}]):
+    ea = eb = None
+    try: lr.apply_style_translation(_PLAN, bad)
+    except Exception as e: ea = f"{type(e).__name__}: {e}"
+    try: ST.apply_style_translation(_PLAN, bad)
+    except Exception as e: eb = f"{type(e).__name__}: {e}"
+    eq(f"style raise{i}", ea, eb)
+
 # ── build_ko_ja_pairs
 print("[build_ko_ja_pairs]")
 with tempfile.TemporaryDirectory() as tmp:
@@ -216,6 +275,7 @@ with tempfile.TemporaryDirectory() as tmp:
         {"tts_cue_files": [{"path": "x.mp3", "cue_index": 0,
                             "cue": {"text": "내레이션", "start_sec": 1.0, "end_sec": 5.0}}]},
         ensure_ascii=False))
+    (bk/STYLE_PLAN_NAME_).write_text(json.dumps(_PLAN, ensure_ascii=False))
     (out/"onscreen_refined.json").write_text(json.dumps(
         [{"text_ko": "텔롭1", "kind": "broadcast_telop", "orig_index": 0,
           "start_sec": 3.1, "end_sec": 6.2},
@@ -227,7 +287,8 @@ with tempfile.TemporaryDirectory() as tmp:
                          "style": {"color": "#FF0000"}},
                         {"index": 2, "ja": "消", "use": False}],
            "tts_cues": [{"index": 0, "ja": "ナレ"}],
-           "telops": [{"index": 0, "use": True, "ja": "T1"}, {"index": 1, "use": False}]}
+           "telops": [{"index": 0, "use": True, "ja": "T1"}, {"index": 1, "use": False}],
+           **_TR16}
     eq("pairs", json.dumps(lr.build_ko_ja_pairs(bk, out, trp), ensure_ascii=False, sort_keys=True),
                json.dumps(M.build_ko_ja_pairs(bk, out, trp), ensure_ascii=False, sort_keys=True))
 
@@ -243,18 +304,19 @@ def make_job(root):
     (bk/"edit_plan.json").write_text(json.dumps({"layout": {"top_title": "구"}}))
     (bk/"checkpoint_resources.json").write_text(json.dumps(
         {"tts_cue_files": [{"path": "x.mp3", "cue_index": 0, "cue": {"text": "내레"}}]}))
+    (bk/STYLE_PLAN_NAME_).write_text(json.dumps(_PLAN, ensure_ascii=False))   # E16
     return job, bk, out
 tr3 = {"top_title_ja": "新\n題",
        "segments": [{"index": 0, "ja": "短い"}, {"index": 1, "ja": "二", "use": False},
                     {"index": 2, "ja": "三", "style": {"color": "#00FF00"}}],
        "tts_cues": [{"index": 0, "ja": "ナレ"}],
-       "telops": []}
+       "telops": [], **_TR16}
 with tempfile.TemporaryDirectory() as t1, tempfile.TemporaryDirectory() as t2:
     ja, ba, oa = make_job(Path(t1)); jb, bb, ob = make_job(Path(t2))
     lr.l3_apply(ja, ba, tr3, [], {"display": "X"}, {"telop_font": "Arial"}, oa)
     A.l3_apply(jb, bb, tr3, [], {"display": "X"}, {"telop_font": "Arial"}, ob)
     for name in ("subtitle_segments.json", "checkpoint_story.json", "edit_plan.json",
-                 "checkpoint_resources.json"):
+                 "checkpoint_resources.json", STYLE_PLAN_NAME_):
         eq(name, (ja/name).read_bytes(), (jb/name).read_bytes())
     eq("telops.ass", (oa/"telops.ass").read_bytes(), (ob/"telops.ass").read_bytes())
 

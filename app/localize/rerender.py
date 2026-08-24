@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 from app.localize.spec import BRAIN, FONTS_DIR, REPO_ROOT
+from app.localize.style_texts import apply_editor_text_translation, load_json_or_none
 from app.modules.ffmpeg_utils import find_ffmpeg_command
 
 CUT_TOLERANCE_SEC = 0.05      # 이보다 어긋나면 gen_flags 재현 실패로 본다
@@ -209,6 +210,11 @@ def l4_render(job: Path, wcfg: dict, locale_cfg: dict, out_dir: Path):
         except ValueError as e:
             raise SystemExit(f"edit_overrides.json 파싱 실패: {e}") from e
         if visual:
+            # E16: 편집실 문구도 일본어로 — 사람이 넣은 것과 AI 가 넣은 것이 한 화면에서
+            # 한쪽만 일본어면 더 이상하다. 번역은 L1 이 이미 해 뒀다(translation.json).
+            tr = load_json_or_none(out_dir / "translation.json") or {}
+            visual = apply_editor_text_translation(visual, tr,
+                                                   font=locale_cfg.get("telop_font"))
             ov_path = out_dir / "edit_overrides_visual.json"
             ov_path.write_text(json.dumps(visual, ensure_ascii=False, indent=2),
                                encoding="utf-8")
