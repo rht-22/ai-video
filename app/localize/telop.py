@@ -137,23 +137,38 @@ def l2b_refine_timing(job: Path, telop_data: list, out_dir: Path, client) -> lis
         f"텔롭 목록:\n{listing}")
     ffmpeg = find_ffmpeg_command("ffmpeg")
     frame_paths = []
+    frame_extract_failed = 0
     for i, t in enumerate(ts):
         fp = frames_dir / f"f{i:03d}.jpg"
         if not fp.exists():
-            subprocess.run([ffmpeg, "-y", "-v", "error", "-ss", str(t), "-i", str(video),
-                            "-frames:v", "1", "-vf", "scale=360:-1", str(fp)], check=True)
+            r = subprocess.run([ffmpeg, "-y", "-v", "error", "-ss", str(t), "-i", str(video),
+                                "-frames:v", "1", "-vf", "scale=360:-1", str(fp)],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                # 프레임 한 장 추출 실패로 전체 L2b 가 죽으면 안 된다 — 아래 판독 실패
+                # ("판독 실패, 제외")와 같은 규율로 이 프레임만 빼고 계속한다. stderr 를
+                # 남기는 이유: check=True 의 CalledProcessError 는 exit code 만 보여주고
+                # 진짜 이유(디코드 실패·시크 범위 밖 등)는 버려서 원인을 못 봤다.
+                print(f"[L2b] ⚠️ frame {i}(t={t}s) 추출 실패(exit {r.returncode}) — 제외: "
+                      f"{(r.stderr or r.stdout or '').strip()[-300:]}")
+                frame_paths.append(None)
+                frame_extract_failed += 1
+                continue
         frame_paths.append(fp)
 
     t0 = time.time()
     flash = model_flash()
 
     def check_frame(i):
+        fp = frame_paths[i]
+        if fp is None:
+            return i, []
         for attempt in range(3):
             try:
                 resp = client.models.generate_content(
                     model=flash,
                     contents=[base_prompt,
-                              types.Part.from_bytes(data=frame_paths[i].read_bytes(),
+                              types.Part.from_bytes(data=fp.read_bytes(),
                                                     mime_type="image/jpeg")],
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json", response_schema=SCHEMA_REFINE),
@@ -181,6 +196,7 @@ def l2b_refine_timing(job: Path, telop_data: list, out_dir: Path, client) -> lis
         refined.append({**t, "orig_index": ti,
                         "start_sec": round(start, 2), "end_sec": round(end, 2)})
     out_path.write_text(json.dumps(refined, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[L2b] {time.time()-t0:.0f}s — 프레임 {len(ts)}장 대조, "
+    fail_note = f" (추출 실패 {frame_extract_failed}장 제외)" if frame_extract_failed else ""
+    print(f"[L2b] {time.time()-t0:.0f}s — 프레임 {len(ts)}장 대조{fail_note}, "
           f"텔롭 {len(refined)}/{len(telops)}건 타이밍 확정")
     return refined

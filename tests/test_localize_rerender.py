@@ -3,6 +3,7 @@
 이관이 충실했는지를 이 파일이 증명한다. 원본 테스트의 단언을 **값까지 그대로** 옮겼고,
 이식하며 새로 뺀 순수 함수(group_hits·render_argv 등)의 가드를 덧붙였다.
 """
+import json
 import sys
 from pathlib import Path
 
@@ -140,6 +141,93 @@ def test_group_hits_tolerates_one_frame_dropout():
 
 def test_group_hits_empty():
     assert telop.group_hits([]) == []
+
+
+# ───────── L2b 프레임 추출 내성 (2026-08-24 실전 관측: ffmpeg 프레임 1장 실패로
+# localize 전체가 죽었다 — 판독 실패("텔롭 N — 프레임 대조 실패, 제외")와 같은 규율로
+# 프레임 추출 실패도 그 프레임만 빼고 계속하게 고쳤다) ─────────
+
+class _FakeModels:
+    """모든 프레임에 telop 0 이 보인다고 답하는 가짜 클라이언트."""
+    def generate_content(self, model, contents, config):
+        class Resp:
+            text = '{"visible": [0]}'
+        return Resp()
+
+
+class _FakeClient:
+    models = _FakeModels()
+
+
+def test_l2b_one_frame_extraction_failure_is_not_fatal(monkeypatch, tmp_path, capsys):
+    """ffmpeg 가 프레임 한 장에서 비표준 exit code 로 죽어도 L2b 전체는 안 죽고,
+    실패한 프레임만 빼고 나머지 프레임으로 매칭을 계속한다."""
+    job = tmp_path / "job"; job.mkdir()
+    (job / "shorts_ko.mp4").write_bytes(b"x")
+    out_dir = tmp_path / "out"; out_dir.mkdir()
+    monkeypatch.setattr(telop, "_probe_duration", lambda video: 4.5)   # ts = 0,1.5,3.0,4.5
+
+    def fake_run(cmd, **kw):
+        t = cmd[cmd.index("-ss") + 1]
+        class R:
+            pass
+        r = R()
+        if t == "1.5":
+            r.returncode, r.stderr, r.stdout = 234, "moov atom not found", ""
+        else:
+            Path(cmd[-1]).write_bytes(b"jpg")
+            r.returncode, r.stderr, r.stdout = 0, "", ""
+        return r
+    monkeypatch.setattr(telop.subprocess, "run", fake_run)
+
+    telops = [{"kind": "broadcast_telop", "text_ko": "가", "start_sec": 0.0, "end_sec": 1.0}]
+    refined = telop.l2b_refine_timing(job, telops, out_dir, _FakeClient())
+
+    assert len(refined) == 1                          # 나머지 3장으로 매칭 성공
+    assert refined[0]["orig_index"] == 0
+    out = capsys.readouterr().out
+    assert "frame 1" in out and "234" in out and "moov atom not found" in out
+    assert "추출 실패 1장 제외" in out
+
+
+def test_l2b_all_frames_failing_degrades_to_empty_not_a_crash(monkeypatch, tmp_path):
+    """전 프레임이 다 실패해도(디스크·코덱 등 전역 문제) 예외 없이 빈 결과로 끝난다 —
+    텔롭 병기가 없을 뿐 본편 자막·내레이션은 이 실패와 무관하다."""
+    job = tmp_path / "job"; job.mkdir()
+    (job / "shorts_ko.mp4").write_bytes(b"x")
+    out_dir = tmp_path / "out"; out_dir.mkdir()
+    monkeypatch.setattr(telop, "_probe_duration", lambda video: 1.5)   # ts = 0, 1.5
+
+    def fake_run(cmd, **kw):
+        class R:
+            returncode, stderr, stdout = 234, "boom", ""
+        return R()
+    monkeypatch.setattr(telop.subprocess, "run", fake_run)
+
+    telops = [{"kind": "broadcast_telop", "text_ko": "가", "start_sec": 0.0, "end_sec": 1.0}]
+    refined = telop.l2b_refine_timing(job, telops, out_dir, _FakeClient())
+    assert refined == []
+    assert json.loads((out_dir / "onscreen_refined.json").read_text(encoding="utf-8")) == []
+
+
+def test_l2b_no_frame_failures_prints_no_fail_note(monkeypatch, tmp_path, capsys):
+    """실패가 없으면 종전 로그 문구 그대로 — 새 문구가 조용히 늘 붙지 않는다."""
+    job = tmp_path / "job"; job.mkdir()
+    (job / "shorts_ko.mp4").write_bytes(b"x")
+    out_dir = tmp_path / "out"; out_dir.mkdir()
+    monkeypatch.setattr(telop, "_probe_duration", lambda video: 0.0)   # ts = [0]
+
+    def fake_run(cmd, **kw):
+        Path(cmd[-1]).write_bytes(b"jpg")
+        class R:
+            returncode, stderr, stdout = 0, "", ""
+        return R()
+    monkeypatch.setattr(telop.subprocess, "run", fake_run)
+
+    telops = [{"kind": "broadcast_telop", "text_ko": "가", "start_sec": 0.0, "end_sec": 1.0}]
+    telop.l2b_refine_timing(job, telops, out_dir, _FakeClient())
+    out = capsys.readouterr().out
+    assert "추출 실패" not in out
 
 
 # ───────── 텔롭 병기 트랙 ─────────
