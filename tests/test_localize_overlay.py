@@ -288,3 +288,29 @@ def test_no_stale_vlp_imports_in_the_port():
 def test_dub_keeps_its_own_entry_point():
     """어댑터가 `-m src.dub` 로 부르던 것을 이 위치로 옮길 수 있어야 한다(P4 컷오버)."""
     assert hasattr(dub, "main") and hasattr(dub, "_parse_args")
+
+
+def test_thinking_uses_the_3x_vocabulary():
+    """🛑 2026-08-24 mm-06 실측: 모델만 규칙에 맞추고 요청 모양을 안 고쳐 번역이 죽었다.
+
+    vlp 의 `thinking_budget=0` 은 2.5 시대 매개변수다. 이 레포가 허용하는 모델은
+    Gemini 3.x 둘뿐이고 3.x 는 그 인자를 400 INVALID_ARGUMENT 로 거절한다 —
+    **모델 규칙과 요청 모양은 짝이다.** 한쪽만 고치면 조용히 안 죽고 크게 죽는다."""
+    import ast as _ast
+    tree = _ast.parse(Path("app/localize/overlay/llm.py").read_text())
+    kwargs = {kw.arg for n in _ast.walk(tree) if isinstance(n, _ast.Call) for kw in n.keywords}
+    assert "thinking_budget" not in kwargs, "2.5 시대 매개변수가 코드에 남아 있다"
+    assert "thinking_level" in kwargs
+
+
+def test_thinking_level_is_a_valid_choice():
+    from app.localize.overlay.llm import FLASH_THINKING
+    assert FLASH_THINKING in ("minimal", "low", "medium", "high")
+
+
+def test_repo_body_uses_the_same_vocabulary():
+    """본체(gemini_client)와 어휘가 갈리면 어느 쪽이 맞는지 사람이 판단할 수 없다."""
+    import ast as _ast
+    tree = _ast.parse(Path("app/modules/gemini_client.py").read_text())
+    kwargs = {kw.arg for n in _ast.walk(tree) if isinstance(n, _ast.Call) for kw in n.keywords}
+    assert "thinking_level" in kwargs and "thinking_budget" not in kwargs

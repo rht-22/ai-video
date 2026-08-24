@@ -13,6 +13,18 @@ from app.localize.overlay.common import get_secret, get_logger
 log = get_logger("llm")
 
 
+# 🛑 vlp 는 `ThinkingConfig(thinking_budget=0)` 을 보냈다 — **2.5 시대 매개변수**다.
+# 이 레포가 허용하는 모델은 Gemini 3.x 둘뿐인데(CLAUDE.md 모델 규칙) 3.x 는 그 인자를
+# 거절한다: 2026-08-24 mm-06 실측에서 `400 INVALID_ARGUMENT` 로 번역이 통째로 죽었다.
+# 모델만 규칙에 맞추고 요청 모양을 안 고친 것이 원인이었다 — **둘은 짝이다.**
+#
+# 원래 의도("thinking 끄기 — 출력 토큰 절약·JSON 잘림 방지")를 3.x 어휘로 옮기면
+# `thinking_level="minimal"` 이다. 이 레포 본체도 thinking_level 만 쓴다
+# (`gemini_client.py` — Gemini 3.x 가이드: 샘플링 매개변수는 건드리지 말고
+#  thinking_level 만 제어한다).
+FLASH_THINKING = "minimal"
+
+
 def provider(config: dict) -> str:
     return str(config.get("translate", {}).get("provider", "gemini")).lower()
 
@@ -74,8 +86,8 @@ def _gemini(system: str, user: str, model: str, max_tokens: int) -> str:
     client = genai.Client(api_key=get_secret("LLM_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
                                              required=True))
     cfg_kwargs = {"system_instruction": system, "max_output_tokens": max_tokens}
-    if "flash" in model:    # flash 2.5: thinking 비활성화(출력 토큰 절약·잘림 방지)
-        cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+    if "flash" in model:
+        cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=FLASH_THINKING)
     resp = client.models.generate_content(
         model=model, contents=user, config=types.GenerateContentConfig(**cfg_kwargs))
     return resp.text or ""
@@ -93,7 +105,7 @@ def _gemini_vision(system: str, user: str, images: list[tuple[bytes, str]],
     parts = [types.Part.from_bytes(data=b, mime_type=m) for b, m in images]
     cfg_kwargs = {"system_instruction": system, "max_output_tokens": max_tokens}
     if "flash" in model:
-        cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+        cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=FLASH_THINKING)
     resp = client.models.generate_content(
         model=model, contents=[*parts, user], config=types.GenerateContentConfig(**cfg_kwargs))
     return resp.text or ""

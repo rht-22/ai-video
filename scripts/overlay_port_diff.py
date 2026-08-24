@@ -53,6 +53,12 @@ EXPECTED_DIFFS = {
     "pipeline.process_video":
         "로그가 안내하는 더빙 실행 경로를 이식 위치로 고쳤다 — vlp 의 `python -m src.dub` 는 "
         "이 레포에 없는 모듈이라 그대로 두면 사람을 없는 파일로 보낸다. 실행문은 같다.",
+    "llm._gemini":
+        "vlp 의 ThinkingConfig(thinking_budget=0) 은 2.5 시대 매개변수라 이 레포가 허용하는 "
+        "Gemini 3.x 가 400 INVALID_ARGUMENT 로 거절한다(2026-08-24 mm-06 실측). 같은 의도를 "
+        "3.x 어휘 thinking_level='minimal' 로 옮겼다 — 모델 규칙과 요청 모양은 짝이다.",
+    "llm._gemini_vision":
+        "위와 같음 — 비전 경로도 같은 매개변수를 쓴다.",
     "dub.dub_from_video":
         "self-ref 프로브가 자기 자신을 서브프로세스로 다시 부르는데(모델 캐시 오염 격리) "
         "vlp 는 `src.dub` 를 박아 뒀다. 모듈 경로를 _SELF_MODULE 한 곳에서 만들도록 바꿨다 "
