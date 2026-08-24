@@ -107,6 +107,29 @@ def _snap_clip_boundaries_to_dialogue(
     return new_variants
 
 
+def _story_checkpoint_fallback(story_data: dict) -> tuple[bool, dict | None]:
+    """checkpoint_story 가 폴백 경로 산출물인지 + 그 사유. → (폴백 여부, 사유)
+
+    표식(`fallback`)이 생기기 전에 만들어진 체크포인트에는 raw_response.selection_reason
+    문자열밖에 없다. 그 편들도 재실행하면 run_log 에 폴백으로 잡혀야 한다 —
+    표식 도입 시점을 기준으로 집계가 끊기면 '고친 뒤 폴백이 사라졌다' 로 오독된다.
+    """
+    if not isinstance(story_data, dict):
+        return False, None
+    if story_data.get("fallback"):
+        reason = story_data.get("fallback_reason")
+        return True, reason if isinstance(reason, dict) else None
+    raw = story_data.get("raw_response")
+    if isinstance(raw, dict):
+        if raw.get("fallback"):
+            reason = raw.get("fallback_reason")
+            return True, reason if isinstance(reason, dict) else None
+        legacy = raw.get("selection_reason")
+        if isinstance(legacy, str) and legacy.startswith("폴백:"):
+            return True, {"kind": "legacy_checkpoint", "error": legacy}
+    return False, None
+
+
 def _candidate_coverage_sec(candidates: list[dict]) -> float:
     """후보들이 덮는 원본 구간의 *합집합* 길이(초). context_extension 범위까지 포함.
 
@@ -3222,6 +3245,18 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             chunk_meta=chunk_meta_list or None,
         )
 
+        # 폴백 표식 — 폴백 산출물은 서로 무관한 장면이 이어붙고 제목이 '작품명 + 설명 앞 20자'
+        # 가 된다. 검수자가 반려하는 그 모양이므로, 조용히 넘어가지 말고 stdout·run_log·
+        # checkpoint_story 세 곳에 남긴다(조용한 대체 금지 원칙).
+        story_fallback = bool(story_plan.get("fallback"))
+        story_fallback_reason = story_plan.get("fallback_reason") if story_fallback else None
+        if story_fallback:
+            print("  [FALLBACK] 스토리 구성이 폴백 경로로 생성됐습니다 — 장면 연결·제목이 자동 조합입니다.")
+            if isinstance(story_fallback_reason, dict):
+                print(f"  [FALLBACK] 사유: {story_fallback_reason.get('kind')} · "
+                      f"finish_reason={story_fallback_reason.get('finish_reason')} · "
+                      f"{story_fallback_reason.get('error')}")
+
         # 멀티쇼츠: ranked_storylines에서 최대 max_shorts개 추출
         ranked_storylines = story_plan.get("ranked_storylines", [])
         if not ranked_storylines:
@@ -3435,9 +3470,24 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         story_elapsed = time.time() - story_start
         print(f"  → 총 {len(all_storyline_variants)}개 쇼츠 생성 예정")
 
+        # run_log 에 스토리 단계를 명시적으로 남긴다 — 종전에는 story 단계 자체가 run_log 에
+        # 없어서 폴백 여부를 checkpoint_story 의 selection_reason 문자열로만 알 수 있었다.
+        run_log["steps"].append({
+            "step": "story",
+            "elapsed": story_elapsed,
+            "fallback": story_fallback,
+            "fallback_reason": story_fallback_reason,
+            "storyline_count": len(story_plan.get("storylines") or []),
+            "variant_count": len(all_storyline_variants),
+        })
+
         # 체크포인트 저장 — PR-4: 각 variant 의 tts_cues 도 함께 저장 (재실행 시 cue 재생성 비용 절약).
         # storyline_tts_cues_pool 와 all_storyline_variants 가 인덱스 1:1 (parallel list 보장).
         checkpoint_data = {
+            # 폴백 표식은 raw_response 안이 아니라 최상위에도 둔다 — 격리 파이프라인이
+            # checkpoint_story 를 clip_metadata 로 그대로 싣기 때문에, 검수·집계가 한 키만 보면 된다.
+            "fallback": story_fallback,
+            "fallback_reason": story_fallback_reason,
             "raw_response": story_plan,
             "variants": [
                 {
@@ -3462,6 +3512,18 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         edit_plan_path = output_dir / "edit_plan.json"
         if checkpoint_story.exists():
             story_data = json.loads(checkpoint_story.read_text(encoding="utf-8"))
+            # 캐시에서 복원해도 폴백 표식은 이어져야 한다 — 재실행 run_log 만 보고
+            # "이번엔 폴백이 아니었다" 고 오독하면 안 된다(장면·제목은 폴백 산출물 그대로다).
+            _cached_fb, _cached_reason = _story_checkpoint_fallback(story_data)
+            if _cached_fb:
+                print("  [FALLBACK] 캐시된 스토리가 폴백 경로 산출물입니다 "
+                      "(checkpoint_story.fallback=true) — 다시 만들려면 --from-step story.")
+                run_log["steps"].append({
+                    "step": "story",
+                    "cached": True,
+                    "fallback": True,
+                    "fallback_reason": _cached_reason,
+                })
             if "variants" in story_data:
                 for v in story_data["variants"]:
                     v_clips = [StoryClip(**c) for c in v["clips"]]
