@@ -456,3 +456,36 @@ def test_style_prompt_is_tracked_by_provenance():
     from app.modules.provenance import _prompt_versions
     assert "style_composition_prompt" in _prompt_versions()
     assert "style_plan/v1" in STYLE_COMPOSITION_PROMPT
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# E16 짝 변경 (2026-08-24) — JP 재렌더가 화면 글자를 일본어로 바꿀 수 있어야 한다
+# ══════════════════════════════════════════════════════════════════════════
+def test_localization_font_is_allowed_for_texts():
+    """현지화가 texts 문구를 일본어로 바꾸면 폰트도 같이 바꾼다 — 화이트리스트에 없으면
+    그 JP 재렌더가 통째로 거절된다(vlp apply_editor_text_translation 의 짝).
+
+    번들 4종은 전부 한글 전용이라(mulmaru 만 가나, 한자는 넷 다 없음) 일본어가 두부(□)다.
+    """
+    from app.modules.edit_overrides import TEXT_FONTS, validate_overrides
+    assert "ArialUnicode" in TEXT_FONTS
+    doc = {"schema": "edit_overrides/v3",
+           "texts": [{"text": "ドンッ！", "source_time_sec": 100.0, "duration_sec": 1.0,
+                      "x": 0.5, "y": 0.3, "font": "ArialUnicode"}]}
+    validate_overrides(doc)                      # 거절되면 여기서 EditOverrideError
+    # 여전히 모르는 폰트는 거절한다(조용한 시스템 폰트 대체 차단 — 원래 규율)
+    bad = {"schema": "edit_overrides/v3",
+           "texts": [{"text": "x", "source_time_sec": 100.0, "duration_sec": 1.0,
+                      "x": 0.5, "y": 0.3, "font": "Helvetica"}]}
+    with pytest.raises(Exception):
+        validate_overrides(bad)
+
+
+def test_ai_plan_still_restricted_to_bundled_fonts():
+    """AI 는 현지화 폰트를 고를 이유가 없다 — KR 연출은 번들 폰트다.
+
+    (검증은 v3 화이트리스트를 공유하므로 ArialUnicode 도 통과한다. 이 테스트는 AI 가
+    실제로 그 값을 쓰지 않는다는 것이 아니라, 프롬프트가 번들 4종만 제시함을 고정한다.)
+    """
+    from app.modules.gemini_client import STYLE_COMPOSITION_PROMPT
+    assert "ArialUnicode" not in STYLE_COMPOSITION_PROMPT
