@@ -4217,7 +4217,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         # 자막 디자인 적용
         print("\n[14/15] 자막 디자인 적용 및 최종 렌더링 중...")
 
-        _burned_band = _detect_burned_band_cached(payload, config, clips, crop_map, output_dir)
+        # 자막을 아예 안 그리는 채널(--no-subtitles)은 잴 것도 없다 — 표본 뜨는 시간만 든다.
+        if payload.show_subtitles:
+            _burned_band = _detect_burned_band_cached(payload, config, clips, crop_map, output_dir)
         if _burned_band:
             run_log["steps"].append({
                 "step": "subtitle_avoid_burned",

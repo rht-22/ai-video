@@ -224,6 +224,7 @@ def band_from_ratios(ratios: list[float], *,
 
     runs: list[tuple[int, int]] = []
     start: int | None = None
+    end = 0
     gap = 0
     for y in range(lo, h):
         if ratios[y] >= threshold:

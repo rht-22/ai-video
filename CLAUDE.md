@@ -508,6 +508,8 @@ E16 이 둘 다 일본어로 바꾼다.
   (행별 검출률 막대 + 판정된 띠 + margin_v 변화). 합성 실측(이 컨테이너 ffmpeg 6.1.1 —
   운영 노드는 7.x, 둘 다 `SUPPORTED_FFMPEG_MAJORS`): 하단 번인 자막
   1건 → y=1324~1376 검출, margin_v 430 → 610. testsrc2·SMPTE 바·난수 노이즈에서는 검출 0건.
+  비용은 4클립×3초 표본에 **0.94초**(그중 행 분석은 0.23초) — 렌더 앞에 붙는 시간이다.
+  `--no-subtitles` 채널은 재지도 않는다.
 - 회귀 가드: `tests/test_e17_burned_subtitle.py`(28건).
 
 ### E17-3 ElevenLabs 토큰 만료 → 기본 백엔드
