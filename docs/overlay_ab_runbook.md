@@ -12,20 +12,33 @@
 
 ---
 
-## 0. 준비
+## 0. 준비 — ⚠ 운영 체크아웃을 건드리지 않는다
+
+노드의 `$R/ai-video` 는 updater 가 SHA 로 고정한 **detached HEAD** 다. `git pull` 은
+"You are not currently on a branch" 로 거절되고, 억지로 옮기면 **잡을 돌리는 중인 엔진을
+바꾸는 것**이 된다. P1 때와 같이 **별도 워크트리**에서 돌린다.
 
 ```zsh
 R=/opt/ves/engines
-AIV=$R/ai-video/.venv/bin/python
-cd $R/ai-video && git pull
+AIV=$R/ai-video/.venv/bin/python        # 인터프리터는 운영 venv 를 그대로 쓴다
+W=/tmp/aiv-p4                            # 대조용 워크트리
+
+cd $R/ai-video && git fetch origin main
+git worktree add -f $W origin/main       # 운영 체크아웃은 그대로 둔다
+cd $W && git log --oneline -1
 ```
+
+끝나면 정리: `cd $R/ai-video && git worktree remove $W --force`
+
+⚠ 워크트리에는 `.venv` 가 없다 — 위 `$AIV`(운영 venv 의 인터프리터)를 쓰고 **cwd 만**
+워크트리로 둔다. 그래야 새 코드가 돌면서 설치된 의존성을 그대로 쓴다.
 
 ## 1. 이식이 vlp 를 따라잡고 있는지부터
 
 vlp 는 이식 중에 **두 번** 앞서갔다(P2b·E16). 대조 전에 먼저 확인한다.
 
 ```zsh
-cd $R/ai-video
+cd $W
 VLP_ROOT=$R/video-localization-project $AIV -m scripts.overlay_port_diff --verbose
 ```
 
@@ -48,7 +61,7 @@ ls -t $R/video-localization-project/outputs | head -20
 VID=<위에서 고른 video_id>
 SRC=<그 원본 mp4 경로>          # autopilot 이 받아 둔 것 (data/source/ 아래)
 
-cd $R/ai-video
+cd $W
 $AIV -m app.cli localize --mode overlay --video "$SRC" --video-id "${VID}_new" --route B
 ```
 
@@ -61,7 +74,7 @@ $AIV -m app.cli localize --mode overlay --video "$SRC" --video-id "${VID}_new" -
 ```zsh
 $AIV -m scripts.overlay_ab \
      --a $R/video-localization-project/outputs/$VID \
-     --b $R/ai-video/outputs/${VID}_new
+     --b $W/outputs/${VID}_new
 ```
 
 읽는 법:
@@ -81,7 +94,7 @@ PATH 에 없을 때 그렇다. `FFMPEG_BIN`·`FFPROBE_BIN` 을 지정하고 다�
 ```zsh
 for VID in <id1> <id2> …; do
   $AIV -m scripts.overlay_ab --a $R/video-localization-project/outputs/$VID \
-                             --b $R/ai-video/outputs/${VID}_new --json \
+                             --b $W/outputs/${VID}_new --json \
     > /tmp/ab_$VID.json
   echo "$VID: $($AIV -c "import json,sys;print('OK' if json.load(open('/tmp/ab_$VID.json'))['ok'] else 'FAIL')")"
 done
