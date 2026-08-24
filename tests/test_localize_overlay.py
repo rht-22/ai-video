@@ -342,3 +342,41 @@ def test_partial_miss_is_still_tolerated(monkeypatch):
     got = tr._transcreate_one(["안녕", "빠진것"], {"translate": {}})
     assert got[0].target == "こんにちは"
     assert got[1].target == "" and got[1].flagged is True
+
+
+# ── 응답 색인 — 모델이 프롬프트 번호를 되돌려주는 경우 (2026-08-24 mm-06 실측) ──
+def test_numbered_source_still_matches():
+    """🛑 실측: gemini-3.6-flash 가 source 를 '1. L' 로 돌려줘 18/18 이 안 붙었다.
+
+    build_user_prompt 는 각 줄을 `1. {텍스트}` 로 적는다. 프롬프트는 안 고친다 —
+    문구를 바꾸면 번역 결과가 달라져 vlp 와 대조가 안 된다."""
+    from app.localize.overlay.translate import _index_by_source
+    idx = _index_by_source([{"source": "1. L", "target": "L"},
+                            {"source": "2. 그", "target": "あの…"}])
+    assert idx["L"]["target"] == "L"
+    assert idx["그"]["target"] == "あの…"
+
+
+def test_exact_match_always_wins():
+    """원문이 진짜로 '3. 항목' 인 경우를 번호로 오해하면 안 된다."""
+    from app.localize.overlay.translate import _index_by_source
+    idx = _index_by_source([{"source": "3. 항목", "target": "정확"},
+                            {"source": "항목", "target": "다른것"}])
+    assert idx["3. 항목"]["target"] == "정확"
+    assert idx["항목"]["target"] == "다른것"
+
+
+def test_plain_sources_are_untouched():
+    from app.localize.overlay.translate import _index_by_source
+    idx = _index_by_source([{"source": "안녕", "target": "こんにちは"}])
+    assert set(idx) == {"안녕"}
+
+
+def test_end_to_end_numbered_response_now_translates(monkeypatch):
+    from app.localize.overlay import llm, translate as tr
+    monkeypatch.setattr(llm, "complete", lambda *a, **k:
+                        '[{"source": "1. 안녕", "target": "こんにちは"}]')
+    monkeypatch.setattr(tr, "load_persona", lambda c: "p")
+    monkeypatch.setattr(tr, "load_glossary", lambda c: {})
+    got = tr._transcreate_one(["안녕"], {"translate": {}})
+    assert got[0].target == "こんにちは"

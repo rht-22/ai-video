@@ -63,6 +63,29 @@ def build_user_prompt(texts: list[str], drafts: Optional[dict[str, str]] = None,
     return "\n".join(lines)
 
 
+# 모델이 프롬프트의 번호 매김을 source 에 되돌려주는 경우가 있다 — build_user_prompt 는
+# 각 줄을 `1. {텍스트}` 로 적는다. 2026-08-24 mm-06 실측: gemini-3.6-flash 가 source 를
+# `'1. L'` 로 돌려줘 18/18 이 안 붙었다(같은 입력으로 붙는 판도 있다 — 비결정적이다).
+_SOURCE_INDEX_PREFIX = re.compile(r"^\s*\d+\.\s*")
+
+
+def _index_by_source(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """응답 행을 source 로 색인. 순수 — 테스트 대상.
+
+    ⚠ **프롬프트는 안 고친다.** 문구를 바꾸면 번역 결과가 통째로 달라져 vlp 와 대조가
+    안 된다(회귀 0 판정의 근거를 잃는다). 대신 붙이는 쪽을 견고하게 만든다.
+
+    정확 일치가 **항상 이긴다** — 원문이 진짜로 `3. 항목` 인 경우를 번호로 오해하면
+    안 되므로, 번호를 뗀 열쇠는 정확 일치를 다 넣은 **뒤**에 빈 자리만 채운다."""
+    idx: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        idx.setdefault(str(r.get("source", "")), r)
+    for r in rows:
+        bare = _SOURCE_INDEX_PREFIX.sub("", str(r.get("source", "")))
+        idx.setdefault(bare, r)
+    return idx
+
+
 def apply_glossary(text: str, glossary: dict[str, str]) -> str:
     """번역 결과에 고정 용어집을 후처리로 강제(한국어 원형이 남아있으면 치환)."""
     for ko, ja in glossary.items():
@@ -164,7 +187,7 @@ def _transcreate_one(texts: list[str], config: dict[str, Any], hero: bool = Fals
                        max_tokens=int(tcfg.get("max_tokens", 1024)), hero=hero)
     rows = parse_llm_json(raw)
 
-    by_source = {r.get("source"): r for r in rows}
+    by_source = _index_by_source(rows)
     entries: list[TranslationEntry] = []
     for t in texts:  # 입력 순서·완전성 보장
         r = by_source.get(t, {})
