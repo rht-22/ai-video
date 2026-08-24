@@ -109,20 +109,33 @@ def test_trim_failure_keeps_the_original_and_does_not_raise(tmp_path, capsys):
 
 
 # ── L4 실패 메시지: 두 원인을 구분한다 ─────────────────────────────────────
-def test_hint_names_the_audio_tail_when_video_matches():
-    """실제로 난 사고의 숫자 — 비디오는 맞는데 컨테이너만 길다."""
-    msg = cut_mismatch_hint(39.400, 39.900, 39.400)
-    assert "오디오 꼬리" in msg and "L3t" in msg
+def test_hint_says_audio_only_when_the_two_video_streams_match():
+    """비디오 스트림끼리 같으면 컷은 재현된 것 — 차이는 오디오뿐이다."""
+    msg = cut_mismatch_hint(25.025, 25.025)
+    assert "일치한다" in msg and "오디오" in msg
     assert "gen_flags" not in msg
 
 
-def test_hint_names_gen_flags_when_the_video_stream_itself_differs():
-    msg = cut_mismatch_hint(49.700, 53.300, 53.300)
+def test_hint_names_gen_flags_when_the_video_streams_differ():
+    msg = cut_mismatch_hint(49.700, 53.300)
     assert "gen_flags 재현 실패" in msg
-    assert "오디오 꼬리" not in msg
+    assert "일치한다" not in msg
 
 
-def test_hint_degrades_gracefully_when_video_duration_is_unknown():
-    """ffprobe 가 스트림 길이를 못 주면(0.0) 종전 문구로 — 진단이 없어도 죽지 않는다."""
-    msg = cut_mismatch_hint(39.400, 39.900, 0.0)
-    assert msg == "gen_flags 재현 실패 의심"
+def test_hint_never_compares_a_container_against_a_stream():
+    """⚠ 첫 판의 실제 결함 — ko **컨테이너**(39.400)와 ja **스트림**(25.025)을 맞대는
+    단위 착오. 두 파일 다 오디오 꼬리가 있으면 컷이 멀쩡해도 늘 '재현 실패'로 오판했다.
+    스트림끼리 넘기면 같은 상황이 '오디오뿐'으로 읽혀야 한다."""
+    assert "gen_flags" not in cut_mismatch_hint(25.025, 25.025)
+
+
+def test_hint_always_prints_both_numbers_so_a_human_can_recheck():
+    """판정이 틀려도 원본 숫자로 되짚을 수 있어야 한다(이번 사고의 교훈)."""
+    for msg in (cut_mismatch_hint(25.025, 25.025), cut_mismatch_hint(25.025, 39.900)):
+        assert "25.025" in msg and "ko" in msg and "ja" in msg
+
+
+def test_hint_degrades_gracefully_when_a_stream_duration_is_unknown():
+    """ffprobe 가 스트림 길이를 못 주면(0.0) 판별 불가라고 말한다 — 단정하지 않는다."""
+    msg = cut_mismatch_hint(0.0, 25.025)
+    assert "판별 불가" in msg and "못 읽었다" in msg
