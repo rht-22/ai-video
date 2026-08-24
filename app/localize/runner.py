@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 
 from app.localize.apply import l3_apply
-from app.localize.collect import l0_backup
+from app.localize.collect import invalidate_localize_cache, l0_backup
 from app.localize.meta import l5_metadata
 from app.localize.narration import l3t_tts
 from app.localize.overrides import apply_overrides
@@ -37,13 +37,24 @@ def _mark(state_path: Path, stage: str, **extra) -> None:
 
 def run_localize(job_dir: str | Path, locale: str = "ja", *,
                  overrides_path: str | Path | None = None,
-                 skip_render: bool = False) -> Path:
-    """job 디렉토리 하나를 현지화한다. 성공 마커(`localize_<locale>/metadata.json`) 경로를 돌려준다."""
+                 skip_render: bool = False, rebuild: bool = False) -> Path:
+    """job 디렉토리 하나를 현지화한다. 성공 마커(`localize_<locale>/metadata.json`) 경로를 돌려준다.
+
+    rebuild(편집실 재렌더): 한국어 백업·번역/텔롭 캐시를 지금 job 디렉토리 상태로 갱신하고
+    L1·L2 를 다시 돌린다. 이것 없이 재실행하면 **사람이 고친 한국어가 일본어판에 반영되지
+    않는다**(2026-08-23 SHOTCONE 실측 — 새 검수 카드의 ko_ja_pairs 가 직전 카드와 바이트
+    단위로 동일했다)."""
     spec = LocalizeSpec.build(job_dir, locale)
     state_path = spec.out_dir / "state.json"
-    print(f"=== 현지화 시작: {spec.job.name} ({spec.work_title} → {locale}) ===")
+    print(f"=== 현지화 시작: {spec.job.name} ({spec.work_title} → {locale}) ==="
+          + (" [rebuild]" if rebuild else ""))
 
-    backup = l0_backup(spec.job)
+    if rebuild:
+        removed = invalidate_localize_cache(spec.out_dir)
+        print(f"[rebuild] 캐시 폐기: {', '.join(removed) or '없음'} — 고친 한국어 원본으로 "
+              f"다시 번역한다")
+
+    backup = l0_backup(spec.job, rebuild=rebuild)
     _mark(state_path, "L0")
 
     client = gemini_client()

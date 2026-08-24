@@ -80,18 +80,71 @@ def ass_filter_hint(ffmpeg: str) -> str:
             "(예: FFMPEG_BIN=/opt/homebrew/opt/ffmpeg@7/bin/ffmpeg).")
 
 
+VISUAL_OVERRIDE_KEYS = ("images", "texts")
+
+
+def visual_only_overrides(ov):
+    """편집실 오버라이드에서 **화면 겹치기(images·texts)만** 남긴다. 순수(테스트 대상).
+
+    제목·자막·구간·내레이션은 L3 가 백업 + 번역으로 이미 일본어로 써 놓았다 — 그것들까지
+    넘기면 사람이 고친 **한국어**가 일본어판 위에 그대로 다시 덮인다. 반대로 images·texts 는
+    edit_overrides.json 에만 있어서(체크포인트에 안 남는다) 안 넘기면 사람이 올린 이미지·
+    문구가 일본어판에서 조용히 사라진다. 그래서 이 두 키만 승계한다.
+
+    스키마는 v3 로 찍는다 — images·texts 는 v3 전용 계약이다."""
+    keep = {k: (ov or {}).get(k) for k in VISUAL_OVERRIDE_KEYS if (ov or {}).get(k)}
+    return {"schema": "edit_overrides/v3", **keep} if keep else None
+
+
+def design_restore_flags(run_log: dict, locale_cfg: dict, fallback=None) -> list:
+    """재렌더에 쓸 --design-* 토큰. 순수(테스트 대상).
+
+    '그 런이 실제로 쓴 디자인'을 그대로 복원한 뒤 현지화 폰트를 **뒤에** 얹는다
+    (argparse 는 뒤가 이긴다). 종전엔 폰트 두 개만 넘겨서 채널·편집실이 정한 화면비·
+    영상 위치·제목 스타일이 전부 엔진 기본값으로 떨어졌다
+    (2026-08-23 SHOTCONE: aspect_ratio 13:9 → 완성본 1:1).
+
+    출처 둘 — 정본은 엔진이 남기는 run_log.design_cli 이고, 없으면 오케스트레이터가
+    run_dir 에 남긴 design_cli.json(fallback)을 쓴다. 두 배포가 서로를 기다리지 않게
+    한 쪽만 있어도 복원이 성립한다. 둘 다 없는 옛 런은 종전과 동일하게 폰트만 — 회귀 0."""
+    source = (run_log or {}).get("design_cli") or fallback or []
+    restored = [str(t) for t in source]
+    return restored + ["--design-title-font", locale_cfg["title_font"],
+                       "--design-subtitle-font", locale_cfg["subtitle_font"]]
+
+
+def read_design_cli_file(job: Path) -> list:
+    """오케스트레이터가 남긴 run_dir/design_cli.json → 토큰 목록(없거나 깨지면 빈 목록).
+
+    깨진 파일에 잡을 걸지 않는다 — 복원이 안 되면 아래에서 경고를 남기고 종전처럼 그린다."""
+    p = job / "design_cli.json"
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        print(f"[L4] ⚠️ design_cli.json 파싱 실패 — 디자인 복원 없이 진행: {p}")
+        return []
+    return [str(t) for t in data] if isinstance(data, list) else []
+
+
 def render_argv(python: str, job: Path, work_display: str, video_path: str,
-                locale_cfg: dict, gen_flags: list) -> list:
+                locale_cfg: dict, gen_flags: list,
+                design_flags=None, ov_flags=None) -> list:
     """재렌더 argv. 순수(테스트 대상) — `--job-id` 지정이라 제목이 달라도 디렉토리가
-    새로 생기지 않는다."""
+    새로 생기지 않는다.
+
+    design_flags 미지정이면 종전처럼 폰트 두 개만 얹는다(옛 런 · 회귀 0)."""
+    design = list(design_flags) if design_flags else [
+        "--design-title-font", locale_cfg["title_font"],
+        "--design-subtitle-font", locale_cfg["subtitle_font"]]
     return [python, "-m", "app.cli", "create_shorts",
             "--title", work_display,
             "--video", video_path,
             "--outdir", str(job.parent),
             "--from-step", "render", "--job-id", job.name,
-            "--design-title-font", locale_cfg["title_font"],
-            "--design-subtitle-font", locale_cfg["subtitle_font"],
-            "--max-shorts", "1", *gen_flags]
+            *design,
+            "--max-shorts", "1", *gen_flags, *(ov_flags or [])]
 
 
 SYSTEM_JP_FONT = Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf")
@@ -137,7 +190,35 @@ def l4_render(job: Path, wcfg: dict, locale_cfg: dict, out_dir: Path):
     gen_flags = render_flags(run_log)
     print(f"[L4] 재현 플래그: {' '.join(gen_flags)}")
 
-    cmd = render_argv(sys.executable, job, wcfg["display"], video_path, locale_cfg, gen_flags)
+    fallback = read_design_cli_file(job)
+    design_flags = design_restore_flags(run_log, locale_cfg, fallback)
+    restored = (run_log or {}).get("design_cli") or fallback
+    if restored:
+        src = "run_log" if run_log.get("design_cli") else "design_cli.json"
+        print(f"[L4] 디자인 복원({src}): {' '.join(str(t) for t in restored)}")
+    else:
+        print("[L4] ⚠️ design_cli 가 없다(옛 런) — 화면비·제목 스타일이 엔진 기본값으로 "
+              "그려진다. 한 번 더 생성하면 복원된다")
+
+    # 편집실이 올린 이미지·자유 텍스트 승계 — 자막·제목은 넘기지 않는다(visual_only_overrides)
+    ov_flags = []
+    ov_src = job / "edit_overrides.json"
+    if ov_src.exists():
+        try:
+            visual = visual_only_overrides(json.loads(ov_src.read_text(encoding="utf-8")))
+        except ValueError as e:
+            raise SystemExit(f"edit_overrides.json 파싱 실패: {e}") from e
+        if visual:
+            ov_path = out_dir / "edit_overrides_visual.json"
+            ov_path.write_text(json.dumps(visual, ensure_ascii=False, indent=2),
+                               encoding="utf-8")
+            ov_flags = ["--edit-overrides", str(ov_path)]
+            print("[L4] 편집실 겹치기 승계: "
+                  + " · ".join(f"{k} {len(visual[k])}건"
+                               for k in VISUAL_OVERRIDE_KEYS if k in visual))
+
+    cmd = render_argv(sys.executable, job, wcfg["display"], video_path, locale_cfg,
+                      gen_flags, design_flags, ov_flags)
     print(f"[L4] 재렌더: {' '.join(cmd[3:])}")
     t0 = time.time()
     r = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, timeout=1800)

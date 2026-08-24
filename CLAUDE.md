@@ -391,19 +391,29 @@ video-localization-project `scripts/localize_run.py`(917줄)를 **충실히 이�
 - 회귀 가드: `tests/test_localize_rerender.py`·`tests/test_localize_pairs.py`(40건) +
   `scripts/localize_port_diff.py`(원본과 **바이트 동일성** 대조 — vlp 동결 시 함께 은퇴).
 
-### 🛑 이식이 vlp 를 따라잡지 못한 것 (2026-08-24 · 컷오버 차단 사유)
+### 편집실 재렌더 계약 (L-P2b, 2026-08-24)
 
-이식 기준은 vlp `66056fe` 인데, 그 뒤 vlp 가 `5f8c3e3` 으로 **147줄**을 얹었다
-(`1da2a16` 편집실 재렌더가 일본어판까지 살아오게 · `2f338e3` 디자인 복원 출처 이원화).
+vlp `1da2a16`·`2f338e3`(147줄)을 따라 이식했다. 이것이 없으면 **사람이 편집실에서 고친
+한국어가 일본어판에 한 글자도 반영되지 않는다**(2026-08-23 SHOTCONE 실측 — 새 검수 카드의
+`ko_ja_pairs` 가 직전 카드와 바이트 단위로 동일했다).
 
-- **`--rebuild`** — 한국어 백업·번역 캐시를 지금 job 상태로 갱신하고 L1·L2 를 다시 돈다.
-  이것이 없어서 **편집실에서 고친 한국어 자막·제목·구간이 일본어판에 한 글자도 반영되지
-  않았다**(SHOTCONE 실측: 새 검수 카드의 `ko_ja_pairs` 가 직전 카드와 바이트 단위 동일).
-- **디자인 복원**(`design_cli.json` · `[L4] 디자인 복원`) — 없으면 화면비가 안 살아온다.
-- **편집실 겹치기 승계** — 이미지·텍스트 오버레이가 일본어판에 안 따라온다.
-
-⚠ **이것이 끝나기 전에는 `ops_config.localize_engine` 을 `ai-video` 로 켜면 안 된다.**
-켜면 vlp `1da2a16` 이 고친 버그가 그대로 되살아난다. 오케스트레이터가
-`localize.AIVIDEO_HAS_REBUILD=False` 로 한 겹 더 막아 두었다(rebuild 요청 잡만 vlp 로
-우회하고 결과에 `vlp(rebuild-fallback)` 로 남긴다) — **이식이 끝나면 그 상수를 True 로
-바꾸고 우회 분기를 지운다.**
+- **`--rebuild`** (`collect.l0_backup(rebuild=)` · `collect.invalidate_localize_cache`) —
+  L0 의 멱등은 이중 번역을 막는 장치인데 편집실 재렌더에서는 **반대로 해롭다**. rebuild 면
+  백업을 지금 job 상태로 갱신하고 `shorts_ko.mp4` 를 새 렌더로 갈아끼운다(L2 텔롭 추출·L4
+  길이 대조의 기준이다). 캐시는 `REBUILD_STALE` + `refine_frames/` 만 폐기한다 —
+  ⚠ **디렉토리째 지우면 안 된다**: L3t 가 같은 곳에 보존한 한국어 mp3 원본이 날아간다.
+- **디자인 복원** (`rerender.design_restore_flags` · `read_design_cli_file`) — 종전엔 폰트
+  둘만 넘겨 채널·편집실이 정한 화면비·영상 위치·제목 스타일이 전부 엔진 기본값으로
+  떨어졌다(SHOTCONE: `aspect_ratio` 13:9 → 완성본 1:1). 출처는 둘이고 **정본은
+  `run_log.design_cli`**, 없으면 오케스트레이터가 남긴 `design_cli.json` — 두 배포가 서로를
+  기다리지 않게 한 쪽만 있어도 성립한다. 현지화 폰트는 **맨 뒤**에 얹는다(argparse 는 뒤가
+  이긴다 — 앞에 두면 원 런의 폰트가 이겨 일본어가 깨진다). 둘 다 없는 옛 런은 폰트만(회귀 0).
+- **편집실 겹치기 승계** (`rerender.visual_only_overrides`) — `images`·`texts` **둘만**
+  넘긴다. 이 둘은 `edit_overrides.json` 에만 있어(체크포인트에 안 남는다) 안 넘기면 사람이
+  올린 이미지·문구가 일본어판에서 조용히 사라진다. 반대로 제목·자막·구간·내레이션까지
+  넘기면 L3 가 써 놓은 일본어 위에 **사람이 고친 한국어가 그대로 다시 덮인다.**
+- `--rebuild` 미지정 = 종전 그대로다. 첫 현지화(planner 정상 체인)는 이 키를 안 쓴다 —
+  무효화할 캐시도 없다. 회귀 가드: `tests/test_localize_rebuild.py`(23건).
+- 기계 대조: 새로 옮긴 함수 5개 중 4개가 vlp 와 **AST 동일**, 상수 2개도 동일.
+  `l0_backup` 만 다른데 P1 에서 하드코딩 대신 계약 상수(`SOURCE_VIDEO_BACKUP`·
+  `RENDER_OUTPUT`)를 쓰기로 한 차이이고 값은 같다.

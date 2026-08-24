@@ -252,6 +252,10 @@ def build_parser() -> argparse.ArgumentParser:
                           "L3+ 를 고친 텍스트로 재실행")
     loc.add_argument("--skip-render", action="store_true",
                      help="L4 재렌더 생략(번역까지만 — 프롬프트·용어집 점검용)")
+    loc.add_argument("--rebuild", action="store_true",
+                     help="편집실 재렌더용 — 한국어 백업·번역/텔롭 캐시를 지금 job 디렉토리 "
+                          "상태로 갱신하고 L1·L2 를 다시 돌린다. 이것 없이 재실행하면 사람이 "
+                          "고친 한국어가 일본어판에 반영되지 않는다")
 
     return parser
 
@@ -433,7 +437,8 @@ def main() -> None:
             ensure_ffmpeg_supported()
         marker = run_localize(args.job_dir, args.locale,
                               overrides_path=args.overrides,
-                              skip_render=args.skip_render)
+                              skip_render=args.skip_render,
+                              rebuild=args.rebuild)
         print(f"[localize] 완료 마커: {marker}")
         return
 

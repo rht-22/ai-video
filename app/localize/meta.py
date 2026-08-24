@@ -109,8 +109,11 @@ def l5_metadata(job: Path, translation: dict, wcfg: dict, out_dir: Path):
         "notes": translation.get("notes", []),
         # 한글 대역(8/14) — 검수 카드가 그대로 내려받아 보여준다
         "ko_ja_pairs": build_ko_ja_pairs(job / "localize_backup_ko", out_dir, translation),
-        "_publish": "publish_youtube.py --title 로 제목 오버라이드. 설명란 필수 고지(권리)는 "
-                    "publish_youtube 가 laeebly 기준으로 별도 추가하므로 여기 description 은 참고용 본문.",
+        "_publish": "publish_youtube.py 의 --title·--description·--hashtags 로 이 값들이 "
+                    "그대로 발행된다(ves-orchestrator approve_and_publish → brain Publish 배선, "
+                    "2026-08-23). description 은 참고용이 아니라 **발행 본문**이다 — 권리사 "
+                    "필수 고지(notice_lines)가 여기 반드시 들어가야 하고, publish_youtube 가 "
+                    "빠졌으면 발행을 거부한다.",
     }
     (out_dir / "metadata.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
