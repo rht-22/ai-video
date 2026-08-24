@@ -239,6 +239,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="자막 스타일 프리셋. auto(기본)=장르 기반 자동 선택. 그 외=강제 적용.",
     )
 
+    # ── localize (L 계열) — 완성된 job 을 다른 언어판으로 다시 그린다 ──────────
+    # 발주서: ves-orchestrator docs/LOCALIZE_UNIFY.md. 생성 경로(create_shorts)와
+    # **완전히 분리된 서브커맨드**라 이 플래그를 안 쓰는 실행은 종전과 한 바이트도 같다.
+    loc = subparsers.add_parser(
+        "localize", help="완성된 job 디렉토리를 현지화한다 (rerender 모드)")
+    loc.add_argument("--job-dir", required=True, help="ai-video job 디렉토리")
+    loc.add_argument("--locale", default="ja",
+                     help="대상 로케일 (app/localize/data/locales.json 의 키)")
+    loc.add_argument("--overrides", default=None,
+                     help="검수 반려 수정 JSON(카드 ko_ja_pairs idx 좌표) — L1 번역에 병합해 "
+                          "L3+ 를 고친 텍스트로 재실행")
+    loc.add_argument("--skip-render", action="store_true",
+                     help="L4 재렌더 생략(번역까지만 — 프롬프트·용어집 점검용)")
+
     return parser
 
 
@@ -411,6 +425,17 @@ def _build_design_config(args: argparse.Namespace,
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+
+    if args.command == "localize":
+        from app.localize.runner import run_localize
+        # 렌더가 자막·텔롭을 번인하므로 ffmpeg 를 먼저 검증한다(create_shorts 와 같은 이유).
+        if not args.skip_render:
+            ensure_ffmpeg_supported()
+        marker = run_localize(args.job_dir, args.locale,
+                              overrides_path=args.overrides,
+                              skip_render=args.skip_render)
+        print(f"[localize] 완료 마커: {marker}")
+        return
 
     if args.command == "create_shorts":
         if args.from_step and not args.job_id:

@@ -1,0 +1,64 @@
+{
+  "_doc": "채널 현지화 정본. channels: 어떤 채널을 어느 로케일로 현지화하는가(판정 기준은 channels.json country 와 일치해야 한다). locales: 로케일별 렌더 자원. works: 작품별 표시 표기·용어집·필수 고지. ⚠️ 내부 키(작품명)는 절대 번역하지 않는다 — laeebly 완전일치 조회 키다.",
+  "channels": {
+    "_doc_cutover": "2026-08-13 ショトコン 항목 제거 — 이 channels 맵은 brain autopilot 게이트(scene_publish_loop._locale_map) 전용이다. 오케스트레이터 컷오버 후 autopilot 이 이 채널을 다루지 않으므로 비워 이중 생산을 막는다. works/locales 섹션은 scene-rerender 엔진이 계속 쓴다."
+  },
+  "locales": {
+    "ja": {
+      "title_font": "ArialUnicode",
+      "subtitle_font": "ArialUnicode",
+      "telop_font": "ArialUnicode",
+      "_font_note": "ArialUnicode 는 임시(스파이크 승계, macOS Arial Unicode 복사본 — ai-video app/assets/fonts/ 에 untracked). 정식 일본어 폰트 선정 시 여기만 바꾸면 된다.",
+      "tts_voice_map": {
+        "_doc": "ai-video VOICE_PRESETS(ko_*) → Edge TTS 일본어 보이스. 톤 성격(밝음/묵직)을 pitch 로 보존한다. chat_* 는 multilingual 이라 원 보이스 그대로 일본어를 말할 수 있어 매핑하지 않는다.",
+        "_default": {
+          "voice_id": "ja-JP-NanamiNeural",
+          "pitch": "+0Hz"
+        },
+        "ko_female": {
+          "voice_id": "ja-JP-NanamiNeural",
+          "pitch": "+0Hz"
+        },
+        "ko_female_high": {
+          "voice_id": "ja-JP-NanamiNeural",
+          "pitch": "+30Hz"
+        },
+        "ko_male": {
+          "voice_id": "ja-JP-KeitaNeural",
+          "pitch": "+0Hz"
+        },
+        "ko_male_low": {
+          "voice_id": "ja-JP-KeitaNeural",
+          "pitch": "-15Hz"
+        }
+      }
+    }
+  },
+  "works": {
+    "혜미리예채파": {
+      "ja": {
+        "display": "ヘミリイェチェパ",
+        "context": "ENA 아이돌 리얼리티 예능. 멤버: 혜리(Girl's Day)·미연((여자)아이들)·리정(댄서)·예나(최예나)·채원(김채원)·파트리샤. 멤버들끼리는 친근한 반말/존대가 섞인 유쾌한 분위기.",
+        "glossary": {
+          "혜미리예채파": "ヘミリイェチェパ",
+          "혜리": "ヘリ",
+          "미연": "ミヨン",
+          "리정": "リジョン",
+          "예나": "イェナ",
+          "채원": "チェウォン",
+          "파트리샤": "パトリシア",
+          "언니": "オンニ"
+        },
+        "_glossary_note": "멤버명 표기는 일본 통용 가타카나 표기 기준 잠정 — 공식 표기 확인 시 갱신(PLAN §9-4)",
+        "notice_lines": [
+          "채널 ENA에서 시청 가능 / チャンネルENAで視聴可能"
+        ],
+        "hashtags_base": [
+          "#ヘミリイェチェパ",
+          "#韓国バラエティ",
+          "#KPOPアイドル"
+        ]
+      }
+    }
+  }
+}

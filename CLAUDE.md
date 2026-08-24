@@ -353,3 +353,57 @@ F-408/410 과 같은 방식(합성 소스 + 손으로 적은 플랜 — 측정 �
   `GEMINI_API_KEY` 없음 → **LLM 호출 경로(compose_style)는 실측 밖**이다. 프롬프트
   `.format()` 은 단위 테스트가 가짜 클라이언트로 덮는다. 실물 1편 on/off A/B(기획서 §12)는
   키·소스가 있는 노드에서 별도로 해야 한다.
+
+## 현지화 계층 계약 (L-P1, 2026-08-23)
+
+`app/localize/` — 발주서: ves-orchestrator `docs/LOCALIZE_UNIFY.md`.
+video-localization-project `scripts/localize_run.py`(917줄)를 **충실히 이식**한 것이다.
+회귀 0 이 조건이라 프롬프트·임계값·파일 이름·순서를 바꾸지 않았다.
+
+- 진입점은 `python -m app.cli localize --job-dir <job> [--locale ja]` 하나.
+  **생성 경로(`create_shorts`)와 완전히 분리된 서브커맨드**라 이 명령을 안 쓰는 실행은
+  종전과 한 바이트도 같다(E11·E13 과 같은 게이트 규약).
+- 단계: L0 백업 → L2 텔롭 추출 → L2b 타이밍 재보정 → L1 통번역 → L3 적용 →
+  L3t 내레이션 재합성 → L4 재렌더+번인 → L5 메타. 모듈이 단계와 1:1 이다.
+- **성공 마커·산출은 vlp 규약 그대로** — `<job>/localize_<locale>/metadata.json`,
+  `<job>/shorts.mp4` 교체본, 원본은 `localize_backup_ko/`·`shorts_ko.mp4`.
+  오케스트레이터 어댑터가 이 이름들을 보므로 바꾸면 컷오버가 깨진다.
+- **번역 입력은 언제나 KO 백업본**이다(원본이 아니라) — 재실행해도 이중 번역이 없다.
+- **컷 재현이 L4 의 전부다.** 원 생성과 같은 A/B 노브(`run_log.provenance.config.app`)로
+  돌지 않으면 컷이 달라져 자막 싱크가 통째로 깨진다(실증: 49.7s→53.3s). 렌더 뒤
+  `shorts_ko.mp4` 와 길이를 대조해 0.05초라도 어긋나면 실패시킨다.
+- **텔롭 인덱스 규약**: `broadcast_telop` 만 추린 목록의 순서가 L1·L2b·L3·검수
+  오버라이드의 공통 좌표다(`telop.only_broadcast_telops`).
+- **환각 클램프는 함수 하나다**(`apply.clamp_hallucination`) — 렌더(L3)와 검수 화면이
+  보는 값(L5 `ko_ja_pairs`)이 같아야 한다. 원본은 같은 수식을 두 곳에 적어 뒀는데,
+  베낀 수식은 언젠가 어긋난다(E13 교훈).
+- 줄 스타일·타이밍 오버라이드(`styles.py`)는 **편집실과 합의된 계약**이라 동작을 바꾸면
+  안 된다. 위반은 조용한 무시가 아니라 `ValueError` — 사람 값이 소리 없이 증발하면
+  '고쳤는데 왜 그대로지'가 된다.
+- ⚠ **이식하며 의도적으로 바꾼 것 둘**:
+  ① **Flash 모델** — vlp 는 `gemini-3-flash-preview` 를 박아 썼지만 이 레포의 모델
+     규칙이 금지한다. `GEMINI_FLASH_MODEL_NAME`(기본 `gemini-3.6-flash`)을 따른다.
+     Pro 는 양쪽이 같다. Flash 가 쓰이는 곳은 L2b 프레임 판독·제목 축약뿐이고 둘 다
+     LLM 판단이라 회귀 0 측정 대상이 아니다(발주서 §8-2).
+  ② **진행 상태 파일** — vlp 는 자기 레포 `results/` 에 썼다. 엔진 레포에 런타임 상태를
+     쓰지 않으므로 job 디렉토리 안(`localize_<locale>/state.json`)으로 옮겼다.
+     읽는 곳이 없어 산출에 영향이 없다.
+- 회귀 가드: `tests/test_localize_rerender.py`·`tests/test_localize_pairs.py`(40건) +
+  `scripts/localize_port_diff.py`(원본과 **바이트 동일성** 대조 — vlp 동결 시 함께 은퇴).
+
+### 🛑 이식이 vlp 를 따라잡지 못한 것 (2026-08-24 · 컷오버 차단 사유)
+
+이식 기준은 vlp `66056fe` 인데, 그 뒤 vlp 가 `5f8c3e3` 으로 **147줄**을 얹었다
+(`1da2a16` 편집실 재렌더가 일본어판까지 살아오게 · `2f338e3` 디자인 복원 출처 이원화).
+
+- **`--rebuild`** — 한국어 백업·번역 캐시를 지금 job 상태로 갱신하고 L1·L2 를 다시 돈다.
+  이것이 없어서 **편집실에서 고친 한국어 자막·제목·구간이 일본어판에 한 글자도 반영되지
+  않았다**(SHOTCONE 실측: 새 검수 카드의 `ko_ja_pairs` 가 직전 카드와 바이트 단위 동일).
+- **디자인 복원**(`design_cli.json` · `[L4] 디자인 복원`) — 없으면 화면비가 안 살아온다.
+- **편집실 겹치기 승계** — 이미지·텍스트 오버레이가 일본어판에 안 따라온다.
+
+⚠ **이것이 끝나기 전에는 `ops_config.localize_engine` 을 `ai-video` 로 켜면 안 된다.**
+켜면 vlp `1da2a16` 이 고친 버그가 그대로 되살아난다. 오케스트레이터가
+`localize.AIVIDEO_HAS_REBUILD=False` 로 한 겹 더 막아 두었다(rebuild 요청 잡만 vlp 로
+우회하고 결과에 `vlp(rebuild-fallback)` 로 남긴다) — **이식이 끝나면 그 상수를 True 로
+바꾸고 우회 분기를 지운다.**
