@@ -1207,19 +1207,21 @@ STYLE_COMPOSITION_PROMPT = """너는 한국어 쇼츠의 **연출 감독**이다
 [연출 수단]
 1) texts — 화면에 얹는 짧은 글자(의성어·의태어·감탄·강조). 대사 자막이 아니다.
    x,y 는 화면 비율(0~1, **글자 중심**), 캔버스는 세로 9:16 이다.
-   ⚠ 영상은 화면 가운데 띠에 있고 대사 자막은 아래쪽에 깔린다 — y 는 0.15~0.35(위) 또는
-     0.60~0.72(아래) 를 써라. y 0.8 이상은 대사 자막과 겹친다.
+   ⚠ **y 는 반드시 {text_y_lo}~{text_y_hi} 안에 둬라.** 이 편의 영상이 실제로 그려지는
+     띠가 그 구간이다. 그 위는 **제목 자리**, 그 아래는 대사 자막·작품명 자리라 글자가
+     겹쳐 읽을 수 없게 된다(범위 밖 값은 엔진이 이 구간으로 당긴다 — 네 의도와 달라진다).
    fx: none|pop|shake (pop=톡 튀어나옴, shake=흔들림). size 는 48~160 이 보통이다.
 2) subtitle_styles — **핵심 대사 한두 줄**만 크게/색으로 강조. 그 줄이 이 쇼츠의 승부처일 때만.
 3) images — 스티커. 아래 [스티커] 목록의 id 만 쓸 수 있다. 목록이 비어 있으면 쓰지 마라.
-4) title_segments — 시간대별 제목. 구간(from_anchor~to_anchor, 원본 절대초)에만 제목이 뜨고
-   **그 밖의 시간은 제목이 사라진다**. '중반부터 제목을 걷어내 화면을 비운다'가 이 기능의 절반이다.
-   창끼리 겹치면 안 된다. 안 쓸 거면 배열을 비워라(그러면 제목이 처음부터 끝까지 나온다).
+4) title_segments — 시간대별 제목. 구간(from_anchor~to_anchor, 원본 절대초)마다 **제목 문구를
+   바꾼다**. ⚠ **제목은 편 내내 반드시 떠 있어야 한다** — 창이 못 덮은 시간에는 엔진이 기본
+   제목을 되돌려 넣는다(제목이 없는 시간은 만들 수 없다). 그러니 '중간에 제목을 없애는'
+   용도로는 쓰지 마라. 창끼리 겹치면 안 된다. 문구를 안 바꿀 거면 배열을 비워라
+   (그러면 기본 제목이 처음부터 끝까지 나온다).
 5) tts — 이미 정해진 내레이션의 **목소리·속도만** 장면 톤에 맞게 바꾼다. 문구는 못 바꾼다.
-6) design — 이 편 전체에 걸리는 것. 제목 배경 박스·굵게, 제목 기울임(title_rotate) 정도만.
-   ⚠ **제목은 웬만하면 기울이지 마라.** title_rotate 는 꼭 필요할 때만, 아주 살짝
-     (±{title_rotate_max}° 이내)만 써라 — 큰 각도는 채널·편집실 몫이다. 이유 없이
-     매 편 기울이면 안 된다. 내레이션 자막 기울기(tts_rotate)는 그보다 자유롭게 쓸 수 있다.
+6) design — 이 편 전체에 걸리는 것. 제목 배경 박스·굵게 정도만.
+   ⚠ **제목은 기울이지 않는다.** `title_rotate` 는 쓰지 마라 — 보내도 엔진이 버린다.
+     제목 기울기는 채널·편집실이 정하는 값이다. 내레이션 자막 기울기(tts_rotate)는 쓸 수 있다.
 
 [출력 형식 — 이 JSON 만, 설명 금지]
 {{
@@ -1247,13 +1249,13 @@ STYLE_COMPOSITION_PROMPT = """너는 한국어 쇼츠의 **연출 감독**이다
 }}
 
 [값 규칙 — 어기면 그 항목이 버려지거나 전체가 거절된다]
-- texts: size 12~400 · color "#RRGGBB" · stroke dark|none|white · fx none|pop|shake ·
+- texts: y {text_y_lo}~{text_y_hi} · size 12~400 · color "#RRGGBB" · stroke dark|none|white · fx none|pop|shake ·
   rotate -180~180(시계방향 양수) · font 는 {fonts} 중 하나(생략하면 기본) · text 60자 이내
 - subtitle_styles.style 은 **size 와 color 만** (위치·회전은 사람이 정한다). size {sub_lo}~{sub_hi}
 - images: x,y 는 좌상단, w 는 가로 비율(0~1) · layer 0=자막 아래, 1=자막 위
 - tts.voice: {voices}
 - tts.speed: {speeds}
-- design.title_rotate: -{title_rotate_max}~{title_rotate_max}(웬만하면 0 — 정말 필요할 때만)
+- design.title_rotate: **쓸 수 없다**(보내면 그 키만 버려진다)
 - design.tts_rotate: -180~180
 - design.title_box(2)/title_box_color(2)/title_bold(2): 박스는 none|round|rect
 - 상한: 효과 텍스트 {max_texts}개 · 스티커 {max_images}개 · 자막 강조 {max_subs}개 · 제목 창 {max_titles}개
@@ -2234,6 +2236,7 @@ class GeminiClient:
         transcript_lines: list[dict[str, Any]],
         tts_cues: list[dict[str, Any]],
         sticker_catalog: str = "",
+        text_y_range: tuple[float, float] = (0.35, 0.66),
         editorial: dict[str, Any] | None = None,
         reject_note: str | None = None,
     ) -> dict[str, Any] | None:
@@ -2241,6 +2244,11 @@ class GeminiClient:
 
         입력은 전부 **원본 절대초** 좌표다(timeline 이 원본↔편집 대응표를 싣는다) —
         플랜의 좌표계와 같아야 LLM 이 표를 보고 그대로 베낄 수 있다.
+
+        `text_y_range` 는 **이 편의 실제 밴드 기하**에서 계산한 효과 텍스트 y 허용 구간이다
+        (`style_compose.text_y_range`). 기본값은 13:9·꽉 찬 폭·세로 중앙 기준의 근사치라
+        호출부가 채널 design 으로 계산해 넘기는 것이 정본이다 — 프롬프트에 하드코딩된
+        구간이 제목 자리를 찍어서 권하고 있었다(E18, 2026-08-24).
 
         반환: 파싱된 dict, 또는 None(끝내 못 받음). **여기서는 계약 검증을 하지 않는다** —
         정본은 style_compose.validate_plan 이고, 호출부가 거기서 거절되면 재시도한다.
@@ -2262,7 +2270,8 @@ class GeminiClient:
             sub_lo=f"{_sc.SUBTITLE_SIZE_RANGE[0]:g}", sub_hi=f"{_sc.SUBTITLE_SIZE_RANGE[1]:g}",
             voices="/".join(_sc.STYLE_VOICES),
             speeds="/".join(_sc.STYLE_SPEEDS),
-            title_rotate_max=f"{_sc.AI_TITLE_ROTATE_RANGE_DEG:g}",
+            text_y_lo=f"{float(text_y_range[0]):.2f}",
+            text_y_hi=f"{float(text_y_range[1]):.2f}",
             max_texts=_sc.MAX_TEXTS, max_images=_sc.MAX_IMAGES,
             max_subs=_sc.MAX_SUBTITLE_STYLES, max_titles=_sc.MAX_TITLE_SEGMENTS,
             work_title=work_title, title_text=(title_text or "").replace("\n", " / "),
