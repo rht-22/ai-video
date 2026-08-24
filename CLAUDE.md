@@ -748,9 +748,16 @@ E16 이 둘 다 일본어로 바꾼다.
 `style_compose.py` · `gemini_client.STYLE_COMPOSITION_PROMPT` · `localize/apply.py` ·
 `localize/telop.py`. 완성본 프레임 4장을 보고 사용자가 짚은 4건 + 조사 중 나온 1건.
 
-⚠ **SHOTCONE 얘기가 아니다.** `channels_mirror` 실측 — 21개 채널 중 20개가
-`style_compose: true` 이고, 키가 없는 HANIPJUMAK 도 전역 게이트(`ops_config.channel_style
-= on`)로 style 단계를 탄다(가왕쇼 런이 그 채널이다). 아래 1·2는 **전 채널 문제**다.
+⚠ **SHOTCONE 얘기가 아니다.** 실측 — **21개 채널 전부** `style_compose: true` 다
+(가왕쇼 런이 그중 하나다). 아래 1·2는 **전 채널 문제**다.
+
+⚠ **켜는 것은 채널 design 키 하나다.** `ops_config.channel_style` 은 *배포 게이트*(허용)일
+뿐이고, 실제 `--style-compose` 는 `design.style_compose` 가 참일 때만 붙는다
+(`adapters/aivideo.py` 의 `design_for_job` — **키가 없으면 꺼짐**).
+⚠ **`channel_design_overrides` 는 통째 교체다** — 대시보드에서 디자인을 저장할 때
+`style_compose` 를 같이 안 실으면 그 채널의 AI 연출이 **조용히 꺼진다.** 2026-08-24
+11:04 HANIPJUMAK 이 그렇게 꺼졌고(00:00 런은 연출을 탔는데 12:59 런은 안 탔다), 키만
+병합해 되살렸다. 채널 설정을 손으로 고친 뒤에는 이 키가 살아 있는지 확인할 것.
 다행히 연출이 실제로 들어간 4편은 전부 미발행이고, 발행된 3편은 AI 플랜이 비어 있었다
 (`texts 0 · title_segments 0`) — 결함이 나간 적은 없다.
 
@@ -793,6 +800,8 @@ overlay_y − 블록높이 − 20`) — 권장 '위' 구간과 거의 완전히 
 - 범위 밖은 **드롭이 아니라 클램프**(사용자 결정) — 연출은 살리고 위치만 당긴다. 건별 기록.
   y 는 v3 계약상 **글자 중심**(`\an5\pos`)이라 글자 반높이(size×0.6)를 여유로 뺀다.
 - 클램프는 **배치 직전**에 건다 — 체크포인트에서 되살아난 옛 플랜도 같은 길을 지난다.
+- 몇 건을 당겼는지 style 단계 `text_clamp: {clamped, of, y_range}` 로 남긴다(2026-08-24
+  후속) — stdout 에만 있으면 '클램프가 돌긴 했나'를 나중에 확인할 길이 없다.
 
 ### E18-3 AI 는 제목을 기울일 수 없다
 
@@ -885,6 +894,12 @@ E17-2 는 *"표본 프레임의 **절반 이상**에서 걸리는 행"* 만 띠�
   원점(`\org`)도 옮겨진 자리를 따라간다.
 - 표본은 `checkpoint_burned_subtitle.json` 의 `profiles` 키에 남아 `--from-step render`
   재개에서 **다시 디코드하지 않고** 창별 재판정이 된다. 클립 구성이 바뀌면 캐시 무효.
+- **감사 기록(2026-08-24 후속)**: 판정이 돌았으면 **띠를 못 찾아도**
+  `steps[{step:"subtitle_avoid_burned"}]` 를 남긴다(`band: null` · `profile_frames`).
+  종전엔 찾은 실행만 남겨서, 단계가 없을 때 '띠가 없었다'인지 '판정이 아예 안 돌았다'인지
+  구분이 안 됐다 — 실물 검증에서 실제로 막혔다. 구간별로 올린 줄 수는 ASS 조립이 끝난 뒤
+  같은 dict 에 `windowed: [{track, moved, lines, base_margin_v}]` 로 채운다.
+  ⚠ `off` 채널·`--no-subtitles` 는 표본을 아예 안 뜨므로 **종전과 같이 아무것도 안 남는다**.
 - ⚠ `_BURNED_PROFILES` 는 모듈 수준이라 한 프로세스에서 여러 편을 돌리면 앞 편 표본이
   남는다 — `_detect_burned_band_cached` 시작에서 비운다(회귀 가드가 이걸 못박는다).
 
@@ -900,14 +915,14 @@ E17-2 는 *"표본 프레임의 **절반 이상**에서 걸리는 행"* 만 띠�
 비용: 전역 0.78s + 구간 1.06s (20초·2클립 기준 중앙값 3회)
 ```
 
-- 회귀 가드: `tests/test_e18_windowed_avoid.py`(17건).
+- 회귀 가드: `tests/test_e18_windowed_avoid.py`(22건).
 
 ### 남은 별건 (사용자와 합의)
 
 없음 — E17-2 간헐 텔롭 건은 위 E18-6 으로 닫혔다.
 
 회귀 가드: `tests/test_e18_style_placement.py`(15건) · `tests/test_e18_localize_telop.py`(11건)
-· `tests/test_e18_windowed_avoid.py`(17건) · `tests/test_e15_style_compose.py` 의 제목 회전 절(4건).
+· `tests/test_e18_windowed_avoid.py`(22건) · `tests/test_e15_style_compose.py` 의 제목 회전 절(4건).
 
 ## 원본 자막 회피 · 제목 회전 · 토큰 만료 폴백 (E17, 2026-08-24)
 
