@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.reframe_ab import (  # noqa: E402
     compare_embeddings, compare_keyframes, face_track_clips, resolve_job_dir,
-    verdict,
+    stacks_differ, verdict,
 )
 
 
@@ -128,3 +128,22 @@ def test_resolve_job_dir_leaves_a_missing_path_alone(tmp_path):
     """없는 경로를 부모로 바꾸면 엉뚱한 곳을 job 으로 읽는다 — 그대로 두고 아래에서 실패시킨다."""
     missing = tmp_path / "없는것"
     assert resolve_job_dir(missing) == missing
+
+
+# ── 같은 스택 두 판은 A/B 가 아니다 ──────────────────────────────────────
+def test_stacks_differ_detects_the_real_axes():
+    old = {"cv2": "4.14.0", "numpy": "2.5.1", "python": "3.12.13"}
+    new = {"cv2": "4.10.0", "numpy": "2.3.5", "python": "3.12.13"}
+    assert stacks_differ(old, new)
+
+
+def test_stacks_differ_false_when_only_unrelated_fields_move():
+    """파이썬 패치 버전이나 deepface 유무로는 A/B 가 성립하지 않는다."""
+    a = {"cv2": "4.10.0", "numpy": "2.3.5", "deepface": "0.0.93"}
+    b = {"cv2": "4.10.0", "numpy": "2.3.5", "deepface": "없음(ImportError)"}
+    assert not stacks_differ(a, b)
+
+
+def test_stacks_differ_true_when_one_axis_moves():
+    assert stacks_differ({"cv2": "4.14.0", "numpy": "2.3.5"},
+                         {"cv2": "4.10.0", "numpy": "2.3.5"})

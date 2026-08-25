@@ -87,6 +87,18 @@ def compare_embeddings(a: dict, b: dict) -> dict:
     return res
 
 
+# A/B 판정을 뒤집는 스택 축. 이 둘이 같으면 '두 판'이 아니라 '같은 판 두 번'이다.
+STACK_KEYS = ("cv2", "numpy")
+
+
+def stacks_differ(env_a: dict, env_b: dict) -> bool:
+    """두 판이 실제로 다른 스택에서 떴는가. 순수 — 테스트 대상.
+
+    운영 venv 는 노드가 갱신되는 순간 새 스택이 된다. 그걸 모르고 갱신 뒤에 A판을
+    뜨면 **양쪽이 같은 스택**이라 무조건 `회귀 0` 이 나온다 — 가장 위험한 헛통과다."""
+    return any(str(env_a.get(k)) != str(env_b.get(k)) for k in STACK_KEYS)
+
+
 def verdict(crops: list[dict], emb: dict, *, emb_tol: float) -> tuple[bool, list[str]]:
     """회귀 0 인가 + 사유. 순수 — 조용한 통과를 막으려고 사유를 늘 돌려준다.
 
@@ -208,7 +220,7 @@ def _embeddings(job: Path) -> dict:
                         for r in fi.references}}
 
 
-def do_diff(a: Path, b: Path, *, emb_tol: float) -> int:
+def do_diff(a: Path, b: Path, *, emb_tol: float, allow_same_stack: bool = False) -> int:
     ma = json.loads((a / "manifest.json").read_text(encoding="utf-8"))
     mb = json.loads((b / "manifest.json").read_text(encoding="utf-8"))
     print("=== 환경 ===")
@@ -217,6 +229,12 @@ def do_diff(a: Path, b: Path, *, emb_tol: float) -> int:
             continue
         va, vb = ma["env"].get(k, "-"), mb["env"].get(k, "-")
         print(f"  {k:10s} A {va}   B {vb}{'' if va == vb else '   ← 다름'}")
+
+    if not stacks_differ(ma["env"], mb["env"]) and not allow_same_stack:
+        print("\n🛑 두 판의 cv2·numpy 가 같다 — 이건 A/B 가 아니라 같은 판 두 번이다.")
+        print("   구 스택을 다시 만들어 A 판을 뜰 것(런북 §2-3). 그래도 돌리려면 "
+              "--allow-same-stack.")
+        return 2
 
     print("\n=== 크롭 타임라인 ===")
     crops = []
@@ -267,10 +285,13 @@ def main() -> None:
     # 임베딩은 부동소수 산술이라 비트 동일을 요구하지 않는다. 1e-4 는 ArcFace 512차
     # 벡터의 코사인 판정(임계 0.4)을 뒤집기에 한참 모자란 크기다.
     ap.add_argument("--emb-tol", type=float, default=1e-4)
+    ap.add_argument("--allow-same-stack", action="store_true",
+                    help="같은 스택 두 판도 대조한다(결정성 확인 등 — A/B 아님)")
     args = ap.parse_args()
 
     if args.diff:
-        raise SystemExit(do_diff(args.diff[0], args.diff[1], emb_tol=args.emb_tol))
+        raise SystemExit(do_diff(args.diff[0], args.diff[1], emb_tol=args.emb_tol,
+                                 allow_same_stack=args.allow_same_stack))
     if not (args.job_dir and args.out):
         ap.error("--job-dir 과 --out 을 함께 주거나 --diff A B 를 줄 것")
     run_once(args.job_dir, args.out, limit=args.clips)
