@@ -1526,7 +1526,7 @@ def _compute_tts_margin_v(
 # (전역 띠와 같은 체크포인트 파일에 남아 `--from-step render` 재개에서도 유지된다.)
 _BURNED_PROFILES: list[list] = []
 # 이번 실행의 띠 판정 경과 — run_log 감사용. '판정이 돌았는가'는 결과가 비어도 남겨야
-# '띠가 없었다'와 '아예 안 돌았다'가 구분된다(8/25 커리어데이 실측: 둘 다 단계 부재였다).
+# '띠가 없었다'와 '아예 안 돌았다'가 구분된다.
 _BURNED_STATE: dict[str, Any] = {}
 
 # 구간별로 실제로 올린 줄 수 — run_log 감사 기록용 (E18 후속, 2026-08-24).
@@ -4478,10 +4478,15 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         # 자막을 아예 안 그리는 채널(--no-subtitles)은 잴 것도 없다 — 표본 뜨는 시간만 든다.
         if payload.show_subtitles:
             _burned_band = _detect_burned_band_cached(payload, config, clips, crop_map, output_dir)
-        # ⚠ 조건은 **결과가 아니라 '판정이 돌았는가'** 다. 결과로 걸면 띠도 표본도 못 찾은
-        #   실행이 단계 부재로 남아, '판정 자체가 안 돌았다'와 구분이 안 된다 — 8/25 실측:
-        #   같은 설정의 커리어데이(단계 없음)와 도깨비(표본 110)가 그렇게 갈렸다.
+        # ⚠ 조건은 **결과가 아니라 '판정이 돌았는가'** 다. 결과로 걸면 판정이 돌고도 띠·표본을
+        #   둘 다 못 얻은 실행(ffmpeg 없음·프레임 못 뜸·예외)이 단계 부재로 남아, '판정 자체가
+        #   안 돌았다'와 구분이 안 된다 — 가장 알고 싶은 경우가 조용해진다. 그 사유는 아래
+        #   error·profiles_error 로 함께 남는다.
         #   `off` 채널·`--no-subtitles` 는 ran 이 안 서므로 종전과 같이 아무것도 안 남는다.
+        #   ⚠ `--no-subtitles` 의 출처는 **둘**이고 둘 다 여기 오기 전에 show_subtitles 를
+        #      끈다(단계 부재가 정상인 경우) — ① 채널 design `subtitles:false`(채널 고정)
+        #      ② 잡 파라미터 `no_subtitles`(그 편 소스에 SRT 가 없으면 true). 8/25 조사에서
+        #      ①을 못 보고 CAREERDAY 를 '자막 그리는 채널'로 오판했다.
         if payload.show_subtitles and _BURNED_STATE.get("ran"):
             _avoid_log = {
                 "step": "subtitle_avoid_burned",

@@ -989,6 +989,20 @@ E17-2 는 *"표본 프레임의 **절반 이상**에서 걸리는 행"* 만 띠�
   구분이 안 됐다 — 실물 검증에서 실제로 막혔다. 구간별로 올린 줄 수는 ASS 조립이 끝난 뒤
   같은 dict 에 `windowed: [{track, moved, lines, base_margin_v}]` 로 채운다.
   ⚠ `off` 채널·`--no-subtitles` 는 표본을 아예 안 뜨므로 **종전과 같이 아무것도 안 남는다**.
+  **조건은 결과가 아니라 `_BURNED_STATE["ran"]`(판정이 돌았는가)이다**(2026-08-25 교정) —
+  결과로 걸면 판정이 돌고도 띠·표본을 **둘 다** 못 얻은 실행(ffmpeg 없음·프레임 못 뜸·예외)이
+  단계 부재로 남아 가장 알고 싶은 경우가 조용해진다. 그 사유는 `error`·`profiles_error` 로
+  함께 남는다. 채널이 끈 경우(`mode != auto`)는 `ran` 이 서기 전에 빠져나가 무기록이다.
+- ⚠ **`--no-subtitles` 의 출처는 둘이고, 단계 부재의 대부분은 이것이다**(2026-08-25에
+  이걸 못 보고 오진했다 — 기록해 둔다):
+  ① 채널 design **`subtitles: false`** → 어댑터 `CHANNEL_DESIGN_FLAGS` 가 `--no-subtitles`
+     로 옮긴다. **채널 고정**이라 그 채널은 늘 자막이 없다(예: CAREERDAY·JAEMISHOTS·
+     HEUNGHAENG·DARAMJI·NEOGULBANG).
+  ② 잡 파라미터 **`no_subtitles`** — planner 가 `sources.has_subtitle=false` 면 true 로
+     넣는다. **편마다 다르다**(자막 그리는 채널이라도 그 편 소스에 SRT 가 없으면 안 그린다).
+  ⇒ '이 채널이 자막을 그리는가'는 **①과 ②를 함께** 봐야 안다. work_order `has_subtitle`
+     하나만 보면 ①을 놓친다. 실측(8/25, 15편): 자막을 실제로 그린 편은 2편(SHOTNOW·
+     TETOCHIP)이고 **둘 다 단계가 남았다** — 나머지 13편의 단계 부재는 전부 정상이다.
 - ⚠ `_BURNED_PROFILES` 는 모듈 수준이라 한 프로세스에서 여러 편을 돌리면 앞 편 표본이
   남는다 — `_detect_burned_band_cached` 시작에서 비운다(회귀 가드가 이걸 못박는다).
 
