@@ -109,18 +109,52 @@ def events_of(doc) -> list:
 
 
 def verdict(checks: dict) -> tuple:
-    """회귀 판정. 번역문 CER 은 **판정에서 빠진다**(localize_ab 와 같은 규율)."""
-    lines, ok = [], True
+    """회귀 판정. 번역문 CER 은 **판정에서 빠진다**(localize_ab 와 같은 규율).
+
+    ⚠ **비교 항목이 0개인 축은 통과가 아니다.** route BC 는 번역·자막을 아예 안 만드는데
+    (`render_mode: clean`) 종전 판정은 `원문 0항목 동일`·`정렬 최대 오차 0.0s` 로 읽고
+    ✅ 를 냈다 — 아무것도 안 재고 합격한 것이다(2026-08-25 실측이 드러냈다).
+    이제 그런 축은 `~~`(판정 제외)로 내려가고, **판정에 남은 축이 하나도 없으면 실패**다."""
+    lines, ok, measured = [], True, 0
     for name, c in checks.items():
-        if c.get("advisory"):
+        if c.get("advisory") or c.get("empty"):
             lines.append(f"~~ {name}: {c['summary']}")
             continue
+        measured += 1
         if c.get("diff"):
             ok = False
             lines.append(f"!! {name}: {c['summary']}")
         else:
             lines.append(f"   {name}: {c['summary']}")
+    if not measured:
+        ok = False
+        lines.append("!! 판정에 들어간 축이 하나도 없다 — 이 대조는 아무것도 재지 못했다")
     return ok, lines
+
+
+def detection_texts(doc) -> list:
+    """detections.json → 프레임순 텍스트 목록. 순수 — 테스트 대상.
+
+    번역이 없는 route(A·BC)에서 **OCR·탐지 축을 대신 잰다.** translations.json 이 없다고
+    그 축을 비워 두면 가장 상류인 탐지가 무검증으로 남는다."""
+    out = []
+    for fr in ((doc or {}).get("frames") or []) if isinstance(doc, dict) else []:
+        for r in fr.get("regions") or []:
+            out.append((int(fr.get("frame_idx", -1)), str(r.get("text", ""))))
+    return out
+
+
+def detection_diff(a: list, b: list) -> list:
+    """탐지 텍스트 차이. 순수 — 완전 일치를 요구한다(OCR 은 결정적이다)."""
+    lines = []
+    if len(a) != len(b):
+        lines.append(f"⚠ 탐지 영역 수가 다르다: {len(a)} vs {len(b)}")
+    for i, (x, y) in enumerate(zip(a, b)):
+        if x != y:
+            lines.append(f"⚠ [frame {x[0]}] {x[1]!r} → {y[1]!r}")
+        if len(lines) >= 20:
+            break
+    return lines
 
 
 # ─────────────────────── 외부 (ffmpeg·파일) ───────────────────────
@@ -194,10 +228,26 @@ def compare(a: pathlib.Path, b: pathlib.Path) -> tuple:
     ea = load_entries(_read_json(a / "translations.json"))
     eb = load_entries(_read_json(b / "translations.json"))
     sd = source_diff(ea, eb)
-    checks["원문(OCR·탐지)"] = {
-        "diff": bool(sd),
-        "summary": (f"{len(sd)}건 변경 — " + " · ".join(sd[:3])) if sd
-                   else f"{len(ea)}항목 동일"}
+    if ea or eb:
+        checks["원문(OCR·탐지)"] = {
+            "diff": bool(sd),
+            "summary": (f"{len(sd)}건 변경 — " + " · ".join(sd[:3])) if sd
+                       else f"{len(ea)}항목 동일"}
+    else:
+        # 번역을 안 만드는 route(A·BC) — 탐지 산출을 직접 맞댄다.
+        da_, db_ = (detection_texts(_read_json(a / "detections.json")),
+                    detection_texts(_read_json(b / "detections.json")))
+        dd = detection_diff(da_, db_)
+        if not da_ and not db_:
+            checks["원문(OCR·탐지)"] = {
+                "empty": True,
+                "summary": "⚠ 못 쟀다 — translations.json 도 detections.json 도 없다"}
+        else:
+            checks["원문(OCR·탐지)"] = {
+                "diff": bool(dd),
+                "summary": (f"{len(dd)}건 변경 — " + " · ".join(dd[:3])) if dd
+                           else f"탐지 {len(da_)}영역 동일 (번역 없는 route — "
+                                f"detections.json 으로 잰다)"}
 
     # ② 번역문 CER — 보고만
     c = target_cer(ea, eb)
@@ -211,12 +261,18 @@ def compare(a: pathlib.Path, b: pathlib.Path) -> tuple:
             + " (LLM 비결정성 — 판정에서 뺀다)") if c["n"] else "비교할 항목 없음"}
 
     # ③ 세그먼트 정렬 — 회귀 판정 대상
-    al, worst = align_diff(events_of(_read_json(a / "ja_events.json")),
-                           events_of(_read_json(b / "ja_events.json")))
-    checks["세그먼트 정렬"] = {
-        "diff": bool(al),
-        "summary": (f"{len(al)}건 — " + " · ".join(al[:3])) if al
-                   else f"최대 오차 {worst}s (허용 {ALIGN_TOL_SEC}s)"}
+    eva = events_of(_read_json(a / "ja_events.json"))
+    evb = events_of(_read_json(b / "ja_events.json"))
+    al, worst = align_diff(eva, evb)
+    if not eva and not evb:
+        checks["세그먼트 정렬"] = {
+            "empty": True,
+            "summary": "비교 항목 0 — 자막 이벤트가 없는 route(A·BC)다. 판정에서 뺀다"}
+    else:
+        checks["세그먼트 정렬"] = {
+            "diff": bool(al),
+            "summary": (f"{len(al)}건 — " + " · ".join(al[:3])) if al
+                       else f"최대 오차 {worst}s (허용 {ALIGN_TOL_SEC}s)"}
 
     # ④ 최종본 길이·라우드니스
     da, db = duration(a / "final_draft.mp4"), duration(b / "final_draft.mp4")

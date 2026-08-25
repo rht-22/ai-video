@@ -45,6 +45,12 @@ PAIRS = [
 
 # 🛑 의도적으로 갈라진 것 — 사유가 없으면 여기 못 들어온다.
 EXPECTED_DIFFS = {
+    "dub.require_level_c":
+        "vlp 는 `level != \"C\"` 로 **C 만** 통과시킨다(src/dub.py:31). 그런데 같은 레포의 "
+        "`DUB_ROUTES` 는 C·BC 둘이고 오케스트레이터 어댑터 needs_dub 도 그렇다 — BC 편은 "
+        "'더빙이 뒤따른다'고 표시된 채 더빙 단계에서 거부당한다. BC 가 실제로 돌아 본 적이 "
+        "없어(vlp·이식본 모두) 안 드러난 불일치다. 세 곳이 갈리면 더빙이 빠진 편이 더빙된 "
+        "줄 알고 발행된다(2026-08-12 사고와 같은 모양) — 정본을 DUB_ROUTES 하나로 모았다.",
     "llm.resolve_model":
         "이 레포의 모델 규칙(CLAUDE.md)을 강제한다 — vlp config 의 gemini-3.5-flash·"
         "gemini-pro-latest 는 사용 금지 모델이다. P1 이 localize_run Flash 를 바꾼 것과 같은 규약.",

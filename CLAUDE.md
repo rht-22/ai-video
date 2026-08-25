@@ -449,7 +449,17 @@ video-localization-project `engine/*` + `src/process_video.py` 를 **충실히 �
 `overlay/dub.py` + `refbank.py` + `precheck.py` — vlp `src/` 에서 함께 옮겼다.
 
 - **overlay 파이프라인이 이 단계를 부르지 않는다**(vlp 규약 그대로). 검수 게이트를 지난 뒤
-  `python -m app.localize.overlay.dub` 로 따로 돈다. 회귀 가드가 파이프라인의 임포트를
+  `python -m app.localize.overlay.dub` 로 따로 돈다.
+- 🛑 **route 게이트 정본은 `DUB_ROUTES`(C·BC) 하나다**(2026-08-25). vlp 는 `level != "C"` 로
+  **BC 를 거부**했는데(`src/dub.py:31`) 같은 레포의 `DUB_ROUTES`·어댑터 `needs_dub` 은 둘 다
+  C·BC 다 — BC 편이 '더빙이 뒤따른다'고 표시된 채 더빙에서 거부당하는 불일치였다. BC 가
+  한 번도 안 돌아 안 드러났다. 어댑터도 `--level=C` 하드코딩을 걷고 그 잡의 route 를 싣는다
+  (게이트가 볼 재료를 위조하지 않는다). 회귀 가드가 `DUB_ROUTES` 와 게이트를 묶는다.
+- ⚠ **self-ref 프로브는 현재 구성에서 도달 불가다** — `dub_backend == "gptsovits"` 일 때만
+  지나는데 config 의 `tts_backend` 는 `elevenlabs` 다(2026-08-13 전환). 실측 로그에 흔적이
+  없던 이유가 이것이다(refbank 때문이 아니다). 이식이 고친 `_SELF_MODULE` 배선만은 모델
+  없이 확인된다: `-m app.localize.overlay.dub --probe-ref=/dev/null --prompt-text=x` 가
+  `PROBE_FAIL` + exit 1 이면 정상(`No module named 'src'` 면 vlp 잔재). 회귀 가드가 파이프라인의 임포트를
   AST 로 훑어 **더빙을 부르지 않는 것**을 고정한다 — 부르면 게이트가 없어진다.
 - 페이싱·리타이밍 숫자(`pacing_plan` 상한 1.35 · `char_budget` 하한 · `atempo` 체인
   분할)는 **잔망루피 목소리의 정체**라 한 개도 안 바꿨고 값으로 고정했다.
@@ -476,8 +486,7 @@ video-localization-project `engine/*` + `src/process_video.py` 를 **충실히 �
 ### 🛑 아직 이식하지 않은 것 (P4 잔여)
 - **`src/autopilot.py` 의 자동 선별·승인** — 폐기다(사용자 결정 2, 사람이 지시한다).
   아카이브·선별은 오케스트레이터가 진다(P3·P3b).
-- **실측 회귀 0** — **route BJ 1편은 통과**(아래 §실측). route C·BC(더빙)와 나머지
-  9편은 아직이다. 대조 기준은 job_queue 가 아니라 **mm-06 의 autopilot 산출물**이다
+- **실측 회귀 0** — **route BJ·C·BC 각 1편 통과**(아래 §실측). 나머지 편수는 아직이다. 대조 기준은 job_queue 가 아니라 **mm-06 의 autopilot 산출물**이다
   (VES 를 통한 overlay 잡은 3건뿐이고 마지막이 8/13, C·BC 는 한 번도 안 돌았다).
 
 ### 실측 (2026-08-24 · mm-06 · `5b2NhVS2h_o` route BJ)
