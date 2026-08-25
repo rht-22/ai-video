@@ -1,7 +1,8 @@
 # ⚠️ Python 3.10 이상 3.14 미만에서 설치할 것 (pyproject.toml 의 requires-python 참고).
 #    아래(3.9): 핀 중 fastapi/uvicorn/alembic/pydantic-settings/python-dotenv/python-multipart 는
 #               3.9 에서 해석되지 않아 조용히 낮은 버전으로 깔린다.
-#    위(3.14): deepface 가 끌어오는 tensorflow 가 cp313 까지만 휠을 내서 설치가 아예 실패한다.
+#    위(3.14): (2026-08-25 이전) deepface 가 끌어오던 tensorflow 가 cp313 까지만 휠을 냈다.
+#              deepface 를 뺐으므로 이 제약은 사라졌지만 3.12 가 실측 통과 조합이다.
 #    실측 통과 조합: Python 3.12 (2026-07-31, 전체 의존성 해석 성공)
 #
 # ⚠️ ffmpeg 는 pip 패키지가 아니라 시스템 바이너리다. **7.x 를 쓸 것 — 8.x 는 미지원.**
@@ -14,7 +15,8 @@ edge-tts>=6.1.9
 #    버전을 정하고, 그건 requirements 어디에도 안 적히는 우연이다.
 #    한쪽만 적는 것으로는 못 없앤다(L-P4 1차 시도 실패 · mm-06 2026-08-25 실측):
 #      contrib ← paddlex(paddleocr 전이)가 **==4.10.0.84 로 못 박는다**
-#      base    ← deepface · retina-face · rapidocr-onnxruntime 이 **상한 없이** 끌어온다
+#      base    ← rapidocr-onnxruntime 이 **상한 없이** 끌어온다(2026-08-25 이전에는
+#                deepface·retina-face 도 같은 자리에 있었다 — 그 둘은 뺐다)
 #    base 를 안 적으면 전이 해석이 **5.0.0.93** 을 가져오는데 5.x 는 번들 haarcascade 를
 #    빼서, 순서가 뒤집혀 그쪽이 이기면 **얼굴검출(reframe)이 죽는다.**
 #    ⇒ 둘을 **같은 버전으로 못 박아** 승자가 누구든 결과가 같게 만든다. contrib 는 base 의
@@ -50,21 +52,14 @@ typing-extensions==4.15.0
 watchfiles==1.1.1
 requests>=2.31.0
 # 로고 자산 처리(여백 트림·잉크 bbox 측정)와 폰트 패밀리명 검증(tests/test_font_family.py)에
-# 쓴다. deepface 가 전이로 끌어와서 지금까지 우연히 동작했지만, 그쪽 의존성이 바뀌면 조용히
-# 사라진다 — 직접 쓰므로 명시한다.
+# 쓴다. 예전엔 deepface 가 전이로 끌어와 우연히 동작했는데, 그 deepface 를 뺐으므로
+# (2026-08-25) 이 줄이 유일한 출처다.
 Pillow>=10.0.0
 
-# Face Recognition (Phase 12)
-deepface>=0.0.93
-# 🛑 이것이 없으면 deepface 는 **한 줄도 못 돈다**(2026-08-25 실측, 노드 6대 전부):
-#     ValueError: You have tensorflow 2.21.0 and this requires tf-keras package.
-#   deepface 는 tf.keras 1세대 API 로 모델을 짜는데 tensorflow 2.16+ 가 Keras 3 을
-#   기본으로 삼으면서 갈라졌다 — 호환 계층이 별도 배포판(tf-keras)이고 deepface 는
-#   그것을 **런타임에만** 요구해서(런타임 검사) 설치 해석은 멀쩡히 통과한다.
-#   그래서 '깔렸는데 안 도는' 상태가 오래 안 보였다.
-#   ⚠ 이걸 넣는다고 바로 화면이 바뀌지는 않는다 — `enable_face_recognition` 기본값을
-#     꺼짐으로 내렸다(config.py 의 사유). 켠 채널만 새 동작을 받는다.
-tf-keras>=2.16
+# ⚠ 얼굴 **인식**(deepface·tf-keras·retina-face)은 2026-08-25 에 뺐다(사용자 결정).
+#   배우 사진이 TMDb 에서만 왔는데 키가 노드 어디에도 없어 사진이 붙은 적이 없고,
+#   사진이 없으면 레퍼런스가 0명이라 그 경로는 한 번도 안 돌았다. tensorflow 를 통째로
+#   끌고 오던 자리다. 얼굴 **검출**(리프레이밍)은 그대로다 — 그건 cv2 haarcascade 다.
 
 # Media / Source download
 # app/modules/youtube_downloader.py 가 `import yt_dlp` 한다. 이게 없으면 --youtube-url 경로가 즉사한다.
@@ -102,7 +97,7 @@ gdown>=5.0
 # 되지만, 실제로 돌리려면 있어야 한다(어댑터가 잡 시작 전에 사전검사로 막는다).
 # 실측(P0 §2-4, mm-06 arm64): 해석 통과 · venv 1.8 → 3.1 GiB(+1.3/노드) · 스모크 9/9.
 #
-# ⚠ numpy 가 2.5.1 → 2.3.5 로 내려간다. 지금 도는 deepface(얼굴검출)·opencv·
+# ⚠ numpy 가 2.5.1 → 2.3.5 로 내려간다. 지금 도는 opencv·
 #   faster-whisper 가 전부 그 위에서 도므로 **배포 전 A/B 가 선결**이다(P0 §2-6).
 #   절차: ves-orchestrator docs/overlay_deps_runbook.md
 elevenlabs>=1.0              # 더빙 TTS (route C·BC) — 잔망루피 클론 보이스

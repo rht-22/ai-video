@@ -1,25 +1,23 @@
-"""L-P4 2차 관문 — 리프레임(얼굴검출) 회귀 A/B.
+"""리프레임(얼굴검출) 회귀 A/B — 같은 job 을 두 스택으로 떠서 크롭을 맞댄다.
 
-발주서: ves-orchestrator `docs/overlay_deps_runbook.md` §2.
+발주서: ves-orchestrator `docs/overlay_deps_runbook.md` §2-3.
 
 **왜 단위 테스트로 안 되는가.** 회귀 가드(`test_e1*` 계열)는 얼굴검출 *좌표*를
-고정하지만 *검출 자체*는 가짜 값으로 우회한다. L-P4 의존성 머지는 그 아래를 바꾼다:
-
-    numpy  2.5.1  → 2.3.5      (deepface·opencv·faster-whisper 가 그 위에서 돈다)
-    cv2    4.14.0 → 4.10.0     (opencv-contrib 로 통합 — haarcascade 도 그 배포판 것)
-
-haar cascade 와 ArcFace 임베딩이 새 스택에서 **같은 답**을 내는지는 실물로만 보인다.
+고정하지만 *검출 자체*는 가짜 값으로 우회한다. 의존성이 바뀌면(L-P4: numpy
+2.5→2.3 · cv2 4.14→4.10) haar cascade 가 같은 답을 내는지는 실물로만 보인다.
 
     python -m scripts.reframe_ab --job-dir <job> --out <dir>     # 한 판 뜬다
     python -m scripts.reframe_ab --diff <A> <B>                  # 두 판 대조
 
 ⚠ **두 판을 같은 job 으로, 두 venv 로 떠야 한다.** 저장된 `crop_*.json` 을 기준으로
-삼지 않는 이유: 그 파일은 face_identifier·character_index 가 붙은 실런 산출이라
-이 스크립트의 단순화된 호출과 조건이 다르다. 조건이 다른 둘을 맞대면 **코드 차이가
-아닌 것**이 차이로 보인다(A/B 의 기본).
+삼지 않는다 — 그 파일은 실런 산출이라 이 도구의 호출과 조건이 미묘하게 다르고,
+조건이 다른 둘을 맞대면 **코드 차이가 아닌 것**이 차이로 보인다(A/B 의 기본).
 
-⚠ 운영 venv 는 노드가 갱신되는 순간 **새 스택이 된다.** A 판(구 스택)은 갱신 전에
-떠야 한다 — 놓치면 구 requirements 로 venv 를 다시 만들어야 한다.
+⚠ 운영 venv 는 노드가 갱신되는 순간 새 스택이 된다. 구 스택 판을 놓쳤으면 그때의
+requirements 로 일회용 venv 를 다시 만들면 된다(`scripts/deps_probe.py --install`).
+
+⚠ **얼굴 인식(deepface)은 2026-08-25 에 사라졌다** — 이 도구도 임베딩 대조를 함께
+   걷어냈다. 남은 축은 haar 검출 하나이고, 그것이 지금 실제로 도는 유일한 경로다.
 """
 from __future__ import annotations
 
@@ -32,14 +30,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 CROP_FIELDS = ("time_sec", "x_center", "y_center", "crop_w", "crop_h")
 
+# A/B 판정을 뒤집는 스택 축. 이 둘이 같으면 '두 판'이 아니라 '같은 판 두 번'이다.
+STACK_KEYS = ("cv2", "numpy")
+
 
 # ─────────────────────────── 순수 (테스트 대상) ───────────────────────────
+
+def resolve_job_dir(p: Path) -> Path:
+    """job 디렉토리로 정규화. 순수 — 테스트 대상.
+
+    후보를 찾는 명령이 `grep -l … outputs/*/edit_plan.json` 이라 **파일 경로가 그대로
+    붙여 넣어진다.** 그대로 두면 `…/edit_plan.json/checkpoint_probe.json` 을 열려다
+    `NotADirectoryError` 로 죽는데, 그 메시지는 무엇을 잘못 줬는지 안 알려준다."""
+    return p.parent if p.is_file() else p
+
 
 def face_track_clips(edit_plan: dict) -> list[dict]:
     """edit_plan timeline 에서 **얼굴추적 클립만** 순서대로. 순수.
 
     `mode == "center"` 는 `--no-reframe` 이거나 crop_map 에 없던 클립이라 검출이
-    돌지 않았다 — 그런 클립까지 새로 검출하면 A/B 가 실런과 다른 것을 잰다."""
+    돌지 않았다 — 그런 클립까지 새로 검출하면 A/B 가 실런과 다른 것을 잰다.
+    crop 파일 이름이 `{role}_{원본 idx}` 라 center 를 건너뛰어도 **원본 idx** 를 쓴다."""
     out = []
     for idx, c in enumerate(edit_plan.get("timeline", []) or []):
         if ((c.get("reframe") or {}).get("mode")) != "face_track":
@@ -68,29 +79,6 @@ def compare_keyframes(a: list, b: list) -> dict:
     return res
 
 
-def compare_embeddings(a: dict, b: dict) -> dict:
-    """{이름: [float,…]} 두 벌 → 최대 절대차. 순수.
-
-    ArcFace 임베딩은 numpy 산술 위에 있어 **비트 단위로 같을 이유가 없다** —
-    그래서 '같다/다르다'가 아니라 크기를 적는다(판정은 호출부 임계값)."""
-    keys_a, keys_b = sorted(a), sorted(b)
-    res = {"keys_a": keys_a, "keys_b": keys_b, "same_keys": keys_a == keys_b,
-           "max_abs_delta": 0.0, "n": 0}
-    for k in set(keys_a) & set(keys_b):
-        va, vb = a[k] or [], b[k] or []
-        if len(va) != len(vb):
-            res["max_abs_delta"] = float("inf")
-            continue
-        res["n"] += 1
-        for x, y in zip(va, vb):
-            res["max_abs_delta"] = max(res["max_abs_delta"], abs(float(x) - float(y)))
-    return res
-
-
-# A/B 판정을 뒤집는 스택 축. 이 둘이 같으면 '두 판'이 아니라 '같은 판 두 번'이다.
-STACK_KEYS = ("cv2", "numpy")
-
-
 def stacks_differ(env_a: dict, env_b: dict) -> bool:
     """두 판이 실제로 다른 스택에서 떴는가. 순수 — 테스트 대상.
 
@@ -99,11 +87,8 @@ def stacks_differ(env_a: dict, env_b: dict) -> bool:
     return any(str(env_a.get(k)) != str(env_b.get(k)) for k in STACK_KEYS)
 
 
-def verdict(crops: list[dict], emb: dict, *, emb_tol: float) -> tuple[bool, list[str]]:
-    """회귀 0 인가 + 사유. 순수 — 조용한 통과를 막으려고 사유를 늘 돌려준다.
-
-    임베딩을 **건너뛴 것은 실패가 아니다**(캐스트 사진이 없는 job 이 정상으로 있다) —
-    대신 사유를 남겨 '봤는데 같았다'와 '아예 안 봤다'가 구분되게 한다."""
+def verdict(crops: list[dict]) -> tuple[bool, list[str]]:
+    """회귀 0 인가 + 사유. 순수 — 조용한 통과를 막으려고 사유를 늘 돌려준다."""
     reasons, ok = [], True
     bad = [c for c in crops if not c["cmp"]["identical"]]
     if not crops:
@@ -112,14 +97,6 @@ def verdict(crops: list[dict], emb: dict, *, emb_tol: float) -> tuple[bool, list
     if bad:
         ok = False
         reasons.append(f"크롭 타임라인 {len(bad)}/{len(crops)}개가 다르다")
-    if emb.get("skipped"):
-        reasons.append(f"임베딩 대조 없음({emb['skipped']})")
-    elif not emb.get("same_keys"):
-        ok = False
-        reasons.append("임베딩 레퍼런스 목록이 다르다")
-    elif emb.get("max_abs_delta", 0.0) > emb_tol:
-        ok = False
-        reasons.append(f"임베딩 최대차 {emb['max_abs_delta']:.2e} > 허용 {emb_tol:.0e}")
     return ok, reasons
 
 
@@ -127,7 +104,7 @@ def verdict(crops: list[dict], emb: dict, *, emb_tol: float) -> tuple[bool, list
 
 def _env() -> dict:
     info = {"python": sys.version.split()[0]}
-    for mod in ("cv2", "numpy", "deepface"):
+    for mod in ("cv2", "numpy"):
         try:
             m = __import__(mod)
             info[mod] = getattr(m, "__version__", "?")
@@ -137,17 +114,7 @@ def _env() -> dict:
     return info
 
 
-def resolve_job_dir(p: Path) -> Path:
-    """job 디렉토리로 정규화. 순수 — 테스트 대상.
-
-    후보를 찾는 명령이 `grep -l … outputs/*/edit_plan.json` 이라 **파일 경로가 그대로
-    붙여 넣어진다.** 그대로 두면 `…/edit_plan.json/checkpoint_probe.json` 을 열려다
-    `NotADirectoryError` 로 죽는데, 그 메시지는 무엇을 잘못 줬는지 안 알려준다."""
-    return p.parent if p.is_file() else p
-
-
-def run_once(job: Path, out: Path, *, limit: int | None, frames: int = 0,
-             face_rec: bool = False) -> None:
+def run_once(job: Path, out: Path, *, limit: int | None) -> None:
     from app.modules.reframe import build_crop_timeline
 
     resolved = resolve_job_dir(job)
@@ -173,247 +140,28 @@ def run_once(job: Path, out: Path, *, limit: int | None, frames: int = 0,
     print(f"[reframe_ab] {job.name} · 얼굴추적 클립 {len(clips)}개 · "
           f"{src.name} {probe['width']}x{probe['height']}")
 
-    # 인물 인식 판(`--face-recognition`) — 켰을 때 크롭이 얼마나 움직이는지 재는 쪽이다.
-    face_identifier = None
-    char_index: list | None = None
-    targets: list[list[str]] = []
-    facerec: dict = {"enabled": bool(face_rec)}
-    if face_rec:
-        facerec.update(_build_face_recognition(job, out, clips, plan))
-        face_identifier = facerec.pop("_fi", None)
-        char_index = facerec.pop("_index", None)
-        targets = facerec.pop("_targets", [])
-
-    # 실런과 같은 sticky anchor 승계 — 안 하면 클립 2번부터 조건이 실런과 달라진다.
+    # 실런과 같은 anchor 승계 — 안 하면 클립 2번부터 조건이 실런과 달라진다.
     ax = ay = None
-    prev_focus = None
-    for ci, c in enumerate(clips):
+    for c in clips:
         dst = out / f"crop_{c['role']}_{c['idx']}.json"
-        tgt = (targets[ci][0] if ci < len(targets) and targets[ci] else None) if face_identifier else None
         build_crop_timeline(
             src, dst, int(probe["width"]), int(probe["height"]), 1.0,
             start_sec=c["start_sec"], end_sec=c["end_sec"],
             enable_speaker_tracking=True,
-            target_character=tgt, face_identifier=face_identifier,
-            character_index=char_index,
-            initial_x=ax, initial_y=ay, prev_target_character=prev_focus,
+            initial_x=ax, initial_y=ay,
         )
-        prev_focus = tgt
         kfs = json.loads(dst.read_text(encoding="utf-8"))
         if kfs:
             ax, ay = float(kfs[-1].get("x_center", 0.0)), float(kfs[-1].get("y_center", 0.0))
         print(f"  {dst.name}: 키프레임 {len(kfs)}개")
 
-    # ⚠ 임베딩은 **부가물**이다 — 여기서 죽으면 이미 만든 크롭까지 manifest 가 없어
-    #   통째로 날아간다(실측: find_ffmpeg_command 인자 하나 때문에 두 판이 다 날아갔다).
-    #   본 관문인 크롭은 지키고, 사유를 담아 건너뛴다.
-    try:
-        emb = _embeddings(job)
-        if emb.get("skipped") and frames:
-            print(f"  [임베딩] 캐스트 사진 경로 없음({emb['skipped']}) → 소스 프레임으로 간다")
-            emb = _frame_embeddings(job, src, out, frames)
-    except Exception as e:  # noqa: BLE001
-        emb = {"skipped": f"임베딩 단계 예외: {type(e).__name__} {e}"}
-        print(f"  [임베딩] 🛑 {emb['skipped']} — 크롭 결과는 그대로 남긴다")
     (out / "manifest.json").write_text(json.dumps(
-        {"job": str(job), "env": _env(), "clips": clips, "embeddings": emb,
-         "face_recognition": facerec},
+        {"job": str(job), "env": _env(), "clips": clips},
         ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[reframe_ab] 완료 → {out}")
 
 
-def align_targets(plan_clips: list[dict], story_clips: list[dict]) -> list[list[str]]:
-    """edit_plan 의 얼굴추적 클립에 checkpoint_story 의 `character_focus` 를 붙인다. 순수.
-
-    ⚠ **개수·role 이 맞을 때만** 붙인다. 둘은 서로 다른 단계의 산출이고(story 는
-    silence_cut·클램프 전) 어긋난 채 index 로 맞추면 **다른 클립의 인물을 따라가는**
-    크롭이 나온다 — 측정이 아니라 거짓말이 된다. 안 맞으면 빈 목록을 돌려주고
-    호출부가 크게 남긴다."""
-    if len(plan_clips) != len(story_clips):
-        return []
-    if any(p.get("role") != s.get("role") for p, s in zip(plan_clips, story_clips)):
-        return []
-    return [list(s.get("character_focus") or []) for s in story_clips]
-
-
-def _fetch_cast_images(job: Path, out: Path) -> list:
-    """checkpoint_research 의 `image_url` 로 배우 사진을 다시 받는다.
-
-    job 디렉토리 정리로 파일은 지워져도 **URL 은 체크포인트에 남아 있다** — 그래서
-    리서치를 다시 돌리지 않고도 레퍼런스를 복원할 수 있다."""
-    import urllib.request
-
-    rp = job / "checkpoint_research.json"
-    if not rp.exists():
-        return []
-    cast = (json.loads(rp.read_text(encoding="utf-8")) or {}).get("cast_images") or []
-    dst = out / "cast"
-    dst.mkdir(parents=True, exist_ok=True)
-    got = []
-    for i, c in enumerate(cast):
-        url = c.get("image_url")
-        if not url:
-            continue
-        f = dst / f"cast_{i}.jpg"
-        try:
-            if not f.exists():
-                urllib.request.urlretrieve(url, f)          # noqa: S310
-            got.append(type("C", (), {"character_name": c.get("character_name", ""),
-                                      "actor_name": c.get("actor_name", ""),
-                                      "image_path": str(f)})())
-        except Exception as e:  # noqa: BLE001
-            print(f"  [FaceRec] 사진 내려받기 실패({c.get('actor_name')}): "
-                  f"{type(e).__name__} {e}")
-    return got
-
-
-def _represent(paths: list[tuple[str, Path]]) -> dict:
-    """(이름, 이미지) → ArcFace 임베딩. 모델·검출기는 `FaceIdentifier` 것을 그대로 쓴다
-    (운영과 다른 파라미터로 재면 운영을 안 재는 것이다)."""
-    from deepface import DeepFace
-
-    from app.modules.face_id import FaceIdentifier
-    fi = FaceIdentifier()
-    out = {}
-    for name, img in paths:
-        try:
-            r = DeepFace.represent(img_path=str(img), model_name=fi.model_name,
-                                   detector_backend=fi.detector_backend,
-                                   enforce_detection=False)
-            if r:
-                out[name] = [float(x) for x in r[0]["embedding"]]
-        except Exception as e:  # noqa: BLE001
-            print(f"  [임베딩] {name} 실패: {type(e).__name__} {e}")
-    return out
-
-
-def _frame_embeddings(job: Path, src: Path, out: Path, n: int) -> dict:
-    """소스에서 프레임을 뽑아 임베딩. 캐스트 사진이 사라진 job(대부분)의 대안이다.
-
-    ⚠ 뽑는 시각은 **방금 만든 크롭 키프레임 시각**이라 얼굴이 있는 것이 보장된다
-    (haar 가 거기서 얼굴을 찾았다). 두 판이 같은 ffmpeg 로 같은 시각을 뽑으므로
-    프레임은 동일하고, 차이가 나면 그건 deepface·numpy 차이다."""
-    import subprocess
-
-    from app.modules.ffmpeg_utils import find_ffmpeg_command
-    ff = find_ffmpeg_command("ffmpeg")
-    times: list[float] = []
-    for f in sorted(out.glob("crop_*.json")):
-        kfs = json.loads(f.read_text(encoding="utf-8"))
-        if kfs:
-            times.append(float(kfs[len(kfs) // 2].get("time_sec", 0.0)))
-    times = times[:n]
-    if not times:
-        return {"skipped": "키프레임이 없어 뽑을 시각이 없다"}
-
-    frames_dir = out / "frames"
-    frames_dir.mkdir(exist_ok=True)
-    pairs = []
-    for t in times:
-        img = frames_dir / f"f_{t:.3f}.png"
-        r = subprocess.run([ff, "-nostdin", "-loglevel", "error", "-ss", f"{t:.3f}",
-                            "-i", str(src), "-frames:v", "1", "-y", str(img)],
-                           capture_output=True, text=True, timeout=120)
-        if r.returncode == 0 and img.exists():
-            pairs.append((f"frame@{t:.3f}", img))
-        else:
-            print(f"  [임베딩] 프레임 추출 실패 t={t:.3f}: {(r.stderr or '').strip()[:200]}")
-    if not pairs:
-        return {"skipped": "프레임을 하나도 못 뽑았다"}
-    print(f"  [임베딩] 소스 프레임 {len(pairs)}장으로 대조")
-    return {"source": "frames", "vectors": _represent(pairs)}
-
-
-def _build_face_recognition(job: Path, out: Path, clips: list[dict], plan: dict) -> dict:
-    """레퍼런스 복원 → 인물 등장 인덱스 → 클립별 타겟. 실패는 전부 '끈 것과 같음'이다.
-
-    켰을 때 무엇이 달라지는지를 재는 것이 목적이라 **비용도 함께 남긴다**
-    (인덱스는 프록시 전체를 2초 간격으로 스캔한다 — 생성 시간이 늘어나는 지점)."""
-    import time as _t
-
-    info: dict = {}
-    cast = _fetch_cast_images(job, out)
-    info["cast_images"] = len(cast)
-    if not cast:
-        info["skipped"] = "배우 사진을 하나도 못 얻었다(체크포인트에 image_url 없음)"
-        print(f"  [FaceRec] 🛑 {info['skipped']} — 끈 것과 같은 크롭이 나온다")
-        return info
-    try:
-        from app.modules.face_id import FaceIdentifier
-        fi = FaceIdentifier()
-        fi.build_references(cast)
-    except Exception as e:  # noqa: BLE001
-        info["skipped"] = f"레퍼런스 빌드 실패: {type(e).__name__} {e}"
-        print(f"  [FaceRec] 🛑 {info['skipped']}")
-        return info
-    info["references"] = len(fi.references)
-    if not fi.references:
-        info["skipped"] = "유효한 레퍼런스 0명"
-        print(f"  [FaceRec] 🛑 {info['skipped']} — 끈 것과 같은 크롭이 나온다")
-        return info
-
-    proxies = sorted(job.glob("*_480.mp4"))
-    if proxies:
-        t0 = _t.time()
-        idx = fi.build_appearance_index(proxies[0], sample_interval_sec=2.0)
-        info["index_segments"] = len(idx)
-        info["index_seconds"] = round(_t.time() - t0, 1)
-        info["proxy"] = proxies[0].name
-        print(f"  [FaceRec] 인물 등장 인덱스 {len(idx)}구간 · "
-              f"{info['index_seconds']}초 ({proxies[0].name})")
-        info["_index"] = idx
-    else:
-        info["index_skipped"] = "프록시(*_480.mp4)가 없다"
-        print(f"  [FaceRec] ⚠ {info['index_skipped']} — 인덱스 없이 간다")
-
-    story_p = job / "checkpoint_story.json"
-    story_clips = []
-    if story_p.exists():
-        story_clips = (json.loads(story_p.read_text(encoding="utf-8")) or {}).get("clips") or []
-    plan_clips = [c for c in (plan.get("timeline") or [])
-                  if ((c.get("reframe") or {}).get("mode")) == "face_track"]
-    targets = align_targets(plan_clips, story_clips)
-    if not targets:
-        info["targets_skipped"] = (f"edit_plan({len(plan_clips)})과 "
-                                   f"checkpoint_story({len(story_clips)})가 안 맞아 "
-                                   f"인물 타겟을 안 붙였다")
-        print(f"  [FaceRec] ⚠ {info['targets_skipped']}")
-    else:
-        info["targets"] = [t[0] if t else None for t in targets][:len(clips)]
-        print(f"  [FaceRec] 클립별 타겟: {info['targets']}")
-    info["_fi"] = fi
-    info["_targets"] = targets
-    return info
-
-
-def _embeddings(job: Path) -> dict:
-    """캐스트 사진 → ArcFace 임베딩. 없으면 사유를 담아 건너뛴다(조용한 생략 금지)."""
-    rp = job / "checkpoint_research.json"
-    if not rp.exists():
-        return {"skipped": "checkpoint_research.json 없음"}
-    cast = (json.loads(rp.read_text(encoding="utf-8")) or {}).get("cast_images") or []
-    have = [c for c in cast if c.get("image_path") and Path(c["image_path"]).exists()]
-    if not have:
-        return {"skipped": f"쓸 수 있는 캐스트 사진 0장(항목 {len(cast)}개)"}
-    try:
-        from app.modules.face_id import FaceIdentifier
-        fi = FaceIdentifier()
-    except Exception as e:  # noqa: BLE001
-        return {"skipped": f"FaceIdentifier 초기화 실패: {type(e).__name__} {e}"}
-
-    class _C:
-        def __init__(self, d):
-            self.character_name = d.get("character_name", "")
-            self.actor_name = d.get("actor_name", "")
-            self.image_path = d.get("image_path")
-
-    fi.build_references([_C(c) for c in have])
-    return {"source": "cast",
-            "vectors": {f"{r.actor_name}|{r.character_name}": [float(x) for x in r.embedding]
-                        for r in fi.references}}
-
-
-def do_diff(a: Path, b: Path, *, emb_tol: float, allow_same_stack: bool = False) -> int:
+def do_diff(a: Path, b: Path, *, allow_same_stack: bool = False) -> int:
     ma = json.loads((a / "manifest.json").read_text(encoding="utf-8"))
     mb = json.loads((b / "manifest.json").read_text(encoding="utf-8"))
     print("=== 환경 ===")
@@ -423,35 +171,11 @@ def do_diff(a: Path, b: Path, *, emb_tol: float, allow_same_stack: bool = False)
         va, vb = ma["env"].get(k, "-"), mb["env"].get(k, "-")
         print(f"  {k:10s} A {va}   B {vb}{'' if va == vb else '   ← 다름'}")
 
-    fa = ma.get("face_recognition") or {}
-    fb = mb.get("face_recognition") or {}
-    facerec_axis = bool(fa.get("enabled")) != bool(fb.get("enabled"))
-    if facerec_axis:
-        print(f"  face_rec   A {bool(fa.get('enabled'))}   B {bool(fb.get('enabled'))}"
-              f"   ← 다름 (이 판의 축)")
-    if not stacks_differ(ma["env"], mb["env"]) and not facerec_axis and not allow_same_stack:
-        print("\n🛑 두 판의 cv2·numpy 도, 인물 인식 설정도 같다 — 이건 A/B 가 아니라 "
-              "같은 판 두 번이다.")
-        print("   구 스택을 다시 만들거나(런북 §2-3) --face-recognition 으로 한 판을 뜰 것. "
-              "그래도 돌리려면 --allow-same-stack.")
+    if not stacks_differ(ma["env"], mb["env"]) and not allow_same_stack:
+        print("\n🛑 두 판의 cv2·numpy 가 같다 — 이건 A/B 가 아니라 같은 판 두 번이다.")
+        print("   구 스택으로 한 판을 다시 뜰 것(런북 §2-3). 그래도 돌리려면 "
+              "--allow-same-stack.")
         return 2
-    if facerec_axis:
-        on = fa if fa.get("enabled") else fb
-        if on.get("skipped"):
-            print(f"\n🛑 켠 판이 실제로는 안 켜졌다: {on['skipped']}")
-            print("   이 대조는 '켜면 무엇이 달라지나'를 재지 못한다.")
-            return 2
-        print(f"\n=== 인물 인식(켠 판) ===")
-        print(f"  배우 사진 {on.get('cast_images')}장 → 레퍼런스 {on.get('references')}명")
-        if on.get("index_seconds") is not None:
-            print(f"  인물 등장 인덱스 {on.get('index_segments')}구간 · "
-                  f"{on.get('index_seconds')}초 ({on.get('proxy')})")
-        else:
-            print(f"  인덱스 없음: {on.get('index_skipped')}")
-        if on.get("targets_skipped"):
-            print(f"  ⚠ {on['targets_skipped']}")
-        else:
-            print(f"  클립별 타겟: {on.get('targets')}")
 
     print("\n=== 크롭 타임라인 ===")
     crops = []
@@ -471,26 +195,10 @@ def do_diff(a: Path, b: Path, *, emb_tol: float, allow_same_stack: bool = False)
               f"x {d['x_center']:.4g} y {d['y_center']:.4g} "
               f"w {d['crop_w']:.4g} h {d['crop_h']:.4g}")
 
-    print("\n=== ArcFace 임베딩 ===")
-    ea, eb = ma.get("embeddings") or {}, mb.get("embeddings") or {}
-    if ea.get("skipped") or eb.get("skipped"):
-        emb = {"skipped": ea.get("skipped") or eb.get("skipped")}
-        print(f"  건너뜀: {emb['skipped']}")
-    elif ea.get("source") != eb.get("source"):
-        # 한쪽은 캐스트 사진, 다른 쪽은 프레임이면 재는 대상이 아예 다르다.
-        emb = {"same_keys": False}
-        print(f"  🛑 대조 대상이 다르다: A {ea.get('source')} · B {eb.get('source')}")
-    else:
-        emb = compare_embeddings(ea.get("vectors") or {}, eb.get("vectors") or {})
-        print(f"  레퍼런스 {len(emb['keys_a'])}/{len(emb['keys_b'])}개 · "
-              f"최대 절대차 {emb['max_abs_delta']:.3e} (허용 {emb_tol:.0e})")
-
-    ok, reasons = verdict(crops, emb, emb_tol=emb_tol)
+    ok, reasons = verdict(crops)
     print("\n=== 판정 ===")
-    if ok and not reasons:
+    if ok:
         print("  ✅ 회귀 0")
-    elif ok:
-        print("  ✅ 회귀 0 (단서: " + " · ".join(reasons) + ")")
     else:
         for r in reasons:
             print(f"  🛑 {r}")
@@ -502,27 +210,17 @@ def main() -> None:
     ap.add_argument("--job-dir", type=Path)
     ap.add_argument("--out", type=Path)
     ap.add_argument("--clips", type=int, default=None, help="앞에서 N개만(빠른 확인용)")
-    ap.add_argument("--face-recognition", action="store_true",
-                    help="인물 인식을 켠 판을 뜬다 — 배우 사진을 체크포인트의 image_url 로 "
-                         "다시 받아 레퍼런스를 만들고, 인물 등장 인덱스를 돌려 그 비용을 "
-                         "재고, 클립별 인물 타겟으로 크롭을 잡는다")
-    ap.add_argument("--frames", type=int, default=0, metavar="N",
-                    help="캐스트 사진이 없으면 소스 프레임 N장으로 임베딩을 대조한다")
     ap.add_argument("--diff", nargs=2, type=Path, metavar=("A", "B"))
-    # 임베딩은 부동소수 산술이라 비트 동일을 요구하지 않는다. 1e-4 는 ArcFace 512차
-    # 벡터의 코사인 판정(임계 0.4)을 뒤집기에 한참 모자란 크기다.
-    ap.add_argument("--emb-tol", type=float, default=1e-4)
     ap.add_argument("--allow-same-stack", action="store_true",
                     help="같은 스택 두 판도 대조한다(결정성 확인 등 — A/B 아님)")
     args = ap.parse_args()
 
     if args.diff:
-        raise SystemExit(do_diff(args.diff[0], args.diff[1], emb_tol=args.emb_tol,
+        raise SystemExit(do_diff(args.diff[0], args.diff[1],
                                  allow_same_stack=args.allow_same_stack))
     if not (args.job_dir and args.out):
         ap.error("--job-dir 과 --out 을 함께 주거나 --diff A B 를 줄 것")
-    run_once(args.job_dir, args.out, limit=args.clips, frames=args.frames,
-             face_rec=args.face_recognition)
+    run_once(args.job_dir, args.out, limit=args.clips)
 
 
 if __name__ == "__main__":

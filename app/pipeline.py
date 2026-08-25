@@ -2412,28 +2412,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 print(f"  시놉시스: {research.work_context[:80]}...")
                 print(f"  등장인물: {len(research.characters)}명")
 
-                # TMDb 배우 이미지 다운로드
-                import os
-                tmdb_key = os.environ.get("TMDB_API_KEY")
-                if tmdb_key:
-                    from app.modules.tmdb_client import download_cast_images as _dl_cast
-                    research_dir = output_dir / "_research"
-                    cast_images = _dl_cast(
-                        research.raw_data.get("characters", []),
-                        research_dir,
-                        tmdb_key,
-                    )
-                else:
-                    cast_images = list(research.characters)
-                    print("  [TMDb] TMDB_API_KEY 미설정 — 배우 이미지 없이 진행")
-                    # 게이트를 켜 놓고 재료가 없으면 사람은 인물 인식이 도는 줄 안다.
-                    # 실측(2026-08-25 mm-06): 키가 어디에도 없어 배우 사진이 0장이었고,
-                    # 그 상태로 켜면 레퍼런스가 안 만들어져 조용히 화자 추적으로 간다.
-                    if payload.design.enable_face_recognition:
-                        print("  [FaceID] ⚠ --face-recognition 을 켰지만 TMDB_API_KEY 가 없어 "
-                              "배우 사진을 못 받는다 — 레퍼런스가 없으므로 인물 인식은 "
-                              "동작하지 않고 화자 추적으로 간다(끈 것과 같다).")
-
+                # 인물 목록(이름만) — 전사 keyterms 에 쓴다. 사진은 안 받는다:
+                # TMDb 연동은 2026-08-25 에 걷어냈다(사용자 결정 "필요없어"). 키가 노드
+                # 어디에도 없어 실제로 사진이 붙은 적이 없고, 사진이 없으면 인물 인식도
+                # 할 일이 없었다 — 그 사슬을 통째로 뺐다.
+                cast_images = list(research.characters)
                 # 체크포인트 저장
                 checkpoint_research.write_text(json.dumps({
                     "work_context": research.work_context,
@@ -2623,45 +2606,12 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     else:
         print(f"[SKIP] 청크 분할 생략 — {from_step} 단계 재개(분할본을 쓰는 단계를 이미 지남)")
 
-    # ═══════════════════════════════════════
-    # [7/15] 인물 등장 인덱스 (face_id 사전 패스)
-    # ═══════════════════════════════════════
-    # 프록시 영상을 일정 간격으로 샘플링하여 등장 인물별 구간을 미리 산출.
-    # 결과는 chunk별로 필터링되어 Gemini analyze_chunk 페이로드에 첨부된다.
-    character_appearances: list[dict[str, Any]] = []
-    checkpoint_char_idx = output_dir / "checkpoint_character_index.json"
-    if checkpoint_char_idx.exists() and from_step != "character_index":
-        try:
-            character_appearances = json.loads(checkpoint_char_idx.read_text(encoding="utf-8"))
-            print(f"\n[7/15] 인물 등장 인덱스 로드 ({len(character_appearances)}개 구간)")
-        except Exception as e:
-            print(f"\n[7/15] 인물 등장 인덱스 로드 실패: {e} — 새로 생성")
-            character_appearances = []
-
-    if not character_appearances and cast_images and payload.design.enable_face_recognition:
-        try:
-            from app.modules.face_id import FaceIdentifier
-            print("\n[7/15] 인물 등장 인덱스 생성 중 (face_id 사전 패스)...")
-            char_idx_start = time.time()
-            _fi_pre = FaceIdentifier()
-            _fi_pre.build_references(cast_images)
-            if _fi_pre.references:
-                character_appearances = _fi_pre.build_appearance_index(
-                    proxy_video_path,
-                    sample_interval_sec=2.0,
-                )
-                checkpoint_char_idx.write_text(
-                    json.dumps(character_appearances, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-                print(f"  → {len(character_appearances)}개 등장 구간 (소요 시간: {time.time() - char_idx_start:.1f}초)")
-            else:
-                print("  [WARN] 유효한 face 레퍼런스 없음 — 인물 인덱스 생략")
-        except ImportError:
-            print("  [WARN] deepface 미설치 — 인물 인덱스 생략")
-        except Exception as e:
-            print(f"  [WARN] 인물 인덱스 생성 실패: {e} — 인덱스 없이 진행")
-            character_appearances = []
+    # [7/15] 인물 등장 인덱스 — 2026-08-25 에 사라졌다(TMDb·deepface 제거, 사용자 결정).
+    # 이 단계는 배우 사진 레퍼런스가 있어야 무언가를 만드는데 **사진이 붙은 적이 없어**
+    # (TMDB_API_KEY 가 노드 어디에도 없었다) 늘 WARN 만 찍고 빈 목록으로 끝났다 —
+    # `checkpoint_character_index.json` 이 쓰인 적도 없다. 그래서 지우는 것이 회귀 0 이다.
+    # ⚠ 단계 이름 `character_index` 는 step_order·`--from-step` 어휘에 그대로 둔다 —
+    #   빼면 뒤 단계 인덱스가 밀려 저장된 run_log 와 재개 지시가 어긋난다.
 
     # ═══════════════════════════════════════
     # [chunk_transcribe] 청크별 transcript 선행 생성 (PR-3 신규)
@@ -2844,19 +2794,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 if getattr(chunk, "actual_start_sec", None) is not None
                 else chunk.start_sec
             )
+            # 인물 등장 구간은 늘 비어 있다(위 [7/15] 참고). 키는 **남긴다** —
+            # `gemini_client` 가 이 키로 프롬프트 블록을 조립하는데, 빈 목록이면 블록도
+            # 빈 문자열이라 지금 나가는 프롬프트와 한 글자도 같다.
             chunk_appearances: list[dict[str, Any]] = []
-            for _ap in character_appearances:
-                if _ap["end_sec"] <= chunk.start_sec or _ap["start_sec"] >= chunk.end_sec:
-                    continue
-                _s = max(_ap["start_sec"], chunk.start_sec) - chunk_offset
-                _e = min(_ap["end_sec"], chunk.end_sec) - chunk_offset
-                if _e <= _s:
-                    continue
-                chunk_appearances.append({
-                    "character": _ap["character"],
-                    "start_sec": float(_s),
-                    "end_sec": float(_e),
-                })
 
             prompt_payload = {
                 "work_title": payload.work_title,
@@ -4260,13 +4201,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                                            "transcribe", "silence_cut", "style", "resources")
                              or _edit_pinned or _tts_override is not None
                              or _resources_speed_stale)
-    # 라운드 9-fix: face_identifier를 resources 단계 *밖*에서도 안전하게 사용할 수 있도록 미리 None 초기화.
-    # --from-step render로 들어와 라인 1490 캐시 로드 분기를 타면 face_identifier가 정의되지 않아
-    # 멀티 variant 렌더링 단계(라인 1862, 1873)에서 UnboundLocalError 발생.
-    face_identifier = None
     # 라운드 11-fix: 라운드 10 자막 스타일 관련 변수들을 모두 함수 단위로 호이스팅 —
     # 멀티 variant 분기에서도 안전하게 사용. 라운드 10이 첫 variant 분기 안에서만 정의해서
-    # 멀티 variant #2/#3 렌더링 시 NameError 발생했음 (face_identifier 라운드 9-fix와 동일 패턴).
+    # 멀티 variant #2/#3 렌더링 시 NameError 발생했음.
     from app.config import DesignConfig as _DefaultDC
     from app.modules.subtitle_styles import select_subtitle_style
     _default_design = _DefaultDC()
@@ -4292,22 +4229,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         resource_start = time.time()
 
         # Phase 12: 인물 인식 레퍼런스 빌드 (배우 사진이 있을 때만)
-        face_identifier = None
-        if cast_images and payload.design.enable_face_recognition:
-            try:
-                from app.modules.face_id import FaceIdentifier
-                fi = FaceIdentifier()
-                fi.build_references(cast_images)
-                if fi.references:
-                    face_identifier = fi
-                    print(f"  [FaceID] 인물 인식 레퍼런스: {len(fi.references)}명")
-                else:
-                    print("  [FaceID] 유효한 레퍼런스 없음 — 화자 추적 폴백")
-            except ImportError:
-                print("  [FaceID] deepface 미설치 — 화자 추적 폴백")
-            except Exception as e:
-                print(f"  [FaceID] 초기화 실패: {e} — 화자 추적 폴백")
-
         # 얼굴 크롭 타임라인
         crop_map = {}
         # enable_reframe=False (--no-reframe) 면 크롭 타임라인을 아예 만들지 않는다. 렌더러는
@@ -4324,46 +4245,24 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         prev_focus_char: str | None = None
         for idx, clip in enumerate(clips) if _reframe_on else []:
             crop_path = output_dir / f"crop_{clip.role}_{idx}.json"
-            # 라운드 19A: ≥2 character_focus + face_identifier/character_index 가능하면 멀티 크롭 (와이드 프레이밍)
-            multi_targets = list(clip.character_focus) if (clip.character_focus and len(clip.character_focus) >= 2) else None
-            current_target_char: str | None = None
-            if multi_targets and (face_identifier or character_appearances) and payload.design.enable_face_recognition:
-                from app.modules.reframe import build_multi_face_crop_timeline
-                print(f"    [multi-crop] clip {idx}: {multi_targets} 와이드 프레이밍")
-                build_multi_face_crop_timeline(
-                    payload.video_path.resolve(),
-                    crop_path,
-                    media_info.width,
-                    media_info.height,
-                    config.crop_sample_interval_sec,
-                    start_sec=clip.start_sec,
-                    end_sec=clip.end_sec,
-                    target_characters=multi_targets,
-                    face_identifier=face_identifier,
-                    character_index=character_appearances,
-                )
-                # multi 분기는 sticky 미적용 (MVP) — anchor 갱신만
-                current_target_char = multi_targets[0] if multi_targets else None
-            else:
-                # Phase 12: character_focus 첫 번째 인물을 타겟으로
-                target_char = clip.character_focus[0] if clip.character_focus and face_identifier else None
-                build_crop_timeline(
-                    payload.video_path.resolve(),
-                    crop_path,
-                    media_info.width,
-                    media_info.height,
-                    config.crop_sample_interval_sec,
-                    start_sec=clip.start_sec,
-                    end_sec=clip.end_sec,
-                    enable_speaker_tracking=payload.design.enable_speaker_tracking,
-                    target_character=target_char,
-                    face_identifier=face_identifier,
-                    character_index=character_appearances,
-                    initial_x=prev_anchor_x,
-                    initial_y=prev_anchor_y,
-                    prev_target_character=prev_focus_char,
-                )
-                current_target_char = target_char
+            # ⚠ 인물 타겟·멀티크롭 분기는 2026-08-25 에 사라졌다(TMDb·deepface 제거).
+            #    둘 다 face_identifier 나 인물 인덱스가 있어야 발동했는데 **한 번도 발동한
+            #    적이 없다** — 배우 사진이 붙은 적이 없어 레퍼런스가 늘 0명이었다.
+            #    즉 여기 남는 화자 추적 경로가 지금까지 실제로 돌던 유일한 경로다(회귀 0).
+            build_crop_timeline(
+                payload.video_path.resolve(),
+                crop_path,
+                media_info.width,
+                media_info.height,
+                config.crop_sample_interval_sec,
+                start_sec=clip.start_sec,
+                end_sec=clip.end_sec,
+                enable_speaker_tracking=payload.design.enable_speaker_tracking,
+                initial_x=prev_anchor_x,
+                initial_y=prev_anchor_y,
+                prev_target_character=prev_focus_char,
+            )
+            current_target_char = None
             crop_map[f"{clip.role}_{idx}"] = crop_path
             # 라운드 24: 방금 생성된 keyframe 의 마지막 위치를 다음 클립에 전달
             try:
@@ -4945,7 +4844,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 var_crop_map = {}
                 for cidx, cclip in enumerate(var_clips) if getattr(payload.design, "enable_reframe", True) else []:
                     crop_file = output_dir / f"crop_{var_num}_{cclip.role}_{cidx}.json"
-                    var_target_char = cclip.character_focus[0] if cclip.character_focus and face_identifier else None
                     build_crop_timeline(
                         payload.video_path.resolve(),
                         crop_file,
@@ -4955,9 +4853,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                         start_sec=cclip.start_sec,
                         end_sec=cclip.end_sec,
                         enable_speaker_tracking=payload.design.enable_speaker_tracking,
-                        target_character=var_target_char,
-                        face_identifier=face_identifier,
-                        character_index=character_appearances,
                     )
                     var_crop_map[f"{cclip.role}_{cidx}"] = crop_file
 

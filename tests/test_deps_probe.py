@@ -144,7 +144,7 @@ def test_absent_ignores_bootstrap_packages():
 
 # ── opencv 두 배포판은 같은 버전으로 묶여 있어야 한다 (L-P4, 2026-08-25) ──────
 # 둘은 같은 `cv2` 디렉토리를 덮어써서 *설치 순서*가 런타임 버전을 정한다. 한쪽만
-# 적으면 다른 쪽이 전이로(deepface·retina-face·rapidocr) 상한 없이 들어와 5.x 가
+# 적으면 다른 쪽이 전이로(rapidocr 등) 상한 없이 들어와 5.x 가
 # 되고, 5.x 는 번들 haarcascade 가 없어 얼굴검출이 죽는다. 버전을 맞춰 두면 누가
 # 이기든 결과가 같다 — `cv2_winner` 가 같은 버전을 '승자 없음'으로 보는 이유다.
 def _requirements_text() -> str:

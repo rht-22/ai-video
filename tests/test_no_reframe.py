@@ -1,8 +1,9 @@
 """--no-reframe — 얼굴 추종 크롭 끄기 (2026-08-10).
 
 인물이 고정된 인터뷰 소재(커리어데이 실측)는 얼굴로 확대하면 **원본에 박힌 자막이 잘린다**.
-enable_face_recognition/enable_speaker_tracking 은 '누구를 따라갈지'만 고르므로 꺼도 크롭은
-계속 일어난다 — 크롭 자체를 끄는 스위치가 따로 필요했다.
+`enable_speaker_tracking` 은 '누구를 따라갈지'만 고르므로 꺼도 크롭은 계속 일어난다 —
+크롭 자체를 끄는 스위치가 따로 필요했다.
+(인물 인식 축은 2026-08-25 에 사라졌다 — TMDb·deepface 제거.)
 """
 from __future__ import annotations
 
@@ -22,7 +23,6 @@ def _args(**kw):
         "design_subtitle_style", "design_title_color", "design_title_color2",
         "design_work_image")}
     base["no_reframe"] = False
-    base["face_recognition"] = False
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -36,14 +36,10 @@ def test_no_reframe_flag_turns_it_off():
     assert _build_design_config(_args(no_reframe=True)).enable_reframe is False
 
 
-def test_no_reframe_is_independent_of_face_flags():
-    # 얼굴 인식·화자 추적은 '누구를' 고르는 것 — 리프레이밍 on/off 와 별개 축이다.
-    # ⚠ 값을 상수로 적지 않는다 — enable_face_recognition 은 2026-08-25 에 기본이
-    #   꺼짐으로 내려갔다(tf-keras 부재로 애초에 안 돌던 것을 게이트로 만들었다).
-    #   여기서 재는 것은 '--no-reframe 이 저 둘을 건드리지 않는다' 하나다.
+def test_no_reframe_is_independent_of_speaker_tracking():
+    # 화자 추적은 '누구를' 고르는 것 — 리프레이밍 on/off 와 별개 축이다.
     base = _build_design_config(_args())
     d = _build_design_config(_args(no_reframe=True))
-    assert d.enable_face_recognition == base.enable_face_recognition
     assert d.enable_speaker_tracking == base.enable_speaker_tracking
 
 
