@@ -56,6 +56,15 @@ Pillow>=10.0.0
 
 # Face Recognition (Phase 12)
 deepface>=0.0.93
+# 🛑 이것이 없으면 deepface 는 **한 줄도 못 돈다**(2026-08-25 실측, 노드 6대 전부):
+#     ValueError: You have tensorflow 2.21.0 and this requires tf-keras package.
+#   deepface 는 tf.keras 1세대 API 로 모델을 짜는데 tensorflow 2.16+ 가 Keras 3 을
+#   기본으로 삼으면서 갈라졌다 — 호환 계층이 별도 배포판(tf-keras)이고 deepface 는
+#   그것을 **런타임에만** 요구해서(런타임 검사) 설치 해석은 멀쩡히 통과한다.
+#   그래서 '깔렸는데 안 도는' 상태가 오래 안 보였다.
+#   ⚠ 이걸 넣는다고 바로 화면이 바뀌지는 않는다 — `enable_face_recognition` 기본값을
+#     꺼짐으로 내렸다(config.py 의 사유). 켠 채널만 새 동작을 받는다.
+tf-keras>=2.16
 
 # Media / Source download
 # app/modules/youtube_downloader.py 가 `import yt_dlp` 한다. 이게 없으면 --youtube-url 경로가 즉사한다.

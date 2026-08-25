@@ -22,6 +22,7 @@ def _args(**kw):
         "design_subtitle_style", "design_title_color", "design_title_color2",
         "design_work_image")}
     base["no_reframe"] = False
+    base["face_recognition"] = False
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -36,9 +37,14 @@ def test_no_reframe_flag_turns_it_off():
 
 
 def test_no_reframe_is_independent_of_face_flags():
-    # 얼굴 인식·화자 추적은 '누구를' 고르는 것 — 리프레이밍 on/off 와 별개 축이다
+    # 얼굴 인식·화자 추적은 '누구를' 고르는 것 — 리프레이밍 on/off 와 별개 축이다.
+    # ⚠ 값을 상수로 적지 않는다 — enable_face_recognition 은 2026-08-25 에 기본이
+    #   꺼짐으로 내려갔다(tf-keras 부재로 애초에 안 돌던 것을 게이트로 만들었다).
+    #   여기서 재는 것은 '--no-reframe 이 저 둘을 건드리지 않는다' 하나다.
+    base = _build_design_config(_args())
     d = _build_design_config(_args(no_reframe=True))
-    assert d.enable_face_recognition is True and d.enable_speaker_tracking is True
+    assert d.enable_face_recognition == base.enable_face_recognition
+    assert d.enable_speaker_tracking == base.enable_speaker_tracking
 
 
 def test_edit_plan_center_mode_when_crop_missing():
