@@ -147,3 +147,10 @@ def test_stacks_differ_false_when_only_unrelated_fields_move():
 def test_stacks_differ_true_when_one_axis_moves():
     assert stacks_differ({"cv2": "4.14.0", "numpy": "2.3.5"},
                          {"cv2": "4.10.0", "numpy": "2.3.5"})
+
+
+# ── 대조 대상이 갈리면 임베딩 판정은 무효다 ──────────────────────────────
+def test_verdict_fails_when_embedding_sources_differ():
+    """A 는 캐스트 사진, B 는 소스 프레임이면 같은 것을 재고 있지 않다."""
+    ok, reasons = verdict(_crops(True), {"same_keys": False}, emb_tol=1e-4)
+    assert not ok and any("레퍼런스 목록" in r for r in reasons)

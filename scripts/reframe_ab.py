@@ -146,7 +146,7 @@ def resolve_job_dir(p: Path) -> Path:
     return p.parent if p.is_file() else p
 
 
-def run_once(job: Path, out: Path, *, limit: int | None) -> None:
+def run_once(job: Path, out: Path, *, limit: int | None, frames: int = 0) -> None:
     from app.modules.reframe import build_crop_timeline
 
     resolved = resolve_job_dir(job)
@@ -188,10 +188,70 @@ def run_once(job: Path, out: Path, *, limit: int | None) -> None:
         print(f"  {dst.name}: 키프레임 {len(kfs)}개")
 
     emb = _embeddings(job)
+    if emb.get("skipped") and frames:
+        print(f"  [임베딩] 캐스트 사진 경로 없음({emb['skipped']}) → 소스 프레임으로 간다")
+        emb = _frame_embeddings(job, src, out, frames)
     (out / "manifest.json").write_text(json.dumps(
         {"job": str(job), "env": _env(), "clips": clips, "embeddings": emb},
         ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[reframe_ab] 완료 → {out}")
+
+
+def _represent(paths: list[tuple[str, Path]]) -> dict:
+    """(이름, 이미지) → ArcFace 임베딩. 모델·검출기는 `FaceIdentifier` 것을 그대로 쓴다
+    (운영과 다른 파라미터로 재면 운영을 안 재는 것이다)."""
+    from deepface import DeepFace
+
+    from app.modules.face_id import FaceIdentifier
+    fi = FaceIdentifier()
+    out = {}
+    for name, img in paths:
+        try:
+            r = DeepFace.represent(img_path=str(img), model_name=fi.model_name,
+                                   detector_backend=fi.detector_backend,
+                                   enforce_detection=False)
+            if r:
+                out[name] = [float(x) for x in r[0]["embedding"]]
+        except Exception as e:  # noqa: BLE001
+            print(f"  [임베딩] {name} 실패: {type(e).__name__} {e}")
+    return out
+
+
+def _frame_embeddings(job: Path, src: Path, out: Path, n: int) -> dict:
+    """소스에서 프레임을 뽑아 임베딩. 캐스트 사진이 사라진 job(대부분)의 대안이다.
+
+    ⚠ 뽑는 시각은 **방금 만든 크롭 키프레임 시각**이라 얼굴이 있는 것이 보장된다
+    (haar 가 거기서 얼굴을 찾았다). 두 판이 같은 ffmpeg 로 같은 시각을 뽑으므로
+    프레임은 동일하고, 차이가 나면 그건 deepface·numpy 차이다."""
+    import subprocess
+
+    from app.modules.ffmpeg_utils import find_ffmpeg_command
+    ff = find_ffmpeg_command()
+    times: list[float] = []
+    for f in sorted(out.glob("crop_*.json")):
+        kfs = json.loads(f.read_text(encoding="utf-8"))
+        if kfs:
+            times.append(float(kfs[len(kfs) // 2].get("time_sec", 0.0)))
+    times = times[:n]
+    if not times:
+        return {"skipped": "키프레임이 없어 뽑을 시각이 없다"}
+
+    frames_dir = out / "frames"
+    frames_dir.mkdir(exist_ok=True)
+    pairs = []
+    for t in times:
+        img = frames_dir / f"f_{t:.3f}.png"
+        r = subprocess.run([ff, "-nostdin", "-loglevel", "error", "-ss", f"{t:.3f}",
+                            "-i", str(src), "-frames:v", "1", "-y", str(img)],
+                           capture_output=True, text=True, timeout=120)
+        if r.returncode == 0 and img.exists():
+            pairs.append((f"frame@{t:.3f}", img))
+        else:
+            print(f"  [임베딩] 프레임 추출 실패 t={t:.3f}: {(r.stderr or '').strip()[:200]}")
+    if not pairs:
+        return {"skipped": "프레임을 하나도 못 뽑았다"}
+    print(f"  [임베딩] 소스 프레임 {len(pairs)}장으로 대조")
+    return {"source": "frames", "vectors": _represent(pairs)}
 
 
 def _embeddings(job: Path) -> dict:
@@ -216,7 +276,8 @@ def _embeddings(job: Path) -> dict:
             self.image_path = d.get("image_path")
 
     fi.build_references([_C(c) for c in have])
-    return {"vectors": {f"{r.actor_name}|{r.character_name}": [float(x) for x in r.embedding]
+    return {"source": "cast",
+            "vectors": {f"{r.actor_name}|{r.character_name}": [float(x) for x in r.embedding]
                         for r in fi.references}}
 
 
@@ -259,6 +320,10 @@ def do_diff(a: Path, b: Path, *, emb_tol: float, allow_same_stack: bool = False)
     if ea.get("skipped") or eb.get("skipped"):
         emb = {"skipped": ea.get("skipped") or eb.get("skipped")}
         print(f"  건너뜀: {emb['skipped']}")
+    elif ea.get("source") != eb.get("source"):
+        # 한쪽은 캐스트 사진, 다른 쪽은 프레임이면 재는 대상이 아예 다르다.
+        emb = {"same_keys": False}
+        print(f"  🛑 대조 대상이 다르다: A {ea.get('source')} · B {eb.get('source')}")
     else:
         emb = compare_embeddings(ea.get("vectors") or {}, eb.get("vectors") or {})
         print(f"  레퍼런스 {len(emb['keys_a'])}/{len(emb['keys_b'])}개 · "
@@ -281,6 +346,8 @@ def main() -> None:
     ap.add_argument("--job-dir", type=Path)
     ap.add_argument("--out", type=Path)
     ap.add_argument("--clips", type=int, default=None, help="앞에서 N개만(빠른 확인용)")
+    ap.add_argument("--frames", type=int, default=0, metavar="N",
+                    help="캐스트 사진이 없으면 소스 프레임 N장으로 임베딩을 대조한다")
     ap.add_argument("--diff", nargs=2, type=Path, metavar=("A", "B"))
     # 임베딩은 부동소수 산술이라 비트 동일을 요구하지 않는다. 1e-4 는 ArcFace 512차
     # 벡터의 코사인 판정(임계 0.4)을 뒤집기에 한참 모자란 크기다.
@@ -294,7 +361,7 @@ def main() -> None:
                                  allow_same_stack=args.allow_same_stack))
     if not (args.job_dir and args.out):
         ap.error("--job-dir 과 --out 을 함께 주거나 --diff A B 를 줄 것")
-    run_once(args.job_dir, args.out, limit=args.clips)
+    run_once(args.job_dir, args.out, limit=args.clips, frames=args.frames)
 
 
 if __name__ == "__main__":
