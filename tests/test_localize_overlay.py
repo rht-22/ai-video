@@ -380,3 +380,33 @@ def test_end_to_end_numbered_response_now_translates(monkeypatch):
     monkeypatch.setattr(tr, "load_glossary", lambda c: {})
     got = tr._transcreate_one(["안녕"], {"translate": {}})
     assert got[0].target == "こんにちは"
+
+
+# ── JP 폰트 번들 (2026-08-25) ───────────────────────────────────────────
+# 🛑 실측에서 **양쪽 엔진이 조용히 기본 폰트로 떨어졌다** — vlp 는 fonts/ 를 gitignore 해
+# 각자 받게 했고 그 노드엔 파일이 없었다. 기본 폰트에는 일본어 글리프가 없어 두부(□)가
+# 된다. ai-video 는 한국어 폰트를 이미 번들하므로 같은 규약으로 맞췄다(OFL — 재배포 가능).
+def test_every_font_map_entry_is_bundled():
+    """font_map 이 가리키는 파일이 없으면 그 규칙은 조용히 기본 폰트로 떨어진다."""
+    from app.localize.overlay.common import load_config, load_yaml, resolve_path
+    cfg = load_config()
+    fm = load_yaml(resolve_path(cfg["paths"]["font_map"]))
+    fonts_dir = resolve_path(cfg["paths"]["fonts_dir"])
+    names = [fm["default"], fm["fallback"]] + [r["jp_font"] for r in fm.get("rules", [])]
+    missing = [n for n in names if not (fonts_dir / n).exists()]
+    assert not missing, f"font_map 이 가리키는데 없는 폰트: {missing} (in {fonts_dir})"
+
+
+def test_bundled_jp_fonts_actually_render_japanese():
+    """확장자만 맞고 글리프가 없으면 두부가 된다 — 실제로 그려 보고 확인한다."""
+    from PIL import Image, ImageDraw, ImageFont
+    from app.localize.overlay.common import load_config, load_yaml, resolve_path
+    cfg = load_config()
+    fm = load_yaml(resolve_path(cfg["paths"]["font_map"]))
+    fonts_dir = resolve_path(cfg["paths"]["fonts_dir"])
+    for name in {fm["default"], *(r["jp_font"] for r in fm.get("rules", []))}:
+        ft = ImageFont.truetype(str(fonts_dir / name), 48)
+        img = Image.new("L", (600, 80), 0)
+        ImageDraw.Draw(img).text((5, 5), "こんにちは 漢字 カタカナ ドンッ！", font=ft, fill=255)
+        ink = sum(1 for p in img.getdata() if p > 40)
+        assert ink > 2000, f"{name}: 일본어가 안 그려진다(글자 픽셀 {ink}) — 두부 의심"

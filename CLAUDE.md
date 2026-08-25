@@ -541,9 +541,16 @@ CER avg 0.318`). 이 값은 인페인팅한 프레임 위에 일본어를 그린
    번역에서 `401 UNAUTHENTICATED` 로 죽었다. 비싼 단계 **앞**에서 키를 확인하면 그
    18분을 안 버린다. vlp 도 같은 구조라 이식 결함은 아니다.
    ⚠ 재개 시 인페인팅은 다시 돈다 — `inpaint_sequence` 는 기존 결과를 건너뛰지 않는다.
-2. **JP 폰트가 양쪽 다 없다.** `NotoSansJP-Black.otf` 를 vlp(`fonts/`)도 이식본
-   (`app/assets/fonts/`)도 못 찾아 **기본 폰트로 떨어진다.** 같은 조건이라 대조는
-   유효했지만 **운영에서는 채워야 한다.**
+2. ~~**JP 폰트가 양쪽 다 없다.**~~ → **번들해서 닫았다**(2026-08-25). vlp 는 `fonts/` 를
+   gitignore 하고 README 의 curl 로 각자 받게 했는데, 그래서 실측 노드에 파일이 없어
+   **양쪽 엔진이 조용히 기본 폰트로 떨어졌다** — 기본 폰트에는 일본어 글리프가 없어
+   두부(□)가 된다. ai-video 는 한국어 폰트를 이미 번들하므로 같은 규약으로 맞췄다:
+   `app/assets/fonts/` 에 Noto Sans JP(Black·Bold·Medium·Regular) + Noto Serif JP(Bold)
+   **28 MB**. OFL 이라 재배포에 문제가 없다.
+   ⚠ 출처가 Google Fonts 라 **TTF** 이고 확장자도 `.ttf` 로 맞췄다(vlp README 의 noto-cjk
+   OTF 와 같은 서체·웨이트이고 PIL·libass 는 둘 다 읽는다). `font_map.yaml` 도 함께 고쳤다.
+   회귀 가드 2건: font_map 이 가리키는 파일이 **전부 있는지**, 그리고 **실제로 일본어가
+   그려지는지**(확장자만 맞고 글리프가 없으면 두부가 된다).
 
 ### 🛑 실런이 잡은 결함 4건 (AST 대조는 넷 다 못 잡는다)
 
