@@ -2426,6 +2426,13 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 else:
                     cast_images = list(research.characters)
                     print("  [TMDb] TMDB_API_KEY 미설정 — 배우 이미지 없이 진행")
+                    # 게이트를 켜 놓고 재료가 없으면 사람은 인물 인식이 도는 줄 안다.
+                    # 실측(2026-08-25 mm-06): 키가 어디에도 없어 배우 사진이 0장이었고,
+                    # 그 상태로 켜면 레퍼런스가 안 만들어져 조용히 화자 추적으로 간다.
+                    if payload.design.enable_face_recognition:
+                        print("  [FaceID] ⚠ --face-recognition 을 켰지만 TMDB_API_KEY 가 없어 "
+                              "배우 사진을 못 받는다 — 레퍼런스가 없으므로 인물 인식은 "
+                              "동작하지 않고 화자 추적으로 간다(끈 것과 같다).")
 
                 # 체크포인트 저장
                 checkpoint_research.write_text(json.dumps({

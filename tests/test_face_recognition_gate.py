@@ -58,3 +58,16 @@ def test_requirements_pins_tf_keras_because_deepface_dies_without_it():
     req = (Path(__file__).resolve().parents[1] / "requirements.txt").read_text(encoding="utf-8")
     lines = [ln.split("#", 1)[0].strip() for ln in req.splitlines()]
     assert any(ln.startswith("tf-keras") for ln in lines), "requirements.txt 에 tf-keras 가 없다"
+
+
+def test_pipeline_says_so_when_the_gate_is_on_but_tmdb_key_is_missing():
+    """재료가 없는데 켜 놓으면 사람은 도는 줄 안다 — 조용한 폴백 금지(2026-08-25 실측).
+
+    mm-06 에는 TMDB_API_KEY 가 `/etc/ves/node.env`·`/opt/ves/secrets/ves.env`·launchd
+    어디에도 없었다. 그 상태로 게이트를 켜면 배우 사진이 0장이라 레퍼런스가 안 만들어지고
+    조용히 화자 추적으로 간다."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app" / "pipeline.py").read_text(encoding="utf-8")
+    blk = src.split('print("  [TMDb] TMDB_API_KEY 미설정', 1)[1][:800]
+    assert "payload.design.enable_face_recognition" in blk
+    assert "화자 추적으로 간다" in blk
