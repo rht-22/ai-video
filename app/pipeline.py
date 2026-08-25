@@ -1525,6 +1525,9 @@ def _compute_tts_margin_v(
 # 구간별 표본 `[[편집본 시각, 글자행 목록], …]` — 검출 한 번, variant 까지 공유한다.
 # (전역 띠와 같은 체크포인트 파일에 남아 `--from-step render` 재개에서도 유지된다.)
 _BURNED_PROFILES: list[list] = []
+# 이번 실행의 띠 판정 경과 — run_log 감사용. '판정이 돌았는가'는 결과가 비어도 남겨야
+# '띠가 없었다'와 '아예 안 돌았다'가 구분된다(8/25 커리어데이 실측: 둘 다 단계 부재였다).
+_BURNED_STATE: dict[str, Any] = {}
 
 # 구간별로 실제로 올린 줄 수 — run_log 감사 기록용 (E18 후속, 2026-08-24).
 # 이 보정은 종전에 stdout 에만 남아서 **돌았는지 안 돌았는지 나중에 알 수가 없었다**
@@ -1552,9 +1555,11 @@ def _detect_burned_band_cached(
     #   앞 편의 원본 자막 자리로 이 편 자막을 올리면 조용히 틀린다. 시작에서 비운다.
     _BURNED_PROFILES[:] = []
     _BURNED_WINDOW_MOVES[:] = []
+    _BURNED_STATE.clear()
     mode = str(getattr(payload.design, "subtitle_avoid_burned", "auto") or "auto").lower()
     if mode != "auto":
-        return None
+        return None                              # 채널이 끈 것 — 종전대로 아무것도 안 남긴다
+    _BURNED_STATE["ran"] = True                  # 여기부터는 결과가 비어도 감사에 남는다
     cache = Path(output_dir) / "checkpoint_burned_subtitle.json"
     sig = _burned_band_signature(clips)
     if cache.exists():
@@ -1580,6 +1585,7 @@ def _detect_burned_band_cached(
         )
     except Exception as e:                       # 검출은 본편을 막지 않는다
         print(f"  [SubtitleAvoid] 검출 실패({e}) — 자막 위치는 종전 그대로입니다")
+        _BURNED_STATE["error"] = f"검출 실패: {type(e).__name__}: {e}"[:200]
         return None
     # E18-2 — 구간별 재판정용 표본. 전역 판정과 **따로** 뜬다(전역 표본 구성을 건드리면
     # 이미 승인된 채널의 자막이 움직인다). 실패는 빈 목록 = 구간 보정 없음.
@@ -1593,6 +1599,7 @@ def _detect_burned_band_cached(
             print(f"  [SubtitleAvoid] 구간별 표본 {len(_BURNED_PROFILES)}프레임 수집")
     except Exception as e:
         print(f"  [SubtitleAvoid] 구간별 표본 실패({e}) — 구간 보정 없이 진행합니다")
+        _BURNED_STATE["profiles_error"] = f"{type(e).__name__}: {e}"[:200]
         _BURNED_PROFILES[:] = []
     try:
         cache.write_text(json.dumps({"clips_signature": sig, "band": band,
@@ -4471,11 +4478,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         # 자막을 아예 안 그리는 채널(--no-subtitles)은 잴 것도 없다 — 표본 뜨는 시간만 든다.
         if payload.show_subtitles:
             _burned_band = _detect_burned_band_cached(payload, config, clips, crop_map, output_dir)
-        # ⚠ 종전엔 **띠를 찾은 실행만** 남겼다. 그러면 단계가 없을 때 '띠가 없었다'인지
-        #   '판정 자체가 안 돌았다'인지 구분이 안 된다 — 실제로 검증에서 막혔다.
-        #   판정이 돌았으면(자막 있는 채널 · auto) 결과가 비어도 남긴다.
-        #   `off` 채널·`--no-subtitles` 는 표본을 아예 안 뜨므로 종전과 같이 아무것도 안 남는다.
-        if payload.show_subtitles and (_burned_band or _BURNED_PROFILES):
+        # ⚠ 조건은 **결과가 아니라 '판정이 돌았는가'** 다. 결과로 걸면 띠도 표본도 못 찾은
+        #   실행이 단계 부재로 남아, '판정 자체가 안 돌았다'와 구분이 안 된다 — 8/25 실측:
+        #   같은 설정의 커리어데이(단계 없음)와 도깨비(표본 110)가 그렇게 갈렸다.
+        #   `off` 채널·`--no-subtitles` 는 ran 이 안 서므로 종전과 같이 아무것도 안 남는다.
+        if payload.show_subtitles and _BURNED_STATE.get("ran"):
             _avoid_log = {
                 "step": "subtitle_avoid_burned",
                 "band": ({k: _burned_band[k] for k in ("top", "bottom")}
@@ -4486,6 +4493,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 # 구간별 재판정(E18-6)이 쓴 표본 수 — 0 이면 구간 보정이 아예 불가능했다는 뜻.
                 "profile_frames": len(_BURNED_PROFILES),
             }
+            for _k in ("error", "profiles_error"):   # 비었으면 왜 비었는지까지 남긴다
+                if _BURNED_STATE.get(_k):
+                    _avoid_log[_k] = _BURNED_STATE[_k]
             run_log["steps"].append(_avoid_log)
 
         if not final_segments and segments_cache_path.exists():
