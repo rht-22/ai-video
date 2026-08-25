@@ -59,6 +59,23 @@ def find_conflicts(names) -> list[list[str]]:
     return out
 
 
+def conflict_severity(group, versions) -> str:
+    """공존 조합의 위험도. 순수 — 테스트 대상.
+
+    같은 `cv2` 를 배포하는 둘이 **같은 버전**이면 설치 순서가 뒤집혀도 결과가 같다
+    (L-P4 2026-08-25: 그래서 requirements 가 둘을 같은 버전으로 못 박았다).
+    이때까지 `⚠ 충돌 예상` 으로 찍으면 늘 뜨는 경고가 되어 아무도 안 본다.
+
+    "same"    — 전원이 같은 버전 (괜찮다)
+    "mixed"   — 버전이 갈린다 (승자를 설치 순서가 정한다 — 진짜 경고)
+    "unknown" — 버전을 모른다 (판정 안 함 · 경고 유지)
+    """
+    vs = {versions.get(n) for n in group} if versions else {None}
+    if None in vs or not vs:
+        return "unknown"
+    return "same" if len(vs) == 1 else "mixed"
+
+
 def human(nbytes: float) -> str:
     for unit in ("B", "KiB", "MiB", "GiB"):
         if abs(nbytes) < 1024 or unit == "GiB":
@@ -296,7 +313,12 @@ def main() -> None:
                     print(f"  · 새 해석에 없는 것(pip 은 지우지 않는다): {', '.join(d['absent'])}")
                 nc = find_conflicts(after)
                 for g in nc:
-                    print(f"  ⚠ 충돌 예상: {' + '.join(g)}")
+                    sev = conflict_severity(g, after)
+                    if sev == "same":
+                        print(f"  · 공존(같은 버전 {after[g[0]]} — 승자가 누구든 같다): "
+                              f"{' + '.join(g)}")
+                    else:
+                        print(f"  ⚠ 충돌 예상: {' + '.join(g)}")
                 result["resolve"]["conflicts"] = nc
         else:
             result["resolve"] = {"error": "resolution_failed"}

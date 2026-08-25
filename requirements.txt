@@ -10,7 +10,20 @@
 
 google-genai>=0.8.0
 edge-tts>=6.1.9
-opencv-python>=4.9.0.80,<5   # 5.x 는 번들 haarcascade 를 제거해 얼굴검출(reframe) 단계가 죽는다
+# 🛑 **opencv 두 배포판은 같은 `cv2` 디렉토리를 덮어쓴다** — 그래서 *설치 순서*가 런타임
+#    버전을 정하고, 그건 requirements 어디에도 안 적히는 우연이다.
+#    한쪽만 적는 것으로는 못 없앤다(L-P4 1차 시도 실패 · mm-06 2026-08-25 실측):
+#      contrib ← paddlex(paddleocr 전이)가 **==4.10.0.84 로 못 박는다**
+#      base    ← deepface · retina-face · rapidocr-onnxruntime 이 **상한 없이** 끌어온다
+#    base 를 안 적으면 전이 해석이 **5.0.0.93** 을 가져오는데 5.x 는 번들 haarcascade 를
+#    빼서, 순서가 뒤집혀 그쪽이 이기면 **얼굴검출(reframe)이 죽는다.**
+#    ⇒ 둘을 **같은 버전으로 못 박아** 승자가 누구든 결과가 같게 만든다. contrib 는 base 의
+#      상위집합이라 이겨도 문제없고, 그 실측 조합(cv2 4.10.0 · haarcascade xml 17개)이
+#      A/B 를 통과한 그 스택이다.
+#    ⚠ paddlex 가 핀을 올리면 **두 줄을 함께** 올린다 — `tests/test_deps_probe.py` 가
+#      두 줄의 버전이 같은지 묶어 둔다(갈리면 조용한 우연으로 되돌아간다).
+opencv-contrib-python==4.10.0.84
+opencv-python==4.10.0.84
 faster-whisper>=1.0.0
 
 # Web Framework & Server
@@ -74,6 +87,28 @@ deepface>=0.0.93
 # 경고를 남겨 두면 다음 사람이 또 그 길로 샌다 — 실제로 오늘 내가 샜다).
 yt-dlp[curl-cffi]==2026.8.18.122307.dev0
 gdown>=5.0
+
+# ── 현지화 overlay 계층 (L-P4, 2026-08-25) ─────────────────────────────
+# `app/localize/overlay/` 가 쓰는 런타임. **전부 지연 임포트**라 이 줄들이 없어도 임포트는
+# 되지만, 실제로 돌리려면 있어야 한다(어댑터가 잡 시작 전에 사전검사로 막는다).
+# 실측(P0 §2-4, mm-06 arm64): 해석 통과 · venv 1.8 → 3.1 GiB(+1.3/노드) · 스모크 9/9.
+#
+# ⚠ numpy 가 2.5.1 → 2.3.5 로 내려간다. 지금 도는 deepface(얼굴검출)·opencv·
+#   faster-whisper 가 전부 그 위에서 도므로 **배포 전 A/B 가 선결**이다(P0 §2-6).
+#   절차: ves-orchestrator docs/overlay_deps_runbook.md
+elevenlabs>=1.0              # 더빙 TTS (route C·BC) — 잔망루피 클론 보이스
+demucs>=4.0                  # 보컬 분리 — torch 를 끌고 온다
+torch>=2.2
+torchaudio>=2.2
+paddleocr>=3.0               # 화면 텍스트 OCR (한국어 인식 우수 — 구 엔진 기본값)
+paddlepaddle>=3.0            # ⚠ macOS arm64 이력이 나빴다(2026-08-12 초기화 실패).
+                             #    P0 §2-4 에서 `import paddle` 3.3.1 성공을 확인했다.
+rapidocr-onnxruntime>=1.3    # 경량 폴백 — paddle 이 죽으면 config 로 여기로 뒤집는다
+scikit-image>=0.22           # 인페인팅 QA (SSIM/PSNR)
+srt>=3.5                     # 자막 파싱 (순수 파이썬)
+
+# 🛑 simple-lama-inpainting 은 여기 못 넣는다 — requirements-nodeps.txt 참조.
+#    (numpy<2.0.0 · pillow<10.0.0 을 요구해 이 스택과 **해석이 안 된다.**)
 
 # Dev
 pytest>=8.0
