@@ -10,8 +10,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.deps_probe import (  # noqa: E402
-    _older, cv2_winner, delta_report, find_conflicts, human, normalize,
-    summarize_resolution, venv_root,
+    _older, conflict_severity, cv2_winner, delta_report, find_conflicts, human,
+    normalize, summarize_resolution, venv_root,
 )
 
 
@@ -165,3 +165,23 @@ def test_both_opencv_distributions_are_pinned_to_the_same_version():
 
 def test_pinned_opencv_is_below_5_because_5x_drops_bundled_haarcascades():
     assert int(_pinned("opencv-python").split(".")[0]) < 5
+
+
+# ── 공존 경고는 버전이 갈릴 때만 경고다 ──────────────────────────────────
+def test_conflict_severity_same_version_is_not_a_warning():
+    g = ["opencv-contrib-python", "opencv-python"]
+    assert conflict_severity(g, {"opencv-contrib-python": "4.10.0.84",
+                                 "opencv-python": "4.10.0.84"}) == "same"
+
+
+def test_conflict_severity_mixed_versions_is_the_real_warning():
+    g = ["opencv-contrib-python", "opencv-python"]
+    assert conflict_severity(g, {"opencv-contrib-python": "4.10.0.84",
+                                 "opencv-python": "5.0.0.93"}) == "mixed"
+
+
+def test_conflict_severity_unknown_keeps_the_warning():
+    """버전을 모르면 판정하지 않는다 — 가드가 조용히 사라지는 것이 오판보다 나쁘다."""
+    g = ["opencv-contrib-python", "opencv-python"]
+    assert conflict_severity(g, {"opencv-contrib-python": "4.10.0.84"}) == "unknown"
+    assert conflict_severity(g, {}) == "unknown"
