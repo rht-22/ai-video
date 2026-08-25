@@ -187,10 +187,17 @@ def run_once(job: Path, out: Path, *, limit: int | None, frames: int = 0) -> Non
             ax, ay = float(kfs[-1].get("x_center", 0.0)), float(kfs[-1].get("y_center", 0.0))
         print(f"  {dst.name}: 키프레임 {len(kfs)}개")
 
-    emb = _embeddings(job)
-    if emb.get("skipped") and frames:
-        print(f"  [임베딩] 캐스트 사진 경로 없음({emb['skipped']}) → 소스 프레임으로 간다")
-        emb = _frame_embeddings(job, src, out, frames)
+    # ⚠ 임베딩은 **부가물**이다 — 여기서 죽으면 이미 만든 크롭까지 manifest 가 없어
+    #   통째로 날아간다(실측: find_ffmpeg_command 인자 하나 때문에 두 판이 다 날아갔다).
+    #   본 관문인 크롭은 지키고, 사유를 담아 건너뛴다.
+    try:
+        emb = _embeddings(job)
+        if emb.get("skipped") and frames:
+            print(f"  [임베딩] 캐스트 사진 경로 없음({emb['skipped']}) → 소스 프레임으로 간다")
+            emb = _frame_embeddings(job, src, out, frames)
+    except Exception as e:  # noqa: BLE001
+        emb = {"skipped": f"임베딩 단계 예외: {type(e).__name__} {e}"}
+        print(f"  [임베딩] 🛑 {emb['skipped']} — 크롭 결과는 그대로 남긴다")
     (out / "manifest.json").write_text(json.dumps(
         {"job": str(job), "env": _env(), "clips": clips, "embeddings": emb},
         ensure_ascii=False, indent=2), encoding="utf-8")
@@ -226,7 +233,7 @@ def _frame_embeddings(job: Path, src: Path, out: Path, n: int) -> dict:
     import subprocess
 
     from app.modules.ffmpeg_utils import find_ffmpeg_command
-    ff = find_ffmpeg_command()
+    ff = find_ffmpeg_command("ffmpeg")
     times: list[float] = []
     for f in sorted(out.glob("crop_*.json")):
         kfs = json.loads(f.read_text(encoding="utf-8"))

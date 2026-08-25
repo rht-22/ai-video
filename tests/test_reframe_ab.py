@@ -154,3 +154,17 @@ def test_verdict_fails_when_embedding_sources_differ():
     """A 는 캐스트 사진, B 는 소스 프레임이면 같은 것을 재고 있지 않다."""
     ok, reasons = verdict(_crops(True), {"same_keys": False}, emb_tol=1e-4)
     assert not ok and any("레퍼런스 목록" in r for r in reasons)
+
+
+# ── 임베딩 경로가 부르는 외부 시그니처 ───────────────────────────────────
+def test_find_ffmpeg_command_still_takes_the_command_name():
+    """`find_ffmpeg_command()` 를 인자 없이 부르다 두 판이 통째로 날아갔다(2026-08-25).
+
+    이 함수는 ffmpeg/ffprobe 를 구분해 받으므로 인자가 필수다 — 시그니처가 바뀌면
+    여기서 먼저 안다."""
+    import inspect
+
+    from app.modules.ffmpeg_utils import find_ffmpeg_command
+    params = list(inspect.signature(find_ffmpeg_command).parameters.values())
+    required = [p for p in params if p.default is inspect.Parameter.empty]
+    assert len(required) == 1, f"인자 개수가 바뀌었다: {params}"
