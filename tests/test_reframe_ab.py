@@ -9,8 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.reframe_ab import (  # noqa: E402
-    align_targets, compare_embeddings, compare_keyframes, face_track_clips,
-    resolve_job_dir, stacks_differ, verdict,
+    compare_keyframes, face_track_clips, resolve_job_dir, stacks_differ, verdict,
 )
 
 
@@ -62,49 +61,24 @@ def test_compare_keyframes_length_mismatch_is_not_identical():
     assert r["n_a"] == 1 and r["n_b"] == 2
 
 
-# ── 임베딩 대조 ───────────────────────────────────────────────────────────
-def test_compare_embeddings_measures_size_not_equality():
-    r = compare_embeddings({"a|A": [1.0, 2.0]}, {"a|A": [1.0, 2.0000001]})
-    assert r["same_keys"] and r["n"] == 1
-    assert 0 < r["max_abs_delta"] < 1e-6
-
-
-def test_compare_embeddings_different_dimension_is_infinite():
-    r = compare_embeddings({"a|A": [1.0, 2.0]}, {"a|A": [1.0]})
-    assert r["max_abs_delta"] == float("inf")
-
-
 # ── 판정 ──────────────────────────────────────────────────────────────────
 def _crops(*flags):
     return [{"name": f"crop_{i}.json", "cmp": {"identical": f}} for i, f in enumerate(flags)]
 
 
-def test_verdict_pass_when_crops_identical_and_embeddings_close():
-    ok, reasons = verdict(_crops(True, True),
-                          {"same_keys": True, "max_abs_delta": 1e-7}, emb_tol=1e-4)
+def test_verdict_passes_when_every_crop_is_identical():
+    ok, reasons = verdict(_crops(True, True))
     assert ok and reasons == []
 
 
-def test_verdict_skipped_embeddings_pass_but_say_so():
-    """캐스트 사진이 없는 job 은 정상이다 — 다만 '안 봤다'가 보여야 한다."""
-    ok, reasons = verdict(_crops(True), {"skipped": "캐스트 사진 0장"}, emb_tol=1e-4)
-    assert ok and any("임베딩 대조 없음" in r for r in reasons)
-
-
 def test_verdict_fails_on_any_different_crop():
-    ok, _ = verdict(_crops(True, False), {"skipped": "x"}, emb_tol=1e-4)
+    ok, _ = verdict(_crops(True, False))
     assert not ok
-
-
-def test_verdict_fails_on_embedding_drift_over_tolerance():
-    ok, reasons = verdict(_crops(True), {"same_keys": True, "max_abs_delta": 1e-3},
-                          emb_tol=1e-4)
-    assert not ok and any("임베딩 최대차" in r for r in reasons)
 
 
 def test_verdict_fails_when_nothing_was_compared():
     """0개 대조를 통과로 읽으면 '아무것도 안 한 A/B' 가 초록으로 나온다."""
-    ok, reasons = verdict([], {"skipped": "x"}, emb_tol=1e-4)
+    ok, reasons = verdict([])
     assert not ok and any("0개" in r for r in reasons)
 
 
@@ -149,50 +123,3 @@ def test_stacks_differ_true_when_one_axis_moves():
                          {"cv2": "4.10.0", "numpy": "2.3.5"})
 
 
-# ── 대조 대상이 갈리면 임베딩 판정은 무효다 ──────────────────────────────
-def test_verdict_fails_when_embedding_sources_differ():
-    """A 는 캐스트 사진, B 는 소스 프레임이면 같은 것을 재고 있지 않다."""
-    ok, reasons = verdict(_crops(True), {"same_keys": False}, emb_tol=1e-4)
-    assert not ok and any("레퍼런스 목록" in r for r in reasons)
-
-
-# ── 임베딩 경로가 부르는 외부 시그니처 ───────────────────────────────────
-def test_find_ffmpeg_command_still_takes_the_command_name():
-    """`find_ffmpeg_command()` 를 인자 없이 부르다 두 판이 통째로 날아갔다(2026-08-25).
-
-    이 함수는 ffmpeg/ffprobe 를 구분해 받으므로 인자가 필수다 — 시그니처가 바뀌면
-    여기서 먼저 안다."""
-    import inspect
-
-    from app.modules.ffmpeg_utils import find_ffmpeg_command
-    params = list(inspect.signature(find_ffmpeg_command).parameters.values())
-    required = [p for p in params if p.default is inspect.Parameter.empty]
-    assert len(required) == 1, f"인자 개수가 바뀌었다: {params}"
-
-
-# ── 인물 인식 판의 타겟 정렬 ──────────────────────────────────────────────
-def _pc(*roles):
-    return [{"role": r, "reframe": {"mode": "face_track"}} for r in roles]
-
-
-def _sc(*pairs):
-    return [{"role": r, "character_focus": f} for r, f in pairs]
-
-
-def test_align_targets_matches_by_role_and_count():
-    got = align_targets(_pc("hook", "payoff"),
-                        _sc(("hook", ["유재석"]), ("payoff", ["이광수", "하하"])))
-    assert got == [["유재석"], ["이광수", "하하"]]
-
-
-def test_align_targets_refuses_when_counts_differ():
-    """개수가 다른 채로 index 로 맞추면 **다른 클립의 인물**을 따라간다 — 거짓 측정이다."""
-    assert align_targets(_pc("hook"), _sc(("hook", ["A"]), ("payoff", ["B"]))) == []
-
-
-def test_align_targets_refuses_when_roles_differ():
-    assert align_targets(_pc("hook", "hook"), _sc(("hook", ["A"]), ("payoff", ["B"]))) == []
-
-
-def test_align_targets_tolerates_clips_without_focus():
-    assert align_targets(_pc("hook"), _sc(("hook", None))) == [[]]

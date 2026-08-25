@@ -123,21 +123,10 @@ class DesignConfig:
     # Phase 11: 화자 우선 얼굴 트래킹 (False면 "가장 큰 얼굴" 폴백)
     enable_speaker_tracking: bool = True
 
-    # Phase 12: 인물 인식 기반 얼굴 추적 (deepface + TMDb 배우 사진)
-    #
-    # ⚠ **기본값이 True 였지만 한 번도 동작한 적이 없다**(2026-08-25 실측). requirements 에
-    #   `tf-keras` 가 없어 `DeepFace.represent` 가 늘
-    #       ValueError: You have tensorflow 2.21.0 and this requires tf-keras package
-    #   로 죽고, `pipeline` 이 그 예외를 인물별로 삼킨 뒤 화자 추적 폴백으로 갔다. 즉
-    #   인물 타겟 리프레이밍·멀티크롭 와이드 프레이밍은 발동한 적이 없다.
-    #
-    #   `tf-keras` 를 넣으면 그날부터 **처음으로** 동작해 `character_focus` 를 쓰는 편의
-    #   크롭이 달라진다 — 승인된 화면이 움직인다. 그래서 기본값을 **꺼짐**으로 내리고
-    #   `--face-recognition` 으로만 켠다(오케스트레이터 채널 design 키 `face_recognition`).
-    #   오늘 산출이 정확히 그대로라는 뜻이다(회귀 0) — 켠 채널만 새 동작을 받는다.
-    #   ⚠ 켜면 [7/15] 인물 등장 인덱스가 실제로 돈다(프록시 전체를 2초 간격 스캔) —
-    #     생성 시간이 늘어난다. 채널을 켜기 전에 한 편으로 재 볼 것.
-    enable_face_recognition: bool = False
+    # ⚠ `enable_face_recognition` 은 2026-08-25 에 사라졌다(TMDb·deepface 제거, 사용자
+    #   결정 "필요없어"). 배우 사진은 TMDb 에서만 왔는데 `TMDB_API_KEY` 가 노드 어디에도
+    #   없어 사진이 붙은 적이 없고, 사진이 없으면 레퍼런스도 0명이라 인물 인식 경로는
+    #   **한 번도 발동한 적이 없다** — 늘 화자 추적으로 갔다. 그래서 지우는 것이 회귀 0 이다.
 
     # 리프레이밍(얼굴 추종 크롭) 자체를 끈다 — False 면 크롭 타임라인을 만들지도, 쓰지도 않고
     # 원본을 가운데 정렬로 넣는다. 위 두 플래그는 '누구를 따라갈지'를 고르는 것이라 꺼도 크롭은
