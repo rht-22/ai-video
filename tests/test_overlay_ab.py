@@ -10,8 +10,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.overlay_ab import (  # noqa: E402
-    ALIGN_TOL_SEC, align_diff, compare, events_of, load_entries, source_diff,
-    target_cer, verdict,
+    ALIGN_TOL_SEC, align_diff, compare, detection_diff, detection_texts, events_of,
+    load_entries, source_diff, target_cer, verdict,
 )
 
 
@@ -69,7 +69,10 @@ def test_different_translation_reports_distance_not_failure():
     b = load_entries(_tr(("안녕", "どうも", True)))
     got = target_cer(a, b)
     assert got["max"] > 0
-    ok, _ = verdict({"번역문 CER": {"advisory": True, "summary": "x"}})
+    # ⚠ 잰 축을 하나 함께 둔다 — 2026-08-25 부터 **판정 축이 하나도 없으면 실패**다
+    #   (route BC 가 그 구멍을 드러냈다). 여기서 재는 것은 'CER 은 판정에 안 든다' 하나.
+    ok, _ = verdict({"번역문 CER": {"advisory": True, "summary": "x"},
+                     "최종본 길이": {"diff": False, "summary": "같다"}})
     assert ok is True                       # 번역 차이만으로는 불합격이 아니다
 
 
@@ -181,3 +184,54 @@ def test_long_references_report_no_short_warning():
     a = [("안녕하세요 여러분", "皆さんこんにちは", True)]
     b = [("안녕하세요 여러분", "みなさんこんにちは", True)]
     assert target_cer(a, b)["short_ref"] == 0
+
+
+# ── 비교 항목 0개는 통과가 아니다 (route BC 가 드러냈다, 2026-08-25) ──────────
+def test_verdict_excludes_empty_axes_and_fails_when_nothing_is_measured():
+    """route BC 는 번역·자막을 안 만든다 — 종전엔 `원문 0항목 동일`·`정렬 0.0s` 로 읽고
+    ✅ 를 냈다. 아무것도 안 재고 합격하는 모양이라 판정에서 빼고, 남은 축이 없으면 실패."""
+    ok, lines = verdict({"원문(OCR·탐지)": {"empty": True, "summary": "못 쟀다"},
+                         "세그먼트 정렬": {"empty": True, "summary": "비교 항목 0"}})
+    assert not ok
+    assert any("판정에 들어간 축이 하나도 없다" in ln for ln in lines)
+
+
+def test_verdict_passes_when_at_least_one_axis_was_measured():
+    ok, lines = verdict({"원문(OCR·탐지)": {"empty": True, "summary": "비교 항목 0"},
+                         "최종본 길이": {"diff": False, "summary": "11.245s vs 11.245s"}})
+    assert ok
+
+
+def test_verdict_still_fails_on_a_real_diff():
+    ok, _ = verdict({"세그먼트 정렬": {"diff": True, "summary": "3건"},
+                     "최종본 길이": {"diff": False, "summary": "같다"}})
+    assert not ok
+
+
+# ── 번역이 없는 route 는 탐지 산출로 OCR 축을 잰다 ──────────────────────────
+def _det(*rows):
+    return {"frames": [{"frame_idx": i, "regions": [{"text": t} for t in texts]}
+                       for i, texts in rows]}
+
+
+def test_detection_texts_flattens_in_frame_order():
+    assert detection_texts(_det((0, ["가", "나"]), (15, ["다"]))) == [
+        (0, "가"), (0, "나"), (15, "다")]
+
+
+def test_detection_texts_survives_junk():
+    assert detection_texts(None) == []
+    assert detection_texts({"frames": None}) == []
+
+
+def test_detection_diff_is_exact_because_ocr_is_deterministic():
+    a = detection_texts(_det((0, ["가"]), (15, ["나"])))
+    assert detection_diff(a, list(a)) == []
+    b = detection_texts(_det((0, ["가"]), (15, ["다"])))
+    assert any("'나' → '다'" in ln for ln in detection_diff(a, b))
+
+
+def test_detection_diff_reports_count_mismatch_first():
+    a = detection_texts(_det((0, ["가", "나"])))
+    b = detection_texts(_det((0, ["가"])))
+    assert "탐지 영역 수가 다르다" in detection_diff(a, b)[0]
