@@ -14,7 +14,7 @@ from pathlib import Path
 from app.localize.style_texts import (
     STYLE_PLAN_NAME, apply_style_translation, load_json_or_none, style_plan_strings,
 )
-from app.localize.styles import style_ass_tags, style_margin_v
+from app.localize.styles import style_ass_tags, style_margin_lr, style_margin_v
 
 # ASR 환각성 초장 구간 방어 — 짧은 대사가 10초 넘게 떠 있으면 어색하다(파일럿 _74 실측 22s).
 HALLUCINATION_SPAN_SEC = 8.0
@@ -99,9 +99,11 @@ def build_telop_ass(telop_data: list, translation: dict, font: str, out_path: Pa
         영상 한 줄을 검게 지우는 것이라 사람이 결정할 일이다.
 
     (8/20) 검수 수정이 translation.telops 항목에 실은 줄 오버라이드 반영:
-    · style {size,y,color,rotate} → 인라인 태그(\\fs·\\1c·\\frz — 계약 rotate 는 시계방향
+    · style {size,y,color,rotate,width} → 인라인 태그(\\fs·\\1c·\\frz — 계약 rotate 는 시계방향
       양수, ASS \\frz 는 반시계 양수라 부호 반전은 태그 조립(style_ass_tags)이 책임)
-      + y 는 이벤트 MarginV(=(1−y)×1920, Telop 스타일이 하단 정렬이라 MarginV 방식).
+      + y 는 이벤트 MarginV(=(1−y)×1920, Telop 스타일이 하단 정렬이라 MarginV 방식)
+      + width 는 이벤트 MarginL/R(=(1−width)×1080÷2, 좌우 대칭 — 글자 크기는 그대로
+        두고 통만 넓혀 줄이 접히는 것을 막는다, F-412).
     · start_sec/end_sec → L2b 재보정 타이밍보다 우선(사람이 보고 정한 값).
     태그는 _ass_escape 밖에서 조립한다 — 이스케이프가 { } 를 바꾼다."""
     telops = [t for t in telop_data if t.get("kind") == "broadcast_telop"] \
@@ -117,9 +119,12 @@ def build_telop_ass(telop_data: list, translation: dict, font: str, out_path: Pa
         style = tr.get("style") or {}
         tags = style_ass_tags(style, 1920) if style else ""
         margin_v = telop_margin_v(t, style or {}, 1920)
+        # width(F-412) → 좌우 대칭 여백. 0 = 스타일 기본값(70/70) — 종전과 바이트 동일.
+        margin_lr = style_margin_lr(style, 1080) if style else 0
         tag_block = f"{{{tags}}}" if tags else ""
         lines.append(f"Dialogue: 0,{_fmt_ts(start)},{_fmt_ts(end)},"
-                     f"Telop,,0,0,{margin_v},, {tag_block}{_ass_escape(tr['ja'])}")
+                     f"Telop,,{margin_lr},{margin_lr},{margin_v},, "
+                     f"{tag_block}{_ass_escape(tr['ja'])}")
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080

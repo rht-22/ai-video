@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
-LINE_STYLE_KEYS = {"size", "y", "color", "rotate"}
+LINE_STYLE_KEYS = {"size", "y", "color", "rotate", "width"}
 _COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
 
@@ -20,7 +20,12 @@ def validate_line_style(style: Any) -> dict[str, Any]:
     """style 오버라이드 검증 → 정규화 사본. 위반은 ValueError(조용한 무시 = 사람 값 증발).
 
     size: 양수(1080×1920 캔버스 px) · y: 0~1(자막 하단, 하단=1) · color: #RRGGBB ·
-    rotate: -180~180(도, **시계방향 양수** — images 와 동일 규약). 모르는 키 즉시 거절."""
+    rotate: -180~180(도, **시계방향 양수** — images 와 동일 규약) ·
+    width: 0.3~1.0(그 줄이 쓸 가로 폭, 캔버스 대비 비율 — F-412). 모르는 키 즉시 거절.
+
+    width 를 여기서도 받는 이유: KR 편집실이 정한 폭이 subtitle_segments.json 을 타고
+    일본어판까지 따라온다(l3_apply 가 KO 백업 세그먼트 위에 번역만 얹는다). 이 목록에
+    없으면 그 style 을 되돌려 보내는 JP 검수 수정이 통째로 거절돼 재렌더가 죽는다."""
     if not isinstance(style, dict):
         raise ValueError(f"style 은 객체여야 합니다: {style!r}")
     unknown = set(style) - LINE_STYLE_KEYS
@@ -47,6 +52,11 @@ def validate_line_style(style: Any) -> dict[str, Any]:
         if not -180.0 <= rot <= 180.0:
             raise ValueError(f"style.rotate 는 -180~180 도: {style['rotate']!r}")
         out["rotate"] = rot
+    if style.get("width") is not None:
+        w = float(style["width"])
+        if not 0.3 <= w <= 1.0:
+            raise ValueError(f"style.width 는 0.3~1.0 비율: {style['width']!r}")
+        out["width"] = w
     return out
 
 
@@ -93,6 +103,18 @@ def style_ass_tags(style: dict[str, Any], play_res_y: int = 1920) -> str:
     if style.get("rotate") is not None and float(style["rotate"]) != 0.0:
         tags.append(f"\\frz{-float(style['rotate']):g}")
     return "".join(tags)
+
+
+def style_margin_lr(style: dict[str, Any], play_res_x: int) -> int:
+    """width(그 줄의 가로 폭 비율) → 이벤트 MarginL/MarginR(px, 좌우 대칭).
+    미지정 0(=스타일 기본값 사용) — style_margin_v 와 같은 규약.
+
+    글자 크기는 건드리지 않는다(F-412): 통만 좌우로 넓혀 줄이 접히는 것을 막는 값이다.
+    최소 1 — 이벤트 여백 0 은 ASS 규약상 '스타일 기본값'이라 width=1(화면 끝까지)이
+    증발한다."""
+    if style.get("width") is None:
+        return 0
+    return max(1, round(play_res_x * (1.0 - float(style["width"])) / 2))
 
 
 def style_margin_v(style: dict[str, Any], play_res_y: int) -> int:

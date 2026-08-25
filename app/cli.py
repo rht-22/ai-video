@@ -198,6 +198,10 @@ def build_parser() -> argparse.ArgumentParser:
                              "줄 묶음 전체를 블록 중심 기준으로 회전한다")
     design.add_argument("--design-tts-rotate", type=float, default=None,
                         help="TTS 자막 블록 회전 (도, -180~180, 시계방향 양수, 기본 0)")
+    design.add_argument("--design-tts-width", type=float, default=None,
+                        help="TTS 자막 컨테이너 가로 폭 (0.3~1.0, 캔버스 대비 비율, "
+                             "기본 0.852). 글자 크기는 그대로 두고 통만 좌우로 넓혀 "
+                             "줄이 접히는 것을 막는다")
     design.add_argument("--design-video-speed", type=float, default=None,
                         help="영상 배속 (0.8~2.0, 기본 1). 원본 영상·현장음에만 적용 — "
                              "TTS 내레이션 오디오는 배속하지 않는다")
@@ -318,6 +322,7 @@ _CLI_TO_DESIGN_FIELD = {
     "design_tts_y_margin": "tts_line_y_margin",
     "design_title_rotate": "title_rotate",
     "design_tts_rotate": "tts_rotate",
+    "design_tts_width": "tts_width",
     "design_video_speed": "video_speed",
     "design_work_font_size": "work_font_size",
     "design_work_color": "work_color",
@@ -358,6 +363,8 @@ def _build_design_config(args: argparse.Namespace,
         "title_rotate": (-180.0, 180.0, "--design-title-rotate"),
         "tts_rotate": (-180.0, 180.0, "--design-tts-rotate"),
         "video_speed": (0.8, 2.0, "--design-video-speed"),
+        # F-412: 자막 통 폭 — 0.3 아래는 한 글자도 못 담아 무한 줄바꿈이 된다.
+        "tts_width": (0.3, 1.0, "--design-tts-width"),
     }
     for _field, (_lo, _hi, _flag) in _E7_RANGES.items():
         if _field in overrides:

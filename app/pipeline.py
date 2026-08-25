@@ -4606,7 +4606,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                                   config=config, title_text=title_text,
                                   font_size=tts_line_style.font_size, label="[TTS] "),
                               tts_subtitle_path, tts_line_style,
-                              rotate_deg=getattr(payload.design, "tts_rotate", 0.0))
+                              rotate_deg=getattr(payload.design, "tts_rotate", 0.0),
+                              width=getattr(payload.design, "tts_width", None))
                 print(f"  [OK] TTS 자막 파일 생성 완료: {tts_subtitle_path}")
             else:
                 tts_subtitle_path = None
@@ -4658,7 +4659,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                                   config=config, title_text=title_text,
                                   font_size=tts_line_style.font_size, label="[TTS] "),
                               tts_subtitle_path, tts_line_style,
-                              rotate_deg=getattr(payload.design, "tts_rotate", 0.0))
+                              rotate_deg=getattr(payload.design, "tts_rotate", 0.0),
+                              width=getattr(payload.design, "tts_width", None))
                 print(f"  [OK] TTS 자막 파일 생성 완료 (대사자막 0건): {tts_subtitle_path}")
             else:
                 tts_subtitle_path = None
@@ -4938,7 +4940,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                         title_text=title_text, font_size=var_tts_line_style.font_size,
                         label="[TTS] ")
                     build_tts_ass(var_tts_segs, var_tts_sub_path, var_tts_line_style,
-                                  rotate_deg=getattr(payload.design, "tts_rotate", 0.0))
+                                  rotate_deg=getattr(payload.design, "tts_rotate", 0.0),
+                                  width=getattr(payload.design, "tts_width", None))
                     var_tts_sub_final = var_tts_sub_path
 
                 # 얼굴 크롭 타임라인 (--no-reframe 면 정본과 같이 생략 — 빈 map = 가운데 정렬)

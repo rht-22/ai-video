@@ -66,6 +66,10 @@ class DesignConfig:
     tts_line_font_size: int = 70
     tts_line_color: str = "&H00EBCE87"
     tts_line_y_margin: int = 580
+    # F-412: TTS 자막 컨테이너 가로 폭(0~1 캔버스 비율, None = 종전 기본 폭 0.852).
+    # **글자 크기는 그대로 두고 통만 좌우로 넓혀** 줄이 접히는 것을 막는 용도다 —
+    # 이벤트 MarginL/R + 자동 줄바꿈 글자 수가 함께 움직인다(subtitle._width_margins).
+    tts_width: float | None = None
 
     # E7-1: 디자인 레벨 회전(이 편 전체) — 도 단위, **시계방향 양수**, -180~180
     # (subtitles[].style.rotate·images[].rotate 와 동일 계약). 0 = 회전 없음(종전 경로 그대로).

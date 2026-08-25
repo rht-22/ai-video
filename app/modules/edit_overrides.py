@@ -122,7 +122,14 @@ TTS_MATCH_TOLERANCE_SEC = 1.0
 SUBTITLE_ANCHOR_SLOP_SEC = 0.5
 # 줄 단위 스타일 계약 — 이 키들만 받는다. 모르는 키를 조용히 무시하면 사람이 고친
 # 값이 반영 안 된 채 영상이 나가므로(제1원칙) 즉시 실패한다.
-SUBTITLE_STYLE_KEYS = ("size", "y", "color", "rotate")
+SUBTITLE_STYLE_KEYS = ("size", "y", "color", "rotate", "width")
+# 줄 폭(F-412) 허용 범위 — 캔버스 가로 대비 비율. 0.3 아래는 한 글자도 못 담아
+# 무한 줄바꿈이 되고, 1.0 은 좌우 여백 0(화면 끝까지). 기본(미지정)은 종전 0.852.
+SUBTITLE_WIDTH_RANGE = (0.3, 1.0)
+# 대사·TTS 자막의 줄 수 상한 — 엔진 subtitle.SUB_MAX_LINES 와 1:1. 사람이 넣은
+# 줄바꿈이 이보다 많으면 엔진이 조용히 잘라내므로 여기서 거절한다(제1원칙).
+# 원본 자막 회피·제목 겹침 계산이 2줄을 전제로 한다.
+SUBTITLE_MAX_LINES = 2
 # images 파일 계약 — ffmpeg 이 그대로 읽는 정지 이미지만(알파가 필요하면 png).
 # 크기 상한은 스티커·짤 용도 기준 재량값이다(캔버스 전체를 덮는 png 도 수 MB 면 충분).
 IMAGE_ALLOWED_SUFFIXES = (".png", ".jpg", ".jpeg")
@@ -241,6 +248,7 @@ def validate_overrides(data: Any) -> dict[str, Any]:
             if not str(s.get("text", "")).strip():
                 raise EditOverrideError(
                     f"subtitles[{i}]: text 가 비어 있습니다 — 그 줄을 지우려면 배열에서 빼세요")
+            _validate_manual_lines(f"subtitles[{i}]", s.get("text", ""))
             _validate_subtitle_v3_fields(i, s, schema)
         # 🛑 겹침은 검사하지 않는다. 넣었다가 실측에서 걷어냈다(2026-08-17):
         #    실제 subtitle_segments.json 이 겹치는 세그먼트를 정상적으로 담고 있다 —
@@ -268,6 +276,8 @@ def validate_overrides(data: Any) -> dict[str, Any]:
             if not str(c.get("text", "")).strip():
                 raise EditOverrideError(
                     f"tts[{i}]: text 가 비어 있습니다 — 그 내레이션을 지우려면 배열에서 빼세요")
+            # 내레이션 문구의 줄바꿈은 **자막용**이다(합성은 공백으로 보낸다, F-412)
+            _validate_manual_lines(f"tts[{i}]", c.get("text", ""))
             if c.get("duration_sec") is not None:
                 try:
                     d = float(c["duration_sec"])
@@ -300,6 +310,20 @@ def validate_overrides(data: Any) -> dict[str, Any]:
         for i, t in enumerate(texts):
             _validate_text(i, t)
     return data
+
+
+def _validate_manual_lines(where: str, text: str) -> None:
+    """사람이 넣은 줄바꿈 수 검증(F-412) — 상한을 넘으면 즉시 실패.
+
+    엔진(subtitle._lay_out_for_ass)은 상한을 넘는 줄을 **잘라낸다** — 조용히 잘리면
+    사람이 넣은 3번째 줄이 영상에서 사라진 채 발행된다(제1원칙 위반). 편집실 UI 도
+    같은 상한으로 막지만, 계약이 정본이라 여기서도 거절한다."""
+    lines = [ln for ln in str(text).replace("\r\n", "\n").split("\n") if ln.strip()]
+    if len(lines) > SUBTITLE_MAX_LINES:
+        raise EditOverrideError(
+            f"{where}: 줄바꿈이 너무 많습니다 ({len(lines)}줄) — 자막은 최대 "
+            f"{SUBTITLE_MAX_LINES}줄입니다 (원본 자막 회피·제목 겹침 계산이 그 줄 수를 "
+            "전제로 합니다)")
 
 
 def _validate_subtitle_v3_fields(i: int, s: dict[str, Any], schema: str) -> None:
@@ -356,6 +380,15 @@ def _validate_subtitle_v3_fields(i: int, s: dict[str, Any], schema: str) -> None
                 f"(받은 값: {style['color']!r})")
     if style.get("rotate") is not None:
         _validate_rotate(f"subtitles[{i}]: style.rotate", style["rotate"])
+    if style.get("width") is not None:
+        try:
+            w = float(style["width"])
+        except (TypeError, ValueError) as ex:
+            raise EditOverrideError(f"subtitles[{i}]: style.width 가 숫자가 아닙니다") from ex
+        if not (SUBTITLE_WIDTH_RANGE[0] <= w <= SUBTITLE_WIDTH_RANGE[1]):
+            raise EditOverrideError(
+                f"subtitles[{i}]: style.width 는 {SUBTITLE_WIDTH_RANGE[0]}~"
+                f"{SUBTITLE_WIDTH_RANGE[1]} (캔버스 가로 비율)이어야 합니다 ({w})")
 
 
 def validate_title_segments(segs: Any) -> None:
@@ -714,6 +747,8 @@ def overrides_subtitles(ov: dict[str, Any] | None) -> list[dict[str, Any]] | Non
                 norm["color"] = str(style["color"])
             if style.get("rotate") is not None:
                 norm["rotate"] = float(style["rotate"])
+            if style.get("width") is not None:
+                norm["width"] = float(style["width"])
             item["style"] = norm
         out.append(item)
     return out

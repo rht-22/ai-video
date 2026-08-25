@@ -274,11 +274,77 @@ def parse_subtitle(path: Path) -> list[SpeechSegment]:
 ASS_PLAY_RES_X = 1080
 ASS_PLAY_RES_Y = 1920
 
+# 자막 컨테이너(글자가 놓일 가로 폭) — _ass_header 의 스타일 MarginL/R 고정값과 반드시
+# 같아야 한다. 이 여백이 좁을수록 libass 가 일찍 줄을 접는다.
+SUB_SIDE_MARGIN = 80
+# 그 기본 폭에서 한 줄에 담는 글자 수(자동 줄바꿈 기준). 폭(style.width)을 넓히면
+# 비례해서 늘어난다 — 폭만 넓히고 글자 수 기준을 그대로 두면 파이썬 쪽이 먼저 잘라
+# 넓힌 폭이 아무 소용이 없다(F-412 실측 함정).
+SUB_BASE_MAX_CHARS = 15
+# 대사·TTS 자막 줄 수 상한 — 자동이든 사람이 넣은 줄바꿈이든 공통이다.
+# 원본 자막 회피(subtitle_region.MAX_SUBTITLE_LINES)와 제목 겹침 계산이 2줄을 전제로
+# 하므로 여기만 늘리면 3줄짜리가 제목을 파고든다. 편집실도 3줄 이상을 막는다.
+SUB_MAX_LINES = 2
+
 # libass 한 줄 높이 근사(폰트 크기 대비) — TTS 블록 회전(E7-1)의 \org(블록 중심) 계산용.
 # 번들 한글 폰트들의 ascender+descender 실측이 1.15~1.25 범위라 중간값을 쓴다. 오차 δ가
 # 나도 원점이 블록 중심에서 δ/2 만큼 어긋날 뿐이고, 그로 인한 블록 이동은 2·(δ/2)·sin(θ/2)
 # 이하(θ=90° 에서도 수 px)다. θ=0 이면 태그 자체를 안 박아 종전 렌더와 바이트 동일.
 _ASS_LINE_HEIGHT_FACTOR = 1.2
+
+
+def _base_width_ratio() -> float:
+    """기본 자막 폭(캔버스 대비 비율) — 스타일 MarginL/R 을 뺀 나머지."""
+    return (ASS_PLAY_RES_X - 2 * SUB_SIDE_MARGIN) / ASS_PLAY_RES_X
+
+
+def _width_margins(width: float | None) -> tuple[str, str]:
+    """폭 비율(0~1) → 이벤트 MarginL/MarginR 필드 문자열. None 이면 ('', '').
+
+    ASS 규약상 이벤트 여백 0 은 '스타일 기본값 사용'이라 최소 1 로 클램프한다
+    (style.y 의 MarginV 와 같은 이유). None(미지정) 은 필드를 비워 종전 렌더와
+    바이트 동일 — 폭을 안 건드린 자막은 아무것도 달라지지 않는다."""
+    if width is None:
+        return "", ""
+    w = min(max(float(width), 0.05), 1.0)
+    m = max(1, int(round(ASS_PLAY_RES_X * (1.0 - w) / 2)))
+    return str(m), str(m)
+
+
+def _width_max_chars(width: float | None, size_ratio: float = 1.0) -> int:
+    """폭 비율 → 자동 줄바꿈 글자 수. 둘 다 기본이면 종전 기준(15자) 그대로.
+
+    size_ratio = (전역 폰트 크기 / 그 줄의 폰트 크기). 사람이 **그 줄만** 크기를
+    바꿨을 때(style.size)만 1 이 아니다 — 글자를 키우면 같은 폭에 덜 들어가고, 줄이면
+    더 들어간다. 채널 전역 자막 크기는 일부러 안 본다: 15자 기준이 그 크기에 맞춰
+    쓰여 온 값이라, 여기서 전역 크기까지 반영하면 손대지도 않은 채널의 줄바꿈이
+    통째로 달라진다(회귀). 사람이 명시적으로 고친 줄만 다르게 계산한다."""
+    if width is None and abs(size_ratio - 1.0) < 1e-9:
+        return SUB_BASE_MAX_CHARS
+    w = min(max(float(width), 0.05), 1.0) if width is not None else _base_width_ratio()
+    r = min(max(float(size_ratio), 0.2), 5.0)
+    return max(3, int(round(SUB_BASE_MAX_CHARS * w / _base_width_ratio() * r)))
+
+
+def _lay_out_for_ass(text: str, *, width: float | None = None,
+                     size_ratio: float = 1.0,
+                     max_lines: int = SUB_MAX_LINES) -> str:
+    r"""자막 한 건 → ASS 본문 한 줄(여러 줄은 \N 으로 묶음). (F-412)
+
+    **사람이 넣은 줄바꿈이 있으면 그대로 존중하고 자동 재분할을 하지 않는다** —
+    편집실에서 사람이 정한 경계가 정본이다. 자동 규칙(어절·글자 수)이 그걸 다시
+    흩뜨리면 '고쳤는데 안 반영'이 되고, 그게 제1원칙 위반이다.
+
+    줄바꿈이 없으면 종전대로 폭 기준 자동 분할 — width 를 안 주면 결과가 바이트
+    단위로 종전과 같다(회귀 0). 줄 수 상한은 자동·수동 공통(SUB_MAX_LINES 주석 참고).
+    """
+    lines = [ln.strip() for ln in str(text).replace("\r\n", "\n").split("\n")]
+    lines = [ln for ln in lines if ln]
+    if len(lines) > 1:
+        return "\\N".join(lines[:max_lines])
+    return _wrap_for_ass(lines[0] if lines else "",
+                         max_chars=_width_max_chars(width, size_ratio),
+                         max_lines=max_lines)
 
 
 def _hex_to_ass_color(color: str) -> str:
@@ -287,8 +353,10 @@ def _hex_to_ass_color(color: str) -> str:
     return f"&H{c[4:6]}{c[2:4]}{c[0:2]}&".upper()
 
 
-def _line_style_overrides(style_ov: dict | None, base_alignment: int) -> tuple[str, str]:
-    """줄 단위 스타일(edit_overrides/v3 subtitles[].style) → (인라인 태그, MarginV 필드).
+def _line_style_overrides(style_ov: dict | None,
+                          base_alignment: int) -> tuple[str, str, str, str]:
+    """줄 단위 스타일(edit_overrides/v3 subtitles[].style)
+    → (인라인 태그, MarginV 필드, MarginL 필드, MarginR 필드).
 
     · size  → {\\fsN} — 캔버스(1080×1920) 기준 폰트 px
     · color → {\\1c&HBBGGRR&}
@@ -301,9 +369,13 @@ def _line_style_overrides(style_ov: dict | None, base_alignment: int) -> tuple[s
       보존하고 libass 충돌 회피가 그대로 동작한다. MarginV=0 은 ASS 규약상 "스타일
       기본값 사용"이라 최소 1 로 클램프한다. 그 외 정렬(상단/중단 프리셋이 생기면)은
       \\pos 로 화면 중앙 x 에 고정한다.
+    · width → 그 줄이 쓸 수 있는 **가로 폭**(0~1 캔버스 비율, F-412). 이벤트 MarginL/R
+      로 표현한다 — 글자 크기는 그대로 두고 통(컨테이너)만 좌우로 넓혀 줄이 접히는
+      것을 막는 용도다. 자동 줄바꿈 글자 수도 같은 비율로 늘어난다(_width_max_chars —
+      한쪽만 바꾸면 파이썬이 먼저 잘라 넓힌 폭이 소용없다).
     """
     if not isinstance(style_ov, dict) or not style_ov:
-        return "", ""
+        return "", "", "", ""
     tags: list[str] = []
     margin_v = ""
     if style_ov.get("size") is not None:
@@ -318,7 +390,8 @@ def _line_style_overrides(style_ov: dict | None, base_alignment: int) -> tuple[s
             margin_v = str(max(1, int(round((1.0 - y) * ASS_PLAY_RES_Y))))
         else:
             tags.append(f"\\pos({ASS_PLAY_RES_X // 2},{int(round(y * ASS_PLAY_RES_Y))})")
-    return ("{" + "".join(tags) + "}") if tags else "", margin_v
+    margin_l, margin_r = _width_margins(style_ov.get("width"))
+    return (("{" + "".join(tags) + "}") if tags else "", margin_v, margin_l, margin_r)
 
 
 @dataclass(frozen=True)
@@ -409,22 +482,33 @@ def build_ass_from_segments(
         start_str = _format_time(seg.start_sec)
         end_str = _format_time(seg.end_sec)
 
-        # 1. 텍스트 정리 (화자 prefix 제거 + 줄바꿈 → 공백)
-        raw_text = _strip_speaker_prefix(seg.text.replace("\n", " ").strip())
-        if not raw_text:
+        # 1. 텍스트 정리 (화자 prefix 제거) — **줄바꿈은 남긴다**(F-412).
+        #    사람이 편집실에서 넣은 줄바꿈이 정본이고, 여기서 공백으로 지우면
+        #    '고쳤는데 안 반영'이 된다. 줄바꿈이 없는 문장은 종전 그대로 자동 분할.
+        raw_text = _strip_speaker_prefix(seg.text.strip())
+        if not raw_text.strip():
             continue
         text = raw_text
 
-        # 2. 터미널 출력
-        print(f"[{idx+1}] {start_str} ~ {end_str} | {text}")
+        # 2. 터미널 출력 — 줄바꿈은 ' / ' 로 눕혀 한 줄에 남긴다(로그가 흐트러지지 않게)
+        _log_text = " / ".join(text.splitlines())
+        print(f"[{idx+1}] {start_str} ~ {end_str} | {_log_text}")
 
         # 3. 한 segment = 한 화면. \N 으로 묶어 시간 균등 분할 깜빡임 제거.
-        joined = _wrap_for_ass(text, max_chars=15, max_lines=2)
+        #    style.width(F-412)가 있으면 자동 분할 기준 글자 수도 그 폭에 맞춰 늘어난다.
+        _sty = getattr(seg, "style", None)
+        _sty = _sty if isinstance(_sty, dict) else None
+        _line_size = (_sty or {}).get("size")
+        _ratio = (style.font_size / float(_line_size)
+                  if _line_size and float(_line_size) > 0 else 1.0)
+        joined = _lay_out_for_ass(text, width=(_sty or {}).get("width"),
+                                  size_ratio=_ratio)
         # 줄 단위 스타일(edit_overrides/v3) — segment 에 style dict 가 실려 오면
-        # 그 줄만 인라인 태그·이벤트 MarginV 로 전역 스타일 위에 얹는다.
-        tags, margin_v = _line_style_overrides(getattr(seg, "style", None), style.alignment)
+        # 그 줄만 인라인 태그·이벤트 MarginV/MarginL/MarginR 로 전역 스타일 위에 얹는다.
+        tags, margin_v, margin_l, margin_r = _line_style_overrides(_sty, style.alignment)
         clip_events_list.append(
-            f"Dialogue: 0,{start_str},{end_str},Default,,,,{margin_v},, {tags}{joined}\n"
+            f"Dialogue: 0,{start_str},{end_str},Default,,{margin_l},{margin_r},"
+            f"{margin_v},, {tags}{joined}\n"
         )
 
     events = "".join(clip_events_list)
@@ -432,10 +516,10 @@ def build_ass_from_segments(
     # TTS 자막 이벤트 (TtsLine 스타일) — 동시 표시 적용
     if tts_segments and tts_style:
         for seg in tts_segments:
-            text = _strip_speaker_prefix(seg.text.replace("\n", " ").strip())
-            if not text:
+            text = _strip_speaker_prefix(seg.text.strip())   # 줄바꿈 보존(F-412)
+            if not text.strip():
                 continue
-            joined = _wrap_for_ass(text, max_chars=15, max_lines=2)
+            joined = _lay_out_for_ass(text)
             events += f"Dialogue: 0,{_format_time(seg.start_sec)},{_format_time(seg.end_sec)},TtsLine,,,,,, {joined}\n"
 
     # 4. 파일 저장
@@ -452,6 +536,7 @@ def build_tts_ass(
     output_path: Path,
     style: SubtitleStyle,
     rotate_deg: float = 0.0,
+    width: float | None = None,
 ) -> None:
     """TTS 자막만 담은 ASS 파일을 생성합니다.
 
@@ -463,17 +548,24 @@ def build_tts_ass(
     줄 수 × 폰트크기 × _ASS_LINE_HEIGHT_FACTOR 근사 — 오차 영향은 상수 주석 참고.
     TTS 스타일은 하단 중앙 정렬(alignment 2)·MarginL/R 80 대칭 고정이라 앵커 x 는
     화면 중앙이다. 0 이면 태그를 안 박아 종전 출력과 바이트 동일(회귀 없음).
+
+    width(F-412, 디자인 레벨 design.tts_width): 내레이션 자막이 쓸 가로 폭(0~1 캔버스
+    비율). 이벤트 MarginL/R 을 대칭으로 좁혀 통만 넓히고, 자동 줄바꿈 글자 수도 같은
+    비율로 늘린다. 대칭이라 회전 \\org 의 앵커 x(화면 중앙)는 그대로다. None 이면
+    필드를 비워 종전 출력과 바이트 동일. 문구 안에 사람이 넣은 줄바꿈이 있으면 자동
+    분할 대신 그 줄바꿈을 그대로 쓴다(_lay_out_for_ass).
     """
     if not (-180.0 <= float(rotate_deg) <= 180.0):
         raise ValueError(f"tts_rotate 범위 밖: {rotate_deg} (-180~180)")
     header = _ass_header(style)
     margin_v = style.margin_v if style.margin_v >= 0 else 480
+    margin_l, margin_r = _width_margins(width)
     events = ""
     for seg in tts_segments:
-        text = _strip_speaker_prefix(seg.text.replace("\n", " ").strip())
-        if not text:
+        text = _strip_speaker_prefix(seg.text.strip())       # 줄바꿈 보존(F-412)
+        if not text.strip():
             continue
-        joined = _wrap_for_ass(text, max_chars=15, max_lines=2)
+        joined = _lay_out_for_ass(text, width=width)   # 줄바꿈·통 폭(F-412)
         # 줄별 세로 위치(E18-2 구간별 원본 자막 회피) — seg.style["y"] 가 있으면 그 줄만
         # 이벤트 MarginV 로 올린다. 없으면 필드를 비워 종전과 **바이트 동일**이다.
         # 대사 자막의 `_line_style_overrides` 와 같은 규약(y = 자막 하단, 하단=1).
@@ -490,7 +582,7 @@ def build_tts_ass(
             org_y = int(round(ASS_PLAY_RES_Y - eff_margin - blk_h / 2))
             tag = f"{{\\frz{-float(rotate_deg):g}\\org({ASS_PLAY_RES_X // 2},{org_y})}}"
         events += (f"Dialogue: 0,{_format_time(seg.start_sec)},{_format_time(seg.end_sec)},"
-                   f"Default,,,,{margin_field},, {tag}{joined}\n")
+                   f"Default,,{margin_l},{margin_r},{margin_field},, {tag}{joined}\n")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes((header + events).encode("utf-8-sig"))
 

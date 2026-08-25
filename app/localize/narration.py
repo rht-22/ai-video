@@ -109,7 +109,10 @@ def l3t_tts(job: Path, backup: Path, locale_cfg: dict):
             continue
         base = SPEED_BASE.get(cue.get("speed", "normal"), 0)
         window = float(cue["end_sec"]) - float(cue["start_sec"])
-        text = cue["text"]
+        # F-412: 문구 안 줄바꿈은 **자막용**이다 — 합성 입력만 공백으로 눕힌다
+        # (KR synthesize_tts 와 같은 이유: 백엔드가 개행을 끊어 읽기로 해석할 수 있다).
+        # cue["text"] 자체는 보존한다 — 자막(build_tts_ass)이 그 줄바꿈을 그대로 그린다.
+        text = " ".join(str(cue["text"]).split())
         dur = 0.0
         for bump in RATE_BUMPS:
             rate = rate_string(base, bump)
