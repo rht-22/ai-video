@@ -232,6 +232,11 @@ def build_parser() -> argparse.ArgumentParser:
                         choices=["left", "right"],
                         help="플랫폼 표기 가로 앵커 (기본 left). right 면 영상 오른쪽 상단 — "
                              "platform-x 는 오른쪽 가장자리에서 안쪽으로의 오프셋이 된다")
+    design.add_argument("--face-recognition", action="store_true",
+                        help="인물 인식(deepface) 기반 얼굴 추적을 켠다 — 기본은 꺼짐. "
+                             "켜면 [7/15] 인물 등장 인덱스가 프록시 전체를 스캔하므로 "
+                             "생성이 느려지고, character_focus 가 있는 클립의 크롭이 "
+                             "인물 타겟으로 바뀐다(끈 편과 화면이 달라진다)")
     design.add_argument("--no-reframe", action="store_true",
                         help="얼굴 추종 크롭(리프레이밍) 끄기 — 원본을 가운데 정렬로 넣는다. "
                              "인물이 고정된 인터뷰 소재에 적합하고(확대하면 원본 자막이 잘린다) "
@@ -373,6 +378,10 @@ def _build_design_config(args: argparse.Namespace,
     # 리프레이밍 스위치 — store_true 라 None 이 아니어서 위 루프에 못 태운다(끄는 쪽만 의미 있음).
     if getattr(args, "no_reframe", False):
         overrides["enable_reframe"] = False
+
+    # 인물 인식 — 기본이 꺼짐이라 **켜는 쪽만** 의미 있다(config.py 의 사유 참고).
+    if getattr(args, "face_recognition", False):
+        overrides["enable_face_recognition"] = True
 
     # 제목 Y 고정(F-409) — 같은 이유로 store_true 는 켜는 쪽만 의미 있다.
     if getattr(args, "design_title_y_fixed", False):
