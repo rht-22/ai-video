@@ -1,0 +1,21 @@
+# --no-deps 로만 설치되는 의존 (L-P4, 2026-08-25)
+#
+#     pip install --no-deps -r requirements-nodeps.txt
+#
+# 🛑 왜 따로인가: 아래 패키지는 **낡은 핀** 때문에 이 레포 스택과 해석이 안 된다. 그렇다고
+#    뺄 수도 없다 — route B/C 의 **기본 인페인트 백엔드**이고 `make_inpainter` 에는 폴백이
+#    없다(OCR 의 _FALLBACK_ORDER 는 인페인트에 없다). 빼면 인페인팅이 즉사한다.
+#
+# simple-lama-inpainting 0.1.2 가 요구하는 것 (2026-08-25 PyPI 실측):
+#     numpy  >=1.24.3,<2.0.0     ← 이 레포는 numpy 2.x
+#     pillow >=9.5.0,<10.0.0     ← 이 레포는 Pillow>=10.0.0
+#     opencv-python >=4.8,<5     ← contrib 로 합친 것과 충돌
+#
+# ⚠ 핀이 지나치게 보수적일 뿐 **실제로는 새 스택에서 돈다** — vlp 가 같은 방식(--no-deps)
+#    으로 깔아 쓰고 있고, 2026-08-25 mm-06 실측에서 lama 가 337/337 프레임을 완주했다.
+#    (그 노드의 numpy·pillow 는 핀 밖이다.)
+#
+# ⚠ 여기 넣는 것은 **핀만 무시하는 것**이지 의존이 없다는 뜻이 아니다. torch·torchvision·
+#    numpy·pillow·opencv 는 위 requirements.txt 가 이미 가져온다. `fire` 만 아래에 함께 적는다.
+simple-lama-inpainting>=0.1.2
+fire>=0.5                    # lama 가 런타임에 쓴다(--no-deps 라 자동으로 안 온다)
