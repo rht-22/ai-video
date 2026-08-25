@@ -191,11 +191,25 @@ def test_every_expected_diff_carries_a_reason():
 from app.localize.overlay import dub  # noqa: E402
 
 
-def test_level_gate_rejects_non_dub_routes():
-    """route C 가 아닌데 더빙이 돌면 안 되는 편에 일본어 오디오가 얹힌다."""
-    dub.require_level_c("C")                       # 통과
-    with pytest.raises((SystemExit, ValueError, RuntimeError)):
-        dub.require_level_c("B")
+def test_level_gate_accepts_exactly_the_dub_routes():
+    """정본은 `DUB_ROUTES` 하나다 — 게이트·어댑터 needs_dub 과 갈리면 더빙이 빠진 편이
+    더빙된 줄 알고 발행된다(2026-08-12 사고와 같은 모양).
+
+    ⚠ vlp 원본은 C 만 통과시켜 **BC 를 거부**했다(`src/dub.py:31`). BC 가 실제로 돌아 본
+    적이 없어 안 드러난 불일치이고, 이식본이 그걸 고쳤다."""
+    from app.localize.overlay import DUB_ROUTES, ROUTES
+    for route in DUB_ROUTES:
+        dub.require_level_c(route)                 # 통과해야 한다
+    assert "BC" in DUB_ROUTES
+    for route in [r for r in ROUTES if r not in DUB_ROUTES]:
+        with pytest.raises((SystemExit, ValueError, RuntimeError)):
+            dub.require_level_c(route)
+
+
+def test_level_gate_rejects_unknown_and_empty():
+    for bad in ("", None, "c c", "X"):
+        with pytest.raises((SystemExit, ValueError, RuntimeError)):
+            dub.require_level_c(bad)
 
 
 def test_atempo_splits_beyond_ffmpeg_limits():

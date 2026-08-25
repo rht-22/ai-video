@@ -35,6 +35,7 @@ from typing import Any, Optional  # noqa: E402
 
 from app.localize.overlay import common  # noqa: E402
 from app.localize.overlay.common import ensure_dir, get_logger, get_secret, load_config, read_json, resolve_path, write_json  # noqa: E402
+from app.localize.overlay import DUB_ROUTES  # noqa: E402
 from app.localize.overlay.cuts import apply_cuts_to_events, cut_total, shift_time, validate_cuts  # noqa: E402
 
 log = get_logger("dub")
@@ -42,8 +43,17 @@ log = get_logger("dub")
 
 # ── 순수 헬퍼 ─────────────────────────────────────────────────────────────
 def require_level_c(level: str) -> None:
-    if level != "C":
-        raise ValueError(f"더빙은 Level C 한정. 현재 level={level}. 게이트/등급 확인.")
+    """더빙이 뒤따르는 route 인가. 아니면 거부.
+
+    ⚠ vlp 원본은 `level != "C"` 로 **C 만** 통과시켰다(`src/dub.py:31`). 그런데 같은
+    레포의 `DUB_ROUTES` 는 C·BC 둘이고 오케스트레이터 어댑터의 `needs_dub` 도 그렇다 —
+    즉 BC 편은 "더빙이 뒤따른다"고 표시된 채 더빙 단계에서 거부당한다. BC 가 실제로
+    돌아 본 적이 없어(vlp·이식본 모두) 안 드러난 불일치다. 세 곳이 갈리면 더빙이 빠진
+    편이 더빙된 줄 알고 발행된다(2026-08-12 에 실제로 난 사고와 같은 모양) — 정본을
+    `DUB_ROUTES` 하나로 모은다."""
+    if str(level or "").upper() not in DUB_ROUTES:
+        raise ValueError(f"더빙은 route {'·'.join(DUB_ROUTES)} 한정. 현재 level={level}. "
+                         f"게이트/route 확인.")
 
 
 def _srt_time(t: str) -> float:
