@@ -258,7 +258,7 @@ def test_the_move_log_is_cleared_per_episode(tmp_path):
 def test_pipeline_records_that_the_judgement_ran_even_with_no_band():
     """띠를 못 찾아도 판정이 돌았다는 사실과 표본 수는 남긴다.
     ⚠ 초판은 결과(_burned_band or _BURNED_PROFILES)로 걸어 이름값을 못 했다 — 둘 다 비면
-    단계가 사라져 '안 돌았다'와 같아진다(8/25 커리어데이 실측)."""
+    단계가 사라져 '안 돌았다'와 같아진다."""
     src = (Path(__file__).resolve().parents[1] / "app" / "pipeline.py").read_text(encoding="utf-8")
     assert 'if payload.show_subtitles and _BURNED_STATE.get("ran"):' in src
     assert '"profile_frames": len(_BURNED_PROFILES),' in src
@@ -272,10 +272,10 @@ def test_pipeline_records_the_text_clamp_in_the_style_step():
     assert '_text_clamp = {"clamped": len(_clamp_notes), "of": len(_clamped),' in src
 
 
-# ── 감사 조건은 '결과'가 아니라 '판정이 돌았는가' (8/25 커리어데이 실측) ──
+# ── 감사 조건은 '결과'가 아니라 '판정이 돌았는가' ──
 def test_avoid_burned_step_logged_even_when_nothing_found():
-    """띠도 표본도 못 찾은 실행이 단계 부재로 남으면 '안 돌았다'와 구분이 안 된다.
-    같은 설정의 두 채널이 실제로 그렇게 갈렸다(커리어데이 단계 없음 / 도깨비 표본 110)."""
+    """판정이 돌고도 띠·표본을 둘 다 못 얻은 실행(ffmpeg 없음·프레임 못 뜸·예외)이 단계
+    부재로 남으면 '판정이 안 돌았다'와 구분이 안 된다 — 가장 알고 싶은 경우가 조용해진다."""
     import inspect
     from app import pipeline
     # 결과로 거는 옛 조건이 되살아나면 같은 구멍이 다시 난다
