@@ -45,6 +45,23 @@ PAIRS = [
 
 # 🛑 의도적으로 갈라진 것 — 사유가 없으면 여기 못 들어온다.
 EXPECTED_DIFFS = {
+    # ── F-412(자막 줄바꿈·글자 통 폭) — **ai-video 가 앞서간 것** ──────────────
+    # 2026-08-25 `a30bace` 가 이 계층에도 F-412 를 적용했는데 vlp 에는 같은 수정이
+    # 아직 없다(그 커밋이 근거로 든 vlp `23648e0` 은 vlp 원격·노드 체크아웃 **어디에도
+    # 없다** — 확인함). 지금까지의 예상 차이는 전부 '이식본이 일부러 다르다' 였지만
+    # 이 넷은 방향이 반대다.
+    # ⚠ **vlp 에 같은 수정이 가면 이 항목들을 지운다.** 안 지우면 그때부터 이 자리는
+    #   진짜 어긋남을 덮는 담요가 된다(이 가드의 존재 이유가 그것이다).
+    "render.validate_line_style":
+        "F-412 — 줄 스타일에 `width`(글자 통 폭)가 늘었다. ai-video 가 앞서간 것.",
+    "render.wrap_text":
+        "F-412 — 사람이 정한 줄바꿈을 존중한다. ai-video 가 앞서간 것.",
+    "render.build_ass":
+        "F-412 — width 를 ASS 로 옮긴다. ai-video 가 앞서간 것.",
+    "render.build_bilingual_ass":
+        "F-412 — build_ass 와 같은 변경. ai-video 가 앞서간 것.",
+    "dub.synthesize_segment":
+        "F-412 짝 변경(a30bace 의 세 수정 중 하나). ai-video 가 앞서간 것.",
     "dub.require_level_c":
         "vlp 는 `level != \"C\"` 로 **C 만** 통과시킨다(src/dub.py:31). 그런데 같은 레포의 "
         "`DUB_ROUTES` 는 C·BC 둘이고 오케스트레이터 어댑터 needs_dub 도 그렇다 — BC 편은 "
@@ -80,6 +97,9 @@ EXPECTED_DIFFS = {
 }
 # 모듈 수준 상수 중 갈라진 것
 EXPECTED_CONST_DIFFS = {
+    "render.LINE_STYLE_KEYS":
+        "F-412 — `width`(글자 통 폭)가 늘었다. ai-video 가 앞서간 것이고, vlp 에 같은 "
+        "수정이 가면 이 항목을 지운다(위 render.* 주석 참고).",
     "common.PROJECT_ROOT":
         "vlp 는 자기 레포 루트, 여기는 ai-video 레포 루트(app/localize/overlay 에서 4단계 위). "
         "config 의 상대경로가 이 기준으로 풀린다.",
@@ -151,6 +171,7 @@ def compare(vlp_root: pathlib.Path, verbose: bool = False) -> int:
     same = 0
     unexpected: list[str] = []
     accounted: list[str] = []
+    used: set = set()          # 실제로 쓰인 예외 키 — 안 쓰인 것은 담요가 된다
 
     for rel_v, rel_p in PAIRS:
         mod = pathlib.Path(rel_p).stem
@@ -164,12 +185,14 @@ def compare(vlp_root: pathlib.Path, verbose: bool = False) -> int:
         for name, body in fv.items():
             key = f"{mod}.{name}"
             if name not in fp:
+                used.add(key) if key in EXPECTED_MISSING else None
                 (accounted if key in EXPECTED_MISSING else unexpected).append(
                     f"{key}: 이식본에 없음" + (f" — {EXPECTED_MISSING[key]}"
                                               if key in EXPECTED_MISSING else ""))
             elif fp[name] == body:
                 same += 1
             elif key in EXPECTED_DIFFS:
+                used.add(key)
                 accounted.append(f"{key}: 의도된 차이 — {EXPECTED_DIFFS[key]}")
             else:
                 unexpected.append(f"{key}: 본문이 다르다")
@@ -181,6 +204,7 @@ def compare(vlp_root: pathlib.Path, verbose: bool = False) -> int:
             elif cp[name] == val:
                 same += 1
             elif key in EXPECTED_CONST_DIFFS:
+                used.add(key)
                 accounted.append(f"{key}: 의도된 차이 — {EXPECTED_CONST_DIFFS[key]}")
             else:
                 unexpected.append(f"{key}: 상수 값이 다르다 ({val} → {cp[name]})")
@@ -194,6 +218,19 @@ def compare(vlp_root: pathlib.Path, verbose: bool = False) -> int:
     for line in unexpected:
         print(f"    !! {line}")
 
+    # ⚠ 안 쓰인 예외는 **담요가 된다.** F-412 처럼 'ai-video 가 앞서간 것' 은 vlp 가
+    #    따라오면 사라져야 하는데, 항목을 안 지우면 그 자리는 그때부터 진짜 어긋남을
+    #    조용히 덮는다. 이 가드의 존재 이유가 그것이므로 스스로도 같은 규율을 따른다.
+    stale = sorted((set(EXPECTED_DIFFS) | set(EXPECTED_CONST_DIFFS)
+                    | set(EXPECTED_MISSING)) - used)
+    if stale:
+        print(f"  정리 대상    {len(stale)}  (예외로 적혀 있는데 실제로는 안 갈린다)")
+        for k in stale:
+            print(f"    ~~ {k}: vlp 와 같아졌거나 사라졌다 — 예외 목록에서 지울 것")
+
+    if stale and not unexpected:
+        print("\n판정: ❌ 예상 밖 차이는 없지만 예외 목록이 낡았다 — 위 항목을 지워라.")
+        return 1
     if unexpected:
         print("\n판정: ❌ 예상 밖 차이가 있다.\n"
               "  vlp 가 앞서갔다면 그 변경을 이식하고, 이식본이 일부러 다르면\n"
