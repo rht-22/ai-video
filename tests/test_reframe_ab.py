@@ -9,8 +9,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.reframe_ab import (  # noqa: E402
-    compare_embeddings, compare_keyframes, face_track_clips, resolve_job_dir,
-    stacks_differ, verdict,
+    align_targets, compare_embeddings, compare_keyframes, face_track_clips,
+    resolve_job_dir, stacks_differ, verdict,
 )
 
 
@@ -168,3 +168,31 @@ def test_find_ffmpeg_command_still_takes_the_command_name():
     params = list(inspect.signature(find_ffmpeg_command).parameters.values())
     required = [p for p in params if p.default is inspect.Parameter.empty]
     assert len(required) == 1, f"인자 개수가 바뀌었다: {params}"
+
+
+# ── 인물 인식 판의 타겟 정렬 ──────────────────────────────────────────────
+def _pc(*roles):
+    return [{"role": r, "reframe": {"mode": "face_track"}} for r in roles]
+
+
+def _sc(*pairs):
+    return [{"role": r, "character_focus": f} for r, f in pairs]
+
+
+def test_align_targets_matches_by_role_and_count():
+    got = align_targets(_pc("hook", "payoff"),
+                        _sc(("hook", ["유재석"]), ("payoff", ["이광수", "하하"])))
+    assert got == [["유재석"], ["이광수", "하하"]]
+
+
+def test_align_targets_refuses_when_counts_differ():
+    """개수가 다른 채로 index 로 맞추면 **다른 클립의 인물**을 따라간다 — 거짓 측정이다."""
+    assert align_targets(_pc("hook"), _sc(("hook", ["A"]), ("payoff", ["B"]))) == []
+
+
+def test_align_targets_refuses_when_roles_differ():
+    assert align_targets(_pc("hook", "hook"), _sc(("hook", ["A"]), ("payoff", ["B"]))) == []
+
+
+def test_align_targets_tolerates_clips_without_focus():
+    assert align_targets(_pc("hook"), _sc(("hook", None))) == [[]]
