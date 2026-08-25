@@ -10,13 +10,20 @@
 
 google-genai>=0.8.0
 edge-tts>=6.1.9
-# ⚠ **contrib 하나로 합쳤다**(L-P4, 2026-08-25 · P0 보고 §2-5 확정 권고).
-# paddleocr 가 opencv-contrib-python 을 끌어오는데 둘은 **같은 cv2 를 배포**한다 — 함께 두면
-# *설치 순서*가 버전을 정하고 그건 requirements 어디에도 안 적히는 우연이다(실측: 해석표는
-# opencv-python 4.14 인데 런타임 cv2 는 4.10 = contrib 가 이겼다). contrib 는 base 의
-# 상위집합이고 cv2/data/haarcascades 도 함께 싣는다 — 얼굴검출(reframe) 전제는 그대로다.
-# 상한 <5 는 그 이유(5.x 가 번들 haarcascade 를 제거한다) 그대로 옮겨 왔다.
-opencv-contrib-python>=4.9.0.80,<5
+# 🛑 **opencv 두 배포판은 같은 `cv2` 디렉토리를 덮어쓴다** — 그래서 *설치 순서*가 런타임
+#    버전을 정하고, 그건 requirements 어디에도 안 적히는 우연이다.
+#    한쪽만 적는 것으로는 못 없앤다(L-P4 1차 시도 실패 · mm-06 2026-08-25 실측):
+#      contrib ← paddlex(paddleocr 전이)가 **==4.10.0.84 로 못 박는다**
+#      base    ← deepface · retina-face · rapidocr-onnxruntime 이 **상한 없이** 끌어온다
+#    base 를 안 적으면 전이 해석이 **5.0.0.93** 을 가져오는데 5.x 는 번들 haarcascade 를
+#    빼서, 순서가 뒤집혀 그쪽이 이기면 **얼굴검출(reframe)이 죽는다.**
+#    ⇒ 둘을 **같은 버전으로 못 박아** 승자가 누구든 결과가 같게 만든다. contrib 는 base 의
+#      상위집합이라 이겨도 문제없고, 그 실측 조합(cv2 4.10.0 · haarcascade xml 17개)이
+#      A/B 를 통과한 그 스택이다.
+#    ⚠ paddlex 가 핀을 올리면 **두 줄을 함께** 올린다 — `tests/test_deps_probe.py` 가
+#      두 줄의 버전이 같은지 묶어 둔다(갈리면 조용한 우연으로 되돌아간다).
+opencv-contrib-python==4.10.0.84
+opencv-python==4.10.0.84
 faster-whisper>=1.0.0
 
 # Web Framework & Server
