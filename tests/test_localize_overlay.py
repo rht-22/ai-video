@@ -424,3 +424,67 @@ def test_bundled_jp_fonts_actually_render_japanese():
         ImageDraw.Draw(img).text((5, 5), "こんにちは 漢字 カタカナ ドンッ！", font=ft, fill=255)
         ink = sum(1 for p in img.getdata() if p > 40)
         assert ink > 2000, f"{name}: 일본어가 안 그려진다(글자 픽셀 {ink}) — 두부 의심"
+
+
+# ── 지연 임포트는 requirements 에 안 적혀도 문법 검사를 통과한다 ─────────────
+# 그래서 '깔렸는데 안 도는' 상태가 오래 안 보인다(soundfile 이 그랬다 — 2026-08-25
+# mm-06 에서 `PROBE_FAIL: No module named 'soundfile'` 로 처음 드러났다).
+# 아래는 overlay 계층이 실제로 import 하는 서드파티를 AST 로 훑어 requirements 와 맞댄다.
+
+# 없어도 되는 것들 — **사유가 있어야 여기 들어온다**(사유 없는 예외는 두지 않는다).
+OPTIONAL_IMPORTS = {
+    "GPT_SoVITS": "gptsovits 백엔드 전용(현재 tts_backend=elevenlabs · 롤백 경로)",
+    "tools":      "GPT-SoVITS 레포 안의 모듈 — 같은 이유",
+    "pyopenjtalk": "gptsovits/xtts 일본어 음소화 — 같은 이유",
+    "TTS":        "xtts 백엔드 전용",
+    "easyocr":    "OCR 3순위 폴백(detect._FALLBACK_ORDER) — 없으면 다음 후보로 넘어간다",
+    "anthropic":  "llm.py 의 대체 프로바이더 — 이 레포는 Gemini 를 쓴다",
+    "simple_lama_inpainting": "requirements-nodeps.txt 에 있다(낡은 핀 때문에 --no-deps)",
+}
+
+# import 이름 → 배포판 이름
+_DIST = {"cv2": "opencv", "PIL": "pillow", "yaml": "pyyaml", "skimage": "scikit-image",
+         "google": "google-genai", "faster_whisper": "faster-whisper",
+         "rapidocr_onnxruntime": "rapidocr", "dotenv": "python-dotenv"}
+
+
+def _lazy_third_party() -> dict:
+    """overlay 계층이 **함수 안에서** import 하는 서드파티 → 어느 파일에서."""
+    import ast as _ast
+    import sys as _sys
+    root = Path(__file__).resolve().parents[1] / "app" / "localize" / "overlay"
+    found: dict[str, set] = {}
+    for f in sorted(root.rglob("*.py")):
+        tree = _ast.parse(f.read_text(encoding="utf-8"))
+        for node in _ast.walk(tree):
+            if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                continue
+            for n in _ast.walk(node):
+                if isinstance(n, _ast.Import):
+                    for a in n.names:
+                        found.setdefault(a.name.split(".")[0], set()).add(f.name)
+                elif isinstance(n, _ast.ImportFrom) and n.module and n.level == 0:
+                    found.setdefault(n.module.split(".")[0], set()).add(f.name)
+    return {k: v for k, v in found.items()
+            if k not in _sys.stdlib_module_names and k != "app"}
+
+
+def test_every_lazy_import_is_declared_or_deliberately_optional():
+    req = (Path(__file__).resolve().parents[1] / "requirements.txt").read_text(
+        encoding="utf-8").lower()
+    missing = []
+    for mod, files in sorted(_lazy_third_party().items()):
+        if mod in OPTIONAL_IMPORTS:
+            continue
+        if _DIST.get(mod, mod).lower() not in req:
+            missing.append(f"{mod} ({'·'.join(sorted(files))})")
+    assert not missing, (
+        "overlay 가 import 하는데 requirements 에 없다 — 지연 임포트라 임포트 검사로는 "
+        "안 드러나고 그 단계에 닿아서야 죽는다:\n  " + "\n  ".join(missing))
+
+
+def test_optional_imports_are_still_actually_imported():
+    """예외 목록이 유령을 남기지 않게 — 코드에서 사라진 이름은 목록에서도 빠져야 한다."""
+    live = set(_lazy_third_party())
+    stale = sorted(set(OPTIONAL_IMPORTS) - live)
+    assert not stale, f"OPTIONAL_IMPORTS 에 코드에 없는 이름이 남았다: {stale}"
