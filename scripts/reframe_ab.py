@@ -125,10 +125,27 @@ def _env() -> dict:
     return info
 
 
+def resolve_job_dir(p: Path) -> Path:
+    """job 디렉토리로 정규화. 순수 — 테스트 대상.
+
+    후보를 찾는 명령이 `grep -l … outputs/*/edit_plan.json` 이라 **파일 경로가 그대로
+    붙여 넣어진다.** 그대로 두면 `…/edit_plan.json/checkpoint_probe.json` 을 열려다
+    `NotADirectoryError` 로 죽는데, 그 메시지는 무엇을 잘못 줬는지 안 알려준다."""
+    return p.parent if p.is_file() else p
+
+
 def run_once(job: Path, out: Path, *, limit: int | None) -> None:
     from app.modules.reframe import build_crop_timeline
 
-    probe = json.loads((job / "checkpoint_probe.json").read_text(encoding="utf-8"))
+    resolved = resolve_job_dir(job)
+    if resolved != job:
+        print(f"[reframe_ab] 파일이 주어져 job 디렉토리로 읽는다: {resolved}")
+    job = resolved
+    probe_path = job / "checkpoint_probe.json"
+    if not probe_path.exists():
+        raise SystemExit(f"job 디렉토리가 아니다(체크포인트 없음): {job}\n"
+                         f"  outputs/<작품_해시>/ 를 줄 것")
+    probe = json.loads(probe_path.read_text(encoding="utf-8"))
     plan = json.loads((job / "edit_plan.json").read_text(encoding="utf-8"))
     src = Path(probe["path"])
     if not src.exists():

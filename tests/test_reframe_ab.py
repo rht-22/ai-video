@@ -9,7 +9,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.reframe_ab import (  # noqa: E402
-    compare_embeddings, compare_keyframes, face_track_clips, verdict,
+    compare_embeddings, compare_keyframes, face_track_clips, resolve_job_dir,
+    verdict,
 )
 
 
@@ -105,3 +106,25 @@ def test_verdict_fails_when_nothing_was_compared():
     """0개 대조를 통과로 읽으면 '아무것도 안 한 A/B' 가 초록으로 나온다."""
     ok, reasons = verdict([], {"skipped": "x"}, emb_tol=1e-4)
     assert not ok and any("0개" in r for r in reasons)
+
+
+# ── 후보를 찾는 명령이 파일 경로를 뱉는다 ────────────────────────────────
+def test_resolve_job_dir_accepts_a_file_inside_the_job(tmp_path):
+    """`grep -l … outputs/*/edit_plan.json` 출력을 그대로 붙여 넣는 것이 자연스럽다."""
+    job = tmp_path / "작품_abc123"
+    job.mkdir()
+    plan = job / "edit_plan.json"
+    plan.write_text("{}", encoding="utf-8")
+    assert resolve_job_dir(plan) == job
+
+
+def test_resolve_job_dir_leaves_a_directory_alone(tmp_path):
+    job = tmp_path / "작품_abc123"
+    job.mkdir()
+    assert resolve_job_dir(job) == job
+
+
+def test_resolve_job_dir_leaves_a_missing_path_alone(tmp_path):
+    """없는 경로를 부모로 바꾸면 엉뚱한 곳을 job 으로 읽는다 — 그대로 두고 아래에서 실패시킨다."""
+    missing = tmp_path / "없는것"
+    assert resolve_job_dir(missing) == missing
