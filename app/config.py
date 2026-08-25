@@ -316,6 +316,15 @@ FONT_FAMILY_MAP = {
     "물마루": "Mulmaru",
     "Griun": "Griun PolFairness",
     "그리운 경찰공평체": "Griun PolFairness",
+    # 일본어 (현지화 overlay 계층 L-P4, 2026-08-25). Google Fonts 배포판 실측치.
+    # ⚠ Sans 네 웨이트가 **같은 패밀리명**이다 — ASS Fontname 만으로는 웨이트를 못 가른다
+    # (굵기는 Bold 플래그로 간다). overlay 의 굵기 선택은 font_map.yaml 이 **파일**을
+    # 직접 고르는 PIL 경로라 영향이 없고, 이 맵은 ASS 를 쓰는 쪽을 위한 것이다.
+    "NotoSansJP-Black": "Noto Sans JP",
+    "NotoSansJP-Bold": "Noto Sans JP",
+    "NotoSansJP-Medium": "Noto Sans JP",
+    "NotoSansJP-Regular": "Noto Sans JP",
+    "NotoSerifJP-Bold": "Noto Serif JP",
 }
 
 
