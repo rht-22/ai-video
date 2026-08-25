@@ -23,7 +23,12 @@ log = get_logger("render")
 # ── 줄 단위 스타일·타이밍 오버라이드 계약 (docs/subtitle-style-overrides.md) ──
 # ai-video edit_overrides/v3 subtitles[].style 과 같은 의미·범위. 두 경로(SHOTCONE·
 # 잔망루피)가 이 검증을 공유한다 — 계약이 갈라지면 편집실 WYSIWYG 이 깨진다.
-LINE_STYLE_KEYS = {"size", "y", "color", "rotate"}
+LINE_STYLE_KEYS = {"size", "y", "color", "rotate", "width"}
+# 줄 폭(F-412) 허용 범위·기준 폭 — vlp 23648e0·ai-video SUBTITLE_WIDTH_RANGE 와 1:1.
+# width 미지정은 기준 폭(0.852)과 같다는 계약이라 글자 수 환산의 앵커도 이 값이다:
+# 기본 16자 × (width/0.852). 편집실 유령(edLayOutVlp 미러)이 같은 식을 쓴다.
+LINE_WIDTH_RANGE = (0.3, 1.0)
+LINE_WIDTH_BASE = (1080 - 2 * 80) / 1080
 _COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
 
@@ -31,7 +36,9 @@ def validate_line_style(style: Any) -> dict[str, Any]:
     """style 오버라이드 검증 → 정규화 사본. 위반은 ValueError(조용한 무시 = 사람 값 증발).
 
     size: 양수(1080×1920 캔버스 px) · y: 0~1(자막 하단, 하단=1) · color: #RRGGBB ·
-    rotate: -180~180(도, **시계방향 양수** — images 와 동일 규약). 모르는 키 즉시 거절."""
+    rotate: -180~180(도, **시계방향 양수** — images 와 동일 규약) ·
+    width: 0.3~1.0(그 줄이 쓸 가로 폭 비율, F-412 — 글자 크기는 그대로 두고 통만 넓혀
+    줄이 접히는 것을 막는다). 모르는 키 즉시 거절."""
     if not isinstance(style, dict):
         raise ValueError(f"style 은 객체여야 합니다: {style!r}")
     unknown = set(style) - LINE_STYLE_KEYS
@@ -58,6 +65,13 @@ def validate_line_style(style: Any) -> dict[str, Any]:
         if not -180.0 <= rot <= 180.0:
             raise ValueError(f"style.rotate 는 -180~180 도: {style['rotate']!r}")
         out["rotate"] = rot
+    if style.get("width") is not None:
+        w = float(style["width"])
+        if not LINE_WIDTH_RANGE[0] <= w <= LINE_WIDTH_RANGE[1]:
+            raise ValueError(
+                f"style.width 는 {LINE_WIDTH_RANGE[0]}~{LINE_WIDTH_RANGE[1]} 비율: "
+                f"{style['width']!r}")
+        out["width"] = w
     return out
 
 
@@ -134,11 +148,41 @@ def resolve_font(style: Style, font_map: dict[str, Any]) -> str:
     return font_map.get("default", "NotoSansJP-Bold.ttf")
 
 
+def width_max_chars(base_chars: int, style: Optional[dict[str, Any]]) -> int:
+    """style.width(F-412) → 이 줄의 글자 수 한도. 미지정이면 base 그대로.
+
+    16자(기본)가 곧 통의 폭이다 — 픽셀 여백보다 이 한도가 훨씬 좁아서, 폭을 넓힌다는
+    것은 사실상 이 숫자를 늘린다는 뜻이다. 앵커는 LINE_WIDTH_BASE(계약 주석 참고)."""
+    w = (style or {}).get("width")
+    if w is None:
+        return base_chars
+    return max(3, round(base_chars * float(w) / LINE_WIDTH_BASE))
+
+
+def width_margin_lr(style: Optional[dict[str, Any]], play_res_x: int) -> int:
+    """style.width → 이벤트 MarginL/R(px, 좌우 대칭). 미지정 0(=스타일 기본값).
+
+    글자 수 한도(width_max_chars)가 1차 관문이고 이 여백은 2차(libass) 안전망이다 —
+    폭을 좁힌 줄이 픽셀에서도 좁아지게. 최소 1(이벤트 여백 0 = ASS '스타일 기본값')."""
+    w = (style or {}).get("width")
+    if w is None:
+        return 0
+    return max(1, round(play_res_x * (1.0 - float(w)) / 2))
+
+
 def wrap_text(text: str, max_chars: int) -> list[str]:
-    """CJK 줄바꿈: 공백이 없을 수 있으므로 글자 수 기준 단순 래핑."""
-    text = text.strip()
+    """CJK 줄바꿈: 공백이 없을 수 있으므로 글자 수 기준 단순 래핑.
+
+    **사람이 넣은 줄바꿈(개행)이 있으면 그 경계를 그대로 쓰고 재분할하지 않는다**
+    (F-412 — ai-video _lay_out_for_ass·vlp 23648e0 과 같은 규약: 편집실에서 정한
+    경계가 정본이다. 종전엔 text.split() 이 개행을 공백과 함께 삼켰다)."""
+    text = str(text).replace("\r\n", "\n").strip()
     if not text:
         return []
+    manual = [ln.strip() for ln in text.split("\n") if ln.strip()]
+    if len(manual) > 1:
+        return manual
+    text = manual[0] if manual else ""
     if " " in text:  # 공백 있으면 단어 단위 우선
         words, line, out = text.split(), "", []
         for w in words:
@@ -191,14 +235,17 @@ def build_ass(events: list[dict[str, Any]], width: int, height: int,
     ]
     lines = list(header)
     for ev in events:
-        wrapped = wrap_text(ev["text"], line_max_chars)
+        style_ov = ev.get("style") or {}
+        # 폭(F-412): 글자 수 한도가 1차 관문(기본 16자가 곧 통의 폭이다), 이벤트
+        # MarginL/R 은 2차(libass) 안전망. 미지정이면 둘 다 종전과 바이트 동일.
+        wrapped = wrap_text(ev["text"], width_max_chars(line_max_chars, style_ov))
         if not wrapped:
             continue
         text = "\\N".join(wrapped)
         an = _align_code(ev.get("position", "bottom-center"))
-        style_ov = ev.get("style") or {}
         tags = style_ass_tags(style_ov, height) if style_ov else ""
         ev_margin_v = 0
+        ev_margin_lr = width_margin_lr(style_ov, width)
         if style_ov.get("y") is not None:
             if an <= 3:                       # 하단 정렬 → MarginV (v3 와 동일 방식)
                 ev_margin_v = style_margin_v(style_ov, height)
@@ -206,7 +253,7 @@ def build_ass(events: list[dict[str, Any]], width: int, height: int,
                 tags += f"\\pos({width // 2},{max(1, round(float(style_ov['y']) * height))})"
         lines.append(
             f"Dialogue: 0,{ass_timestamp(ev['start'])},{ass_timestamp(ev['end'])},"
-            f"Default,,0,0,{ev_margin_v},,{{\\an{an}{tags}}}{text}")
+            f"Default,,{ev_margin_lr},{ev_margin_lr},{ev_margin_v},,{{\\an{an}{tags}}}{text}")
     return "\n".join(lines) + "\n"
 
 
@@ -235,12 +282,12 @@ def build_bilingual_ass(events: list[dict[str, Any]], width: int, height: int,
     ]
     lines = list(header)
     for ev in events:
-        wrapped = wrap_text(ev["text"], line_max_chars)
+        style_ov = ev.get("style") or {}
+        wrapped = wrap_text(ev["text"], width_max_chars(line_max_chars, style_ov))
         if not wrapped:
             continue
         text = "\\N".join(wrapped)
         bbox = ev.get("bbox")
-        style_ov = ev.get("style") or {}
         extra = style_ass_tags(style_ov, height) if style_ov else ""
         if style_ov.get("y") is not None:      # 사용자 위치 — 자동 배치보다 우선
             cx = (bbox[0] + bbox[2]) // 2 if bbox else width // 2

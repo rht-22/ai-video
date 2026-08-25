@@ -612,6 +612,8 @@ def _synthesize_elevenlabs(text: str, voice_id: str, config: dict[str, Any]) -> 
 
 def synthesize_segment(text: str, config: dict[str, Any], voice_id: Optional[str] = None,
                        speaker_wav: Optional[str] = None, lang: Optional[str] = None) -> bytes:
+    # F-412: 문구 안 줄바꿈은 **자막용** — 합성 입력만 공백으로(vlp 23648e0 과 동일).
+    text = " ".join(str(text).split())
     backend = dub_backend(config)
     if backend == "gptsovits":
         seg_lang = lang or _detect_lang(text, config.get("dub", {}).get("language", "ja"))
@@ -1075,7 +1077,22 @@ def dub_from_video(video_id: str, video: str, level: str, config: dict[str, Any]
     from app.localize.overlay import render as render_mod
     from app.localize.overlay.translate import transcreate
 
-    segs = transcribe(video, config, language=source_lang)
+    # ── 재렌더 안정화(2026-08-25 잔망루피 실측 — vlp 23648e0 과 같은 수정) ────
+    # ASR 를 캐시한다: 재렌더가 ASR 부터 다시 돌면 세그 경계·개수가 흔들려 오버라이드
+    # 좌표(idx=세그 순번)가 다른 줄에 붙고 번역 캐시도 원문 불일치로 통째 미스난다.
+    _cache_base = ensure_dir(resolve_path(f"{config['paths']['outputs_dir']}/{video_id}"))
+    _asr_cache = _cache_base / "dub_asr.json"
+    segs = None
+    if _asr_cache.exists():
+        try:
+            segs = read_json(_asr_cache)
+            log.info("ASR 캐시 재사용: %d세그 (%s)", len(segs), _asr_cache.name)
+        except (OSError, ValueError) as e:
+            log.warning("ASR 캐시 읽기 실패(다시 받아쓰기): %s", e)
+            segs = None
+    if segs is None:
+        segs = transcribe(video, config, language=source_lang)
+        write_json(_asr_cache, segs)
     if not segs:
         raise ValueError("받아쓰기된 대사 없음 — 대사 없는 영상(ASMR 등)일 수 있음. 대사 있는 영상 필요.")
     if config.get("dub", {}).get("dialogue_only", False):
@@ -1108,8 +1125,32 @@ def dub_from_video(video_id: str, video: str, level: str, config: dict[str, Any]
     # → 원문 슬롯 초수 × 합성 발화속도(자/초)로 문자 예산을 걸어 간결한 번역 유도.
     cps = float(config.get("dub", {}).get("dub_chars_per_sec", 5.5))
     budgets = [char_budget(s["end"] - s["start"], cps) for s in segs]
-    entries = transcreate([s["text"] for s in segs], config,   # 한국어→일본어(LLM, persona)
-                          char_budgets=budgets)
+    # 번역(LLM) 캐시 — transcreate 는 비결정적이라 재렌더마다 안 고친 줄까지 문구가
+    # 통째로 바뀌고 그 문구로 합성까지 다시 된다('아예 새로운 TTS 와 자막', 실측).
+    # 원문 목록이 정확히 같을 때만 재사용 — ASR 캐시(위)가 그 전제를 지킨다.
+    # 사람 수정은 이 **뒤** overrides 병합이 덮으므로 캐시와 무관하게 항상 이긴다.
+    _sources = [s["text"] for s in segs]
+    _tr_cache = _cache_base / "dub_translations.json"
+    entries = None
+    if _tr_cache.exists():
+        try:
+            _tc = read_json(_tr_cache)
+            if _tc.get("sources") == _sources:
+                from app.localize.overlay.schemas import TranslationEntry
+                entries = [TranslationEntry(source=e["source"], target=e["target"])
+                           for e in _tc.get("entries", [])]
+                log.info("번역 캐시 재사용: %d줄 (%s)", len(entries), _tr_cache.name)
+            else:
+                log.info("번역 캐시 원문 불일치 — 다시 번역")
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            log.warning("번역 캐시 읽기 실패(다시 번역): %s", e)
+            entries = None
+    if entries is None:
+        entries = transcreate(_sources, config,   # 한국어→일본어(LLM, persona)
+                              char_budgets=budgets)
+        write_json(_tr_cache, {"sources": _sources,
+                               "entries": [{"source": e.source, "target": e.target}
+                                           for e in entries]})
     # 한글 잔존 교정 + 괄호 지문 제거: LLM 이 고유명사(마라엽'떡')를 한글로 남기거나
     # 지문(（もぐもぐ）)을 넣으면 더빙이 억지 발음해 뭉개짐 → 가타카나 변환 + 지문 제거.
     jmap = {e.source: strip_stage_directions(fix_leaked_korean(e.target, config)) for e in entries}
@@ -1133,9 +1174,12 @@ def dub_from_video(video_id: str, video: str, level: str, config: dict[str, Any]
                                      duration=float(_common.probe(video).get("duration", 0.0)))
             events, n_ov = apply_dub_overrides(events, ov)
             log.info("반려 수정 병합: 더빙 대사 %d건 교체(overrides.json)", n_ov)
-        except Exception as e:  # noqa: BLE001 — 병합 실패가 더빙을 죽이지 않게(원문대로 진행)
-            cuts = []
-            log.warning("overrides.json 병합 실패(무시하고 원문 진행): %s", e)
+        except Exception as e:  # noqa: BLE001
+            # 조용히 원문으로 진행하지 않는다(2026-08-25 잔망루피 실측 — vlp 23648e0 과
+            # 같은 수정): 구 엔진이 모르는 style 키가 여기서 삼켜져, 사람이 고친 값이
+            # 전부 무시된 채 전체 재실행이 성공으로 끝났다. overrides.json 이 있다는 것
+            # 자체가 수정 재렌더라는 뜻 — 목적을 못 지키면 실패시켜 검수함에 남긴다.
+            raise ValueError(f"overrides.json 병합 실패 — 수정 재렌더를 중단합니다: {e}") from e
     # 구간 잘라내기(E9): use:false·문구·타이밍 병합 **뒤**, pairs·합성·SRT 기록 **전** —
     # 사용자 타이밍(end_fixed)도 당김 대상이다(절대값이 아니라 그 장면에 붙어 있다).
     # 완전히 컷 안인 줄은 use=false 와 동일 의미로 표시돼 아래 한 곳에서 함께 빠지고,
