@@ -256,9 +256,11 @@ def test_the_move_log_is_cleared_per_episode(tmp_path):
 
 
 def test_pipeline_records_that_the_judgement_ran_even_with_no_band():
-    """띠를 못 찾아도 판정이 돌았다는 사실과 표본 수는 남긴다."""
+    """띠를 못 찾아도 판정이 돌았다는 사실과 표본 수는 남긴다.
+    ⚠ 초판은 결과(_burned_band or _BURNED_PROFILES)로 걸어 이름값을 못 했다 — 둘 다 비면
+    단계가 사라져 '안 돌았다'와 같아진다(8/25 커리어데이 실측)."""
     src = (Path(__file__).resolve().parents[1] / "app" / "pipeline.py").read_text(encoding="utf-8")
-    assert 'if payload.show_subtitles and (_burned_band or _BURNED_PROFILES):' in src
+    assert 'if payload.show_subtitles and _BURNED_STATE.get("ran"):' in src
     assert '"profile_frames": len(_BURNED_PROFILES),' in src
     # 구간 결과는 ASS 조립 뒤에 채워진다 — 같은 dict 를 들고 있다가 마지막에 붙인다.
     assert '_avoid_log["windowed"] = list(_BURNED_WINDOW_MOVES)' in src
@@ -268,3 +270,33 @@ def test_pipeline_records_the_text_clamp_in_the_style_step():
     src = (Path(__file__).resolve().parents[1] / "app" / "pipeline.py").read_text(encoding="utf-8")
     assert '"text_clamp": _text_clamp,' in src
     assert '_text_clamp = {"clamped": len(_clamp_notes), "of": len(_clamped),' in src
+
+
+# ── 감사 조건은 '결과'가 아니라 '판정이 돌았는가' (8/25 커리어데이 실측) ──
+def test_avoid_burned_step_logged_even_when_nothing_found():
+    """띠도 표본도 못 찾은 실행이 단계 부재로 남으면 '안 돌았다'와 구분이 안 된다.
+    같은 설정의 두 채널이 실제로 그렇게 갈렸다(커리어데이 단계 없음 / 도깨비 표본 110)."""
+    import inspect
+    from app import pipeline
+    # 결과로 거는 옛 조건이 되살아나면 같은 구멍이 다시 난다
+    assert "and (_burned_band or _BURNED_PROFILES)" not in inspect.getsource(pipeline.run_pipeline)
+
+    fn = inspect.getsource(pipeline._detect_burned_band_cached)
+    assert "_BURNED_STATE.clear()" in fn                      # 편마다 초기화
+    # 채널이 끈 경우(off)는 ran 이 서기 전에 빠져나간다 = 종전대로 무기록
+    assert fn.index('if mode != "auto":') < fn.index('_BURNED_STATE["ran"] = True')
+    assert '_BURNED_STATE["error"]' in fn                     # 왜 비었는지도 남긴다
+
+
+def test_avoid_burned_state_is_reset_per_episode():
+    """모듈 수준 저장소라 한 프로세스에서 여러 편을 돌리면 앞 편 판정이 남는다."""
+    from app.pipeline import _BURNED_STATE, _BURNED_PROFILES, _BURNED_WINDOW_MOVES
+    import inspect
+    from app import pipeline
+    fn = inspect.getsource(pipeline._detect_burned_band_cached)
+    body = fn.split('mode = str(')[0]
+    for name in ("_BURNED_PROFILES[:] = []", "_BURNED_WINDOW_MOVES[:] = []",
+                 "_BURNED_STATE.clear()"):
+        assert name in body, name
+    assert isinstance(_BURNED_STATE, dict)
+    assert isinstance(_BURNED_PROFILES, list) and isinstance(_BURNED_WINDOW_MOVES, list)
