@@ -254,6 +254,18 @@ def localizable(text: str, confidence: float, bbox, *, min_conf: float = 0.0,
     return bool(rx.search(txt)) if rx else True
 
 
+def text_persistence(doc: DetectionDoc) -> dict:
+    """텍스트 → 그것이 나타난 **샘플 프레임 수**. 순수.
+
+    같은 문구가 여러 위치에 잡혀도 한 프레임에서는 1로 센다(같은 자막이다)."""
+    seen: dict = {}
+    for f in doc.frames:
+        for t in {str(r.text or "").strip() for r in f.regions}:
+            if t:
+                seen[t] = seen.get(t, 0) + 1
+    return seen
+
+
 def filter_localizable(doc: DetectionDoc, config: dict[str, Any]) -> tuple:
     """현지화 대상만 남긴 DetectionDoc + 버린 목록. 순수(사본을 만든다).
 
@@ -266,15 +278,28 @@ def filter_localizable(doc: DetectionDoc, config: dict[str, Any]) -> tuple:
                                      dcfg.get("min_confidence", 0.5))),
           "min_area_px": int(dcfg.get("min_area_px", 400)),
           "source_lang": str(dcfg.get("source_lang", "ko"))}
+    # 🛑 두 번째 축: **한 샘플에만 나타난 탐지는 버린다.**
+    #    실측 2026-08-26 — 걸러야 했던 탐지가 **전부** 정확히 한 샘플(0.50초)짜리였다
+    #    (13건 + 재실행의 `'은` 1건). 화면에 실제로 박힌 글자는 여러 샘플에 걸쳐 남는다.
+    #    문자 종류·크기·신뢰도로는 못 잡는 것이 이것이다: `'은` 은 한글이고 상자도
+    #    211×169 로 컸다 — 다만 **딱 한 번 보였다**. 사용자 확인: 그런 말은 영상에 없다.
+    #    ⚠ 대가: 0.5초만 스치는 진짜 자막은 함께 버려진다. `min_frames: 1` 로 끈다.
+    min_frames = max(1, int(dcfg.get("min_frames", 2)))
+    persist = text_persistence(doc) if min_frames > 1 else {}
     dropped, frames = [], []
     for f in doc.frames:
         keep = []
         for r in f.regions:
-            if localizable(r.text, r.confidence, r.bbox, **kw):
+            txt = str(r.text or "").strip()
+            n_seen = persist.get(txt, 0) if min_frames > 1 else min_frames
+            if localizable(r.text, r.confidence, r.bbox, **kw) and n_seen >= min_frames:
                 keep.append(r)
             else:
+                why = ("한 샘플만 보임" if n_seen and n_seen < min_frames
+                       else "현지화 대상 아님")
                 dropped.append({"frame_idx": f.frame_idx, "timestamp": f.timestamp,
-                                "bbox": list(r.bbox), "text": r.text,
+                                "bbox": list(r.bbox), "text": r.text, "why": why,
+                                "frames_seen": n_seen,
                                 "confidence": round(float(r.confidence or 0.0), 3)})
         if keep:
             frames.append(replace(f, regions=keep))

@@ -68,7 +68,9 @@ def _doc(texts, roi=None):
 
 
 def test_filter_keeps_only_targets_and_records_the_rest():
-    doc, dropped = filter_localizable(_doc(["루피야"] + REAL_NOISE), {})
+    # 이 절은 **문자·크기 축**만 본다 — 지속 축(min_frames)은 아래 절이 따로 고정한다.
+    doc, dropped = filter_localizable(_doc(["루피야"] + REAL_NOISE),
+                                      {"detect": {"min_frames": 1}})
     kept = [r.text for f in doc.frames for r in f.regions]
     assert kept == ["루피야"]
     assert len(dropped) == len(REAL_NOISE)          # 조용히 사라지지 않는다
@@ -101,3 +103,51 @@ def test_the_filter_runs_before_detections_are_saved():
     body = src.split("def detect(", 1)[1]
     assert body.index("filter_localizable(doc, config)") < body.index("doc.save(out)")
     assert "detections_dropped.json" in body
+
+
+# ── 두 번째 축: 한 샘플에만 보인 탐지 (2026-08-26 재실측) ────────────────────
+#
+# 첫 필터를 넣고 다시 돌렸더니 28건이 걸러지고 **1건이 남았다**:
+#   ko="'은" ja='〜は' · 10.01~10.51 (0.50s) · box=[129,514,340,683] = 211×169
+# 사용자 확인: 영상에 그런 말은 없다. 한글이고 상자도 커서 앞의 세 축으로는 못 잡는다.
+# 남은 서명은 하나 — **딱 한 샘플에만 보였다**(앞선 13건도 전부 0.5005초였다).
+
+def _doc_frames(per_frame):
+    """per_frame: [[text, …], …] — 프레임마다의 텍스트 목록."""
+    frames = []
+    for i, texts in enumerate(per_frame):
+        frames.append(FrameDetections(
+            frame_idx=i * 15, timestamp=i * 0.5,
+            regions=[Region(bbox=(129, 514, 340, 683), text=t, confidence=0.9, style=Style())
+                     for t in texts]))
+    return DetectionDoc(video_id="v", fps=30.0, width=1080, height=1920, sample_every=15,
+                        ocr_backend="paddleocr", roi=None, frames=frames)
+
+
+def test_the_single_sample_ghost_is_dropped():
+    """실측 그대로 — 진짜 자막은 여러 샘플에 남고 유령은 한 번만 보인다."""
+    doc, dropped = filter_localizable(
+        _doc_frames([["루피야"], ["루피야", "'은"], ["루피야"]]), {})
+    kept = {r.text for f in doc.frames for r in f.regions}
+    assert kept == {"루피야"}
+    assert [d["text"] for d in dropped] == ["'은"]
+    assert dropped[0]["why"] == "한 샘플만 보임" and dropped[0]["frames_seen"] == 1
+
+
+def test_persistence_counts_frames_not_boxes():
+    """같은 문구가 한 프레임에 여러 번 잡혀도 1이다 — 아니면 유령이 통과한다."""
+    from app.localize.overlay.detect import text_persistence
+    assert text_persistence(_doc_frames([["헐", "헐", "헐"]])) == {"헐": 1}
+
+
+def test_short_real_subtitles_are_the_known_cost():
+    """⚠ 0.5초짜리 진짜 자막도 함께 버려진다 — 그 대가를 알고 켠 것이다(min_frames=1 로 끔)."""
+    doc, dropped = filter_localizable(_doc_frames([["쿵!"]]), {})
+    assert dropped and doc.frames == []
+    doc2, dropped2 = filter_localizable(_doc_frames([["쿵!"]]), {"detect": {"min_frames": 1}})
+    assert not dropped2 and len(doc2.frames) == 1
+
+
+def test_two_samples_is_enough():
+    doc, dropped = filter_localizable(_doc_frames([["루피야"], ["루피야"]]), {})
+    assert not dropped and len(doc.frames) == 2
