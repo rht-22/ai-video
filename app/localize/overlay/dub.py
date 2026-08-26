@@ -898,6 +898,44 @@ def fix_leaked_korean(text: str, config: dict[str, Any]) -> str:
     return text
 
 
+# ── 상용구 환각 (2026-08-26 실사고로 신설 — vlp 에 없다) ────────────────────
+#
+# 🛑 `-wgxMaRHaYQ`(노래뿐인 편)에서 받아쓰기가 14초 전체에 대해 **딱 한 문장**을 지어냈다:
+#    `다음 영상에서 만나요!` → 그 뒤 전부가 그것을 사실로 믿고 진행했다 —
+#    demucs 가 보컬(=노래 가사)을 지우고, 그 자리에 없는 말을 더빙·자막으로 박았다.
+#    백체크는 CER 0.11 로 **통과**했다: TTS 는 시킨 대로 말했으니 당연하다. 백체크는
+#    환각을 검증하는 장치가 아니다.
+#
+# `reliable_segment`(no_speech·logprob)는 이 건을 못 잡았다 — 음악 위 환각은 모델이
+# 자신 있게 내놓는다. 남은 서명은 **문구 + 길이**다: 진짜로 그 말을 했다면 세그먼트가
+# 그 발화 길이(1~2초)지, 영상 전체가 아니다.
+_BOILERPLATE = (
+    "다음 영상에서 만나요", "다음 영상에서 봐요", "구독과 좋아요", "시청해주셔서 감사",
+    "시청해 주셔서 감사", "구독 좋아요", "유료 광고 포함", "감사합니다 다음",
+    "ご視聴ありがとう", "チャンネル登録", "次の動画で",
+    "thanks for watching", "subscribe to", "see you in the next",
+)
+
+
+def is_boilerplate(text: str) -> bool:
+    """받아쓰기가 음악·무음에서 잘 지어내는 상용 문구인가. 순수 — 테스트 대상."""
+    t = "".join(str(text or "").split()).lower()
+    return any("".join(b.split()).lower() in t for b in _BOILERPLATE)
+
+
+def hallucinated_boilerplate(text: str, seg_sec: float, total_sec: float = 0.0,
+                             *, max_sec: float = 5.0, cover: float = 0.8) -> bool:
+    """상용구 **이면서** 길이가 발화답지 않으면 환각으로 본다. 순수 — 테스트 대상.
+
+    ⚠ 문구만으로 버리지 않는다 — 진짜로 "다음 영상에서 만나요!" 라고 말하는 편이 있다.
+    그때 세그먼트는 그 발화 길이(1~2초)다. 실사고의 그것은 **14초 영상의 0~14초**였다."""
+    if not is_boilerplate(text):
+        return False
+    if seg_sec >= float(max_sec):
+        return True
+    return bool(total_sec) and seg_sec >= float(cover) * float(total_sec)
+
+
 def reliable_segment(no_speech_prob: float, avg_logprob: float,
                      max_no_speech: float = 0.5, min_logprob: float = -1.2) -> bool:
     """Whisper 할루시네이션 필터 — 음악/효과음에서 '유료 광고 포함' 류 문구를 지어내는
@@ -936,8 +974,10 @@ def transcribe(media: str, config: dict[str, Any], language: str = "ko") -> list
     vad = bool(dconf.get("asr_vad_filter", True))
     max_ns = float(dconf.get("asr_max_no_speech", 0.5))
     min_lp = float(dconf.get("asr_min_logprob", -1.2))
+    max_bp = float(dconf.get("asr_boilerplate_max_sec", 5.0))
     model = WhisperModel(size, device="cpu", compute_type="int8")
-    segs, _ = model.transcribe(str(media), language=language, vad_filter=vad)
+    segs, info = model.transcribe(str(media), language=language, vad_filter=vad)
+    total = float(getattr(info, "duration", 0.0) or 0.0)
     out = []
     for s in segs:
         if not s.text.strip():
@@ -946,7 +986,17 @@ def transcribe(media: str, config: dict[str, Any], language: str = "ko") -> list
             log.info("ASR 할루시네이션 의심 제외: %r (no_speech=%.2f, logprob=%.2f)",
                      s.text.strip(), s.no_speech_prob, s.avg_logprob)
             continue
+        if hallucinated_boilerplate(s.text, float(s.end) - float(s.start), total,
+                                    max_sec=max_bp):
+            # 크게 남긴다 — 이걸 놓치면 노래가 통째로 더빙된다(2026-08-26 실사고).
+            log.warning("ASR 상용구 환각 제외: %r (%.1fs / 영상 %.1fs) — 음악·무음 구간에서 "
+                        "받아쓰기가 지어낸 문장이다", s.text.strip(),
+                        float(s.end) - float(s.start), total)
+            continue
         out.append({"start": float(s.start), "end": float(s.end), "text": s.text.strip()})
+    if not out:
+        log.warning("받아쓸 대사가 없다(노래·효과음만인 편일 수 있다) — 더빙하지 않는다. "
+                    "보컬 제거도 하지 않으므로 원곡이 그대로 남는다")
     return out
 
 

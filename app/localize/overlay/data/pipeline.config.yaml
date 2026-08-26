@@ -148,6 +148,11 @@ dub:                               # Level C 한정. 게이트 통과 후에만.
   asr_vad_filter: false            # VAD 는 짧은 발화 드롭+타이밍뭉갬(2026-07-08 '요음!' 누락) → off.
                                    # 음악 오검출은 아래 할루시네이션 필터가 차단(no_speech/logprob)
   asr_max_no_speech: 0.5           # 할루시네이션 필터: no_speech_prob 초과 세그 제외
+  # 상용구 환각(2026-08-26 실사고 -wgxMaRHaYQ): 노래뿐인 14초 편에서 받아쓰기가
+  # 전 구간에 '다음 영상에서 만나요!' 한 문장을 지어냈고, 그것을 믿고 보컬을 지운 뒤
+  # 없는 말을 더빙했다. no_speech·logprob 는 못 잡는다(모델이 자신 있게 낸다).
+  # 상용 문구이면서 이 길이를 넘으면(또는 영상의 80% 이상을 덮으면) 환각으로 본다.
+  asr_boilerplate_max_sec: 5.0
   asr_min_logprob: -1.2            # 할루시네이션 필터: avg_logprob 미만 세그 제외
   # 음악-only 쇼츠는 강제 ko 인식이 '구독과 좋아요' 류 문구를 지어내며 위 두 필터를
   # 통과한다(2026-07-13 cvE0wNNrju4 실측: no_speech 0.372, logprob -1.052 로 통과,
