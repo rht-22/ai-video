@@ -19,6 +19,11 @@ from pathlib import Path
 
 from app.modules.ffmpeg_utils import find_ffmpeg_command
 
+# ElevenLabs 경로의 창 맞추기 눈금(EL_SPEED: normal 1.0 · fast 1.1 · very_fast 1.2).
+# ⚠ edge-tts 의 +0/+15/+30% 와 **끝이 다르다** — ElevenLabs 는 문서 허용 상한이 1.2 라
+# 더 못 올린다. 그래도 안 맞으면 아래 _trim_to_window 가 창 길이로 자른다(E-L3t 계약).
+EL_SPEED_BUMPS = ("normal", "fast", "very_fast")
+
 # edge-tts rate(%) 기준값 — ai-video VOICE_PRESETS 의 speed 라벨과 같은 어휘다.
 SPEED_BASE = {"very_slow": -25, "slow": -10, "normal": 0, "fast": 10, "very_fast": 25}
 RATE_BUMPS = (0, 15, 30)          # 창을 넘으면 이만큼씩 올려 재합성
@@ -95,6 +100,8 @@ def l3t_tts(job: Path, backup: Path, locale_cfg: dict):
     import asyncio
 
     import edge_tts
+
+    from app.modules.tts import is_elevenlabs_voice, synthesize_tts
     vmap = locale_cfg.get("tts_voice_map", {})
     for c in cues:
         cue = c["cue"]
@@ -114,15 +121,22 @@ def l3t_tts(job: Path, backup: Path, locale_cfg: dict):
         # cue["text"] 자체는 보존한다 — 자막(build_tts_ass)이 그 줄바꿈을 그대로 그린다.
         text = " ".join(str(cue["text"]).split())
         dur = 0.0
-        for bump in RATE_BUMPS:
-            rate = rate_string(base, bump)
+        for bump, speed_label in zip(RATE_BUMPS, EL_SPEED_BUMPS):
+            if is_elevenlabs_voice(prof["voice_id"]):
+                # E12 접두사 경로 — 편집실이 쓰는 것과 **같은 통로**다(키 검사·실패 분류·
+                # 토큰 만료 폴백이 거기 있다). 창 맞추기는 rate 대신 speed 라벨로 한다:
+                # ElevenLabs 는 0.7~1.2 만 받으므로 edge-tts 의 +0/+15/+30% 와 눈금이 다르다.
+                synthesize_tts(text, mp3, lang="ja", voice=prof["voice_id"],
+                               speed=speed_label)
+            else:
+                rate = rate_string(base, bump)
 
-            async def _run():
-                await edge_tts.Communicate(
-                    text, prof["voice_id"], rate=rate, pitch=prof.get("pitch", "+0Hz")
-                ).save(str(mp3))
+                async def _run():
+                    await edge_tts.Communicate(
+                        text, prof["voice_id"], rate=rate, pitch=prof.get("pitch", "+0Hz")
+                    ).save(str(mp3))
 
-            asyncio.run(_run())
+                asyncio.run(_run())
             dur = _audio_dur(mp3)
             if fits_window(dur, window):
                 break
