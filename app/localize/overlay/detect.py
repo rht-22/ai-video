@@ -10,10 +10,13 @@
 from __future__ import annotations
 
 import argparse
+import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional
 
-from app.localize.overlay.common import get_logger, load_config, resolve_path
+from app.localize.overlay.common import (get_logger, load_config, resolve_path,
+                                         write_json)
 from app.localize.overlay.schemas import BBox, DetectionDoc, FrameDetections, Region, Style
 
 log = get_logger("detect")
@@ -206,6 +209,78 @@ def estimate_style(frame_bgr, bbox: BBox, width: int, height: int) -> Style:
 
 
 # ── 메인 탐지 ────────────────────────────────────────────────────────────
+# ── 현지화 대상 판정 (2026-08-26 실측으로 신설 — vlp 에 없다) ────────────────
+#
+# 🛑 실사고: 잔망루피 `a6wO8o91Oi0`(route B) 완성본에 인형 몸통 한가운데 얼룩이 남았다.
+#    `ja_events.json` 13건이 **전부 글자가 아니었다**: `-` `・` `ATAL` `2` `U` `AI`
+#    `：` `'9` `L`. 인형 표면의 무늬·경계·반사를 OCR 이 글자로 잡은 것이다.
+#
+#    route B 는 "지우고 그 자리에 일본어를 그린다"라서, 그 노이즈 자리를 **인페인팅으로
+#    지우고** 같은 노이즈를 다시 그렸다. 화면에 남은 것이 그 얼룩이다.
+#
+#    구조적 원인: 파이프라인이 마스크·인페인팅을 번역보다 **먼저** 하고, 마스크는
+#    탐지된 모든 상자를 쓴다(`mask.build_masks`). 즉 '지울지'를 '번역해서 그릴 것인가'와
+#    무관하게 정한다. 그래서 판정을 **탐지가 끝나는 이 지점 한 곳**에서 한다 —
+#    여기서 걸러야 마스크·렌더·검수 카드가 **같은 목록**을 본다.
+#
+# 규율: 버린 것은 조용히 사라지지 않는다(`detections_dropped.json` + 로그).
+_SCRIPT_RE = {
+    "ko": re.compile(r"[가-힣ㄱ-ㆎ]"),
+    "ja": re.compile(r"[぀-ゟ゠-ヿ㐀-䶿一-鿿]"),
+    "en": re.compile(r"[A-Za-z]"),
+}
+
+
+def localizable(text: str, confidence: float, bbox, *, min_conf: float = 0.0,
+                min_area_px: int = 0, source_lang: str = "ko") -> bool:
+    """이 탐지가 **현지화 대상**인가 — 지우고 그 자리에 번역을 그릴 것인가. 순수.
+
+    셋을 본다: ① 소스 언어 문자가 실제로 들어 있는가 ② 신뢰도 ③ 상자 넓이.
+    ①이 핵심이다 — 우리가 지우는 이유는 그 자리에 번역을 그리려는 것이고, 소스 문자가
+    없으면 번역할 것이 없다(그대로 다시 그리게 된다). 모르는 언어면 ①은 건너뛴다.
+    """
+    txt = str(text or "").strip()
+    if not txt:
+        return False
+    if float(confidence or 0.0) < float(min_conf):
+        return False
+    try:
+        x1, y1, x2, y2 = (int(v) for v in bbox)
+        if (x2 - x1) * (y2 - y1) < int(min_area_px):
+            return False
+    except (TypeError, ValueError):
+        pass                     # 상자가 깨졌으면 넓이로 버리지 않는다(오판 금지)
+    rx = _SCRIPT_RE.get(str(source_lang or "").lower())
+    return bool(rx.search(txt)) if rx else True
+
+
+def filter_localizable(doc: DetectionDoc, config: dict[str, Any]) -> tuple:
+    """현지화 대상만 남긴 DetectionDoc + 버린 목록. 순수(사본을 만든다).
+
+    ⚠ ROI(`--subtitle-area`)를 사람이 지정한 실행은 **거르지 않는다** — 사람이 그
+    사각형을 자막이라고 말한 것이다(detect 의 'ROI 는 항상 마스킹 대상' 규약)."""
+    dcfg = config.get("detect", {})
+    if not bool(dcfg.get("localizable_only", True)) or doc.roi:
+        return doc, []
+    kw = {"min_conf": float(dcfg.get("mask_min_confidence",
+                                     dcfg.get("min_confidence", 0.5))),
+          "min_area_px": int(dcfg.get("min_area_px", 400)),
+          "source_lang": str(dcfg.get("source_lang", "ko"))}
+    dropped, frames = [], []
+    for f in doc.frames:
+        keep = []
+        for r in f.regions:
+            if localizable(r.text, r.confidence, r.bbox, **kw):
+                keep.append(r)
+            else:
+                dropped.append({"frame_idx": f.frame_idx, "timestamp": f.timestamp,
+                                "bbox": list(r.bbox), "text": r.text,
+                                "confidence": round(float(r.confidence or 0.0), 3)})
+        if keep:
+            frames.append(replace(f, regions=keep))
+    return replace(doc, frames=frames), dropped
+
+
 def detect(video: str, video_id: str, config: dict[str, Any],
            roi: Optional[BBox] = None, out_path: Optional[str] = None) -> DetectionDoc:
     """영상에서 텍스트 탐지 → DetectionDoc 반환(+ detections.json 저장)."""
@@ -260,6 +335,16 @@ def detect(video: str, video_id: str, config: dict[str, Any],
 
     out = Path(out_path) if out_path else resolve_path(
         f"{config['paths']['outputs_dir']}/{video_id}/detections.json")
+    doc, dropped = filter_localizable(doc, config)
+    if dropped:
+        # 조용한 드롭 금지 — 무엇을 왜 버렸는지 파일과 로그 양쪽에 남긴다.
+        write_json({"video_id": video_id, "reason": "현지화 대상 아님(문자·신뢰도·크기)",
+                    "dropped": dropped}, out.parent / "detections_dropped.json")
+        sample = " · ".join(repr(d["text"]) for d in dropped[:8])
+        log.warning("현지화 대상 아님으로 %d건 제외(지우지도 그리지도 않는다): %s",
+                    len(dropped), sample)
+        log.info("남은 영역 %d (샘플프레임 %d)",
+                 sum(len(f.regions) for f in doc.frames), len(doc.frames))
     doc.save(out)
     log.info("저장: %s", out)
     return doc

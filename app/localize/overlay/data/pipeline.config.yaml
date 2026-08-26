@@ -56,6 +56,14 @@ detect:
   paddle_det_model: PP-OCRv5_mobile_det
   paddle_rec_model: korean_PP-OCRv5_mobile_rec
   ocr_downscale_width: 960         # OCR 입력 가로 폭(0=원본). 축소해도 bbox 는 원본좌표로 환원
+  # 현지화 대상 판정(2026-08-26 신설 — vlp 에 없다). 지우는 이유는 그 자리에 번역을
+  # 그리려는 것이므로, 소스 문자가 없는 탐지는 지우지도 그리지도 않는다.
+  # 실사고: 인형 표면의 무늬를 글자로 잡아(`-` `・` `ATAL` `2` `U`) 그 자리를 인페인팅으로
+  # 지우고 같은 노이즈를 다시 그렸다 — 완성본에 얼룩이 남았다.
+  localizable_only: true           # false = 종전(vlp) 동작
+  source_lang: ko                  # 이 문자군이 있어야 현지화 대상
+  min_area_px: 400                 # 20x20 미만은 글자로 안 본다
+  mask_min_confidence: 0.5         # 미지정이면 min_confidence 를 쓴다
 
 mask:
   dilate_px: 8                     # bbox 팽창(잔여 글자 테두리 제거)

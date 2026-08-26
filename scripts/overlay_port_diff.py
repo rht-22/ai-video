@@ -68,6 +68,14 @@ EXPECTED_DIFFS = {
         "'더빙이 뒤따른다'고 표시된 채 더빙 단계에서 거부당한다. BC 가 실제로 돌아 본 적이 "
         "없어(vlp·이식본 모두) 안 드러난 불일치다. 세 곳이 갈리면 더빙이 빠진 편이 더빙된 "
         "줄 알고 발행된다(2026-08-12 사고와 같은 모양) — 정본을 DUB_ROUTES 하나로 모았다.",
+    "detect.detect":
+        "탐지 결과를 저장하기 **전에** 현지화 대상만 남긴다(filter_localizable). "
+        "2026-08-26 실사고: 잔망루피 a6wO8o91Oi0(route B) 완성본에 인형 몸통 얼룩이 남았고 "
+        "ja_events 13건이 전부 글자가 아니었다(`-` `・` `ATAL` `2` `U` `AI` `：` `\'9` `L`). "
+        "인형 표면 무늬를 OCR 이 글자로 잡았고, route B 는 지우고 그 자리에 그리는 길이라 "
+        "노이즈를 지운 뒤 같은 노이즈를 다시 그렸다. vlp 도 같은 구조다(마스크가 번역보다 "
+        "먼저 돌고 모든 상자를 쓴다) — 이식본이 의도적으로 앞서간 지점이다. "
+        "`detect.localizable_only: false` 로 종전 동작으로 돌아간다.",
     "llm.resolve_model":
         "이 레포의 모델 규칙(CLAUDE.md)을 강제한다 — vlp config 의 gemini-3.5-flash·"
         "gemini-pro-latest 는 사용 금지 모델이다. P1 이 localize_run Flash 를 바꾼 것과 같은 규약.",
