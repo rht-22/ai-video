@@ -66,3 +66,54 @@ def test_voice_map_is_data_not_code():
         if label.startswith("_"):
             continue
         assert "voice_id" in prof, label
+
+
+# ── 실제 매핑 (2026-08-26 사용자가 고른 4종) ────────────────────────────────
+
+def _ja_map():
+    import json
+    cfg = json.loads(pathlib.Path("app/localize/data/locales.json").read_text(encoding="utf-8"))
+    return cfg["locales"]["ja"]["tts_voice_map"]
+
+
+def test_every_mapped_voice_is_elevenlabs_now():
+    """edge-tts(ja-JP-*)에서 갈아탔다 — 하나라도 남아 있으면 그 라벨만 옛 소리다."""
+    for label, prof in _ja_map().items():
+        if label.startswith("_doc"):
+            continue
+        assert is_elevenlabs_voice(prof["voice_id"]), label
+
+
+def test_voice_ids_pass_the_engine_contract():
+    """🛑 형태가 틀리면 합성에서 permanent 실패한다(E12) — 발행 직전에 알면 늦다."""
+    from app.modules.tts import elevenlabs_voice_id
+    for label, prof in _ja_map().items():
+        if label.startswith("_doc"):
+            continue
+        assert len(elevenlabs_voice_id(prof["voice_id"])) >= 16, label
+
+
+def test_four_distinct_voices_two_each():
+    """여성 2 · 남성 2 — 밝음/묵직 변형을 pitch 가 아니라 보이스로 낸다."""
+    m = _ja_map()
+    ids = {k: v["voice_id"] for k, v in m.items() if not k.startswith("_doc")}
+    assert len(set(ids.values())) == 4
+    assert ids["ko_female"] != ids["ko_female_high"]
+    assert ids["ko_male"] != ids["ko_male_low"]
+    assert ids["_default"] == ids["ko_female"]
+
+
+def test_pitch_is_gone_because_elevenlabs_has_no_such_knob():
+    """남겨 두면 '피치가 안 먹는다' 를 코드에서 찾게 된다 — E12 계약대로 지웠다."""
+    for label, prof in _ja_map().items():
+        if label.startswith("_doc"):
+            continue
+        assert "pitch" not in prof, label
+
+
+def test_chat_labels_are_mapped_by_gender():
+    """종전엔 매핑이 없어 남성 chat_* 도 _default(여성)로 떨어졌다."""
+    m = _ja_map()
+    assert m["chat_brian"]["voice_id"] == m["ko_male"]["voice_id"]
+    assert m["chat_florian"]["voice_id"] == m["ko_male_low"]["voice_id"]
+    assert m["chat_emma"]["voice_id"] == m["ko_female"]["voice_id"]
