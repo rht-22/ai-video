@@ -4239,10 +4239,13 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             print(f"  크롭 타임라인 생략 (--no-reframe) — 원본 가운데 정렬로 렌더")
         else:
             print(f"  크롭 타임라인 생성 중... ({len(clips)}개 클립)")
-        # 라운드 24: 컷 경계 위치 점프 완화. 직전 클립의 마지막 keyframe(x,y)과 타겟 인물을 다음 호출에 sticky anchor 로 전달.
+        # 라운드 24: 컷 경계 위치 점프 완화 — 직전 클립의 마지막 keyframe(x,y)을 다음
+        # 호출에 sticky anchor 로 전달한다.
+        # ⚠ '타겟 인물' sticky 는 2026-08-25 인물 인식 제거와 함께 사라졌다 — 그때 인자만
+        #   지우고 **호출부에 남겨 둬서** 그날 생성이 전멸했다(TypeError). 회귀 가드:
+        #   tests/test_reframe_call_signature.py 가 호출 키워드와 시그니처를 묶는다.
         prev_anchor_x: float | None = None
         prev_anchor_y: float | None = None
-        prev_focus_char: str | None = None
         for idx, clip in enumerate(clips) if _reframe_on else []:
             crop_path = output_dir / f"crop_{clip.role}_{idx}.json"
             # ⚠ 인물 타겟·멀티크롭 분기는 2026-08-25 에 사라졌다(TMDb·deepface 제거).
@@ -4260,9 +4263,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 enable_speaker_tracking=payload.design.enable_speaker_tracking,
                 initial_x=prev_anchor_x,
                 initial_y=prev_anchor_y,
-                prev_target_character=prev_focus_char,
             )
-            current_target_char = None
             crop_map[f"{clip.role}_{idx}"] = crop_path
             # 라운드 24: 방금 생성된 keyframe 의 마지막 위치를 다음 클립에 전달
             try:
@@ -4270,7 +4271,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 if isinstance(_kfs, list) and _kfs:
                     prev_anchor_x = float(_kfs[-1].get("x_center", prev_anchor_x or 0.0))
                     prev_anchor_y = float(_kfs[-1].get("y_center", prev_anchor_y or 0.0))
-                    prev_focus_char = current_target_char
             except (json.JSONDecodeError, OSError, KeyError, ValueError):
                 pass  # 다음 클립은 sticky 없이 진행
             if (idx + 1) % 5 == 0 or (idx + 1) == len(clips):
