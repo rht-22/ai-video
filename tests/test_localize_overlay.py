@@ -488,3 +488,89 @@ def test_optional_imports_are_still_actually_imported():
     live = set(_lazy_third_party())
     stale = sorted(set(OPTIONAL_IMPORTS) - live)
     assert not stale, f"OPTIONAL_IMPORTS 에 코드에 없는 이름이 남았다: {stale}"
+
+
+# ───────── P6-2: 수정 재렌더의 번역 캐시 ─────────
+# 편집실 계약("고치면 그 항목만 다시 렌더")의 엔진 쪽 절반이다. 재렌더는 translate 를
+# 다시 지나는데, 매번 재번역하면 고치지 않은 줄이 비결정적으로 흔들려 검수자가 본
+# 문구와 다른 본이 렌더된다. dub 의 번역 캐시와 같은 규약 — vlp 와 의도적 차이
+# (scripts/overlay_port_diff.py EXPECTED_DIFFS "translate.translate").
+
+def _tr_fixture(tmp_path, sources):
+    """detections.json + 기존 translations.json 을 흉내 낸다."""
+    import json
+    det = {"video_id": "vidX", "fps": 2.0, "width": 100, "height": 100,
+           "sample_every": 1, "ocr_backend": "test",
+           "frames": [{"frame_idx": i, "timestamp": float(i),
+                       "regions": [{"text": s, "confidence": 0.9,
+                                    "bbox": [0, 0, 10, 10]}]}
+                      for i, s in enumerate(sources)]}
+    det_path = tmp_path / "detections.json"
+    det_path.write_text(json.dumps(det, ensure_ascii=False), encoding="utf-8")
+    return det_path
+
+
+def test_translate_reuses_existing_draft_when_sources_match(tmp_path, monkeypatch):
+    import json
+    from app.localize.overlay import translate as tr
+    det_path = _tr_fixture(tmp_path, ["안녕", "잘 가"])
+    out = tmp_path / "translations.json"
+    prev = {"video_id": "vidX", "model": "m", "draft": True,
+            "entries": [
+                {"source": "안녕", "target": "こんにちは", "use": True,
+                 "style": {"size": 44.0}},
+                {"source": "잘 가", "target": "またね", "use": False},
+            ]}
+    out.write_text(json.dumps(prev, ensure_ascii=False), encoding="utf-8")
+
+    def boom(*a, **k):
+        raise AssertionError("원문이 같은데 재번역했다 — 무편집 줄이 흔들린다")
+    monkeypatch.setattr(tr, "transcreate", boom)
+    doc = tr.translate(str(det_path), {"paths": {"outputs_dir": str(tmp_path)}},
+                       out_path=str(out))
+    # 지난 재렌더가 병합해 둔 style·use 도 이 경로로 살아남는다
+    assert [e.target for e in doc.entries] == ["こんにちは", "またね"]
+    assert doc.entries[0].style == {"size": 44.0}
+    assert doc.entries[1].use is False
+
+
+def test_translate_retranslates_when_sources_differ(tmp_path, monkeypatch):
+    """원문이 하나라도 다르면 전량 재번역 — 좌표(entries 순번)가 달라진다."""
+    import json
+    from app.localize.overlay import translate as tr
+    from app.localize.overlay.schemas import TranslationEntry
+    det_path = _tr_fixture(tmp_path, ["안녕", "새 줄"])
+    out = tmp_path / "translations.json"
+    out.write_text(json.dumps(
+        {"video_id": "vidX", "model": "m", "draft": True,
+         "entries": [{"source": "안녕", "target": "こんにちは", "use": True}]},
+        ensure_ascii=False), encoding="utf-8")
+    called = {}
+
+    def fake(texts, config, hero=False, use_deepl=False, **k):
+        called["texts"] = list(texts)
+        return [TranslationEntry(source=t, target=f"ja:{t}") for t in texts]
+    monkeypatch.setattr(tr, "transcreate", fake)
+    monkeypatch.setattr("app.localize.overlay.llm.resolve_model",
+                        lambda *a, **k: "m")
+    doc = tr.translate(str(det_path), {"paths": {"outputs_dir": str(tmp_path)}},
+                       out_path=str(out))
+    assert called["texts"] == ["안녕", "새 줄"]
+    assert [e.target for e in doc.entries] == ["ja:안녕", "ja:새 줄"]
+
+
+def test_translate_broken_cache_falls_back_to_fresh(tmp_path, monkeypatch):
+    """깨진 캐시는 조용히 무시하고 새로 번역한다 — 캐시가 본편을 막으면 안 된다."""
+    from app.localize.overlay import translate as tr
+    from app.localize.overlay.schemas import TranslationEntry
+    det_path = _tr_fixture(tmp_path, ["안녕"])
+    out = tmp_path / "translations.json"
+    out.write_text("{깨진 json", encoding="utf-8")
+    monkeypatch.setattr(tr, "transcreate",
+                        lambda texts, config, **k: [TranslationEntry(source=t, target="j")
+                                                    for t in texts])
+    monkeypatch.setattr("app.localize.overlay.llm.resolve_model",
+                        lambda *a, **k: "m")
+    doc = tr.translate(str(det_path), {"paths": {"outputs_dir": str(tmp_path)}},
+                       out_path=str(out))
+    assert len(doc.entries) == 1

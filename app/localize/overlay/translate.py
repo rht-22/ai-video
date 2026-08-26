@@ -218,13 +218,28 @@ def translate(detections_path: str, config: dict[str, Any], hero: bool = False,
               use_deepl: bool = False, out_path: Optional[str] = None) -> TranslationDoc:
     doc = DetectionDoc.load(detections_path)
     texts = doc.unique_texts()
+    out = Path(out_path) if out_path else resolve_path(
+        f"{config['paths']['outputs_dir']}/{doc.video_id}/translations.json")
+    # 재실행 캐시(P6-2, vlp 와 의도적 차이 — dub 의 번역 캐시와 같은 규약): 원문이
+    # 그대로면 있는 초벌을 다시 쓴다. 수정 재렌더(overrides 병합)가 이 함수 **뒤**에
+    # 도는데, 매번 재번역하면 **고치지 않은 줄**이 비결정적으로 흔들려 검수자가 본
+    # 문구와 다른 본이 렌더된다 — 편집실 계약("고치면 그 항목만 다시 렌더")이 깨진다.
+    # 지난 재렌더가 병합해 둔 style·타이밍·use 도 이 경로로 살아남는다.
+    # 원문이 하나라도 다르면(재탐지 변화) 전량 재번역 — 좌표(entries 순번)가 다르다.
+    if out.exists():
+        try:
+            prev = TranslationDoc.load(out)
+            if [e.source for e in prev.entries] == texts:
+                log.info("번역 캐시 재사용: %d줄 (%s) — 수정 재렌더의 무편집 줄 고정",
+                         len(prev.entries), out.name)
+                return prev
+            log.info("번역 캐시 원문 불일치 — 다시 번역")
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            log.warning("번역 캐시 읽기 실패(다시 번역): %s", e)
     from app.localize.overlay import llm
     model = llm.resolve_model(config, hero=hero)
     entries = transcreate(texts, config, hero=hero, use_deepl=use_deepl)
     tdoc = TranslationDoc(video_id=doc.video_id, model=model or "unknown", draft=True, entries=entries)
-
-    out = Path(out_path) if out_path else resolve_path(
-        f"{config['paths']['outputs_dir']}/{doc.video_id}/translations.json")
     tdoc.save(out)
     flagged = sum(1 for e in entries if e.flagged)
     log.info("번역 초벌 저장(검수 전): %s (항목 %d, 검수필요 %d)", out, len(entries), flagged)
