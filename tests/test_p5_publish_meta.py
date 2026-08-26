@@ -102,6 +102,11 @@ def test_generate_writes_the_draft_next_to_the_outputs(tmp_path, monkeypatch):
     fake.complete = lambda *a, **k: json.dumps(
         {"title_candidates": ["日本語1", "日本語2"], "description": "本文",
          "tags": ["t"], "hashtags": ["#ルーピー"]})
+    # ⚠ `from app.localize.overlay import llm` 는 **패키지 속성**을 먼저 본다 —
+    # sys.modules 만 갈아끼우면 다른 테스트가 이미 임포트한 진짜 모듈이 이긴다
+    # (단독 실행은 통과하고 전체 실행만 깨지는 부류).
+    import app.localize.overlay as pkg
+    monkeypatch.setattr(pkg, "llm", fake, raising=False)
     monkeypatch.setitem(sys.modules, "app.localize.overlay.llm", fake)
     out = meta.generate("vid1", "원제", "", cfg, out_path=str(tmp_path / "vid1" / "metadata_draft.json"))
     got = json.loads(pathlib.Path(out).read_text(encoding="utf-8"))
