@@ -9,6 +9,8 @@ rerender 는 job 디렉토리, overlay 는 외부 완성본 mp4 한 개.
 """
 from __future__ import annotations
 
+import json
+
 from pathlib import Path
 from typing import Optional
 
@@ -25,10 +27,32 @@ def needs_dub(route: str) -> bool:
     return str(route or "").upper() in DUB_ROUTES
 
 
+def _metadata_draft(video_id: str, source_title: str, source_desc: str,
+                    cfg: dict, hero: bool) -> dict:
+    """일본어 메타 초벌(제목 후보·설명·태그)을 산출 디렉토리에 남긴다.
+
+    ⚠ **본편을 막지 않는다.** 영상은 이미 다 만들어졌고 메타는 부가물이다 — LLM 이
+    실패했다고 수십 분짜리 산출을 실패로 돌리면 다시 다 돌려야 한다. 대신 사유를
+    결과에 실어 **위로 올린다**: 발행 게이트가 초벌 없이는 잡을 세우지 않으므로
+    (`meta.publishable`) 조용히 한국어 제목이 나가는 일은 생기지 않는다."""
+    from app.localize.overlay import meta
+    try:
+        out = meta.generate(video_id, source_title, source_desc, cfg, hero=hero)
+        draft = json.loads(Path(out).read_text(encoding="utf-8"))
+        print(f"[overlay] 일본어 메타 초벌: {out} "
+              f"(제목 후보 {len(draft.get('title_candidates') or [])}개)")
+        return {"metadata_draft": str(out), "metadata": draft}
+    except Exception as e:                                    # noqa: BLE001
+        print(f"[overlay] ⚠️ 일본어 메타 초벌 실패 — 본편은 정상이다: {type(e).__name__} {e}")
+        return {"metadata_error": f"{type(e).__name__}: {e}"}
+
+
 def run_overlay(video: str | Path, video_id: str, *, route: str = "B",
                 locale: str = "ja", content_type: Optional[str] = None,
                 roi: Optional[tuple] = None, backend: Optional[str] = None,
-                hero: bool = False, config_path: Optional[str | Path] = None) -> dict:
+                hero: bool = False, config_path: Optional[str | Path] = None,
+                source_title: Optional[str] = None,
+                source_desc: str = "") -> dict:
     """완성본 한 개를 현지화한다. 산출 dict(`final`·`report`·`render`)를 돌려준다.
 
     ⚠ 더빙(route C·BC)은 **여기서 하지 않는다** — vlp 규약 그대로다(`process_video`
@@ -47,6 +71,8 @@ def run_overlay(video: str | Path, video_id: str, *, route: str = "B",
     result["locale"] = locale
     result["needs_dub"] = needs_dub(route)
     work = resolve_path(f"{cfg['paths']['outputs_dir']}/{video_id}")
+    if source_title:
+        result.update(_metadata_draft(video_id, source_title, source_desc, cfg, hero))
     if result["needs_dub"]:
         print(f"[overlay] route {result['route']}: 더빙은 검수 게이트 통과 후 별도 단계다"
               f" — 이 산출물은 아직 한국어 오디오다")

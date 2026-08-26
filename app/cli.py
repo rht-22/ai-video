@@ -284,6 +284,11 @@ def build_parser() -> argparse.ArgumentParser:
     loc.add_argument("--video", default=None, help="overlay: 원본 완성본 mp4")
     loc.add_argument("--video-id", dest="video_id", default=None,
                      help="overlay: 산출 디렉토리 이름이 되는 식별자")
+    loc.add_argument("--source-title", dest="source_title", default=None,
+                     help="overlay: 원본(한국어) 제목 — 주면 일본어 메타 초벌"
+                          "(metadata_draft.json)을 함께 만든다")
+    loc.add_argument("--source-desc", dest="source_desc", default="",
+                     help="overlay: 원본 설명(선택)")
     loc.add_argument("--route", choices=OVERLAY_ROUTES, default="B",
                      help="overlay: A(자막) B(지우고 재합성) BJ(병기) C(더빙) BC(더빙+clean)")
     loc.add_argument("--content-type", dest="content_type", default=None,
@@ -498,8 +503,12 @@ def main() -> None:
             roi = tuple(args.subtitle_area) if args.subtitle_area else None
             out = run_overlay(args.video, args.video_id, route=args.route,
                               locale=args.locale, content_type=args.content_type,
-                              roi=roi, backend=args.inpaint_backend)
+                              roi=roi, backend=args.inpaint_backend,
+                              source_title=args.source_title,
+                              source_desc=args.source_desc)
             print(f"[localize] overlay 완료: {out.get('final')}")
+            if out.get("metadata_draft"):
+                print(f"[localize] 메타 초벌: {out['metadata_draft']}")
             return
         if args.video or args.video_id:
             raise SystemExit("--video/--video-id 는 --mode overlay 전용입니다 "
