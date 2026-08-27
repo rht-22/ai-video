@@ -70,7 +70,7 @@
     "잔망루피 유튜브 숏폼": {
       "ja": {
         "display": "ジャンマンルーピー",
-        "context": "「残念だけど愛おしいルーピー」 — 어딘가 안쓰럽지만 미워할 수 없는 공감형 캐릭터. 타깃은 일본 MZ·여성 친화(공감·위로·실패담). 톤은 자조적이되 따뜻하게, 과하게 시끄럽지 않게. 귀엽되 유치하지 않게. 정본: app/localize/overlay/data/persona.md",
+        "context": "「残念だけど愛おしいルーピー」 — 어딘가 안쓰럽지만 미워할 수 없는 공감형 캐릭터. 타깃은 일본 MZ·여성 친화(공감·위로·실패담). 톤은 자조적이되 따뜻하게, 과하게 시끄럽지 않게. 귀엽되 유치하지 않게. 캐릭터 어미: 루피의 대사·내레이션 문장 끝에 「ルプ」를 붙인다(한국어 원어미 '~뤂' 대응, 2026-08-27 확정). 문장 끝에만, 어색한 문장은 무리하게 붙이지 말고 표준어로. 설명란·© 표기 등 정보성 텍스트에는 붙이지 않는다. 정본: app/localize/overlay/data/persona.md §2",
         "glossary": {
           "잔망루피": "ジャンマンルーピー",
           "루피": "ルーピー",
@@ -84,7 +84,7 @@
           "김밥": "キンパ",
           "라면": "ラーメン"
         },
-        "_glossary_note": "overlay 계층 `app/localize/overlay/data/glossary.yaml` 이 정본이다 — 여기 사본이 갈리면 같은 말이 rerender 편과 overlay 편에서 다르게 나간다(회귀 가드가 둘을 묶는다). ⚠ 캐릭터 어미(한국어 '~뤂' 대응)는 persona.md §2 에서 아직 [채택 대기]다 — 여기서 임의로 정하지 않는다.",
+        "_glossary_note": "overlay 계층 `app/localize/overlay/data/glossary.yaml` 이 정본이다 — 여기 사본이 갈리면 같은 말이 rerender 편과 overlay 편에서 다르게 나간다(회귀 가드가 둘을 묶는다). 캐릭터 어미(한국어 '~뤂' 대응)는 「〜ルプ」로 확정됐다(2026-08-27) — 규칙 정본은 persona.md §2, 발음 보정은 ja_reading.clip_character_ending(합성 입력만 「ルプッ」).",
         "notice_lines": [
           "© ICONIX / OCON / EBS / SKbroadband"
         ],

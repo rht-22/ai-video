@@ -61,7 +61,9 @@ EXPECTED_DIFFS = {
     "render.build_bilingual_ass":
         "F-412 — build_ass 와 같은 변경. ai-video 가 앞서간 것.",
     "dub.synthesize_segment":
-        "F-412 짝 변경(a30bace 의 세 수정 중 하나). ai-video 가 앞서간 것.",
+        "F-412 짝 변경(a30bace 의 세 수정 중 하나) + 캐릭터 어미 「〜ルプ」 발음 보정"
+        "(2026-08-27 확정 — 합성 입력만 문말 ルプ→ルプッ, ja_reading.clip_character_ending). "
+        "ai-video 가 앞서간 것.",
     "dub.require_level_c":
         "vlp 는 `level != \"C\"` 로 **C 만** 통과시킨다(src/dub.py:31). 그런데 같은 레포의 "
         "`DUB_ROUTES` 는 C·BC 둘이고 오케스트레이터 어댑터 needs_dub 도 그렇다 — BC 편은 "

@@ -120,6 +120,11 @@ def l3t_tts(job: Path, backup: Path, locale_cfg: dict):
         # (KR synthesize_tts 와 같은 이유: 백엔드가 개행을 끊어 읽기로 해석할 수 있다).
         # cue["text"] 자체는 보존한다 — 자막(build_tts_ass)이 그 줄바꿈을 그대로 그린다.
         text = " ".join(str(cue["text"]).split())
+        # 캐릭터 어미 「〜ルプ」 발음 보정(overlay persona §2 와 같은 규약) — 합성
+        # 입력만이다: cue["text"]·자막은 표기 「ルプ」 그대로 남는다. 어미가 없는
+        # 작품(SHOTCONE 등)은 문말 「ルプ」 자체가 없어 no-op(회귀 0).
+        from app.localize.ja_reading import clip_character_ending
+        text = clip_character_ending(text)
         dur = 0.0
         for bump, speed_label in zip(RATE_BUMPS, EL_SPEED_BUMPS):
             if is_elevenlabs_voice(prof["voice_id"]):

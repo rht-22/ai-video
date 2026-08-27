@@ -624,6 +624,9 @@ def synthesize_segment(text: str, config: dict[str, Any], voice_id: Optional[str
                        speaker_wav: Optional[str] = None, lang: Optional[str] = None) -> bytes:
     # F-412: 문구 안 줄바꿈은 **자막용** — 합성 입력만 공백으로(vlp 23648e0 과 동일).
     text = " ".join(str(text).split())
+    # 캐릭터 어미 「〜ルプ」 발음 보정(persona §2) — 합성 입력만, 자막·SRT 는 그대로.
+    from app.localize.ja_reading import clip_character_ending
+    text = clip_character_ending(text)
     backend = dub_backend(config)
     if backend == "gptsovits":
         seg_lang = lang or _detect_lang(text, config.get("dub", {}).get("language", "ja"))

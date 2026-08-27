@@ -52,10 +52,15 @@ def test_copyright_line_matches_the_metadata_module():
     assert DEFAULT_COPYRIGHT in _ja()["notice_lines"]
 
 
-def test_character_ending_is_not_decided_here():
-    """⚠ '~뤂' 대응 어미는 persona.md §2 에서 [채택 대기]다 — 여기서 정하지 않는다."""
+def test_character_ending_is_decided_and_consistent():
+    """'~뤂' 대응 어미는 「〜ルプ」로 확정(2026-08-27, 운영자 결정). 세 곳이 같은 말을
+    해야 한다 — persona(정본)·locales(rerender 프롬프트)·발음 보정 모듈."""
     note = _ja().get("_glossary_note", "")
-    assert "채택 대기" in note
+    assert "채택 대기" not in note
+    assert "ルプ" in note and "ルプ" in _ja().get("context", "")
+    persona = pathlib.Path("app/localize/overlay/data/persona.md").read_text(encoding="utf-8")
+    assert "최종 채택: 「〜ルプ」" in persona
+    assert "[채택 대기]" not in persona
 
 
 def test_shotcone_entry_is_untouched():

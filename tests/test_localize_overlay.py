@@ -574,3 +574,53 @@ def test_translate_broken_cache_falls_back_to_fresh(tmp_path, monkeypatch):
     doc = tr.translate(str(det_path), {"paths": {"outputs_dir": str(tmp_path)}},
                        out_path=str(out))
     assert len(doc.entries) == 1
+
+
+# ───────── 캐릭터 어미 「〜ルプ」 발음 보정 (2026-08-27 확정) ─────────
+# 표기와 발음의 분리가 계약이다: 자막·SRT·검수 카드는 「ルプ」 그대로, 더빙 합성
+# 입력만 문말 「ルプ」→「ルプッ」(한국어 '뤂' 받침을 촉음으로 근사 — persona §2).
+
+def test_clip_ending_only_at_sentence_end():
+    from app.localize.ja_reading import clip_character_ending as clip
+    assert clip("できたルプ！") == "できたルプッ！"
+    assert clip("むりルプ") == "むりルプッ"
+    assert clip("できたルプ。でもむりルプ！") == "できたルプッ。でもむりルプッ！"
+    assert clip("「やったルプ」") == "「やったルプッ」"
+
+
+def test_clip_ending_leaves_everything_else_alone():
+    from app.localize.ja_reading import clip_character_ending as clip
+    assert clip("ルプルプ体操") == "ルプルプ体操"        # 문중 — 그대로
+    assert clip("できたルプッ！") == "できたルプッ！"    # 이미 치환 — 이중 치환 없음
+    assert clip("ふつうの文です。") == "ふつうの文です。"
+    assert clip("") == ""
+
+
+def test_dub_synthesis_input_is_clipped_but_contract_text_is_not(monkeypatch):
+    """합성 입력에만 걸린다 — synthesize_segment 가 백엔드에 넘기는 문자열이 치환된
+    형태여야 하고, 호출자가 든 원문(자막·SRT 로 가는 텍스트)은 건드리지 않는다."""
+    from app.localize.overlay import dub
+    got = {}
+
+    def fake_el(text, voice_id, config):
+        got["text"] = text
+        return b"mp3"
+    monkeypatch.setattr(dub, "_synthesize_elevenlabs", fake_el)
+    src = "できたルプ！"
+    data = dub.synthesize_segment(src, {"dub": {"tts_backend": "elevenlabs"}},
+                                  voice_id="v" * 20)
+    assert data == b"mp3"
+    assert got["text"] == "できたルプッ！"
+    assert src == "できたルプ！"                        # 원문 불변
+
+
+def test_narration_synthesis_input_is_clipped_source_of_truth():
+    """rerender 내레이션(l3t_tts)도 같은 보정을 탄다 — 배선을 소스로 고정한다.
+    (l3t_tts 는 ffmpeg·체크포인트 의존이 커서 배선 단언은 소스 검사로 한다)"""
+    import inspect
+    from app.localize import narration
+    src = inspect.getsource(narration.l3t_tts)
+    assert "clip_character_ending" in src
+    # 치환은 cue["text"] 조립(공백 정규화) **뒤** — 자막이 그리는 원문은 그대로다
+    assert src.index('" ".join(str(cue["text"]).split())') \
+         < src.index("clip_character_ending(text)")
