@@ -1208,3 +1208,14 @@ E11·E12 는 **모든** 실패를 fail-loud 로 막았다(조용한 목소리 �
   그 항목만")이 깨진다. 지난 재렌더가 병합한 style·타이밍·use 도 이 경로로 살아남는다.
   원문이 하나라도 다르면 전량 재번역(좌표가 다르다). vlp 와 의도적 차이 —
   `overlay_port_diff` EXPECTED_DIFFS "translate.translate".
+
+
+## P8 — vlp 동결 (2026-08-27)
+
+- 레거시 검수 카드 15장 일괄 반려(운영자 지시) 후 `ops_config vlp_frozen=on`(ves 0102).
+  `zanmang_decision` 어댑터가 실행을 거절한다 — vlp 는 더 이상 어떤 잡도 받지 않는다.
+- **`scripts/localize_port_diff.py`·`scripts/overlay_port_diff.py` 는 함께 은퇴했다**
+  (위 절들의 "vlp 동결 시 함께 은퇴" 예고 이행). EXPECTED_DIFFS 의 사유들은 각 계약
+  절에 이미 옮겨져 있다. vlp 산출물(mm-06 outputs/)은 남는다 — 재작업이 필요하면
+  그 mp4 를 overlay 파이프라인 입력으로 쓴다(vlp 를 되살리지 않는다).
+- 절차·판정 기록: ves-orchestrator `docs/P8_VLP_FREEZE.md`.

@@ -10,7 +10,7 @@ vlp `tests/test_localize_style_texts.py`(0757b68) 이식. 발주서: ves-orchest
 · **문구·폰트만 바꾼다** — 좌표·크기·색·fx·rotate 는 연출 의도라 불변.
 · 스티커(images)·자막 강조(subtitle_styles)는 언어 중립이라 손대지 않는다.
 
-이식본이 원본과 **같은 답을 내는지**는 `scripts/localize_port_diff.py` 가 따로 본다.
+이식본↔원본 대조(localize_port_diff)는 vlp 동결(P8)과 함께 은퇴했다.
 """
 import json
 import sys

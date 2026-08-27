@@ -165,24 +165,10 @@ def test_importing_overlay_pulls_no_heavy_deps():
     assert r.stdout.strip() == "", f"임포트만으로 끌려온 무거운 의존: {r.stdout.strip()}"
 
 
-# ── 이식 대조 — vlp 가 앞서가면 여기서 먼저 운다 ────────────────────────
-def test_port_matches_vlp_when_the_source_is_present():
-    """P2b·E16 때 vlp 가 두 번 앞서갔다. 그때 이식본이 뒤처진 것을 사람이 뒤늦게 알았다.
-
-    vlp 체크아웃이 있는 환경에서만 돈다 — 없으면 건너뛴다(CI·컨테이너)."""
-    from scripts.overlay_port_diff import DEFAULT_VLP, compare
-    if not (DEFAULT_VLP / "engine" / "common.py").exists():
-        pytest.skip(f"vlp 체크아웃 없음: {DEFAULT_VLP}")
-    assert compare(DEFAULT_VLP) == 0, "vlp 와 어긋났다 — overlay_port_diff 출력을 보라"
-
-
-def test_every_expected_diff_carries_a_reason():
-    """사유 없는 예외를 두면 다음 사람이 '원래 그런 것'으로 읽는다."""
-    from scripts.overlay_port_diff import (EXPECTED_CONST_DIFFS, EXPECTED_DIFFS,
-                                           EXPECTED_MISSING)
-    for table in (EXPECTED_DIFFS, EXPECTED_CONST_DIFFS, EXPECTED_MISSING):
-        for key, why in table.items():
-            assert len(why) > 20, f"{key} 의 사유가 너무 짧다: {why!r}"
+# ── 이식 대조는 은퇴했다 (P8, 2026-08-27) ───────────────────────────────
+# overlay_port_diff·localize_port_diff 는 "vlp 가 앞서가면 먼저 운다"가 존재 이유였는데,
+# vlp 가 동결돼(0102 vlp_frozen) 앞서갈 일이 없다. EXPECTED_DIFFS 에 쌓인 사유들은
+# CLAUDE.md 해당 절(overlay 현지화 계층·P6-2 등)에 옮겨져 있다.
 
 
 # ── 더빙 (route C·BC 뒷단) ──────────────────────────────────────────────
@@ -494,7 +480,7 @@ def test_optional_imports_are_still_actually_imported():
 # 편집실 계약("고치면 그 항목만 다시 렌더")의 엔진 쪽 절반이다. 재렌더는 translate 를
 # 다시 지나는데, 매번 재번역하면 고치지 않은 줄이 비결정적으로 흔들려 검수자가 본
 # 문구와 다른 본이 렌더된다. dub 의 번역 캐시와 같은 규약 — vlp 와 의도적 차이
-# (scripts/overlay_port_diff.py EXPECTED_DIFFS "translate.translate").
+# (vlp 와 의도적 차이 — 사유는 CLAUDE.md P6-2 절. port-diff 가드는 P8 로 은퇴).
 
 def _tr_fixture(tmp_path, sources):
     """detections.json + 기존 translations.json 을 흉내 낸다."""
