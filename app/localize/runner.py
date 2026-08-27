@@ -85,6 +85,13 @@ def run_localize(job_dir: str | Path, locale: str = "ja", *,
     if not skip_render:
         l4_render(spec.job, spec.work_cfg, spec.locale_cfg, spec.out_dir)
         _mark(state_path, "L4")
+        # L4d(2026-08-27): work_cfg["dub"] 가 있는 작품만 — 대사를 일본어 더빙으로
+        # 교체한다(잔망루피 롱폼). 없으면 단계 자체가 없다(SHOTCONE 등 회귀 0).
+        from app.localize.dub_rerender import l4d_dub
+        dres = l4d_dub(spec.job, spec.work_cfg, spec.locale_cfg, spec.out_dir)
+        if dres is not None:
+            _mark(state_path, "L4d", segments=dres.get("segments"),
+                  skipped=dres.get("skipped"))
     l5_metadata(spec.job, translation, spec.work_cfg, spec.out_dir)
     _mark(state_path, "L5", done=True)
 

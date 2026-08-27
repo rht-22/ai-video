@@ -108,6 +108,10 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--no-tts-subtitles", action="store_true", help="TTS 내레이션 자막을 영상에 표시 안 함 (TTS 음성은 그대로 재생)")
     create.add_argument("--no-title-overlay", action="store_true",
                         help="상단 제목·하단 작품명 오버레이를 그리지 않음 (JP 파이프라인: 텍스트는 현지화 단계가 일본어로 렌더)")
+    create.add_argument("--no-narration", action="store_true",
+                        help="내레이션을 아예 만들지 않음 — cue 합성(요금)·TTS 자막·오디오 믹스 전부 생략, "
+                             "현지화(L3t) 재합성도 자연히 없다 (더빙 채널: 잔망루피 롱폼). "
+                             "--no-tts-audio(믹스만 생략)와 다르다")
     create.add_argument("--no-tts-audio", action="store_true",
                         help="TTS 내레이션 오디오를 믹스하지 않음 — 원본 오디오만 (JP: 일본어 TTS 는 현지화 단계가 합성). tts_subtitles.ass 는 그대로 생성되어 현지화의 타이밍 원료가 된다")
     create.add_argument("--max-shorts", type=int, default=3, help="생성할 최대 쇼츠 수 (1-3, 기본: 3)")
@@ -627,6 +631,7 @@ def main() -> None:
                 show_tts_subtitles=not getattr(args, "no_tts_subtitles", False),
                 show_title_overlay=not getattr(args, "no_title_overlay", False),
                 include_tts_audio=not getattr(args, "no_tts_audio", False),
+                include_narration=not getattr(args, "no_narration", False),
                 max_shorts=max_shorts,
                 skip_research=getattr(args, "no_research", False),
                 episode=getattr(args, "episode", None),

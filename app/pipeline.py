@@ -2224,6 +2224,9 @@ class PipelineInput:
     show_title_overlay: bool = True     # False = 상단 제목·하단 작품명 오버레이 생략
     include_tts_audio: bool = True      # False = TTS 오디오 믹스 생략(원본 오디오만).
                                         #   tts_subtitles.ass 는 계속 생성 — 현지화 타이밍 원료
+    include_narration: bool = True      # False = 내레이션 자체가 없다(cue 합성·자막·믹스 전부,
+                                        #   현지화 L3t 재합성까지 자연 소멸) — 더빙 채널(잔망루피 롱폼)용.
+                                        #   include_tts_audio(믹스만 생략)와 다르다: 이쪽은 합성 요금도 없다.
     max_shorts: int = 3
     skip_research: bool = False
     episode: int | None = None
@@ -3921,6 +3924,17 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             storyline_tts_cues_pool = [_tts_override]
         print(f"  [edit] 내레이션 오버라이드 적용 {_before_cues}→{len(_tts_override)}건 "
               f"— 사람이 고친 문구로 재합성")
+
+    # 내레이션 없는 채널(--no-narration, 2026-08-27 잔망루피 롱폼 결정) — story 가
+    # 문구를 냈어도 여기서 전량 버린다. cue 0 은 이미 정상 상태라(아래 else 분기)
+    # 하류(합성·tts 자막·믹스·현지화 L3t)가 전부 자연히 비고, 합성 요금도 없다.
+    # ⚠ 편집실 내레이션 오버라이드(위 블록)보다 뒤라 사람이 넣은 cue 도 버려진다 —
+    #   조용히 버리지 않고 건수를 남긴다(이 채널 편집실엔 내레이션 탭 자체가 안 뜬다).
+    if not payload.include_narration:
+        _dropped = sum(len(c) for c in storyline_tts_cues_pool)
+        if _dropped:
+            print(f"  [tts cues] 내레이션 없는 채널 — cue {_dropped}건 전량 제거(--no-narration)")
+        storyline_tts_cues_pool = [[] for _ in storyline_tts_cues_pool]
 
     # ═══════════════════════════════════════
     # [tts cues] 앵커 해석 — storyline_tts_cues_pool → tts_cues_per_variant
