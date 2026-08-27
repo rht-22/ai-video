@@ -1148,3 +1148,63 @@ E11·E12 는 **모든** 실패를 fail-loud 로 막았다(조용한 목소리 �
   갈린다). 실행 전 만료가 보통이라 전량 폴백이 정상 경로고, 중간 만료는 로그로 드러난다.
 - 테스트 격리: 만료 판정이 전역이라 `tests/conftest.py` 가 매 테스트 앞뒤로 되돌린다.
 - 회귀 가드: `tests/test_e17_elevenlabs_fallback.py`(13건).
+
+## 잔망루피 롱폼 JP 포맷 계약 (2026-08-27, 운영자 결정)
+
+혜미리예채파식 "한국어 원음 + 일본어 자막" 포맷은 **예능 전용**이다. 잔망루피 롱폼
+(`shorts_jp_localized` · work "잔망루피 유튜브 숏폼")은 **대사도 일본어 더빙 + 내레이션
+없음**이다 — 첫 실전 판(巨大イチゴ, run 439a39a4)으로 왕복 검증됨.
+
+### --no-narration (`PipelineInput.include_narration`)
+
+- 오케스트레이터 채널 design 스위치 `narration:false` → 이 플래그. **미지정 = 종전
+  그대로(회귀 0).** `--no-tts-audio`(믹스만 생략)와 다르다 — 이쪽은 **합성 요금도 없다**.
+- 개입 지점은 **앵커 해석 직전 한 곳**(`pipeline.py` `[tts cues]` 블록 앞) — 신규·체크포인트
+  재개·편집실 오버라이드 모든 경로가 그 지점을 지나고, cue 0 은 이미 정상 상태라 하류
+  (합성·TTS 자막·믹스·현지화 L3t)가 전부 자연히 빈다.
+- ⚠ 편집실 내레이션 오버라이드보다 **뒤**라 사람이 넣은 cue 도 버려진다(건수 로그) —
+  이 채널 편집실엔 내레이션 탭 자체가 안 뜬다(cue 0).
+- ⚠ 새 CLI 플래그 — 구 엔진 노드에서 argparse 즉사. 채널 design 에 싣는 것은 엔진 전
+  노드 배포 **뒤**다(style_compose 와 같은 롤아웃). 실측: design 키를 넣기 전에 출발한
+  잡이 구 포맷으로 나와 반려-재실행했다(잡은 **실행 시점**에 design 을 읽는다 —
+  `enrich_params` 가 DB 를 읽으므로 체인 재실행 전에 키가 있으면 된다).
+
+### L4d — 롱폼 대사 더빙 (`app/localize/dub_rerender.py`)
+
+- **게이트**: `locales.json works[작품].ja.dub` — 없으면 단계 자체가 없다(SHOTCONE 회귀 0).
+  자리는 runner 의 L4 **뒤**·L5 앞(렌더 산출 위에서만 돈다 — `skip_render` 면 없음).
+- **쇼츠 C 루트의 기계를 그대로** 쓴다: `overlay/dub.dub()`(합성·백체크·페이싱 1.35) ·
+  `separate_vocals`(demucs) · `common.mux_dub`. 목소리도 쇼츠와 같은 루피 보이스
+  (overlay config `dub.voice_id`) — work_cfg `dub.voice_id` 로 편별 교체만 열어 둔다.
+- **다른 것 둘뿐**: ① ASR·재번역 없음 — 문구·시각 정본은 L3 의 일본어
+  `subtitle_segments.json`(렌더가 구운 자막과 더빙이 **같은 소스**라 어긋날 수 없다).
+  ② 자막 안 굽기(`burn_dub_subtitle=False`) — L4 가 이미 구웠다.
+- 대사 0줄(노래뿐인 편)은 **원음 유지**(空飛ぶルーピー 실사고 — 보컬 제거가 가사를
+  지운다). 그 외 실패는 크게 — 한국어 원음이 조용히 발행되는 것이 실패보다 나쁘다.
+- 의존(demucs·faster_whisper) 프리체크를 합성 **앞**에 둔다. 교체 전 본은
+  `localize_<locale>/shorts_ja_nodub.mp4` 보존. 산출은 `localize_<locale>/dub/`.
+- 회귀 가드: `tests/test_longform_dub.py`(11건).
+
+## 캐릭터 어미 「〜ルプ」 (2026-08-27 확정 — persona §2 의 [채택 대기] 종료)
+
+- **표기와 발음이 다르다.** 표기(자막·번인·SRT·검수 카드)는 「ルプ」 그대로. 발음(더빙
+  TTS)만 한국어 "뤂"처럼 받침으로 — **합성 입력에서만** 문말 「ルプ」→「ルプッ」 치환
+  (`app/localize/ja_reading.clip_character_ending` 한 곳 · overlay dub `synthesize_segment`
+  와 rerender `narration.l3t_tts` 두 배선).
+- 문장 끝에만 · 정보성 텍스트(설명란·©) 금지. 규칙 정본은 overlay `persona.md` §2,
+  rerender 는 `locales.json` works 항목 context 가 같은 말을 한다 — **세 곳(persona·
+  locales·모듈)이 갈리면 가드가 실패한다**(`test_p7_loopy_work_locale` ·
+  `test_localize_overlay` 어미 절).
+- 문중 「ルプルプ」·이미 치환된 「ルプッ」·어미 없는 작품(SHOTCONE)은 그대로(회귀 0).
+
+## overlay 검수 카드 좌표 계약 (P6-2, 2026-08-27)
+
+- 카드 `ko_ja_pairs` 의 칸은 **`subs`** 고 idx = **translations.json entries 순번** —
+  엔진 오버라이드(`_apply_subtitle_overrides` subs{idx})와 같은 좌표라 편집실이 고친 값이
+  왕복한다(첫 판 telops 는 화면만 그리고 엔진에서 증발했다). use:false 줄은 빼되 idx 는
+  건너뛴 채 보존. 시각·스타일은 `ja_events.json`(entry_idx)에서 얹는다.
+- **translate 재실행 캐시**: 원문이 같으면 초벌 재사용(dub 의 번역 캐시와 같은 규약) —
+  수정 재렌더에서 **고치지 않은 줄**이 비결정 재번역으로 흔들리면 편집실 계약("고치면
+  그 항목만")이 깨진다. 지난 재렌더가 병합한 style·타이밍·use 도 이 경로로 살아남는다.
+  원문이 하나라도 다르면 전량 재번역(좌표가 다르다). vlp 와 의도적 차이 —
+  `overlay_port_diff` EXPECTED_DIFFS "translate.translate".
