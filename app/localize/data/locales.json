@@ -10,7 +10,7 @@
       "telop_font": "ArialUnicode",
       "_font_note": "ArialUnicode 는 임시(스파이크 승계, macOS Arial Unicode 복사본 — ai-video app/assets/fonts/ 에 untracked). 정식 일본어 폰트 선정 시 여기만 바꾸면 된다.",
       "tts_voice_map": {
-        "_doc": "ai-video VOICE_PRESETS 라벨 → 일본어 보이스. 2026-08-26 사용자 지시로 edge-tts(ja-JP-Nanami/Keita)에서 **ElevenLabs 일본어 보이스**로 바꿨다 (Voice Library 에서 사람이 고른 4종: 여성 2 · 남성 2).\n⚠ pitch 키는 여기서 사라졌다 — ElevenLabs 에는 피치 노브가 없다(E12 계약: 'pitch 변형은 목소리 선정으로 재현'). 밝음/묵직은 **다른 보이스**로 낸다.\n⚠ 어느 쪽이 밝고 어느 쪽이 묵직한지는 들어 보고 정할 일이다 — 지금은 첫 번째를 기본, 두 번째를 변형(high/low)에 뒀다. 바꾸려면 이 파일에서 두 줄을 맞바꾸면 된다(코드 수정 아님).\n매핑에 없는 라벨(편집실이 고른 elevenlabs:{id} 등)은 _default 로 떨어진다.",
+        "_doc": "ai-video VOICE_PRESETS 라벨 → 일본어 보이스. 2026-08-26 사용자 지시로 edge-tts(ja-JP-Nanami/Keita)에서 **ElevenLabs 일본어 보이스**로 바꿨다 (Voice Library 에서 사람이 고른 4종: 여성 2 · 남성 2).\n⚠ pitch 키는 여기서 사라졌다 — ElevenLabs 에는 피치 노브가 없다(E12 계약: 'pitch 변형은 목소리 선정으로 재현'). 밝음/묵직은 **다른 보이스**로 낸다.\n배정 확정(2026-08-27, 운영자): 첫 번째 = 기본, 두 번째 = 변형(high/low) — 지금 이대로 간다. 나중에 바꾸려면 이 파일에서 두 줄을 맞바꾸면 된다(코드 수정 아님).\n매핑에 없는 라벨(편집실이 고른 elevenlabs:{id} 등)은 _default 로 떨어진다.",
         "_default": {
           "voice_id": "elevenlabs:B8gJV1IhpuegLxdpXFOE"
         },
