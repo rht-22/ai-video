@@ -49,7 +49,9 @@
     "min_exposure":      { "value": "0.4s · 12자/초", "status": "auto", "note": "E14 상수 — 벤치마크 회전(중앙값 0.9s/줄)과 호환 확인됨" },
     "speaker_colors":    { "value": { "narrator": "#7DE8D8", "protagonist": "#FFA23C", "secondary": "#FF9EC4", "default": "#FFFFFF" },
                            "status": "e19", "note": "갭 ② 화자별 색. 내레이션 민트는 아래 tts_color로 오늘 가능. 대사 화자 분리는 diarize 계약 변경 별건" },
-    "profanity_mask":    { "value": "XX",      "status": "e19", "note": "음성은 원음, 자막만 자체검열 (「아 이 XX끼가」) — 플랫폼 노출 안전" }
+    "profanity_mask":    { "value": "XX",      "status": "e19", "note": "음성은 원음, 자막만 자체검열 (「아 이 XX끼가」) — 플랫폼 노출 안전" },
+    "single_line":       { "value": true,      "status": "prompt", "note": "한 화면 한 줄 — 넘치면 어절 경계에서 시간축 분할, 글자 수 비례로 오디오 근사 동기(대사·TTS 공통, E19-9 · 2026-08-28 지시)" },
+    "max_line_chars":    { "value": 15,        "status": "prompt", "note": "한 줄 글자 상한 — 종전 자동 줄바꿈 폭(SUB_BASE_MAX_CHARS)과 동일. 줄 모양은 그대로, 표시만 한 줄씩 회전" }
   },
 
   "narration_tts": {

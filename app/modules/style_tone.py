@@ -45,6 +45,8 @@ COLOR_MAP_KEYS = ("state", "comment", "tsukkomi", "laugh", "positive")
 SFX_BEATS = ("rage", "surprise", "action_foley")
 SFX_GAIN_RANGE = (-30.0, 0.0)
 SFX_MAX_LIMIT = 10
+# E19-9 — subtitle 절(선택). 절이 없는 프로파일 = 자막 분할 없음(종전 2줄 랩 그대로).
+SUBTITLE_LINE_CHARS_RANGE = (4, 40)
 
 _HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
@@ -63,6 +65,8 @@ class StyleTone:
     # E19-5 — 없으면 None = 이 채널의 SFX 는 닫혀 있다(프롬프트에도 안 실리고
     # 플랜에 실려 와도 validate_plan 이 전량 드롭+기록한다).
     sfx: dict[str, Any] | None = None
+    # E19-9 — 없으면 None = 자막 단일 줄 분할 없음(종전 2줄 랩 그대로, 회귀 0).
+    subtitle: dict[str, Any] | None = None
 
     @property
     def density_max(self) -> int:
@@ -171,6 +175,15 @@ def validate_tone_data(data: Any, name: str) -> dict[str, Any]:
         if not beats or not set(beats) <= set(SFX_BEATS):
             _fail(name, f"sfx.target_beats 는 {'/'.join(SFX_BEATS)} 의 비어있지 않은 "
                         f"부분집합이어야 합니다({beats!r})")
+
+    # E19-9 — subtitle 절은 선택이다(없음 = 단일 줄 분할 없음). 있으면 전부 검증한다.
+    if data.get("subtitle") is not None:
+        sub = _need(data, "subtitle", dict, name, "")
+        _need(sub, "single_line", bool, name, "subtitle")
+        mlc = _need(sub, "max_line_chars", int, name, "subtitle")
+        lo, hi = SUBTITLE_LINE_CHARS_RANGE
+        if not (lo <= mlc <= hi):
+            _fail(name, f"subtitle.max_line_chars 는 {lo}~{hi} 이어야 합니다({mlc})")
     return data
 
 
@@ -197,6 +210,7 @@ def load_style_tone(name: str) -> StyleTone:
         labels=dict(data["labels"]),
         story=dict(data["story"]),
         sfx=dict(data["sfx"]) if data.get("sfx") is not None else None,
+        subtitle=dict(data["subtitle"]) if data.get("subtitle") is not None else None,
     )
 
 

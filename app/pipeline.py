@@ -1508,6 +1508,7 @@ from app.modules.subtitle import (
     merge_subtitle_segments,
     parse_subtitle,
     remap_transcript_to_edited_timeline,
+    split_segments_single_line,
 )
 from app.modules.tts import synthesize_tts
 from app.modules.work_researcher import research_work, CharacterInfo
@@ -4029,6 +4030,32 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             {"step": "subtitle_profanity_mask", "masked": _pm_n,
              "of": len(final_segments), "details": _pm_details})
 
+    # ── E19-9 단일 줄 자막 (2026-08-28 사용자 지시) ─────────────────────────
+    # "자막이 한 줄이상 넘어가면 안돼. 오디오 싱크에 맞게 한 줄 씩 나오게 해줘.
+    #  … 띄어쓰기가 들어가는 곳으로 잘라야해."
+    # 자리: E19-7 마스킹 **뒤**(마스킹 사전은 온전한 문장 기준 — 분할이 먼저면 토큰
+    # 열이 조각 경계에 걸려 안 잡힌다) · 편집실 오버라이드 **앞**(사람이 정한 줄은
+    # 사람 것이다). 정본(subtitle_segments.json)도 같이 다시 쓴다 — 편집실·현지화가
+    # 화면과 같은 줄을 봐야 한다(E19-7 과 같은 이유). 분할은 멱등이라 캐시 재개가
+    # 두 번 지나도 안전하다. 게이트: 톤 프로파일 subtitle 절(없으면 회귀 0).
+    _sl_cfg = (getattr(style_tone_profile, "subtitle", None) or {}) \
+        if style_tone_profile else {}
+    _sl_on = bool(_sl_cfg.get("single_line"))
+    _sl_max = int(_sl_cfg.get("max_line_chars", 15))
+    if _sl_on and final_segments:
+        _sl_before = len(final_segments)
+        final_segments = split_segments_single_line(
+            final_segments, _sl_max, base_font_size=payload.design.subtitle_size)
+        if len(final_segments) != _sl_before:
+            print(f"  [단일줄자막] 대사 {_sl_before} → {len(final_segments)} 줄 — "
+                  f"어절 경계 시간축 분할(한 줄 {_sl_max}자)")
+            segments_cache_path.write_text(
+                json.dumps([_subtitle_segment_json(s) for s in final_segments],
+                           ensure_ascii=False, indent=2), encoding="utf-8")
+        run_log.setdefault("steps", []).append(
+            {"step": "subtitle_single_line", "before": _sl_before,
+             "after": len(final_segments), "max_line_chars": _sl_max})
+
     # ── 편집실 자막 오버라이드(2026-08-17) ──────────────────────────────────
     # 반드시 **재매핑 뒤**다. 구간을 함께 고치면 위 블록이 전사에서 자막을 새로 만드는데,
     # 그보다 앞에서 덮으면 사람이 고친 문장이 조용히 기계 전사로 되돌아간다.
@@ -4755,6 +4782,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     text=str(_cue.get("text", "")),
                 ))
 
+            # E19-9: TTS 자막도 한 줄씩 — cue 창 안에서 어절 경계·글자 수 비례 시간
+            # 분할(mp3 는 한 파일이라 단어별 실측 타이밍이 없다 — 비례가 정직한 근사).
+            if _sl_on and tts_line_segs:
+                tts_line_segs = split_segments_single_line(tts_line_segs, _sl_max)
+
             # E17-2: TTS(내레이션) 자막도 원본 자막과 겹치면 안 된다(대사 자막과 같은 이유·
             # 같은 상한 — 제목 아래를 넘지 않는다). 밴드 앵커(E10) 뒤, 프리셋(TTS 는 채널
             # tts_line_font_size 고정이라 여기서 이미 확정)이 있으니 바로 계산한다.
@@ -4825,6 +4857,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 tts_line_segs.append(SimpleNamespace(
                     start_sec=_cue_start, end_sec=_cue_end, text=str(_cue.get("text", "")),
                 ))
+            # E19-9: 대사자막 0건 분기도 정본 분기와 같은 규약으로 한 줄씩
+            if _sl_on and tts_line_segs:
+                tts_line_segs = split_segments_single_line(tts_line_segs, _sl_max)
             if tts_line_segs:
                 # E17-2: 대사 자막이 0건이어도 TTS 는 독립적으로 나가므로 여기도 회피를 탄다.
                 _tts_margin_v = _compute_tts_margin_v(
@@ -5039,6 +5074,12 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                         text=s.get("text", "") if isinstance(s, dict) else s.text,
                     ) for s in var_merged
                 ]
+                # E19-9: variant 대사도 정본 수렴 지점과 같은 규약으로 한 줄씩
+                # (variant 는 전사에서 새로 만들므로 정본 분할이 승계되지 않는다)
+                if _sl_on and var_final_segs:
+                    var_final_segs = split_segments_single_line(
+                        var_final_segs, _sl_max,
+                        base_font_size=payload.design.subtitle_size)
 
                 # TTS 생성 (variant별 cue 사용) — fit 적용으로 cue 시간 안에 들어가게 합성
                 _g_v = locals().get("gemini") or load_gemini_client()
@@ -5085,6 +5126,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                         end_sec=_cue_end,
                         text=str(_cue.get("text", "")),
                     ))
+                # E19-9: variant 도 정본과 같은 규약으로 한 줄씩
+                if _sl_on and var_tts_segs:
+                    var_tts_segs = split_segments_single_line(var_tts_segs, _sl_max)
 
                 # 자막 ASS 파일 생성
                 var_sub_path = output_dir / f"subtitles_{var_num}.ass"

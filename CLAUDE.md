@@ -1415,3 +1415,29 @@ design 키 `subtitle_profanity_mask`(기본 "off", `--design-subtitle-profanity-
 - 게이트 없음(전 렌더 공통 관측) — run_log 키 추가는 가산적이고 비용은 디코드 1회다.
 - 회귀 가드: `tests/test_e19_audio_qa.py`(6건 — 파서 순수·실 ffmpeg 실측(합성 사인+
   무음)·실패 무해·임계 고정·배선).
+
+### E19-9 단일 줄 자막 (2026-08-28, 사용자 지시)
+
+`subtitle.split_segments_single_line` · 톤 프로파일 `subtitle` 절
+(`{single_line, max_line_chars}`). 지시: "자막이 한 줄이상 넘어가면 안돼. 오디오
+싱크에 맞게 한 줄 씩 나오게 해줘. tts도 마찬가지고, 단어 중간에 끊기면 안돼."
+
+- **게이트는 톤 프로파일 subtitle 절 하나다**(새 CLI 플래그 없음 — E19-1 규약).
+  절이 없는 톤·톤 미지정은 종전 2줄 랩 그대로(회귀 0). ⚠ `merge_subtitle_segments`
+  는 안 건드렸다(E14 경고 — 전 채널 공유 경로).
+- **화면 분할이 아니라 시간축 분할이다.** max 를 넘는 세그먼트를 어절(공백) 경계에서
+  잘라 조각마다 글자 수 비례로 시간을 배분한다 — 한 화면에 늘 한 줄, 줄이 오디오
+  진행을 따라 돈다. 단어 중간 절단 없음, max 를 넘는 **단일 어절은 통째로**(자르는
+  것보다 넘치는 게 낫다는 지시). 경계 단조·양 끝 보존·부가 속성(style·
+  low_confidence) 조각마다 복사·멱등.
+- **적용은 5곳**: 대사 수렴 지점(E19-7 마스킹 **뒤** — 마스킹 사전은 온전한 문장
+  기준 · 편집실 오버라이드 **앞** — 사람이 정한 줄은 사람 것) + TTS 정본 2분기 +
+  variant 대사·TTS. variant 는 전사에서 새로 만들므로 정본 분할이 승계 안 된다.
+  정본(`subtitle_segments.json`)도 다시 쓴다 — 편집실·현지화가 화면과 같은 줄을 본다.
+- E15 강조로 키운 줄(style.size)은 `build_ass_from_segments` 의 size_ratio 와 같은
+  수식으로 그 줄만 max 를 줄인다 — 갈리면 강조 줄만 화면에서 두 줄로 넘친다.
+- TTS 는 cue mp3 가 한 파일이라 단어별 실측 타이밍이 없다 — 글자 수 비례가 근사다.
+- ⚠ E14 노출 하한(merge 단계)보다 뒤라 조각이 0.4초 아래로 갈 수 있다 — 조각은
+  문장을 잇는 회전이라 하한을 다시 걸면 오디오 싱크가 깨진다(의도된 예외).
+- run_log: `steps[{step:"subtitle_single_line"}]` (before/after/max_line_chars).
+- 회귀 가드: `tests/test_e19_single_line.py`(17건).

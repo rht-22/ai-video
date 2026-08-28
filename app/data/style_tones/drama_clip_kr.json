@@ -35,5 +35,9 @@
     "max_per_episode": 3,
     "mix_gain_db": -6,
     "target_beats": ["rage", "surprise", "action_foley"]
+  },
+  "subtitle": {
+    "single_line": true,
+    "max_line_chars": 15
   }
 }

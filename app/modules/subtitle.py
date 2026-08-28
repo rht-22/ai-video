@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 from app.modules.speech import SpeechSegment
 from app.modules.story_builder import StoryClip
@@ -53,6 +54,59 @@ def _wrap_for_ass(text: str, max_chars: int = 15, max_lines: int = 2) -> str:
         rebalanced_chars = max(max_chars, (len(text) + max_lines - 1) // max_lines + 2)
         lines = _split_text_to_lines(text, max_chars=rebalanced_chars)[:max_lines]
     return "\\N".join(lines)
+
+
+def split_segments_single_line(segments: list, max_chars: int,
+                               *, base_font_size: int | None = None) -> list:
+    """단일 줄 자막(E19-9): max_chars 를 넘는 세그먼트를 어절(공백) 경계에서
+    **시간축으로** 쪼갠다 — 화면에는 늘 한 줄만 뜨고, 줄이 오디오 진행을 따라 돈다.
+
+    2026-08-28 사용자 지시: "자막이 한 줄이상 넘어가면 안돼. 오디오 싱크에 맞게 한 줄
+    씩 나오게 해줘. tts도 마찬가지고, 그렇다고 자막이 단어 중간에 끊기면 안돼."
+
+    - 절단은 `_split_text_to_lines`(어절 경계 greedy) 그대로 — 단어 중간 절단 없음.
+      max 를 넘는 **단일 어절**은 통째로 남는다(자르는 것보다 넘치는 게 낫다는 지시).
+    - 시간은 조각 글자 수 비례 배분 — 단어별 실시간 타이밍은 합성기·전사기만 아는
+      값이라 비례가 정직한 근사다. 경계는 단조, 양 끝은 원본 그대로(전체 노출 불변).
+    - max 이하 세그먼트는 **같은 객체**를 그대로 돌려준다(시간·부가 속성 불변).
+      이미 분할된 조각은 다시 태워도 그대로라(멱등) 캐시 재개가 두 번 지나도 안전.
+    - 부가 속성(style·low_confidence 등)은 조각마다 복사된다 — E15 강조·E13 표시가
+      분할로 증발하면 안 된다.
+    - base_font_size: 대사 경로 전용. style.size 로 키운 줄은 같은 폭에 덜 들어가므로
+      build_ass_from_segments 의 size_ratio(전역 크기/줄 크기)와 같은 수식으로 그 줄의
+      max 를 줄인다 — 갈리면 강조 줄만 화면에서 두 줄로 넘친다.
+
+    ⚠ E14 노출 하한(merge 단계)보다 뒤라 조각이 0.4초 아래로 갈 수 있다 — 조각은
+    문장을 잇는 회전이라 읽기 리듬이 다르고, 하한을 다시 걸면 오디오 싱크가 깨진다.
+    """
+    out: list = []
+    for seg in segments:
+        text = str(getattr(seg, "text", "") or "")
+        eff_max = max(1, int(max_chars))
+        sty = getattr(seg, "style", None)
+        line_size = sty.get("size") if isinstance(sty, dict) else None
+        if base_font_size and line_size and float(line_size) > 0:
+            ratio = float(base_font_size) / float(line_size)
+            if ratio < 1.0:
+                eff_max = max(3, int(round(eff_max * ratio)))
+        chunks = _split_text_to_lines(text.strip(), max_chars=eff_max) if text.strip() else []
+        if len(chunks) <= 1:
+            out.append(seg)
+            continue
+        start, end = float(seg.start_sec), float(seg.end_sec)
+        dur = max(0.0, end - start)
+        total_chars = sum(len(c) for c in chunks) or 1
+        extra = {k: v for k, v in vars(seg).items()
+                 if k not in ("start_sec", "end_sec", "text")}
+        t, acc = start, 0
+        for i, chunk in enumerate(chunks):
+            acc += len(chunk)
+            piece_end = end if i == len(chunks) - 1 else \
+                round(start + dur * (acc / total_chars), 3)
+            out.append(SimpleNamespace(start_sec=round(t, 3), end_sec=piece_end,
+                                       text=chunk, **extra))
+            t = piece_end
+    return out
 
 
 def parse_srt(srt_path: Path) -> list[SpeechSegment]:

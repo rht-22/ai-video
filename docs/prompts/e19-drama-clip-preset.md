@@ -1,11 +1,12 @@
 # E19 — 드라마 클립 프리셋 갭 묶음 (발주서)
 
-**상태: E19-1~8 전 항목 구현 완료(2026-08-28).** 계약 정본은 이제 코드다:
-ai-video `CLAUDE.md`(채널 톤 프로파일 절 + E19-2~8 하위 절) ·
+**상태: E19-1~9 전 항목 구현 완료(2026-08-28).** 계약 정본은 이제 코드다:
+ai-video `CLAUDE.md`(채널 톤 프로파일 절 + E19-2~9 하위 절) ·
 `app/modules/style_tone.py` · `renderer.strip_title_markup`/`extract_title_highlights` ·
 `pipeline.snap_cues_to_dialogue_gaps` · `style_compose.avoid_faces_for_texts`/
 `load_sfx_manifest` · `reframe.CropKeyframe(face_*)` · `renderer.sfx_audio` ·
-`profanity_mask.py` · `audio_qa.py` · `tests/test_e19_*.py`.
+`profanity_mask.py` · `audio_qa.py` · `subtitle.split_segments_single_line`(E19-9
+단일 줄 자막 — 김부장 v2 검수 후 사용자 지시로 추가) · `tests/test_e19_*.py`.
 
 남은 후속(전부 별건으로 명시된 것):
 ① E19-2 **AI 마크업 생성** — story 산출 제목의 마크업이 edit_plan·발행 메타(대시보드·
