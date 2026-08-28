@@ -4327,6 +4327,18 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     print(f"  [style] 자막 강조 드롭(tts 고아 규칙과 동일): "
                           f"source_time_sec={_o.get('source_time_sec')} {_o.get('why', '')}")
                 if _n_sub:
+                    # E19-9: 강조(size)는 수렴 지점의 단일 줄 분할 **뒤**에 얹힌다 —
+                    # 커진 줄은 같은 폭에 덜 들어가므로 여기서 한 번 더 태운다(멱등 —
+                    # 강조로 좁아진 줄만 다시 갈라진다). 김부장 v3 실측: 13자 강조 줄이
+                    # ASS 조립의 size_ratio 재계산(max 11자)에서 \N 두 줄로 갈라졌다.
+                    if _sl_on:
+                        _sl_b2 = len(final_segments)
+                        final_segments = split_segments_single_line(
+                            final_segments, _sl_max,
+                            base_font_size=payload.design.subtitle_size)
+                        if len(final_segments) != _sl_b2:
+                            print(f"  [단일줄자막] 강조 재분할 {_sl_b2} → "
+                                  f"{len(final_segments)} 줄")
                     # 강조가 캐시에 남아야 --from-step resources 재개에서도 유지된다.
                     segments_cache_path.write_text(
                         json.dumps([_subtitle_segment_json(s) for s in final_segments],

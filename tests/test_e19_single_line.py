@@ -179,7 +179,18 @@ def test_pipeline_wires_single_line():
     split = src.index("split_segments_single_line(")
     override = src.index("_sub_override = overrides_subtitles(_edit_overrides)")
     assert mask < split < override
-    # TTS: 정본 두 분기 + variant 대사·TTS — 대사 수렴 1곳과 합쳐 총 5곳
-    assert src.count("split_segments_single_line(") == 5
+    # 수렴 1 + 강조 재분할 1 + TTS 정본 2분기 + variant 대사·TTS — 총 6곳
+    assert src.count("split_segments_single_line(") == 6
     # 게이트는 톤 프로파일 subtitle 절 하나다(새 CLI 플래그 없음 — E19-1 규약)
     assert 'get("single_line")' in src
+
+
+def test_pipeline_resplits_after_emphasis():
+    """E15 자막 강조(size)는 수렴 분할 **뒤**에 얹힌다 — 강조 적용 직후·캐시 기록
+    **앞**에 재분할이 있어야 한다. 김부장 v3 실측: 13자 강조 줄(size 78)이 ASS 조립의
+    size_ratio 재계산(max 11자)에서 \\N 두 줄로 갈라졌다 — 이 배선이 그 결함의 수정."""
+    src = (REPO / "app" / "pipeline.py").read_text("utf-8")
+    emph = src.index("apply_subtitle_styles(")
+    resplit = src.index("split_segments_single_line(", emph)
+    cache_write = src.index("강조가 캐시에 남아야", emph)
+    assert emph < resplit < cache_write
