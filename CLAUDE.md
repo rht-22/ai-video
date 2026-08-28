@@ -1267,3 +1267,27 @@ E11·E12 는 **모든** 실패를 fail-loud 로 막았다(조용한 목소리 �
 - 기록: run_log `steps[{step:"tts_cue_gaps"}]` = `{of, cue_snapped, warned, details,
   tolerance_sec}` + 건별 stdout. 순수 함수 — 넘겨받은 cue 를 건드리지 않는다.
 - 회귀 가드: `tests/test_e19_cue_overlap.py`(11건 — 게이트·자리·순수성·점유 스냅 고정).
+
+### E19-2 제목 단어 단위 색 강조 (2026-08-28)
+
+`renderer.strip_title_markup`·`extract_title_highlights`·`_emit_line_text` ·
+design 키 `title_highlight_color`(기본 `#FFE24A`, `--design-title-highlight-color`).
+
+- 문법은 제목 문자열 안 **`{{어절}}`** 하나. 제목(title_text)과 시간대별 제목
+  (title_segments 텍스트) 둘 다 같은 문법을 탄다. **마크업이 없으면 렌더 경로가 종전과
+  바이트 동일**(회귀 0 — E10/E8/E7 필터그래프 문자열 가드가 함께 지킨다).
+- 세그먼트 배치는 같은 TTF 를 **Pillow 로 재서 절대 x** 로 나란히 놓는다(둥근 박스 PNG
+  폭 측정 `_measure_title_text_width` 와 같은 신뢰). ffmpeg 와의 수 px 차이는 세그먼트
+  경계에서만 나며 실렌더 확인 대상. 폰트가 파일이 아니면 1em/글자 근사(한글 근사 충분).
+- 마커는 **줄바꿈 계산에 안 센다**(split_text_smart 의 clean_word) — 마커 때문에 20자
+  제목이 두 줄로 갈라지거나 길이 축소가 달라지면 안 된다.
+- rect 박스 줄의 강조: 세그먼트별 box 는 조각난 상자가 되므로 **상자색 글자+box 밑그림**
+  을 먼저 깔고(ffmpeg 가 전체 폭을 직접 잰다) 글자는 box 없이 그 위에 그린다.
+  round 박스·회전 제목(_emit_rotated_title)·bold(세그먼트 색 외곽선)와 전부 직교.
+- **잔여물은 떼고 그리되 건별 경고**(`[TitleHighlight] ⚠`) — 홀짝 불일치·중첩·빈 강조
+  전부. 제목에 중괄호가 노출된 채 발행되는 것이 최악이다.
+- ⚠ **AI 마크업 생성은 아직 닫혀 있다**(사람 경로만 개통 — 편집실·채널이 제목 문자열에
+  직접 쓴다). 톤 프로파일로 열려면 story 산출 제목의 마크업이 edit_plan·발행 메타로
+  그대로 흘러가는 표면(대시보드·유튜브 제목)의 세척이 선행돼야 한다 — E19 후속 별건.
+- 회귀 가드: `tests/test_e19_title_highlight.py`(16건 — 파서·잔여물·회귀 0·절대 x 배치·
+  rect 밑그림·회전·tseg 경로).

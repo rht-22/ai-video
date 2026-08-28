@@ -486,6 +486,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import subprocess
 from dataclasses import dataclass, replace, field
 from pathlib import Path
@@ -996,6 +997,90 @@ def _make_title_box_png(text: str, font_path: str, font_size: int, color: str,
 _TITLE_BOX_STYLES = ("none", "round", "rect")
 
 
+# ─────────────────────────────────────────────────────────────
+# E19-2: 제목 단어 단위 색 강조 (2026-08-28)
+# ─────────────────────────────────────────────────────────────
+# 발주서: docs/prompts/e19-drama-clip-preset.md §2. 벤치마크(신병4)의 "가장 **X같은**
+# 질문" — 제목 문자열 안 `{{어절}}` 마크업이 그 어절만 design.title_highlight_color 로
+# 그려진다. **마크업이 없으면 이 경로 전체가 no-op** — 렌더 필터그래프가 종전과 바이트
+# 동일하다(회귀 0, E10 문자열 가드가 함께 지킨다).
+
+_TITLE_HL_TOKEN_RE = re.compile(r"(\{\{|\}\})")
+
+
+def strip_title_markup(text: str) -> tuple[str, list[str]]:
+    """잔여물 정리 — 균형 잡힌 `{{…}}` 쌍만 남기고 나머지 마커는 뗀다(경고 목록 반환).
+
+    홀짝 불일치·중첩·빈 강조(`{{}}`)는 마커만 제거하고 건별 경고 — 제목이 깨진 채
+    (중괄호 노출) 발행되는 것이 최악이다(발주서 §2). 마크업 없는 제목은 그대로
+    돌려준다(빠른 경로 — 기존 제목 전부가 이 줄에서 끝난다)."""
+    if "{{" not in text and "}}" not in text:
+        return text, []
+    tokens = _TITLE_HL_TOKEN_RE.split(text)
+    warnings: list[str] = []
+    keep: set[int] = set()
+    open_idx: int | None = None
+    for i, tok in enumerate(tokens):
+        if tok == "{{":
+            if open_idx is None:
+                open_idx = i
+            else:
+                warnings.append(f"중첩된 {{{{ — 마커 제거 ({text[:24]!r})")
+        elif tok == "}}":
+            if open_idx is not None:
+                inner = "".join(tokens[open_idx + 1:i])
+                if inner:
+                    keep.add(open_idx)
+                    keep.add(i)
+                else:
+                    warnings.append(f"빈 강조 {{{{}}}} — 마커 제거 ({text[:24]!r})")
+                open_idx = None
+            else:
+                warnings.append(f"짝 없는 }}}} — 마커 제거 ({text[:24]!r})")
+    if open_idx is not None:
+        warnings.append(f"닫히지 않은 {{{{ — 마커 제거 ({text[:24]!r})")
+    out = "".join(tok if tok not in ("{{", "}}") or i in keep else ""
+                  for i, tok in enumerate(tokens))
+    return out, warnings
+
+
+def extract_title_highlights(
+    lines: list[tuple[int, str]],
+) -> tuple[list[tuple[int, str]], dict[int, list[tuple[str, bool]]]]:
+    """wrap 된 줄들에서 마커를 떼고, 강조가 있는 줄의 세그먼트를 돌려준다.
+
+    입력은 strip_title_markup 을 지난(= 마커가 전역 균형인) 줄 목록. 강조가 wrap
+    경계를 넘으면 열림 상태가 다음 줄로 이월된다(마커는 어절에 붙으므로 어절 단위
+    wrap 이 마커 토큰 자체를 쪼개는 일은 없다).
+
+    반환: (마커 제거된 줄 목록, {visual_idx: [(조각, 강조여부), …]}) —
+    강조 없는 줄은 dict 에 없고 텍스트도 원본 그대로다(회귀 0)."""
+    out_lines: list[tuple[int, str]] = []
+    hl: dict[int, list[tuple[str, bool]]] = {}
+    open_hl = False
+    for vi, (oi, line) in enumerate(lines):
+        if "{{" not in line and "}}" not in line and not open_hl:
+            out_lines.append((oi, line))
+            continue
+        segs: list[tuple[str, bool]] = []
+        buf = ""
+        for tok in _TITLE_HL_TOKEN_RE.split(line):
+            if tok in ("{{", "}}"):
+                if buf:
+                    segs.append((buf, open_hl))
+                    buf = ""
+                open_hl = tok == "{{"
+            else:
+                buf += tok
+        if buf:
+            segs.append((buf, open_hl))
+        clean = "".join(t for t, _ in segs)
+        out_lines.append((oi, clean))
+        if clean.strip() and any(h for _, h in segs):
+            hl[vi] = segs
+    return out_lines, hl
+
+
 def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_inputs: int) -> str:
     W = inputs.canvas_width
     H = inputs.canvas_height
@@ -1040,7 +1125,10 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
             words = line.split()
             current_line = ""
             for word in words:
-                clean_word = word.split(':')[0].replace('{', '').replace('}', '') if ':' in word else word
+                # E19-2: {{강조}} 마커는 글자 수에 안 센다 — 마커 때문에 줄바꿈·축소가
+                # 달라지면 안 된다(마커 없는 어절은 종전과 동일).
+                clean_word = (word.split(':')[0].replace('{', '').replace('}', '')
+                              if ':' in word else word.replace('{{', '').replace('}}', ''))
                 if len(current_line) + len(clean_word) <= max_chars:
                     current_line = (current_line + " " + word).strip()
                 else:
@@ -1051,7 +1139,13 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
 
 
     # 라운드 22: 최대 20자까지 한 줄 유지 (이전 15자). 20자 초과는 pipeline에서 LLM 재작성 또는 절단.
-    title_lines = split_text_smart(inputs.title_text, 20)
+    # E19-2: {{어절}} 강조 마크업 — 잔여물을 먼저 떼고(경고), wrap 뒤 세그먼트를 추출한다.
+    # 마크업 없는 제목은 세 단계 전부 no-op 라 종전과 바이트 동일하다(회귀 0).
+    _hl_warnings: list[str] = []
+    _clean_title_text, _w = strip_title_markup(inputs.title_text)
+    _hl_warnings += _w
+    title_lines = split_text_smart(_clean_title_text, 20)
+    title_lines, _title_hl = extract_title_highlights(title_lines)
 
     # E8: 시간대별 제목 — 세그먼트가 있으면 그 창들만 그린다(창 밖 시간은 제목 없음이
     # 유효값, title_text 는 무시). 창은 자막과 같은 편집본 시간축으로 들어오고, 제목은
@@ -1059,12 +1153,22 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     # ([6.5])와 같은 규약. CLI·오버라이드 검증을 안 거친 호출(파이프라인 재개·테스트)이
     # 깨진 창을 들고 오면 즉시 실패한다(E7 과 같은 렌더 경계 검증).
     _tsegs = list(inputs.title_segments or [])
+    _tseg_hl: list[dict[int, list[tuple[str, bool]]]] = []
     if _tsegs:
         validate_title_segments(_tsegs)
         _tsegs.sort(key=lambda sg: (float(sg["start_sec"]), float(sg["end_sec"])))
-        _tseg_lines = [split_text_smart(str(sg["text"]), 20) for sg in _tsegs]
+        _tseg_lines = []
+        for sg in _tsegs:
+            _txt, _w = strip_title_markup(str(sg["text"]))     # E19-2 — 제목과 같은 문법
+            _hl_warnings += _w
+            _ls, _hl = extract_title_highlights(split_text_smart(_txt, 20))
+            _tseg_lines.append(_ls)
+            _tseg_hl.append(_hl)
     else:
         _tseg_lines = []
+    for _hw in _hl_warnings:
+        # 잔여물은 조용히 못 넘긴다 — 제목이 깨진 채 발행되는 것이 최악(발주서 §2).
+        print(f"  [TitleHighlight] ⚠ {_hw}")
 
     # 줄별 폰트 크기 (title_sizes가 있으면 사용, 없으면 title_size로 통일)
     title_sizes = getattr(d, 'title_sizes', [d.title_size])
@@ -1283,12 +1387,15 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     # 달라도 모든 세그먼트의 첫 줄이 같은 y 에서 시작한다(위 title_total_height 참고).
     _title_block_top = cumulative_y
 
-    def _line_specs(lines: list[tuple[int, str]]) -> list[tuple[str, int, int, str, dict]]:
+    def _line_specs(lines: list[tuple[int, str]],
+                    hl_map: dict[int, list[tuple[str, bool]]] | None = None,
+                    ) -> list[tuple[str, int, int, str, dict]]:
         # (color, font_size, frame_y, escaped, style) — frame_y 는 **글자** 윗변(박스 윗변은
         # frame_y - pad). style: box(none|round|rect)·box_color·pad·bold_w·raw(원문, PNG 폭 측정용)
+        # ·hl_segments(E19-2 — 강조 줄만, [(조각, 강조여부), …])
         specs: list[tuple[str, int, int, str, dict]] = []
         y = _title_block_top
-        for orig_idx, raw_line in lines:
+        for visual_idx, (orig_idx, raw_line) in enumerate(lines):
             base_color = custom_colors[orig_idx] if orig_idx < len(custom_colors) else custom_colors[-1]
             base_font_size = title_sizes[orig_idx] if orig_idx < len(title_sizes) else title_sizes[-1]
             font_size = _scale_font_for_length(base_font_size, len(raw_line))
@@ -1300,6 +1407,7 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
                 "pad": pad,
                 "bold_w": _bold_w(font_size, bool(_per_line(title_bolds, orig_idx))),
                 "raw": raw_line,
+                "hl_segments": (hl_map or {}).get(visual_idx),
             }
             specs.append((base_color, font_size, y + pad, _escape_text_for_drawtext(raw_line), style))
             y += font_size + 2 * pad + line_spacing
@@ -1339,7 +1447,53 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
             label = f"[{prefix}bo{visual_idx}]"
         return label
 
-    _title_specs = _line_specs(title_lines)
+    _title_specs = _line_specs(title_lines, _title_hl)
+
+    def _emit_line_text(in_label: str, out_label: str, sub: str, base_color: str,
+                        font_size: int, y_val: int, escaped_full: str, style: dict,
+                        enable_clause: str) -> None:
+        """한 줄의 글자 그리기 — 강조가 없으면 종전과 **문자열까지 동일한** drawtext 한 개
+        (회귀 0, E10 문자열 가드가 지킨다). 강조 줄(E19-2)은 세그먼트별 drawtext 를 절대
+        x 로 나란히 놓는다 — 폭은 같은 TTF 를 Pillow 로 잰다(둥근 박스 PNG 와 같은 신뢰,
+        ffmpeg 와의 수 px 차이는 세그먼트 경계에서만 나고 실렌더 확인 대상)."""
+        segs = style.get("hl_segments")
+        if not segs:
+            filters.append(
+                f"{in_label}drawtext=expansion=none:fontfile='{font_arg}':text='{escaped_full}':"
+                f"fontcolor={base_color}:fontsize={font_size}:"
+                f"x=(w-text_w)/2:y={y_val}{_drawtext_extra(base_color, style)}{enable_clause}{out_label}"
+            )
+            return
+        hl_color = getattr(d, "title_highlight_color", None) or "#FFE24A"
+        widths = [_measure_title_text_width(t, actual_font, font_size) for t, _ in segs]
+        x0 = int(round((W - sum(widths)) / 2.0))
+        label = in_label
+        if style["box"] == "rect":
+            # 세그먼트별 box 는 조각난 상자가 된다 — 상자색 글자+box 밑그림 한 장을 먼저
+            # 깔아 상자만 보이게 하고(ffmpeg 가 전체 폭을 직접 잰다), 글자는 그 위에 그린다.
+            filters.append(
+                f"{label}drawtext=expansion=none:fontfile='{font_arg}':text='{escaped_full}':"
+                f"fontcolor={style['box_color']}:fontsize={font_size}:"
+                f"x=(w-text_w)/2:y={y_val}:box=1:boxcolor={style['box_color']}:"
+                f"boxborderw={style['pad']}{enable_clause}[{sub}hb]"
+            )
+            label = f"[{sub}hb]"
+        print(f"  [TitleHighlight] {len(segs)}세그먼트 x0={x0} "
+              f"({'/'.join(t for t, h in segs if h)!r} → {hl_color})")
+        off = 0
+        for k, ((seg_text, is_hl), seg_w) in enumerate(zip(segs, widths)):
+            nl = out_label if k == len(segs) - 1 else f"[{sub}h{k}]"
+            col = hl_color if is_hl else base_color
+            extra = (f":borderw={style['bold_w']}:bordercolor={col}"
+                     if style["bold_w"] else "")
+            filters.append(
+                f"{label}drawtext=expansion=none:fontfile='{font_arg}':"
+                f"text='{_escape_text_for_drawtext(seg_text)}':"
+                f"fontcolor={col}:fontsize={font_size}:x={x0 + off}:y={y_val}"
+                f"{extra}{enable_clause}{nl}"
+            )
+            label = nl
+            off += seg_w
 
     def _emit_title_lines(specs: list[tuple[str, int, int, str]], in_label: str,
                           prefix: str, enable_clause: str = "") -> str:
@@ -1347,11 +1501,8 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         label = _emit_round_boxes(specs, in_label, prefix, 0, enable_clause)
         for visual_idx, (base_color, font_size, frame_y, escaped_full, style) in enumerate(specs):
             next_label = f"[{prefix}{visual_idx}]"
-            filters.append(
-                f"{label}drawtext=expansion=none:fontfile='{font_arg}':text='{escaped_full}':"
-                f"fontcolor={base_color}:fontsize={font_size}:"
-                f"x=(w-text_w)/2:y={frame_y}{_drawtext_extra(base_color, style)}{enable_clause}{next_label}"
-            )
+            _emit_line_text(label, next_label, f"{prefix}{visual_idx}", base_color,
+                            font_size, frame_y, escaped_full, style, enable_clause)
             label = next_label
         return label
 
@@ -1382,11 +1533,8 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         _ttl_label = _emit_round_boxes(specs, _ttl_label, prefix, _canvas_top)
         for visual_idx, (base_color, font_size, frame_y, escaped_full, style) in enumerate(specs):
             next_label = f"[{prefix}{visual_idx + 1}]"
-            filters.append(
-                f"{_ttl_label}drawtext=expansion=none:fontfile='{font_arg}':text='{escaped_full}':"
-                f"fontcolor={base_color}:fontsize={font_size}:"
-                f"x=(w-text_w)/2:y={frame_y - _canvas_top}{_drawtext_extra(base_color, style)}{next_label}"
-            )
+            _emit_line_text(_ttl_label, next_label, f"{prefix}r{visual_idx}", base_color,
+                            font_size, frame_y - _canvas_top, escaped_full, style, "")
             _ttl_label = next_label
         print(f"  [TitleRotate] {title_rotate:g}° — 블록 {W}x{_blk_h} → bb {_bb_w}x{_bb_h}, "
               f"overlay=({_ox},{_oy})")
@@ -1402,7 +1550,7 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
             s_out = float(sg["start_sec"]) / speed
             e_out = float(sg["end_sec"]) / speed
             enable = f":enable='between(t,{s_out:.3f},{e_out:.3f})'"
-            specs = _line_specs(seg_lines)
+            specs = _line_specs(seg_lines, _tseg_hl[k])
             print(f"  [TitleSegment {k}] {s_out:.3f}~{e_out:.3f}s ({len(specs)}줄)"
                   + (f" — 편집본 {float(sg['start_sec']):g}~{float(sg['end_sec']):g}s"
                      f" ×1/{speed:g}" if speed != 1.0 else ""))
