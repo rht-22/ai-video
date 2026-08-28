@@ -1,6 +1,8 @@
 # E19 — 드라마 클립 프리셋 갭 묶음 (발주서)
 
-**상태: 기획(2026-08-28).** ⚠ 발주서 정본 위치는 ves-orchestrator `docs/prompts/` 인데,
+**상태: E19-1 구현 완료(2026-08-28) · E19-2~8 기획.** E19-1 계약 정본은 이제 코드다:
+ai-video `CLAUDE.md`(채널 톤 프로파일 절) · `app/modules/style_tone.py` ·
+`tests/test_e19_style_tone.py`. ⚠ 발주서 정본 위치는 ves-orchestrator `docs/prompts/` 인데,
 그 저장소 메인 체크아웃이 지금 다른 세션의 브랜치에 올라가 있어 **임시로 이 레포에
 둔다** — ves 체크아웃이 정리되면 그쪽으로 옮기고 여기는 포인터만 남긴다.
 

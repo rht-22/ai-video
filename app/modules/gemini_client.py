@@ -2022,11 +2022,16 @@ class GeminiClient:
         editorial: dict | None = None,
         relationship_edges: list[dict] | None = None,
         chunk_meta: list[dict] | None = None,
+        style_tone_block: str | None = None,
     ) -> dict[str, Any]:
         """후보 장면들로 바이럴 최적화 스토리라인을 구성합니다.
 
         하이라이트형 3개 + 서사형 3개를 생성하고 최적 1개를 선정합니다.
         JSON 강제 응답 + 구조 검증 + 3회 재시도 + 폴백을 적용합니다.
+
+        `style_tone_block`(E19-1)은 채널 톤 프로파일이 만든 **덧붙임 절**이다
+        (`style_tone.story_prompt_block`). None/빈 문자열이면 프롬프트는 종전과
+        한 글자도 다르지 않다(회귀 0) — editorial/reject_note 와 같은 규약.
         """
         candidates_str = ""
         for m in all_candidates:
@@ -2083,6 +2088,9 @@ class GeminiClient:
         # 작품별 편집 지침 — 이 프롬프트가 선정·제목·tts_cues 를 한 번에 내므로
         # 하드 필터(장면+문구)·랭킹 편향·문체가 전부 여기 걸린다. editorial.py 가 정본.
         prompt += format_editorial_block(editorial, use_case="story")
+        # E19-1 채널 톤 — 맨 뒤에 얹는다(같은 주제를 다루는 절 중 마지막이 이긴다는
+        # 블록 안 선언과 짝). 비어 있으면 종전과 동일.
+        prompt += style_tone_block or ""
 
         # 폴백 사유 추적 — 폴백으로 떨어지면 그 사실과 이유가 산출물에 남아야 한다.
         # 종전에는 selection_reason 문자열을 눈으로 읽어야만 폴백인 줄 알았고, 왜 실패했는지는
@@ -2323,6 +2331,8 @@ class GeminiClient:
         text_y_range: tuple[float, float] = (0.35, 0.66),
         editorial: dict[str, Any] | None = None,
         reject_note: str | None = None,
+        style_tone_block: str | None = None,
+        max_texts: int | None = None,
     ) -> dict[str, Any] | None:
         """E15 — 편 단위 연출 플랜(style_plan/v1)을 Flash 로 구성한다.
 
@@ -2338,6 +2348,11 @@ class GeminiClient:
         정본은 style_compose.validate_plan 이고, 호출부가 거기서 거절되면 재시도한다.
         연출은 부가물이라 예외를 올리지 않는다(본편 발행을 막지 않는다 — 호출부가
         '스타일 없이 진행'을 stdout·run_log 에 남긴다).
+
+        `style_tone_block`/`max_texts`(E19-1): 채널 톤 프로파일의 덧붙임 절과 효과
+        텍스트 상한 오버라이드. 미지정이면 프롬프트·상한이 종전과 완전히 동일하다
+        (회귀 0). max_texts 를 여기서도 받는 이유: 프롬프트의 '상한' 줄과 검증기
+        (`validate_plan`)가 **같은 숫자**를 봐야 LLM 이 캡까지 쓰고도 잘리지 않는다.
         """
         from app.modules import style_compose as _sc
         from app.modules.edit_overrides import TEXT_FONTS
@@ -2356,7 +2371,8 @@ class GeminiClient:
             speeds="/".join(_sc.STYLE_SPEEDS),
             text_y_lo=f"{float(text_y_range[0]):.2f}",
             text_y_hi=f"{float(text_y_range[1]):.2f}",
-            max_texts=_sc.MAX_TEXTS, max_images=_sc.MAX_IMAGES,
+            max_texts=(max_texts if max_texts is not None else _sc.MAX_TEXTS),
+            max_images=_sc.MAX_IMAGES,
             max_subs=_sc.MAX_SUBTITLE_STYLES, max_titles=_sc.MAX_TITLE_SEGMENTS,
             work_title=work_title, title_text=(title_text or "").replace("\n", " / "),
             timeline_block=_fmt(timeline,
@@ -2367,6 +2383,8 @@ class GeminiClient:
         )
         prompt += _format_reject_note(reject_note, use_case="style")
         prompt += format_editorial_block(editorial, use_case="story")
+        # E19-1 채널 톤 — story 쪽과 같은 규약(맨 뒤·비면 종전 동일).
+        prompt += style_tone_block or ""
 
         for attempt in range(2):
             try:

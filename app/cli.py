@@ -138,6 +138,16 @@ def build_parser() -> argparse.ArgumentParser:
              "시간대별 제목·제목 기울기·내레이션 톤)을 구성해 그대로 렌더한다. "
              "미지정이면 그 단계 자체가 없다 — 산출은 종전과 완전히 동일하다. "
              "편집실이 고친 항목은 AI 것을 이긴다(우선순위: 편집실 > 채널 > AI).")
+    # E19-1(2026-08-28) 채널 톤 프로파일 — app/data/style_tones/<이름>.json 의 채널 문법
+    # (내레이션 톤·라벨 어휘·밀도 캡)을 story·style 프롬프트에 주입한다. 오케스트레이터
+    # 어댑터가 채널 design 키 style_tone 을 그대로 이 플래그로 넘긴다(엔진 전 노드 배포 뒤).
+    # 미지정 = 프롬프트·하드캡이 종전과 완전히 동일(회귀 0). 없는 이름은 아래 사전검사에서
+    # 즉시 실패 — argparse choices 가 아닌 이유는 프로파일이 늘어나는 어휘이기 때문.
+    create.add_argument("--style-tone", dest="style_tone", type=str, default=None,
+                        help="(선택) 채널 톤 프로파일 이름(예: drama_clip_kr). "
+                             "app/data/style_tones/<이름>.json 을 읽어 스토리·연출 프롬프트에 "
+                             "채널 문법을 주입한다. 없는 이름은 즉시 실패한다. "
+                             "미지정이면 프롬프트가 종전과 완전히 동일하다.")
     create.add_argument("--no-research", action="store_true",
                         help="작품 자동 리서치를 건너뜁니다")
     create.add_argument("--episode", type=int, default=None,
@@ -613,6 +623,15 @@ def main() -> None:
         except ValueError as e:
             parser.error(str(e))
 
+        # E19-1: 톤 프로파일 사전검사 — 비싼 단계(청크 분석) 앞에서 죽는다. 없는 이름이
+        # 밤중 생성에서 조용히 기본 톤으로 떨어지면 '프리셋 적용했는데 왜 그대로지'가 된다.
+        if getattr(args, "style_tone", None):
+            from app.modules.style_tone import StyleToneError, load_style_tone
+            try:
+                load_style_tone(args.style_tone)
+            except StyleToneError as e:
+                parser.error(str(e))
+
         # E15: 채널이 **명시한** design 키를 함께 걷는다(AI 연출이 못 덮게 하는 근거).
         _design_explicit: set[str] = set()
         _design = _build_design_config(args, collect=_design_explicit)
@@ -645,6 +664,7 @@ def main() -> None:
                                      if getattr(args, "edit_overrides", None) else None),
                 transcribe_backend=getattr(args, "transcribe_backend", None),
                 style_compose=bool(getattr(args, "style_compose", False)),
+                style_tone=getattr(args, "style_tone", None),
                 design_explicit_fields=frozenset(_design_explicit),
             ),
             from_step=args.from_step,

@@ -187,6 +187,7 @@ def validate_plan(
     manifest: dict[str, dict[str, Any]],
     app_root: Path,
     run_dir: Path,
+    max_texts: int | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """style_plan/v1 → (정규화된 플랜, 기록할 메모들). 계약 위반이면 StylePlanError.
 
@@ -218,7 +219,10 @@ def validate_plan(
     out: dict[str, Any] = {}
 
     # ── texts / images: v3 검증기에 그대로 태운다 ─────────────────────────
-    texts = _cap(list(plan.get("texts") or []), MAX_TEXTS, "효과 텍스트", notes)
+    # 효과 텍스트 캡은 톤 프로파일(E19-1)이 키울 수 있다 — 상한은 프로파일 로더가
+    # 이미 검증했다(style_tone.DENSITY_MAX_LIMIT). None(톤 미지정) = 종전 8 그대로.
+    texts = _cap(list(plan.get("texts") or []),
+                 max_texts if max_texts is not None else MAX_TEXTS, "효과 텍스트", notes)
     texts = [{k: v for k, v in t.items() if k != "reason"} if isinstance(t, dict) else t
              for t in texts]
 

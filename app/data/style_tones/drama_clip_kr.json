@@ -1,0 +1,33 @@
+{
+  "schema": "style_tone/v1",
+  "name": "drama_clip_kr",
+  "narration": {
+    "tone": "recall_first_person",
+    "max_cues": 5,
+    "cue_len_chars": [3, 12],
+    "relay_rule": true,
+    "placement": "dialogue_gaps_only"
+  },
+  "labels": {
+    "categories": ["state_paren", "meme_tsukkomi", "wordplay"],
+    "color_map": {
+      "state": "#FF9EC4",
+      "comment": "#FFE24A",
+      "tsukkomi": "#FF4632",
+      "laugh": "#FFFFFF",
+      "positive": "#7DFF9E"
+    },
+    "density_max": 14,
+    "duration_sec": [0.6, 2.5],
+    "sync_to_speech": true,
+    "fill_gaps": true,
+    "payoff_clean": true,
+    "running_gag": true
+  },
+  "story": {
+    "structure": "single_scene_rule_of_three",
+    "title_tone": "community_meme",
+    "ending": "hard_cut",
+    "payoff_longtake": true
+  }
+}

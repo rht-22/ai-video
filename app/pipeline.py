@@ -2258,6 +2258,11 @@ class PipelineInput:
     # **False(기본)면 style 단계가 통째로 없다** — 체크포인트를 쓰지도 읽지도 않고
     # 산출은 종전과 한 글자도 다르지 않다(회귀 0).
     style_compose: bool = False
+    # E19-1(2026-08-28) 채널 톤 프로파일 이름 — app/data/style_tones/<이름>.json 을 읽어
+    # story·style 프롬프트에 채널 문법(내레이션 톤·라벨 어휘·밀도 캡)을 덧붙인다.
+    # **None(기본)이면 프롬프트·하드캡이 종전과 완전히 동일하다**(회귀 0). 없는 이름은
+    # fail-loud(StyleToneError) — CLI 사전검사가 먼저 잡지만 파이프라인도 같은 규율을 탄다.
+    style_tone: str | None = None
     # 채널(CLI)이 **명시한** design 필드 이름들. AI 스타일 플랜이 덮어도 되는지 가리는 데만
     # 쓴다(§5 우선순위: 편집실 > 채널 명시 > AI > 기본값). '기본값과 다른가'로 판정하면
     # 채널이 기본값과 같은 값을 일부러 명시한 경우를 구분하지 못해 사람 결정이 덮인다.
@@ -2369,6 +2374,16 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         print(f"  - Job ID: {job_id}")
         print(f"  - 출력 디렉토리: {output_dir}")
     run_log.setdefault("provenance", build_provenance(config))
+    # E19-1 채널 톤 프로파일 — 미지정이면 None(종전 그대로). 이름·파일·값 오류는 여기서
+    # 즉시 실패한다(재개 실행이 CLI 사전검사를 안 지나도 같은 규율). 어느 톤으로 나간
+    # 산출물인지 provenance 에 이름+sha 로 남는다 — 프로파일 파일이 고쳐지면 sha 가 갈린다.
+    style_tone_profile = None
+    if payload.style_tone:
+        from app.modules import style_tone as _tonemod
+        style_tone_profile = _tonemod.load_style_tone(payload.style_tone)
+        run_log["provenance"]["style_tone"] = {
+            "name": style_tone_profile.name, "sha12": style_tone_profile.sha12}
+        print(f"  - 채널 톤 프로파일: {style_tone_profile.name} (sha {style_tone_profile.sha12})")
     print("[OK] 초기화 완료")
 
     # ═══════════════════════════════════════
@@ -3201,6 +3216,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             editorial=payload.editorial,
             relationship_edges=relationship_edges or None,
             chunk_meta=chunk_meta_list or None,
+            # E19-1 — 톤 미지정이면 빈 문자열이라 프롬프트가 종전과 동일하다.
+            style_tone_block=(_tonemod.story_prompt_block(style_tone_profile)
+                              if style_tone_profile else None),
         )
 
         # 폴백 표식 — 폴백 산출물은 서로 무관한 장면이 이어붙고 제목이 '작품명 + 설명 앞 20자'
@@ -4023,6 +4041,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     # 프롬프트에 하드코딩된 구간(0.15~0.35)이 제목 자리와 겹쳐 있었다.
                     text_y_range=_stylemod.text_y_range(payload.design),
                     editorial=payload.editorial, reject_note=payload.reject_note,
+                    # E19-1 — 프롬프트의 '상한' 줄과 아래 validate_plan 이 같은 숫자를 본다.
+                    style_tone_block=(_tonemod.style_prompt_block(style_tone_profile)
+                                      if style_tone_profile else None),
+                    max_texts=(style_tone_profile.density_max
+                               if style_tone_profile else None),
                 )
             except Exception as _e:      # noqa: BLE001 — 연출은 부가물, 본편을 막지 않는다
                 print(f"  [style] 호출 실패({type(_e).__name__}: {_e}) — 연출 없이 진행")
@@ -4031,7 +4054,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 try:
                     _style_plan, _style_notes = _stylemod.validate_plan(
                         _raw_plan, manifest=_manifest, app_root=paths.app_root,
-                        run_dir=output_dir)
+                        run_dir=output_dir,
+                        max_texts=(style_tone_profile.density_max
+                                   if style_tone_profile else None))
                     checkpoint_style.write_text(
                         json.dumps(_style_plan, ensure_ascii=False, indent=2), encoding="utf-8")
                 except _stylemod.StylePlanError as _e:

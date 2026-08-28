@@ -1219,3 +1219,31 @@ E11·E12 는 **모든** 실패를 fail-loud 로 막았다(조용한 목소리 �
   절에 이미 옮겨져 있다. vlp 산출물(mm-06 outputs/)은 남는다 — 재작업이 필요하면
   그 mp4 를 overlay 파이프라인 입력으로 쓴다(vlp 를 되살리지 않는다).
 - 절차·판정 기록: ves-orchestrator `docs/P8_VLP_FREEZE.md`.
+
+## 채널 톤 프로파일 (E19-1, 2026-08-28)
+
+`app/modules/style_tone.py` · `app/data/style_tones/<이름>.json` · `--style-tone <이름>`.
+발주서: `docs/prompts/e19-drama-clip-preset.md` §1 — **E19 의 나머지 항목(2~8)은 미구현**이고
+이 플래그 하나가 E19 전체의 유일한 신규 CLI 플래그다(롤아웃 표면적 최소화 설계).
+값 정본: `docs/design_presets/drama_clip_kr.preset.json` 의 `status:"prompt"` 항목 —
+프로파일과 갈리면 `tests/test_e19_style_tone.py` 가 잡는다.
+
+- **게이트**: `--style-tone` 미지정 = 프롬프트·하드캡이 종전과 완전히 동일(회귀 0).
+  블록 함수(`story_prompt_block`/`style_prompt_block`)는 None 에 빈 문자열을 돌려준다.
+- **주입은 덧붙임 절 두 개뿐** — story(`compose_story_with_context`)·style(`compose_style`)
+  프롬프트 **맨 뒤**. 본문 프롬프트 문자열은 동결(E13 규율 — 문구가 바뀌면 전 채널이 흔들린다).
+- `labels.density_max`(상한 `DENSITY_MAX_LIMIT` 20)가 E15 `MAX_TEXTS`(8)를 대체한다 —
+  프롬프트의 '상한' 줄(compose_style `max_texts` 인자)과 `validate_plan(max_texts=)` 이
+  **같은 숫자**를 봐야 LLM 이 캡까지 쓰고도 잘리지 않는다. 체크포인트 재적용(E15 재개
+  계약)은 재검증이 없으므로 캡 변경의 영향도 없다.
+- **fail-loud**: 없는 이름·깨진 파일·모르는 enum·범위 밖 값 전부 `StyleToneError` 즉시 실패.
+  CLI 사전검사(비싼 청크 분석 **앞**)와 파이프라인 로드 두 곳이 같은 규율 — 조용히 기본
+  톤으로 떨어지는 경로가 없다(E11 transcribe-backend 규율).
+- **enum 은 고정 화이트리스트**(NARRATION_TONES 등) — 값을 늘리려면 프롬프트 문구 표
+  (`_STRUCTURE_TEXT` 등)를 **같이** 늘린다. 문구 없는 enum 은 로드에서 죽는다.
+- 기록: `run_log.provenance.style_tone = {name, sha12(파일 바이트)}` — 프로파일을 고치면
+  sha 가 갈려 산출물이 어느 판으로 나갔는지 재추적된다.
+- ⚠ **신 CLI 플래그** — 구 엔진 노드 argparse 즉사. ves 어댑터 `style_tone` 키 미러는
+  엔진 전 노드 배포 **뒤**(style_compose 와 같은 롤아웃, ops 게이트 channel_style 재사용).
+- 회귀 가드: `tests/test_e19_style_tone.py`(23건 — 회귀 0·fail-loud·프리셋↔프로파일 값
+  대조·배선 문자열 고정).
