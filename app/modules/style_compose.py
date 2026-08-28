@@ -660,3 +660,227 @@ def apply_subtitle_styles(final_segments: list, styles: list[dict[str, Any]],
         hit.style = dict(p["_style"])
         applied += 1
     return applied, dropped
+
+
+# ─────────────────────────────────────────────────────────────
+# E19-4: 라벨 얼굴 회피 · 컷 경계 재배치 (2026-08-28)
+# ─────────────────────────────────────────────────────────────
+# 발주서: docs/prompts/e19-drama-clip-preset.md §4. 벤치마크 실측(보고서 §12): 라벨은
+# 인물 얼굴 옆 빈 공간에 붙고, 컷이 바뀌면 새 구도에 맞춰 재배치된다.
+#
+# 얼굴 좌표는 **리프레임 크롭 타임라인의 얼굴 박스를 재사용**한다(reframe.CropKeyframe
+# 의 face_* 필드 — 검출을 두 번 돌리지 않는다). face_tracking 을 끈 채널·검출 실패
+# 클립·구 캐시 JSON(face 키 없음)은 전부 '얼굴 없음' = 회피 없이 종전 배치 —
+# 안전장치가 연출을 막으면 안 된다(E17-2 실패 규율).
+
+# 라벨-얼굴 최소 간격(캔버스 px)과 얼굴 표본 허용 시차. 표본은 crop_sample_interval
+# (기본 0.5s 안팎)로 찍히므로 0.75s 면 이웃 표본 하나는 반드시 잡힌다.
+FACE_AVOID_GAP_PX = 12
+FACE_SAMPLE_TOLERANCE_SEC = 0.75
+# 조각이 이보다 짧으면 쪼개지 않는다(깜빡이는 라벨 조각 방지 — E18-1 의 틈 규율과 동류).
+FACE_SPLIT_MIN_SEC = 0.15
+
+
+def face_box_on_canvas(keyframes: list[dict[str, Any]], t_rel: float,
+                       geom: Any, *, canvas_width: int = 1080,
+                       ) -> tuple[float, float, float, float] | None:
+    """크롭 키프레임 → 그 시각 얼굴의 **캔버스** 박스 (cx, cy, w, h). 없으면 None.
+
+    변환은 렌더 체인과 같은 순서다: crop(cw×ch, 중심 x/y_center) → scale
+    force_original_aspect_ratio=increase → 중앙 crop(scaled_w×scaled_h) → pad.
+    키프레임 time_sec 는 원본 절대초이고 렌더는 첫 키프레임 기준으로 정규화하므로
+    (renderer._build_crop_expr 의 t0), 여기도 같은 기준을 쓴다. 얼굴이 크롭 밖으로
+    잘려 나갔으면 None — 화면에 없는 얼굴은 피할 것도 없다."""
+    if not keyframes:
+        return None
+    t0 = float(keyframes[0].get("time_sec", 0.0))
+    best = None
+    best_d = FACE_SAMPLE_TOLERANCE_SEC
+    for kf in keyframes:
+        if float(kf.get("face_w", 0) or 0) <= 0:
+            continue                       # 미검출 표본 · 구 캐시(face 키 없음)
+        d = abs((float(kf.get("time_sec", 0.0)) - t0) - t_rel)
+        if d <= best_d:
+            best, best_d = kf, d
+    if best is None:
+        return None
+    cw = float(best.get("crop_w", 0) or 0)
+    ch = float(best.get("crop_h", 0) or 0)
+    if cw <= 0 or ch <= 0:
+        return None
+    s = max(geom.scaled_w / cw, geom.scaled_h / ch)
+    ox = (cw * s - geom.scaled_w) / 2.0
+    oy = (ch * s - geom.scaled_h) / 2.0
+    crop_left = float(best["x_center"]) - cw / 2.0
+    crop_top = float(best["y_center"]) - ch / 2.0
+    cx = geom.pad_x + (float(best["face_cx"]) - crop_left) * s - ox
+    cy = geom.overlay_y + (float(best["face_cy"]) - crop_top) * s - oy
+    w = float(best["face_w"]) * s
+    h = float(best["face_h"]) * s
+    band_right = geom.pad_x + geom.scaled_w
+    band_bottom = geom.overlay_y + geom.scaled_h
+    if cx < geom.pad_x or cx > band_right or cy < geom.overlay_y or cy > band_bottom:
+        return None                        # 리프레임 크롭이 얼굴을 잘라낸 경우
+    return (cx, cy, w, h)
+
+
+def _label_box(item: dict[str, Any], canvas_w: int, canvas_h: int,
+               ) -> tuple[float, float, float, float] | None:
+    """라벨의 캔버스 박스 (cx, cy, w, h). 폭은 1em/글자 근사 — 한글·짧은 라벨에 충분
+    (제목 강조 E19-2 의 폰트 폴백과 같은 근사)."""
+    try:
+        cx = float(item["x"]) * canvas_w
+        cy = float(item["y"]) * canvas_h
+        size = float(item.get("size") or 72.0)
+    except (TypeError, ValueError, KeyError):
+        return None
+    lines = str(item.get("text", "")).split("\n")
+    w = size * max(1, max(len(ln) for ln in lines))
+    h = size * len(lines)
+    return (cx, cy, w, h)
+
+
+def _boxes_overlap(a: tuple[float, float, float, float],
+                   b: tuple[float, float, float, float], gap: float) -> bool:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    return (abs(ax - bx) < (aw + bw) / 2.0 + gap
+            and abs(ay - by) < (ah + bh) / 2.0 + gap)
+
+
+def avoid_faces_for_texts(
+    texts: list[dict[str, Any]],
+    clips: list,
+    crop_map: dict[str, Path],
+    design: Any,
+    y_lo: float,
+    y_hi: float,
+    *,
+    canvas_width: int = 1080,
+    canvas_height: int = 1920,
+) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
+    """배치된(편집본 시간축) 효과 텍스트를 얼굴 비가림 자리로 옮긴다. 순수(사본만).
+
+    - 후보는 **위 → 아래 → 옆(원위치에서 먼 쪽이 아니라 얼굴 반대쪽 먼저)** 순서로
+      첫 성립 — 성립 조건은 얼굴 박스 비겹침 + 밴드 y 구간(E18-2 와 같은 글자 반높이
+      여유) + 캔버스 가로 안. 어느 후보도 성립 못 하면 **옮기지 않고 기록**한다
+      (E18-2 '살리고 당긴다' — 겹침이 증발보다 낫다).
+    - 창이 클립 경계를 넘으면 경계에서 쪼개 조각마다 그 클립의 얼굴로 다시 배치한다
+      (v3 texts 는 조각당 한 항목 — 렌더 계약 변경 없음). FACE_SPLIT_MIN_SEC 미만
+      조각은 만들지 않는다.
+    - 얼굴 정보가 없으면(face_tracking 끔·검출 실패·구 캐시) 아무것도 안 한다.
+
+    반환: (새 목록, 건별 메모, {"of","split","moved","kept_overlap","no_face"}).
+    """
+    from app.modules.subtitle_region import band_geometry
+
+    report = {"of": len(texts or []), "split": 0, "moved": 0,
+              "kept_overlap": 0, "no_face": 0}
+    notes: list[str] = []
+    if not texts or not clips:
+        return [dict(t) for t in (texts or [])], notes, report
+
+    geom = band_geometry(design, canvas_width=canvas_width, canvas_height=canvas_height)
+    # 편집본 클립 구간표 + 크롭 키프레임 캐시(클립당 한 번만 읽는다)
+    spans: list[tuple[float, float, int]] = []
+    base = 0.0
+    for i, c in enumerate(clips):
+        dur = max(0.0, float(c.end_sec) - float(c.start_sec))
+        spans.append((base, base + dur, i))
+        base += dur
+    kf_cache: dict[int, list[dict[str, Any]]] = {}
+
+    def _kfs_for(clip_idx: int) -> list[dict[str, Any]]:
+        if clip_idx not in kf_cache:
+            key = f"{clips[clip_idx].role}_{clip_idx}"
+            path = (crop_map or {}).get(key)
+            data: list[dict[str, Any]] = []
+            if path is not None:
+                try:
+                    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+                    if isinstance(raw, list):
+                        data = [k for k in raw if isinstance(k, dict)]
+                except (OSError, ValueError):
+                    data = []                # 못 읽으면 얼굴 없음 — 회피 없이 종전 배치
+            kf_cache[clip_idx] = data
+        return kf_cache[clip_idx]
+
+    def _adjust(piece: dict[str, Any]) -> None:
+        try:
+            p_s, p_e = float(piece["start_sec"]), float(piece["end_sec"])
+        except (TypeError, ValueError, KeyError):
+            return
+        t_mid = (p_s + p_e) / 2.0
+        span = next((sp for sp in spans if sp[0] - 1e-9 <= t_mid < sp[1] + 1e-9), None)
+        if span is None:
+            report["no_face"] += 1
+            return
+        face = face_box_on_canvas(_kfs_for(span[2]), t_mid - span[0], geom,
+                                  canvas_width=canvas_width)
+        if face is None:
+            report["no_face"] += 1
+            return
+        label = _label_box(piece, canvas_width, canvas_height)
+        if label is None:
+            return
+        if not _boxes_overlap(label, face, FACE_AVOID_GAP_PX):
+            return
+        lx, ly, lw, lh = label
+        fx, fy, fw, fh = face
+        half_y = float(piece.get("size") or 72.0) * 0.6      # E18-2 클램프와 같은 여유
+        y_min = y_lo * canvas_height + half_y
+        y_max = y_hi * canvas_height - half_y
+        x_min = 24 + lw / 2.0
+        x_max = canvas_width - 24 - lw / 2.0
+        gap = FACE_AVOID_GAP_PX
+        cands: list[tuple[float, float, str]] = [
+            (lx, fy - fh / 2.0 - gap - lh / 2.0, "위"),
+            (lx, fy + fh / 2.0 + gap + lh / 2.0, "아래"),
+        ]
+        side_far = (fx - fw / 2.0 - gap - lw / 2.0 if lx <= fx
+                    else fx + fw / 2.0 + gap + lw / 2.0)
+        side_near = (fx + fw / 2.0 + gap + lw / 2.0 if lx <= fx
+                     else fx - fw / 2.0 - gap - lw / 2.0)
+        cands += [(side_far, ly, "옆"), (side_near, ly, "옆")]
+        for nx, ny, kind in cands:
+            if not (x_min <= nx <= x_max and y_min <= ny <= y_max):
+                continue
+            if _boxes_overlap((nx, ny, lw, lh), face, gap - 1):
+                continue
+            piece["x"] = round(nx / canvas_width, 4)
+            piece["y"] = round(ny / canvas_height, 4)
+            report["moved"] += 1
+            notes.append(f"{str(piece.get('text', ''))[:12]!r} 얼굴 가림 → {kind}로 이동 "
+                         f"({lx / canvas_width:.2f},{ly / canvas_height:.2f} → "
+                         f"{piece['x']:g},{piece['y']:g})")
+            return
+        report["kept_overlap"] += 1
+        notes.append(f"{str(piece.get('text', ''))[:12]!r} 얼굴을 다 못 피함 — 그대로 둔다"
+                     f"(겹침이 증발보다 낫다)")
+
+    out: list[dict[str, Any]] = []
+    for t in texts:
+        item = dict(t)
+        try:
+            t_s, t_e = float(item["start_sec"]), float(item["end_sec"])
+        except (TypeError, ValueError, KeyError):
+            out.append(item)
+            continue
+        cut_points = [sp[1] for sp in spans[:-1] if t_s + FACE_SPLIT_MIN_SEC <= sp[1] <= t_e - FACE_SPLIT_MIN_SEC]
+        if cut_points:
+            report["split"] += len(cut_points)
+            bounds = [t_s] + cut_points + [t_e]
+            pieces = []
+            for b_s, b_e in zip(bounds, bounds[1:]):
+                p = dict(item)
+                p["start_sec"] = round(b_s, 3)
+                p["end_sec"] = round(b_e, 3)
+                pieces.append(p)
+            notes.append(f"{str(item.get('text', ''))[:12]!r} 창이 컷 경계를 넘음 → "
+                         f"{len(pieces)}조각으로 나눠 각 클립 기준 재배치")
+        else:
+            pieces = [item]
+        for p in pieces:
+            _adjust(p)
+            out.append(p)
+    return out, notes, report

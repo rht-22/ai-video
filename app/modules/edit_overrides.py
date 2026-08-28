@@ -143,7 +143,9 @@ IMAGE_KEYS = ("file", "source_time_sec", "duration_sec", "x", "y", "w", "layer",
 TEXT_KEYS = ("text", "source_time_sec", "duration_sec", "x", "y", "size", "color",
              "stroke", "fx", "rotate", "font")
 TEXT_STROKES = ("dark", "none", "white")     # 테두리: 어둡게(기본)/없음/흰색
-TEXT_FX = ("none", "pop", "shake")           # 등장 효과: 없음(기본)/튀어나옴/흔들림
+# 등장 효과: 없음(기본)/튀어나옴/흔들림/발광 테두리(E19-4 — 괄호형 상태 라벨용,
+# 렌더는 build_texts_ass 한 곳: 같은 색 외곽선 + \blur).
+TEXT_FX = ("none", "pop", "shake", "glow")
 # 번들 폰트 파일 stem + 현지화 폰트.
 # ⚠ `ArialUnicode` 는 **레포에 없다** — macOS 시스템 폰트라 재배포 라이선스 문제로 못 넣고,
 # 현지화(vlp `_provision_fonts` / app.localize)가 잡 시작 때 이 디렉토리로 복사한다.

@@ -264,6 +264,10 @@ def style_prompt_block(tone: StyleTone | None) -> str:
         f"- 이 채널의 효과 텍스트 상한은 {tone.density_max}개다(위 '상한' 줄의 효과 텍스트 "
         f"개수 대신 이 값을 쓴다).",
     ]
+    if "state_paren" in lab["categories"]:
+        lines.append(
+            "- 괄호형 상태 라벨에는 fx:\"glow\"(같은 색 발광 테두리)를 써라 — "
+            "훈수·워드플레이는 pop/shake/none 그대로.")
     if lab["sync_to_speech"]:
         lines.append(
             "- 동기: 라벨은 해당 대사/내레이션이 **시작되는 시각과 같은 시각**에 띄워라 — "

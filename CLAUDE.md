@@ -1291,3 +1291,33 @@ design 키 `title_highlight_color`(기본 `#FFE24A`, `--design-title-highlight-c
   그대로 흘러가는 표면(대시보드·유튜브 제목)의 세척이 선행돼야 한다 — E19 후속 별건.
 - 회귀 가드: `tests/test_e19_title_highlight.py`(16건 — 파서·잔여물·회귀 0·절대 x 배치·
   rect 밑그림·회전·tseg 경로).
+
+### E19-4 라벨 얼굴 회피 · 컷 경계 재배치 · 글로우 (2026-08-28)
+
+`style_compose.avoid_faces_for_texts`·`face_box_on_canvas` · `reframe.CropKeyframe`
+face_* 필드 · `[face avoid]` 블록(크롭 타임라인 생성 직후 · 텍스트 ASS 앞) ·
+`TEXT_FX += "glow"`.
+
+- **얼굴 좌표는 리프레임 크롭 타임라인의 것을 재사용한다** — `CropKeyframe` 에 그
+  표본의 raw 검출 박스(face_cx/cy/w/h)를 함께 싣는다(검출 비용 0, 발주서 §4 규율).
+  ⚠ **구 캐시 JSON 은 face 키가 없다** — `.get()` 으로 미검출 취급 = 회피 없이 종전
+  배치(재개 호환). `face_tracking:false`·검출 실패·크롭이 얼굴을 잘라낸 경우도 같다
+  (안전장치가 연출을 막으면 안 된다 — E17-2 실패 규율).
+- **게이트 셋**: ① AI 라벨만(`_texts_from_style` — 편집실 텍스트는 사람 배치라 안
+  건드린다) ② 톤 프로파일 채널만(미지정 = 종전 배치, 회귀 0) ③ 리프레임 켜짐.
+- 후보는 **위 → 아래 → 옆(얼굴 반대쪽 먼저)** 첫 성립 — 성립 = 얼굴 비겹침(간격
+  12px) + 밴드 y 구간(E18-2 와 같은 글자 반높이 여유 size×0.6) + 캔버스 가로 안.
+  어느 후보도 안 되면 **옮기지 않고 기록**(살리고 당긴다 — 겹침이 증발보다 낫다).
+- **컷 경계 재배치**: 창이 클립 경계를 넘으면 경계에서 쪼개 조각마다 그 클립의 얼굴로
+  재배치(v3 texts 조각당 한 항목 — 렌더 계약 불변). 0.15s 미만 조각은 안 만든다.
+- ⚠ 리프레임은 얼굴을 크롭 중앙에 두므로 얼굴의 캔버스 위치는 대개 밴드 중앙 부근이다
+  — 회피가 실질을 갖는 것은 EMA 지연·데드존·소스 가장자리 클램프로 크롭 중심과 raw
+  얼굴이 어긋나는 순간과 얼굴 크기다(테스트 픽스처 주석에 같은 말이 있다).
+- **fx="glow"**(괄호형 상태 라벨 발광): `build_texts_ass` 한 곳 — 외곽선을 글자 자기
+  색으로 두껍게(size×0.12) + `\blur`(size×0.08). stroke 지정은 glow 가 대체한다.
+  v3 어휘 확장이라 편집실도 쓸 수 있고, 미사용 시 ASS 는 종전과 동일. 톤 프로파일
+  style 블록이 괄호형에 glow 를 권한다(기본 프롬프트는 동결 유지).
+- 기록: run_log `steps[{step:"style_face_avoid"}]` = `{of, split, moved, kept_overlap,
+  no_face}` + 건별 stdout `[face-avoid]`. 순수 함수(사본만).
+- 회귀 가드: `tests/test_e19_label_face_avoid.py`(17건 — 변환 수계산·후보 순서·실패
+  유지·컷 분할·구 JSON 호환·글로우 ASS·배선).

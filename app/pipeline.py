@@ -4140,6 +4140,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     _style_design_kwargs: dict[str, Any] = {}
     _style_plan_applied: dict[str, Any] | None = None
     _text_clamp: dict[str, Any] | None = None      # 효과 텍스트 밴드 클램프 기록(E18-2)
+    _texts_from_style = False                      # E19-4: AI 라벨만 얼굴 회피를 탄다
+                                                   # (편집실 텍스트는 사람 배치 — 안 건드린다)
     checkpoint_style = output_dir / "checkpoint_style.json"
     if payload.style_compose:
         from app.modules import style_compose as _stylemod
@@ -4280,6 +4282,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                           f"(tts 고아 규칙과 동일): source_time_sec={_o.get('source_time_sec')} "
                           f"{str(_o.get('text', ''))[:20]!r}")
                 _text_overlays = _placed
+                _texts_from_style = bool(_placed)
                 if _placed:
                     print(f"  [style] 효과 텍스트 {len(_placed)}건 배치")
             elif _style_plan.get("texts"):
@@ -4461,6 +4464,28 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 pass  # 다음 클립은 sticky 없이 진행
             if (idx + 1) % 5 == 0 or (idx + 1) == len(clips):
                 print(f"    진행 중... ({idx + 1}/{len(clips)})")
+
+        # ═══════════════════════════════════════
+        # [face avoid] E19-4 AI 라벨 얼굴 회피 (2026-08-28)
+        # ═══════════════════════════════════════
+        # 자리: 크롭 타임라인이 방금 생겼고(얼굴 박스가 그 안에 있다) 텍스트 ASS 는 아직
+        # 안 만들어졌다. 게이트 셋: ① AI 라벨만(_texts_from_style — 편집실 텍스트는 사람
+        # 배치라 안 건드린다, E18-6 규율) ② 톤 프로파일 채널만(미지정 = 종전 배치, 회귀 0)
+        # ③ 리프레임이 켜져 있어야(얼굴 좌표의 출처) — 셋 다 아니면 이 블록은 없다.
+        # 얼굴 미검출·구 캐시 JSON(face 키 없음)은 함수 안에서 '회피 없음'으로 끝난다.
+        if (_texts_from_style and _text_overlays and style_tone_profile is not None
+                and getattr(payload.design, "enable_reframe", True) and crop_map):
+            from app.modules import style_compose as _stylemod_fa
+            _fa_y_lo, _fa_y_hi = _stylemod_fa.text_y_range(payload.design)
+            _text_overlays, _fa_notes, _fa_rep = _stylemod_fa.avoid_faces_for_texts(
+                _text_overlays, clips, crop_map, payload.design, _fa_y_lo, _fa_y_hi)
+            if _fa_rep["moved"] or _fa_rep["split"] or _fa_rep["kept_overlap"]:
+                print(f"  [face-avoid] 라벨 {_fa_rep['of']}건 중 {_fa_rep['moved']}건 이동 · "
+                      f"컷 분할 {_fa_rep['split']} · 못 피함 {_fa_rep['kept_overlap']}")
+            for _n in _fa_notes:
+                print(f"  [face-avoid] {_n}")
+            run_log.setdefault("steps", []).append({"step": "style_face_avoid", **{
+                k: v for k, v in _fa_rep.items()}})
 
         # TTS 오디오 생성 (cue별 — voice/speed 적용)
         # cue 시간(end_sec - start_sec) 안에 들어가도록 fit. 초과 시 Flash로 텍스트 단축.

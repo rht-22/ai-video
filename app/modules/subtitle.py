@@ -1005,14 +1005,22 @@ def build_texts_ass(texts: list[dict], output_path: Path, *, speed: float = 1.0)
         py = int(round(float(t["y"]) * ASS_PLAY_RES_Y))
         rot_ass = -float(t.get("rotate") or 0.0)
         stroke = str(t.get("stroke") or "dark")
+        fx = str(t.get("fx") or "none")
         outline_color, bord_ratio = _TEXT_STROKE_BORDER.get(stroke, _TEXT_STROKE_BORDER["dark"])
         bord = max(1, int(round(size * bord_ratio))) if bord_ratio else 0
+        if fx == "glow":
+            # E19-4 괄호형 라벨 발광 — 외곽선을 글자 **자기 색**으로 두껍게 + \blur 로 번짐.
+            # stroke 지정은 glow 가 대체한다(발광과 검정 외곽선은 양립하지 않는다).
+            outline_color = _hex_to_ass_color(str(t.get('color') or '#FFFFFF'))
+            bord = max(2, int(round(size * 0.12)))
         tags = [f"\\an5\\pos({px},{py})", f"\\fn{to_font_family(str(t.get('font') or 'Jalnan'))}",
                 f"\\fs{size}", f"\\1c{_hex_to_ass_color(str(t.get('color') or '#FFFFFF'))}",
                 f"\\3c{outline_color}", f"\\bord{bord}", "\\shad0"]
+        if fx == "glow":
+            tags.append(f"\\blur{max(2, int(round(size * 0.08)))}")
         if rot_ass != 0.0:
             tags.append(f"\\frz{rot_ass:g}")
-        tags.append(_text_fx_tags(str(t.get("fx") or "none"), rot_ass))
+        tags.append(_text_fx_tags(fx, rot_ass))
         lines.append(f"Dialogue: 2,{_format_time(s)},{_format_time(e)},Text,,0,0,0,,"
                      f"{{{''.join(tags)}}}{_escape_ass_text(t['text'])}\n")
     output_path.write_text("".join(lines), encoding="utf-8-sig")

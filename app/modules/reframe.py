@@ -15,6 +15,14 @@ class CropKeyframe:
     y_center: float
     crop_w: int
     crop_h: int
+    # E19-4(2026-08-28): 그 표본에서 실제로 검출된 얼굴 박스(원본 픽셀, 스무딩 전 raw).
+    # 라벨 얼굴 회피가 재사용한다 — 검출을 두 번 돌리지 않는 발주서 규율. 미검출은
+    # face_w=0 이고, **구 캐시 JSON 은 이 키들이 아예 없다** — 읽는 쪽은 .get() 으로
+    # 미검출과 동일하게 취급한다(재개 호환·회피 없이 종전 배치).
+    face_cx: float = -1.0
+    face_cy: float = -1.0
+    face_w: int = 0
+    face_h: int = 0
 
 
 def build_crop_timeline(
@@ -185,6 +193,7 @@ def _detect_faces(
                     fw = gray.shape[1]
                     faces = np.array([[fw - (x + w), y, w, h] for x, y, w, h in faces_flip])
 
+        _det_face: tuple[float, float, int, int] | None = None   # E19-4: 이 표본의 raw 얼굴 박스
         if len(faces) > 0:
             if enable_speaker_tracking:
                 best = _pick_speaker(
@@ -197,6 +206,7 @@ def _detect_faces(
             x, y, w, h = best
             target_x = float(x + w / 2)
             target_y = float(y + h / 2)
+            _det_face = (target_x, target_y, int(w), int(h))
 
         if len(faces) > 0:
             # EMA + dead zone: 작은 변동(±5% 이내)은 무시, 큰 변동만 부드럽게 추적
@@ -217,6 +227,10 @@ def _detect_faces(
                 y_center=smooth_y,
                 crop_w=int(crop_w),
                 crop_h=int(crop_h),
+                face_cx=_det_face[0] if _det_face else -1.0,
+                face_cy=_det_face[1] if _det_face else -1.0,
+                face_w=_det_face[2] if _det_face else 0,
+                face_h=_det_face[3] if _det_face else 0,
             )
         )
 
