@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -13,6 +14,48 @@ class SpeechSegment:
     start_sec: float
     end_sec: float
     text: str
+
+
+# E20-A3 정규화: 문장부호·공백 차이만 다른 두 전사를 같은 문장으로 본다
+# ("주다니 말이야" vs "주다니 말이야." — 김부장 v3 실측 중복).
+_DEDUP_NORM_RE = re.compile(r"[\s\.,!?…~‥'\"“”‘’·\-]+")
+
+
+def dedup_overlapping_transcripts(segments: list) -> tuple[list, list]:
+    """청크 오버랩 중복 전사 제거 (E20-A3, 2026-08-28).
+
+    청크가 180초씩 겹치게 잘리므로 겹침 구간의 대사는 양쪽 청크가 **다** 전사한다 —
+    시각이 조금 어긋나고 문장부호가 달라 병합부의 완전 일치 dedup 을 빠져나가,
+    같은 대사가 화면에 두 벌 겹쳐 그려졌다(김부장 v3: "이렇게 자기 발로 들어와 주다니"
+    가 39.7s·40.3s 두 벌).
+
+    규칙(보수적 — 진짜 데이터를 지우면 안 된다):
+    - **시간이 겹치고**(짧은 쪽 대비 50% 이상) **정규화 텍스트가 같을 때만** 뒤엣것을
+      버린다. 연달아 두 번 말한 진짜 반복 대사는 시간이 안 겹쳐 남고(E14 규율 —
+      겹침은 있는 그대로의 데이터), 텍스트가 다른 교차 대화도 그대로 남는다.
+    - 반환 목록은 시작 시각순 정렬본이다(하류 소비자는 전수 스캔이거나 자체 정렬).
+
+    반환: (남은 목록, 버린 목록) — 버린 건 호출부가 건별 로그로 남긴다(조용한 드롭 금지).
+    """
+    ordered = sorted(segments, key=lambda s: (float(s.start_sec), float(s.end_sec)))
+    kept: list = []
+    dropped: list = []
+    for seg in ordered:
+        norm = _DEDUP_NORM_RE.sub("", str(getattr(seg, "text", "")))
+        dup = False
+        for prev in reversed(kept[-8:]):        # 정렬돼 있어 근처만 보면 충분하다
+            ov = (min(float(prev.end_sec), float(seg.end_sec))
+                  - max(float(prev.start_sec), float(seg.start_sec)))
+            shorter = min(float(prev.end_sec) - float(prev.start_sec),
+                          float(seg.end_sec) - float(seg.start_sec))
+            if ov <= 0 or shorter <= 0:
+                continue
+            if (ov / shorter >= 0.5 and norm
+                    and _DEDUP_NORM_RE.sub("", str(getattr(prev, "text", ""))) == norm):
+                dup = True
+                break
+        (dropped if dup else kept).append(seg)
+    return kept, dropped
 
 
 def extract_transcript(

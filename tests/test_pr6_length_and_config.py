@@ -71,7 +71,7 @@ def test_config_defaults_preserve_baseline(monkeypatch):
     assert c.silence_cut_profile == "conservative"
     assert c.max_duration_tolerance == 1.5
     assert c.min_duration_sec == 40
-    assert c.max_duration_sec == 60
+    assert c.max_duration_sec == 120     # E20(2026-08-28): 상한 2분 — 사용자 결정
     assert c.target_duration_sec == 50
 
 

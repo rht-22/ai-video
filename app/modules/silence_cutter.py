@@ -489,6 +489,109 @@ def _cut_clip_gap_level(
     return _finalize(clip, _absorb_short_intervals(out, profile.min_interval_sec))
 
 
+def apply_speech_gap_pacing(
+    clips: list[StoryClip],
+    transcript_segments: list,
+    tts_cues: list[dict] | None,
+    params: dict,
+) -> tuple[list[StoryClip], dict]:
+    """E20-B1(2026-08-28) 발화 갭 페이싱 — 조립 마지막에 도는 **무발화** 상한 패스.
+
+    silence_cut(dB·전사 혼합)과 별개로 필요한 이유(김부장 v3 실측):
+    ① 앰비언스 바닥이 −16dB 면 dB 무음이 0건이라 커터가 무력하고,
+    ② visual_essential 클립은 통째 보존이라 내부 무발화(1.1·2.3초)가 그대로 나가고,
+    ③ silence_cut 은 snap·narrative-ext·gap-fill **앞**에 돌아서 확장이 만든 무발화를
+       못 보며, 유일한 컷(1.0초)은 gap-fill 이 도로 메웠다.
+    그래서 이 패스는 gap-fill **뒤**·length-clamp **앞**에서 최종 클립을 본다.
+
+    - 커버리지 = 대사 전사 ∪ 계획된 내레이션 cue 창(source_time_sec ~ +duration+0.2)
+      — cue 가 살 자리를 잘라 버리면 안 된다(E19-3 dialogue_gaps_only 와 한 몸).
+      클립 시작 직전(-6s 이내) 앵커는 cue-resolve 가 클립 머리로 클램프하므로 같은
+      자리를 커버리지로 친다.
+    - 내부 무발화 run > max_speech_gap_sec → 가운데를 잘라 gap_residual_sec(양쪽
+      절반)만 남기고 클립을 쪼갠다. 조각이 0.8초 미만이 되는 컷은 접는다(조각 난사 금지).
+    - 머리는 첫 커버리지 - head_lead_in_sec, 꼬리는 마지막 커버리지 + tail_hold_sec
+      까지만 — 꼬리 여유가 리액션 컷 자리다(v3 엔딩 원수 표정 컷이 +2.5s 확장 구간에
+      살았다).
+    - 전사가 하나도 없는 클립은 건드리지 않는다(비주얼 비트 — 오판 금지).
+      visual_essential 이라도 **대사가 있으면** 상한을 받는다 — v3 payoff 가 그 유형.
+
+    순수 함수 — 넘겨받은 clips 를 건드리지 않는다. 반환 (새 클립 목록, stats).
+    stats = {clips_in, clips_out, gaps_cut, removed_sec, details[]}.
+    """
+    max_gap = float(params["max_speech_gap_sec"])
+    residual = float(params["gap_residual_sec"])
+    lead_in = float(params.get("head_lead_in_sec", 1.0))
+    tail_hold = float(params.get("tail_hold_sec", 2.5))
+    min_piece = 0.8
+
+    out_clips: list[StoryClip] = []
+    gaps_cut = 0
+    details: list[str] = []
+    total_in = sum(c.end_sec - c.start_sec for c in clips)
+
+    for clip in clips:
+        cov: list[list[float]] = []
+        has_speech = False
+        for seg in transcript_segments or []:
+            a, b = float(seg.start_sec), float(seg.end_sec)
+            if b > clip.start_sec and a < clip.end_sec:
+                cov.append([max(clip.start_sec, a), min(clip.end_sec, b)])
+                has_speech = True
+        if not has_speech:
+            out_clips.append(clip)
+            continue
+        for cue in tts_cues or []:
+            t = cue.get("source_time_sec")
+            if t is None:
+                continue
+            d = float(cue.get("duration_sec") or 1.5) + 0.2
+            a = float(t)
+            if clip.start_sec - 6.0 <= a < clip.start_sec:
+                a = clip.start_sec                     # cue-resolve 의 머리 클램프와 동일
+            if a + d > clip.start_sec and a < clip.end_sec:
+                cov.append([max(clip.start_sec, a), min(clip.end_sec, a + d)])
+        cov.sort()
+        merged: list[list[float]] = []
+        for a, b in cov:
+            if merged and a <= merged[-1][1] + 1e-9:
+                merged[-1][1] = max(merged[-1][1], b)
+            else:
+                merged.append([a, b])
+
+        head = max(clip.start_sec, merged[0][0] - lead_in)
+        tail = min(clip.end_sec, merged[-1][1] + tail_hold)
+        pieces: list[Interval] = []
+        cur_start, cur_end = head, merged[0][1]
+        for a, b in merged[1:]:
+            gap = a - cur_end
+            if gap > max_gap:
+                left_end = cur_end + residual / 2.0
+                right_start = a - residual / 2.0
+                if left_end - cur_start >= min_piece and b - right_start >= min_piece:
+                    pieces.append(Interval(cur_start, left_end))
+                    details.append(f"무발화 {gap:.1f}s 컷 "
+                                   f"({cur_end:.1f}~{a:.1f} → 잔여 {residual:g}s)")
+                    gaps_cut += 1
+                    cur_start = right_start
+            cur_end = max(cur_end, b)
+        pieces.append(Interval(cur_start, tail))
+        if head > clip.start_sec + 0.05:
+            details.append(f"머리 무발화 {head - clip.start_sec:.1f}s 정리"
+                           f"(리드인 {lead_in:g}s)")
+        if tail < clip.end_sec - 0.05:
+            details.append(f"꼬리 무발화 {clip.end_sec - tail:.1f}s 정리"
+                           f"(여유 {tail_hold:g}s)")
+        for iv in pieces:
+            if iv.end_sec > iv.start_sec:
+                out_clips.append(replace(clip, start_sec=iv.start_sec, end_sec=iv.end_sec))
+
+    total_out = sum(c.end_sec - c.start_sec for c in out_clips)
+    stats = {"clips_in": len(clips), "clips_out": len(out_clips), "gaps_cut": gaps_cut,
+             "removed_sec": round(total_in - total_out, 3), "details": details}
+    return out_clips, stats
+
+
 def cut_silence_with_story_filter(
     clips: list[StoryClip],
     transcript_segments: list[SpeechSegment],

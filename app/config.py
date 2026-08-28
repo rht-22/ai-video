@@ -150,7 +150,10 @@ class AppConfig:
     target_duration_sec: int = field(default_factory=lambda: int(os.environ.get("TARGET_DURATION_SEC", "50")))
     target_duration_tolerance_sec: int = 10
     min_duration_sec: int = field(default_factory=lambda: int(os.environ.get("MIN_DURATION_SEC", "40")))
-    max_duration_sec: int = field(default_factory=lambda: int(os.environ.get("MAX_DURATION_SEC", "60")))  # 라운드 11: 100 → 60
+    # 라운드 11: 100 → 60. E20(2026-08-28, 사용자 결정): 60 → 120 — 상한이 빠듯해
+    # 확장(narrative-ext)이 만든 0.8초 초과에 제목의 핵심 build 12.9초가 통째로
+    # 잘려 나간 실사고(김부장 v3)의 구조적 원인 중 하나. 채널별 예외는 env 로.
+    max_duration_sec: int = field(default_factory=lambda: int(os.environ.get("MAX_DURATION_SEC", "120")))
     # storyline 총 길이 상한 배수 (validate_story_clips). 1.5=레거시(최대 90s 허용 → 100s 클립 원인).
     # env MAX_DURATION_TOLERANCE 로 조정. aggressive A/B 는 1.1 권장(≈66s 상한).
     max_duration_tolerance: float = field(default_factory=lambda: float(os.environ.get("MAX_DURATION_TOLERANCE", "1.5")))

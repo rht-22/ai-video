@@ -297,11 +297,19 @@ def _extend_storyline_for_narrative(
     candidates_lookup: dict,
     target_max: float = 60.0,
     max_extend_per_side: float = 8.0,
+    transcript_segments: list | None = None,
+    max_lead_in_sec: float = 1.0,
 ) -> list[tuple[list[StoryClip], str, float]]:
     """라운드 19C-3: 길이 < target_max면 candidate.context_extension까지 always-on 확장.
 
     - 첫 clip: candidate.extended_start_sec까지 앞 확장 (max +max_extend_per_side, target_max 초과 안 함)
     - 마지막 clip: candidate.extended_end_sec까지 뒤 확장 (max +max_extend_per_side, target_max 초과 안 함)
+
+    E20-A2(2026-08-28): **앞 확장은 무발화 방향으로 늘리지 않는다.** transcript_segments
+    (원본 절대초)가 주어지면, 확장 창 안에서 가장 이른 발화 시작 - max_lead_in_sec 까지만
+    앞당긴다 — 창에 발화가 아예 없으면 앞 확장 0. 김부장 v3 실측: +7.4초 앞 확장이 전부
+    무발화 빗속 화면이라 도입 6.1초가 침묵으로 나갔다. 전사가 없으면 판정하지 않고 종전
+    그대로다(오판 금지). **뒤 확장은 게이트 밖** — 무발화 리액션 컷(엔딩 비트)이 거기 산다.
     """
     if not variants or not candidates_lookup:
         return variants
@@ -323,7 +331,21 @@ def _extend_storyline_for_narrative(
         if first_cand is not None and budget > 0.5:
             ext = first_cand.get("context_extension") or {}
             ext_start = float(ext.get("extended_start_sec", first.start_sec)) if ext else first.start_sec
-            available = first.start_sec - max(0.0, ext_start)
+            ext_floor = max(0.0, ext_start)
+            # E20-A2: 확장 창 [ext_floor, first.start] 안 가장 이른 발화까지만 —
+            # 새 시작점에서 첫 발화까지의 침묵이 max_lead_in_sec 를 넘지 않게 한다.
+            if transcript_segments:
+                in_window = [max(ext_floor, float(getattr(_ts, "start_sec", 0.0)))
+                             for _ts in transcript_segments
+                             if float(getattr(_ts, "end_sec", 0.0)) > ext_floor
+                             and float(getattr(_ts, "start_sec", 0.0)) < first.start_sec]
+                if not in_window:
+                    ext_floor = first.start_sec   # 창에 발화 없음 → 앞 확장 0
+                    print("  [narrative-ext] 첫 clip 앞 확장 생략 — 확장 창에 발화 없음"
+                          "(침묵 도입 방지, E20-A2)")
+                else:
+                    ext_floor = max(ext_floor, min(in_window) - max_lead_in_sec)
+            available = first.start_sec - ext_floor
             if available > 0:
                 ext_amount = min(budget, max_extend_per_side, available)
                 if ext_amount > 0.5:
@@ -803,6 +825,11 @@ def _resolve_cue_anchors(
 # 릴레이는 경계가 맞닿는 문법이라(cue 가 대사 끝에 바로 붙는다) 관용치가 필요하다.
 CUE_OVERLAP_TOLERANCE_SEC = 0.2
 
+# 렌더 컨테이너/오디오 priming 오버헤드(~0.1s) 여유 — 길이 클램프 상한과 narrative-ext
+# 확장 예산이 **같은 값**을 봐야 확장이 만든 초과를 클램프가 되무는 자기충돌이 없다
+# (E20-A2, 김부장 v3 실측: 확장이 60.5s 를 만들고 클램프 59.7s 가 build 를 지웠다).
+RENDER_SAFETY_MARGIN_SEC = 0.3
+
 
 def snap_cues_to_dialogue_gaps(
     cues: list[dict],
@@ -1277,8 +1304,11 @@ def _fit_storyline_to_duration(
 
     동작:
     - 합계 ≤ target_max 그리고 ≥ target_min → 변경 없음
-    - 합계 > target_max → 점수 낮은 build부터 제거. build 모두 제거 후에도 초과면
-      가장 긴 clip의 끝을 잘라 단축. hook/payoff는 가능한 보존.
+    - 합계 > target_max → 점수 낮은 build부터 제거. 단(E20-A1) 초과분이 그 build
+      길이의 절반 미만이면 통째 제거 대신 **끝만 잘라** 상한에 맞춘다 — 초과 0.8초에
+      12.9초 장면이 사라진 김부장 v3 실사고의 재발 방지(절반 이상을 잘라야 하면
+      꽁다리가 남으니 종전대로 통째 제거). build 모두 제거 후에도
+      초과면 가장 긴 clip의 끝을 잘라 단축. hook/payoff는 가능한 보존.
     - 합계 < target_min → 마지막 clip의 끝을 같은 candidate.end_sec까지 확장 (있으면).
       그래도 부족하면 워닝 메시지 (호출부에서 reject 또는 다음 storyline 시도).
 
@@ -1323,9 +1353,14 @@ def _fit_storyline_to_duration(
             build_clip = out[idx]
             build_dur = build_clip.end_sec - build_clip.start_sec
             proposed_total = cur_total - build_dur
-            if proposed_total < target_min:
-                # 통째로 제거 시 너무 짧아짐 → 이 build의 끝만 잘라 target_max에 맞춤
-                cut_amount = cur_total - target_max
+            excess = cur_total - target_max
+            # E20-A1(2026-08-28): 초과분이 이 build 길이의 **절반 미만**이면 통째 제거는
+            # 과잉이다 — 끝만 잘라 상한에 맞춘다. 김부장 v3 실측: narrative-ext 가 만든
+            # 0.8초 초과에 제목의 핵심 장면(build 12.9초)이 통째로 증발했다. 절반 이상을
+            # 잘라야 하면 종전대로 통째 제거 — 반토막 난 장면 꽁다리는 없느니만 못하다
+            # (86s→60s 류의 대폭 단축은 제거가 맞다).
+            if excess < build_dur * 0.5 or proposed_total < target_min:
+                cut_amount = excess
                 if cut_amount < build_dur:
                     new_end = build_clip.end_sec - cut_amount
                     out[idx] = StoryClip(
@@ -3783,6 +3818,15 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 if _k not in _seen_seg_keys:
                     _seen_seg_keys.add(_k)
                     transcript_text.append(seg)
+    # E20-A3: 위 완전 일치 dedup 은 청크 오버랩(180s)의 근사 중복(시각 0.x초 차·문장부호
+    # 차)을 못 잡는다 — 같은 대사가 화면에 두 벌 겹쳐 그려진다(김부장 v3 실측).
+    # 자막·cue 앵커·snap/ext 가 전부 이 목록을 보므로 여기 한 곳에서 거른다.
+    if transcript_text:
+        from app.modules.speech import dedup_overlapping_transcripts
+        transcript_text, _dup_dropped = dedup_overlapping_transcripts(transcript_text)
+        for _d in _dup_dropped:
+            print(f"  [transcript-dedup] 청크 오버랩 중복 전사 제거: "
+                  f"{_d.start_sec:.1f}~{_d.end_sec:.1f} {str(_d.text)[:28]!r}")
 
     # SRT 직접 파싱 폴백 — chunk_transcripts 가 비면(예: --from-step gemini 재개) variant 경로처럼
     # SRT 를 직접 파싱해 라인 단위 자막을 복원한다. candidate.transcript(1줄/clip) 폴백보다 우선.
@@ -3868,12 +3912,44 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         all_storyline_variants = _extend_storyline_for_narrative(
             all_storyline_variants,
             candidates_lookup=_build_candidates_lookup(all_candidates),
-            target_max=float(config.max_duration_sec) * _speed,
+            # E20-A2: 예산 기준을 아래 길이 클램프 상한과 통일(자기충돌 제거)
+            target_max=(float(config.max_duration_sec) - RENDER_SAFETY_MARGIN_SEC) * _speed,
             max_extend_per_side=8.0,
+            # E20-A2: 무발화 방향 앞 확장 금지 판정용(원본 절대초 전사)
+            transcript_segments=transcript_text,
         )
         all_storyline_variants = _fill_intra_storyline_gaps(
             all_storyline_variants, max_gap_sec=3.0,
         )
+        # ── E20-B1 발화 갭 페이싱 (2026-08-28) ──────────────────────────────
+        # dB 무음이 아니라 **무발화** 기준의 컷 — 자리는 반드시 gap-fill **뒤**
+        # (gap-fill 이 silence_cut 의 컷을 도로 메운 v3 실측)·length-clamp **앞**
+        # (클램프가 조여진 총량을 보게). 커버리지에 계획된 cue 창을 합쳐 내레이션이
+        # 살 자리는 자르지 않는다. 게이트: 톤 프로파일 pacing 절(없으면 회귀 0).
+        _pacing_cfg = (getattr(style_tone_profile, "pacing", None) or {}) \
+            if style_tone_profile else {}
+        if _pacing_cfg:
+            from app.modules.silence_cutter import apply_speech_gap_pacing
+            _paced = []
+            _pace_stats0 = None
+            for _pi, (_pvc, _pvt, _pvs) in enumerate(all_storyline_variants):
+                _pcues = (storyline_tts_cues_pool[_pi]
+                          if _pi < len(storyline_tts_cues_pool) else [])
+                _pvc2, _pst = apply_speech_gap_pacing(
+                    _pvc, transcript_text, _pcues, _pacing_cfg)
+                if _pi == 0:
+                    _pace_stats0 = _pst
+                _paced.append((_pvc2, _pvt, _pvs))
+            all_storyline_variants = _paced
+            if _pace_stats0:
+                for _d in _pace_stats0["details"]:
+                    print(f"  [speech-gap] {_d}")
+                print(f"  [speech-gap] 무발화 정리 합계 {_pace_stats0['removed_sec']:.1f}s "
+                      f"(컷 {_pace_stats0['gaps_cut']}회, 클립 "
+                      f"{_pace_stats0['clips_in']}→{_pace_stats0['clips_out']})")
+                run_log.setdefault("steps", []).append(
+                    {"step": "speech_gap_pacing", **{k: _pace_stats0[k] for k in
+                     ("clips_in", "clips_out", "gaps_cut", "removed_sec", "details")}})
         # snap/extend/fill 이 variant clips 를 변경했으면 shorts #1 clips 동기화 (라운드 17 패턴)
         if all_storyline_variants:
             synced_first = list(all_storyline_variants[0][0])
@@ -3895,10 +3971,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     #   · 통째 제거 금지(allow_remove=False) — 넘치면 역할별 부분 trim 으로만 줄인다.
     #   · 하한(확장) 없음 — 사람이 짧게 만들었으면 그것이 의도다.
     # 클램프 예산도 위 [speed] 규약대로 ×S (정의는 snap/extend 블록 위 _speed 참고)
-    _RENDER_SAFETY_MARGIN = 0.3
-    _EDIT_PINNED_MAX_SEC = (180.0 - _RENDER_SAFETY_MARGIN) * _speed   # 쇼츠 3분 한계 - 렌더 오버헤드
+    _EDIT_PINNED_MAX_SEC = (180.0 - RENDER_SAFETY_MARGIN_SEC) * _speed   # 쇼츠 3분 한계 - 렌더 오버헤드
     _clamp_max = max(float(config.min_duration_sec),
-                     float(config.max_duration_sec) - _RENDER_SAFETY_MARGIN) * _speed
+                     float(config.max_duration_sec) - RENDER_SAFETY_MARGIN_SEC) * _speed
     _clamp_lookup = _build_candidates_lookup(all_candidates)
     _clamped_variants: list[tuple[list[StoryClip], str, float]] = []
     for _ci, (_vc, _vt, _vs) in enumerate(all_storyline_variants):
@@ -5316,6 +5391,18 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 두 곳을 맞춰 봐야 한다).
     if _avoid_log is not None and _BURNED_WINDOW_MOVES:
         _avoid_log["windowed"] = list(_BURNED_WINDOW_MOVES)
+        # E20-C1(2026-08-28): 회피가 **광범위**하면 소스가 전편 번인 자막 소재라는 신호다 —
+        # 회피(위치 이동)는 겹침만 피하지, 같은 문장이 두 번 보이는 **이중 자막** 자체는
+        # 못 푼다(김부장 v3 실측). 자동으로 자막을 끄지는 않는다(콘텐츠 결정은 사람 몫) —
+        # 크게 표시만 한다. 판정: 대사 트랙에서 20% 이상·5줄 이상이 창별 회피로 움직였다.
+        for _w in _BURNED_WINDOW_MOVES:
+            if (_w.get("track") == "대사" and int(_w.get("lines") or 0) >= 5
+                    and int(_w.get("moved") or 0) / max(1, int(_w.get("lines") or 1)) >= 0.2):
+                print("  [번인자막] ⚠ 원본 자막 회피가 광범위합니다 — 전편 번인 자막 "
+                      "소재로 보입니다. 우리 대사 자막과 이중 표기가 되므로 채널 "
+                      "subtitles:false(원본 자막 그대로 쓰기)를 검토하세요.")
+                _avoid_log["pervasive_burned_hint"] = True
+                break
 
     run_log_serializable = _make_json_serializable(_slim_run_log(run_log))
     run_log_path = output_dir / "run_log.json"

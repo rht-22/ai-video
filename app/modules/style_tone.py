@@ -47,6 +47,13 @@ SFX_GAIN_RANGE = (-30.0, 0.0)
 SFX_MAX_LIMIT = 10
 # E19-9 — subtitle 절(선택). 절이 없는 프로파일 = 자막 분할 없음(종전 2줄 랩 그대로).
 SUBTITLE_LINE_CHARS_RANGE = (4, 40)
+# E20-B1 — pacing 절(선택). 절이 없는 프로파일 = 발화 갭 페이싱 없음(회귀 0).
+PACING_RANGES = {
+    "max_speech_gap_sec": (0.5, 5.0),
+    "gap_residual_sec": (0.1, 2.0),
+    "head_lead_in_sec": (0.0, 3.0),
+    "tail_hold_sec": (0.0, 5.0),
+}
 
 _HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
@@ -67,6 +74,8 @@ class StyleTone:
     sfx: dict[str, Any] | None = None
     # E19-9 — 없으면 None = 자막 단일 줄 분할 없음(종전 2줄 랩 그대로, 회귀 0).
     subtitle: dict[str, Any] | None = None
+    # E20-B1 — 없으면 None = 발화 갭 페이싱 없음(회귀 0).
+    pacing: dict[str, Any] | None = None
 
     @property
     def density_max(self) -> int:
@@ -132,6 +141,9 @@ def validate_tone_data(data: Any, name: str) -> dict[str, Any]:
     # 선택 필드 — 없으면 창 지시를 안 얹는다(종전 프롬프트 그대로).
     if nar.get("cue_duration_sec") is not None:
         _need_range(nar, "cue_duration_sec", name, "narration", 0.5, 6.0)
+    # E20-B2 — 선택: 대사 없는 틈마다 cue 를 배치하라는 지시(오디오가 비지 않게)
+    if nar.get("fill_gaps") is not None:
+        _need(nar, "fill_gaps", bool, name, "narration")
     _need(nar, "relay_rule", bool, name, "narration")
     _need_enum(nar, "placement", NARRATION_PLACEMENTS, name, "narration")
 
@@ -159,6 +171,15 @@ def validate_tone_data(data: Any, name: str) -> dict[str, Any]:
     _need_enum(st, "title_tone", TITLE_TONES, name, "story")
     _need_enum(st, "ending", ENDINGS, name, "story")
     _need(st, "payoff_longtake", bool, name, "story")
+    # E20-B3 — 선택: 훅 상한·제목-훅 일치(김부장 v3 실측 — 도입 설전 28초 뒤에야
+    # 제목의 장면이 왔고 그마저 클램프에 잘렸다)
+    if st.get("hook_max_sec") is not None:
+        hm = st.get("hook_max_sec")
+        if (not isinstance(hm, (int, float)) or isinstance(hm, bool)
+                or not (3.0 <= float(hm) <= 20.0)):
+            _fail(name, f"story.hook_max_sec 는 3~20 숫자여야 합니다({hm!r})")
+    if st.get("hook_title_scene") is not None:
+        _need(st, "hook_title_scene", bool, name, "story")
 
     # E19-5 — sfx 절은 선택이다(없음 = SFX 닫힘). 있으면 전부 검증한다.
     if data.get("sfx") is not None:
@@ -175,6 +196,21 @@ def validate_tone_data(data: Any, name: str) -> dict[str, Any]:
         if not beats or not set(beats) <= set(SFX_BEATS):
             _fail(name, f"sfx.target_beats 는 {'/'.join(SFX_BEATS)} 의 비어있지 않은 "
                         f"부분집합이어야 합니다({beats!r})")
+
+    # E20-B1 — pacing 절은 선택이다(없음 = 발화 갭 페이싱 없음). 있으면 전부 검증한다.
+    if data.get("pacing") is not None:
+        pc = _need(data, "pacing", dict, name, "")
+        vals: dict[str, float] = {}
+        for key, (lo, hi) in PACING_RANGES.items():
+            v = pc.get(key)
+            if (not isinstance(v, (int, float)) or isinstance(v, bool)
+                    or not (lo <= float(v) <= hi)):
+                _fail(name, f"pacing.{key} 는 {lo:g}~{hi:g} 숫자여야 합니다({v!r})")
+            vals[key] = float(v)
+        if vals["gap_residual_sec"] >= vals["max_speech_gap_sec"]:
+            _fail(name, "pacing.gap_residual_sec 이 max_speech_gap_sec 이상이면 "
+                        f"컷이 성립하지 않습니다({vals['gap_residual_sec']:g} ≥ "
+                        f"{vals['max_speech_gap_sec']:g})")
 
     # E19-9 — subtitle 절은 선택이다(없음 = 단일 줄 분할 없음). 있으면 전부 검증한다.
     if data.get("subtitle") is not None:
@@ -211,6 +247,7 @@ def load_style_tone(name: str) -> StyleTone:
         story=dict(data["story"]),
         sfx=dict(data["sfx"]) if data.get("sfx") is not None else None,
         subtitle=dict(data["subtitle"]) if data.get("subtitle") is not None else None,
+        pacing=dict(data["pacing"]) if data.get("pacing") is not None else None,
     )
 
 
@@ -270,6 +307,16 @@ def story_prompt_block(tone: StyleTone | None) -> str:
         lines.append(
             "- 페이오프 보존: 페이오프(핵심 대답·반전) 구간은 하나의 클립으로 통째로 유지하라 "
             "— 잘게 쪼개지 마라. 그 구간의 지루함은 잦은 자막 회전이 상쇄한다.")
+    # E20-B3 — 훅 규칙
+    if st.get("hook_title_scene"):
+        lines.append(
+            "- 제목-훅 일치: 제목이 약속하는 바로 그 장면(사건의 순간)을 **첫 클립**으로 "
+            "써라. 첫 2초 안에 사건·행동·강한 대사 중 하나가 화면에 있어야 한다 — "
+            "배경 설명·설전 장면으로 열지 마라(그건 build 자리다).")
+    if st.get("hook_max_sec") is not None:
+        lines.append(
+            f"- 훅 상한: hook 클립은 {st['hook_max_sec']:g}초 이내로 — 도입을 길게 "
+            f"끌면 첫 이탈 곡선이 무너진다(위 클립 길이 가이드보다 이 값이 이긴다).")
     lines += [
         "",
         f"[채널 톤 — TTS cue 규칙 (위 'TTS cue 작성'의 톤·길이·개수 규칙을 다음으로 대체한다)]",
@@ -289,6 +336,12 @@ def story_prompt_block(tone: StyleTone | None) -> str:
         lines.append(
             "- 릴레이: 직전 대사가 질문이면 cue 가 그 질문을 받아치는 문구를 우선하라"
             "(대사 \"근데 이거 어디다 버리지?\" → cue \"누구나 갈 수 있는 곳\").")
+    # E20-B2 — 내레이션 갭 채움(오디오가 비지 않게)
+    if nar.get("fill_gaps"):
+        lines.append(
+            "- 공백 채우기: 대사가 없는 1.5초 이상의 틈**마다** cue 를 배치해 **오디오가 "
+            "비지 않게** 하라 — 개수 상한 안에서 틈이 남으면 cue 를 더 써라. 이 채널 "
+            "문법의 정체는 내레이션이 모든 틈을 잇는 릴레이다.")
     return "\n".join(lines) + "\n"
 
 

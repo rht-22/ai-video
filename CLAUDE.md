@@ -1445,3 +1445,84 @@ design 키 `subtitle_profanity_mask`(기본 "off", `--design-subtitle-profanity-
   문장을 잇는 회전이라 하한을 다시 걸면 오디오 싱크가 깨진다(의도된 예외).
 - run_log: `steps[{step:"subtitle_single_line"}]` (before/after/max_line_chars).
 - 회귀 가드: `tests/test_e19_single_line.py`(17건).
+
+## E20 — 페이싱·구성 수정 묶음 (2026-08-28, 김부장 v3 프레임 해부 후속)
+
+지시: "영상 길이 상한을 2분으로 변경해주고, 고치는 작업 순서대로 해줘".
+근거 실측(v3): 무발화 10.5초·발화 커버리지 75%·첫 컷 8.5초·정지 화면 71% + 확장이
+만든 0.8초 초과에 제목의 핵심 build 12.9초가 클램프에 통째로 증발.
+
+### E20-⓪ 길이 상한 120초 (사용자 결정)
+
+- `MAX_DURATION_SEC` 기본 60 → **120**(하한 40 유지). env 로 채널별 예외 가능.
+- **전 채널 정책 변경이다** — 길이 정책은 전부 `config.min/max_duration_sec` 로
+  흐르므로(스토리 프롬프트·BeatTrim·narrative-ext·length-clamp) 기본값 하나로 움직인다.
+- 스토리 프롬프트의 40~60 하드코딩을 `{min_duration_sec}`/`{max_duration_sec}`/
+  `{ideal_duration_sec}`(범위 중앙값 파생) 포맷 키로 교체 — 상한을 바꿨는데 프롬프트가
+  계속 "40~60초"라고 말하면 LLM 은 60초로 낸다.
+
+### E20-A1 length-clamp 비례 트림
+
+- `_fit_storyline_to_duration`: 초과분이 그 build 길이의 **절반 미만**이면 통째 제거
+  대신 끝만 잘라 상한에 맞춘다. 절반 이상이면 종전대로 통째 제거(반토막 꽁다리가
+  없느니만 못하다 — 86s→60s 류 대폭 단축은 제거가 맞다).
+
+### E20-A2 narrative-ext 무발화 앞 확장 금지 + 예산 통일
+
+- 앞 확장은 확장 창 안 **가장 이른 발화 - 1.0초(리드인)** 까지만. 창에 발화가 없으면
+  앞 확장 0(v3: +7.4초 전부 무발화 → 도입 6.1초 침묵). 전사가 없으면 종전 그대로
+  (오판 금지). **뒤 확장은 게이트 밖** — 무발화 리액션 컷(엔딩 비트)이 거기 산다.
+- 확장 예산 기준을 클램프 상한(`RENDER_SAFETY_MARGIN_SEC` 0.3 차감)과 통일 — 확장이
+  만든 초과를 클램프가 되무는 자기충돌 제거.
+
+### E20-A3 청크 오버랩 중복 전사 dedup
+
+- `speech.dedup_overlapping_transcripts` — 청크가 180초씩 겹치게 잘려 겹침 구간
+  대사를 양쪽 청크가 다 전사한다(시각 0.x초 차·문장부호 차로 완전 일치 dedup 통과 →
+  같은 자막이 화면에 두 벌 겹침). **시간 겹침(짧은 쪽 50%+) + 정규화 텍스트 동일**만
+  제거 — 연달아 말한 진짜 반복 대사(시간 비겹침)·교차 대화(텍스트 다름)는 그대로.
+- 배선은 청크 전사 병합 직후 한 곳 — 자막·cue 앵커·snap/ext 가 전부 이 목록을 본다.
+  건별 stdout `[transcript-dedup]`.
+
+### E20-B1 발화 갭 페이싱 (dB 무음이 아니라 무발화 기준)
+
+`silence_cutter.apply_speech_gap_pacing` · 톤 프로파일 `pacing` 절
+(`{max_speech_gap_sec, gap_residual_sec, head_lead_in_sec, tail_hold_sec}`).
+
+- **왜 별도 패스인가**(v3 실측 셋): ① 앰비언스 −16dB 면 dB 무음 0건이라 커터 무력
+  ② visual_essential 클립 통째 보존이라 내부 무발화(payoff 1.1·2.3초)가 그대로 나감
+  ③ silence_cut 은 snap·ext·gap-fill **앞**이라 확장이 만든 무발화를 못 보고,
+  유일한 컷 1.0초는 gap-fill 이 도로 메웠다.
+- **자리: gap-fill 뒤 · length-clamp 앞**(조립 마지막) — 되메움 방지 + 클램프가
+  조여진 총량을 본다. `_edit_pinned` 는 그 블록째 건너뛴다(사람 고정).
+- **커버리지 = 대사 전사 ∪ 계획된 cue 창**(anchor~+duration+0.2 · 클립 머리 -6s
+  앵커는 머리로 클램프 — cue-resolve 와 동일) — 내레이션이 살 자리를 자르면 안 된다
+  (E19-3 과 한 몸). 내부 무발화 run > max_gap → 가운데 컷·잔여 residual(양쪽 절반)·
+  클립 분할. 머리 lead_in·꼬리 tail_hold 까지만 허용(꼬리 여유 = 리액션 컷 자리).
+- 전사 없는 클립은 불변(비주얼 비트 — 오판 금지). visual_essential 이라도 **대사가
+  있으면** 상한을 받는다(v3 payoff 유형). 0.8초 미만 조각을 만들 컷은 접는다.
+- 게이트: 톤 `pacing` 절 하나(없으면 회귀 0). run_log `steps[{step:"speech_gap_pacing"}]`
+  + 건별 stdout `[speech-gap]`. 순수 함수.
+
+### E20-B2·B3 스토리 규칙 (프롬프트 지시 — 강제는 A1·B1 이 한다)
+
+- `narration.fill_gaps`(선택 bool): 대사 없는 1.5초+ 틈**마다** cue 배치 — 오디오가
+  비지 않게(v3: max_cues 5 중 3개만 쓰고 무발화 10.5초).
+- `story.hook_max_sec`(선택 3~20)·`story.hook_title_scene`(선택 bool): 훅 상한 +
+  제목이 약속한 장면을 첫 클립으로 + 첫 2초 안에 사건(v3: 도입 설전 28초).
+- drama_clip_kr: fill_gaps true · hook_max_sec 8 · hook_title_scene true ·
+  pacing {1.2, 0.4, 1.0, 2.5}. 값 정본은 preset.json(교차 테스트).
+
+### E20-C1 번인 자막 광범위 경고
+
+- E18-6 창별 회피가 대사 트랙 20%+·5줄+ 움직이면 stdout ⚠ + run_log
+  `pervasive_burned_hint` — 회피는 겹침만 피하지 **이중 표기**(소스 번인 + 우리 자막)
+  자체는 못 푼다. 자막을 끄는 결정은 사람 몫(채널 `subtitles:false`).
+
+### 미이행(별건 — 실렌더 튜닝 필요)
+
+- C2 저조도 보정(eq): 화면 픽셀이 바뀌는 전 채널 변경이라 실렌더 A/B 선행.
+- C3 라벨-컷 동기: 장면 전환 검출 인프라가 엔진에 없다(scdet 도입 별건).
+
+회귀 가드: `tests/test_e20_pacing_fixes.py`(21건) · `tests/test_e20_speech_gap.py`(19건)
+· `tests/test_e20_story_rules.py`(8건). 전체 1438 통과.

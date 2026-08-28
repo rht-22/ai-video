@@ -6,6 +6,7 @@
     "max_cues": 5,
     "cue_len_chars": [3, 12],
     "cue_duration_sec": [1.2, 1.8],
+    "fill_gaps": true,
     "relay_rule": true,
     "placement": "dialogue_gaps_only"
   },
@@ -29,7 +30,9 @@
     "structure": "single_scene_rule_of_three",
     "title_tone": "community_meme",
     "ending": "hard_cut",
-    "payoff_longtake": true
+    "payoff_longtake": true,
+    "hook_max_sec": 8,
+    "hook_title_scene": true
   },
   "sfx": {
     "max_per_episode": 3,
@@ -39,5 +42,11 @@
   "subtitle": {
     "single_line": true,
     "max_line_chars": 15
+  },
+  "pacing": {
+    "max_speech_gap_sec": 1.2,
+    "gap_residual_sec": 0.4,
+    "head_lead_in_sec": 1.0,
+    "tail_hold_sec": 2.5
   }
 }

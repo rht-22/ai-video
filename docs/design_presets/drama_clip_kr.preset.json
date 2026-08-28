@@ -68,7 +68,8 @@
     "cue_duration_sec": { "value": [1.2, 1.8], "status": "prompt",
                           "note": "김부장 실측(8/28) 후속 — 창이 2.5s 면 대사 빽빽한 소재에서 gap 성립 0/3. 초단문은 창도 짧아야 릴레이가 선다" },
     "relay_rule":    { "value": true,       "status": "prompt", "note": "직전 대사의 질문을 받아치는 문구 우선 (「어디다 버리지?」→「누구나 갈 수 있는 곳」)" },
-    "placement":     { "value": "dialogue_gaps_only", "status": "e19", "note": "갭 ③-c — cue 창과 subtitle_segments 겹침 검출 → 가까운 gap으로 스냅/경고" }
+    "placement":     { "value": "dialogue_gaps_only", "status": "e19", "note": "갭 ③-c — cue 창과 subtitle_segments 겹침 검출 → 가까운 gap으로 스냅/경고" },
+    "fill_gaps":     { "value": true,       "status": "prompt", "note": "E20-B2 — 대사 없는 1.5초+ 틈마다 cue 배치(오디오가 비지 않게). v3 실측: max_cues 5 중 3개만 쓰고 무발화 10.5초" }
   },
 
   "labels_fx": {
@@ -102,13 +103,19 @@
     "ending":               { "value": "hard_cut",    "status": "prompt", "note": "마지막 대사 종료 즉시 컷 — 여운 0초 = 루프 유도" },
     "video_speed":          { "value": 1.0,           "status": "native", "note": "A/B 후보: 1.05~1.1 (벤치마크 대사 스팬 10~15% 압축 관측)" },
     "loudness_target_lufs": { "value": -13.5,         "status": "qa",  "note": "벤치마크 -12.3~-13.4 LUFS · LRA≤4. 산출물 검사 지표" },
-    "silence_qa_max":       { "value": "0.3s+ 무음 ≤ 2건", "status": "qa", "note": "렌더 후 silencedetect로 세는 QA 지표" }
+    "silence_qa_max":       { "value": "0.3s+ 무음 ≤ 2건", "status": "qa", "note": "렌더 후 silencedetect로 세는 QA 지표" },
+    "max_speech_gap_sec":   { "value": 1.2,           "status": "prompt", "note": "E20-B1 발화 갭 상한 — dB 무음이 아니라 **무발화**(전사∪내레이션 창) 기준. 조립 마지막(스냅·확장·갭메움 뒤)에 최종 클립을 자른다" },
+    "gap_residual_sec":     { "value": 0.4,           "status": "prompt", "note": "잘라도 남기는 정적(양쪽 절반) — 벤치마크 반전 직후 0.3~0.5s 호흡" },
+    "head_lead_in_sec":     { "value": 1.0,           "status": "prompt", "note": "클립 머리 무발화 허용치 — 첫 발화까지 이 이상 침묵이면 정리" },
+    "tail_hold_sec":        { "value": 2.5,           "status": "prompt", "note": "클립 꼬리 무발화 허용치 — 리액션 컷(무발화 엔딩 비트)이 사는 자리" }
   },
 
   "story": {
     "structure":   { "value": "single_scene_rule_of_three", "status": "prompt", "note": "완결된 한 장면 + 같은 패턴 2번 반복 후 3번째 비틀기 + 카운트다운 리듬 장치" },
     "length_sec":  { "value": [40, 60],  "status": "auto",   "note": "기존 길이 정책 그대로 (벤치마크 46~52초)" },
-    "title_tone":  { "value": "community_meme", "status": "prompt", "note": "훅 = 밈 화법 한 문장 (「가장 X같은 질문」) — 유튜브 제목 = 화면 제목" }
+    "title_tone":  { "value": "community_meme", "status": "prompt", "note": "훅 = 밈 화법 한 문장 (「가장 X같은 질문」) — 유튜브 제목 = 화면 제목" },
+    "hook_max_sec":     { "value": 8,    "status": "prompt", "note": "E20-B3 — hook 클립 상한. v3 실측: 도입 설전 21초(확장 후 28초)가 '앞이 루즈해'의 절반" },
+    "hook_title_scene": { "value": true, "status": "prompt", "note": "E20-B3 — 제목이 약속한 장면을 첫 클립으로 + 첫 2초 안에 사건·행동·강한 대사" }
   },
 
   "work_platform": {
