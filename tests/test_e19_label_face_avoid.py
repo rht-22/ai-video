@@ -219,4 +219,11 @@ def test_pipeline_wiring():
     assert src.index("build_crop_timeline(") < gate < src.index("build_texts_ass(")
     assert '"step": "style_face_avoid"' in src
     # 톤 게이트 — 미지정 채널은 종전 배치(회귀 0)
-    assert "style_tone_profile is not None" in src[gate - 800:gate]
+    assert "style_tone_profile is not None" in src[gate - 1200:gate]
+    # ⚠ 울트라리뷰 bug_001(2026-08-28): 리소스 **생성 elif 안**에 두면 --from-step render
+    # (A/B 재렌더의 표준 경로)가 캐시 else 로 빠지며 회피를 건너뛰고, 체크포인트의 원
+    # 좌표로 texts.ass 를 덮어쓴다 — 승인 화면이 조용히 되돌아간다(E15 재개 계약 위반).
+    # 블록은 리소스 3분기(캐시 로드·생성·재개 폴백)가 **수렴한 뒤**에 있어야 한다.
+    # rindex — 이 문구는 파일에 두 번 있다(3653 의 다른 재개 블록이 먼저 걸리면 헛가드).
+    assert src.rindex("체크포인트 파일이나 edit_plan.json을 찾을 수 없습니다") < gate
+    assert src.index("[OK] 리소스 로드 완료 (체크포인트에서)") < gate

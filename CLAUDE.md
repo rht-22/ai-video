@@ -1295,8 +1295,16 @@ design 키 `title_highlight_color`(기본 `#FFE24A`, `--design-title-highlight-c
 ### E19-4 라벨 얼굴 회피 · 컷 경계 재배치 · 글로우 (2026-08-28)
 
 `style_compose.avoid_faces_for_texts`·`face_box_on_canvas` · `reframe.CropKeyframe`
-face_* 필드 · `[face avoid]` 블록(크롭 타임라인 생성 직후 · 텍스트 ASS 앞) ·
+face_* 필드 · `[face avoid]` 블록(**리소스 3분기 수렴 직후** · 텍스트 ASS 앞) ·
 `TEXT_FX += "glow"`.
+
+- ⚠ **자리 교정(울트라리뷰 bug_001, 2026-08-28)**: 처음엔 리소스 생성 elif **안**에
+  뒀다가, `--from-step render`(A/B 재렌더 표준 경로)가 캐시 else 로 빠지며 회피를
+  건너뛰고 checkpoint_style 원 좌표로 texts.ass 를 덮어쓰는 결함이 리뷰에서 잡혔다
+  (E15 재개 계약 위반). 지금은 3분기(캐시·생성·폴백) 수렴 뒤라 재개도 지난다. 회피는
+  플랜+크롭 JSON+design 의 **결정적** 순수 함수라 재개마다 재도출해도 같은 좌표다 —
+  체크포인트에 따로 저장하지 않는 이유(크롭 JSON 은 run_dir 에 남는다). 가드가 블록
+  위치를 문자열 순서로 고정한다(같은 앵커 문구가 파일에 두 번 있어 **rindex** 로 잰다).
 
 - **얼굴 좌표는 리프레임 크롭 타임라인의 것을 재사용한다** — `CropKeyframe` 에 그
   표본의 raw 검출 박스(face_cx/cy/w/h)를 함께 싣는다(검출 비용 0, 발주서 §4 규율).

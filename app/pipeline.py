@@ -4536,28 +4536,6 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             if (idx + 1) % 5 == 0 or (idx + 1) == len(clips):
                 print(f"    진행 중... ({idx + 1}/{len(clips)})")
 
-        # ═══════════════════════════════════════
-        # [face avoid] E19-4 AI 라벨 얼굴 회피 (2026-08-28)
-        # ═══════════════════════════════════════
-        # 자리: 크롭 타임라인이 방금 생겼고(얼굴 박스가 그 안에 있다) 텍스트 ASS 는 아직
-        # 안 만들어졌다. 게이트 셋: ① AI 라벨만(_texts_from_style — 편집실 텍스트는 사람
-        # 배치라 안 건드린다, E18-6 규율) ② 톤 프로파일 채널만(미지정 = 종전 배치, 회귀 0)
-        # ③ 리프레임이 켜져 있어야(얼굴 좌표의 출처) — 셋 다 아니면 이 블록은 없다.
-        # 얼굴 미검출·구 캐시 JSON(face 키 없음)은 함수 안에서 '회피 없음'으로 끝난다.
-        if (_texts_from_style and _text_overlays and style_tone_profile is not None
-                and getattr(payload.design, "enable_reframe", True) and crop_map):
-            from app.modules import style_compose as _stylemod_fa
-            _fa_y_lo, _fa_y_hi = _stylemod_fa.text_y_range(payload.design)
-            _text_overlays, _fa_notes, _fa_rep = _stylemod_fa.avoid_faces_for_texts(
-                _text_overlays, clips, crop_map, payload.design, _fa_y_lo, _fa_y_hi)
-            if _fa_rep["moved"] or _fa_rep["split"] or _fa_rep["kept_overlap"]:
-                print(f"  [face-avoid] 라벨 {_fa_rep['of']}건 중 {_fa_rep['moved']}건 이동 · "
-                      f"컷 분할 {_fa_rep['split']} · 못 피함 {_fa_rep['kept_overlap']}")
-            for _n in _fa_notes:
-                print(f"  [face-avoid] {_n}")
-            run_log.setdefault("steps", []).append({"step": "style_face_avoid", **{
-                k: v for k, v in _fa_rep.items()}})
-
         # TTS 오디오 생성 (cue별 — voice/speed 적용)
         # cue 시간(end_sec - start_sec) 안에 들어가도록 fit. 초과 시 Flash로 텍스트 단축.
         print("  TTS 오디오 생성 중 (cue별, fit 적용)...")
@@ -4634,6 +4612,35 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             tts_cue_files = []
         else:
             raise FileNotFoundError("체크포인트 파일이나 edit_plan.json을 찾을 수 없습니다.")
+
+    # ═══════════════════════════════════════
+    # [face avoid] E19-4 AI 라벨 얼굴 회피 (2026-08-28)
+    # ═══════════════════════════════════════
+    # 자리: 리소스 **3분기(캐시 로드·생성·재개 폴백)가 수렴한 직후** — crop_map(얼굴 박스의
+    # 출처)이 어느 경로로든 확정됐고 텍스트 ASS 는 아직 안 만들어졌다.
+    # ⚠ 처음엔 생성 elif **안**에 있었다(울트라리뷰 bug_001, 2026-08-28) — 그러면
+    # `--from-step render`(라우드니스·무음 A/B 의 표준 재렌더 경로)가 캐시 else 로 빠지며
+    # 회피를 건너뛰고, checkpoint_style 의 원 좌표로 texts.ass 를 덮어써 승인된 화면이
+    # 조용히 되돌아갔다(E15 재개 계약 위반). 회피는 플랜+크롭 JSON+design 의 **결정적**
+    # 순수 함수라 재개마다 여기서 다시 도출해도 같은 좌표가 나온다 — 체크포인트에 따로
+    # 저장하지 않는 이유다(크롭 JSON 은 run_dir 에 남는다).
+    # 게이트 셋: ① AI 라벨만(_texts_from_style — 편집실 텍스트는 사람 배치라 안 건드린다,
+    # E18-6 규율) ② 톤 프로파일 채널만(미지정 = 종전 배치, 회귀 0) ③ 리프레임이 켜져
+    # 있어야(얼굴 좌표의 출처) — 셋 다 아니면 이 블록은 없다. 얼굴 미검출·구 캐시 JSON
+    # (face 키 없음)은 함수 안에서 '회피 없음'으로 끝난다.
+    if (_texts_from_style and _text_overlays and style_tone_profile is not None
+            and getattr(payload.design, "enable_reframe", True) and crop_map):
+        from app.modules import style_compose as _stylemod_fa
+        _fa_y_lo, _fa_y_hi = _stylemod_fa.text_y_range(payload.design)
+        _text_overlays, _fa_notes, _fa_rep = _stylemod_fa.avoid_faces_for_texts(
+            _text_overlays, clips, crop_map, payload.design, _fa_y_lo, _fa_y_hi)
+        if _fa_rep["moved"] or _fa_rep["split"] or _fa_rep["kept_overlap"]:
+            print(f"  [face-avoid] 라벨 {_fa_rep['of']}건 중 {_fa_rep['moved']}건 이동 · "
+                  f"컷 분할 {_fa_rep['split']} · 못 피함 {_fa_rep['kept_overlap']}")
+        for _n in _fa_notes:
+            print(f"  [face-avoid] {_n}")
+        run_log.setdefault("steps", []).append({"step": "style_face_avoid", **{
+            k: v for k, v in _fa_rep.items()}})
 
     # 편집 계획 생성 — **항상** 쓴다(2026-08-16 수정).
     # 종전엔 `start_idx <= resources` 일 때만 써서, --from-step render 재렌더가 옛 edit_plan 을
