@@ -1524,5 +1524,5 @@ design 키 `subtitle_profanity_mask`(기본 "off", `--design-subtitle-profanity-
 - C2 저조도 보정(eq): 화면 픽셀이 바뀌는 전 채널 변경이라 실렌더 A/B 선행.
 - C3 라벨-컷 동기: 장면 전환 검출 인프라가 엔진에 없다(scdet 도입 별건).
 
-회귀 가드: `tests/test_e20_pacing_fixes.py`(21건) · `tests/test_e20_speech_gap.py`(19건)
+회귀 가드: `tests/test_e20_pacing_fixes.py`(15건) · `tests/test_e20_speech_gap.py`(17건)
 · `tests/test_e20_story_rules.py`(8건). 전체 1438 통과.
