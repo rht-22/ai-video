@@ -4008,6 +4008,27 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         final_segments = [SimpleNamespace(**seg) for seg in cached_data]
         print(f"  자막 캐시 로드 완료 ({len(final_segments)} segments)")
 
+    # ── E19-7 자막 욕설 마스킹 (2026-08-28) ─────────────────────────────────
+    # 음성은 원음 그대로, **자막 텍스트만** 사전으로 가린다(벤치마크 「XX끼」 규율).
+    # 자리: 신규 생성·캐시 로드 두 경로가 수렴한 직후, 편집실 자막 오버라이드 **앞** —
+    # 사람이 고친 문장은 마스킹이 덮지 않는다(사람이 이긴다). 전사 원문·TTS cue 텍스트는
+    # 여기 안 지나므로 그대로다. 마스킹 결과는 사전 키와 다시 안 맞아 멱등이라 캐시
+    # 재개가 두 번 지나도 안전하다. 게이트: design 키(기본 off = 종전 그대로, 회귀 0).
+    if getattr(payload.design, "subtitle_profanity_mask", "off") == "on" and final_segments:
+        from app.modules.profanity_mask import apply_mask_to_segments
+        _pm_n, _pm_details = apply_mask_to_segments(final_segments)
+        if _pm_n:
+            for _d in _pm_details:
+                print(f"  [자막마스킹] {_d}")
+            # 정본(subtitle_segments.json)도 같은 텍스트여야 한다 — 편집실·현지화가
+            # 이 파일을 읽는다(화면과 자료가 갈리면 안 된다).
+            segments_cache_path.write_text(
+                json.dumps([_subtitle_segment_json(s) for s in final_segments],
+                           ensure_ascii=False, indent=2), encoding="utf-8")
+        run_log.setdefault("steps", []).append(
+            {"step": "subtitle_profanity_mask", "masked": _pm_n,
+             "of": len(final_segments), "details": _pm_details})
+
     # ── 편집실 자막 오버라이드(2026-08-17) ──────────────────────────────────
     # 반드시 **재매핑 뒤**다. 구간을 함께 고치면 위 블록이 전사에서 자막을 새로 만드는데,
     # 그보다 앞에서 덮으면 사람이 고친 문장이 조용히 기계 전사로 되돌아간다.
@@ -4882,7 +4903,18 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         render_elapsed = time.time() - render_start
 
         cmd_serializable = [str(item) if isinstance(item, Path) else item for item in ffmpeg_cmd]
-        run_log["steps"].append({"step": "render", "command": cmd_serializable})
+        _render_step: dict[str, Any] = {"step": "render", "command": cmd_serializable}
+        # E19-8 — 렌더를 바꾸지 않는다, 재기만 한다(디코드 1회). 목표값 판정은 ves 몫.
+        from app.modules.audio_qa import measure_audio_qa
+        _qa = measure_audio_qa(output_video)
+        if _qa.get("error"):
+            _render_step["audio_qa_error"] = _qa["error"]
+            print(f"  [audio-qa] 측정 실패(발행은 막지 않는다): {_qa['error']}")
+        else:
+            _render_step["audio_qa"] = _qa
+            print(f"  [audio-qa] {_qa['lufs_i']} LUFS · LRA {_qa['lra']} · "
+                  f"0.3s+ 무음 {_qa['silence_count']}건({_qa['silence_total_sec']}s)")
+        run_log["steps"].append(_render_step)
         print(f"[OK] 최종 렌더링 완료 (소요 시간: {render_elapsed:.1f}초)")
     else:
         print(f"\n[14/15] 렌더링 스킵 (이미 파일 존재: {output_video.name})")

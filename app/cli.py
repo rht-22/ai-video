@@ -197,6 +197,11 @@ def build_parser() -> argparse.ArgumentParser:
     design.add_argument("--design-title-color2", type=str, default=None, help="제목 2번째 줄 색상 (기본: #FFFF00)")
     # 제목 줄별 배경 박스·굵게(2026-08-21) — 값은 렌더러의 title_boxes/title_box_colors/title_bolds
     # 리스트로 조립된다(title_color(2) 와 같은 패턴). 여백·라운드는 글자 크기 비례 고정값.
+    design.add_argument("--design-subtitle-profanity-mask",
+                        dest="design_subtitle_profanity_mask",
+                        type=str, default=None, choices=["off", "on"],
+                        help="자막 욕설 마스킹 (E19-7). on=자막 텍스트만 사전으로 가린다"
+                             "(음성은 원음 — 벤치마크의 「XX끼」 규율). off(기본)=종전 그대로.")
     design.add_argument("--design-title-highlight-color", type=str, default=None,
                         help="제목 {{어절}} 마크업의 강조색 (기본: #FFE24A). 마크업이 없는 "
                              "제목은 이 값과 무관하게 종전과 동일하다 (E19-2)")
@@ -334,6 +339,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 _CLI_TO_DESIGN_FIELD = {
     "design_title_highlight_color": "title_highlight_color",   # E19-2
+    "design_subtitle_profanity_mask": "subtitle_profanity_mask",   # E19-7
     "design_title_y": "title_y",
     "design_video_y": "video_y",
     "design_video_width": "video_width",

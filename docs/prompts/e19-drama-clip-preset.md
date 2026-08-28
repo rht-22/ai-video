@@ -1,15 +1,20 @@
 # E19 — 드라마 클립 프리셋 갭 묶음 (발주서)
 
-**상태: E19-1~6 구현 완료(2026-08-28) · 나머지(E19-7·8) 기획.** 구현된 항목의
-계약 정본은 이제 코드다: ai-video `CLAUDE.md`(채널 톤 프로파일 절 + E19-2~6 하위 절) ·
+**상태: E19-1~8 전 항목 구현 완료(2026-08-28).** 계약 정본은 이제 코드다:
+ai-video `CLAUDE.md`(채널 톤 프로파일 절 + E19-2~8 하위 절) ·
 `app/modules/style_tone.py` · `renderer.strip_title_markup`/`extract_title_highlights` ·
 `pipeline.snap_cues_to_dialogue_gaps` · `style_compose.avoid_faces_for_texts`/
 `load_sfx_manifest` · `reframe.CropKeyframe(face_*)` · `renderer.sfx_audio` ·
-`tests/test_e19_*.py`. ⚠ SFX 는 번들이 비어 있으면 닫힌 채로다 — 라이선스 확인된
-효과음 파일을 `app/assets/sfx/` 에 manifest 와 함께 넣어야 실전에서 열린다.
-⚠ E19-2 의 **AI 마크업 생성**(§2 두 경로 중 AI 쪽)은 구현하지 않았다 — story 산출
-제목의 마크업이 edit_plan·발행 메타(대시보드·유튜브 제목)로 그대로 흘러가는 표면의
-세척이 선행돼야 한다. 사람 경로(편집실·채널 제목 문자열)만 개통. 후속 별건.
+`profanity_mask.py` · `audio_qa.py` · `tests/test_e19_*.py`.
+
+남은 후속(전부 별건으로 명시된 것):
+① E19-2 **AI 마크업 생성** — story 산출 제목의 마크업이 edit_plan·발행 메타(대시보드·
+   유튜브 제목)로 흘러가는 표면의 세척 선행. 사람 경로(편집실·채널 제목)만 개통 상태.
+② **SFX 번들 채우기** — 라이선스 확인된 효과음 파일을 `app/assets/sfx/` 에 manifest 와
+   함께 넣어야 실전에서 열린다(비어 있으면 닫힌 채로가 정상).
+③ **실소재 실렌더 A/B**(§10-2) — 신병4 EPK 1편, 톤 on/off 프레임·오디오 대조.
+④ **ves 어댑터 미러 + 롤아웃**(§11) — `style_tone`·`subtitle_profanity_mask` design 키,
+   엔진 전 노드 배포 뒤.
 ⚠ 발주서 정본 위치는 ves-orchestrator `docs/prompts/` 인데,
 그 저장소 메인 체크아웃이 지금 다른 세션의 브랜치에 올라가 있어 **임시로 이 레포에
 둔다** — ves 체크아웃이 정리되면 그쪽으로 옮기고 여기는 포인터만 남긴다.

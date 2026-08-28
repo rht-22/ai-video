@@ -35,6 +35,9 @@ class DesignConfig:
     # E19-2(2026-08-28) 제목 {{어절}} 마크업 강조색 — 마크업이 없으면 렌더 경로가 종전과
     # 바이트 동일(회귀 0)이라 이 값은 읽히지 않는다. drawtext hex 그대로(ASS 변환 없음).
     title_highlight_color: str = "#FFE24A"
+    # E19-7(2026-08-28) 자막 욕설 마스킹 — "on" 이면 자막 텍스트만 사전
+    # (app/data/profanity_mask_ko.json)으로 가린다(음성은 원음). "off"(기본) = 종전 그대로.
+    subtitle_profanity_mask: str = "off"
     title_sizes: list[int] = field(default_factory=lambda: [70, 90])
     title_y: int = 120
     # F-409: True 면 동적 배치(영상 위 20px) 대신 title_y 를 그대로 쓴다 — 편집실 제목

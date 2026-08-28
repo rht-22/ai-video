@@ -1374,3 +1374,36 @@ A/B 도구 `scripts/e19_silence_residual_ab.py`.
   정리하면 안 된다 — 되돌리기가 중간값을 복원해 다른 테스트를 오염시킨다(실측).
 - 회귀 가드: `tests/test_e19_silence_residual.py`(14건 — 회귀 0·기하 수계산·보호 분기
   불변·env/CLI fail-loud·캐시 키·도구 존재).
+
+### E19-7 자막 욕설 마스킹 (2026-08-28)
+
+`app/modules/profanity_mask.py` · `app/data/profanity_mask_ko.json` ·
+design 키 `subtitle_profanity_mask`(기본 "off", `--design-subtitle-profanity-mask`).
+
+- **음성은 원음, 자막 텍스트만** 가린다(벤치마크 신병4: 음성 「새끼야」 · 자막 「XX끼야」
+  — 제목 "X같은" 자체검열과 같은 플랫폼 노출 안전 규율).
+- 사전은 코드가 아니라 데이터 한 곳. 규칙은 **공백 토큰(열) 완전 일치**뿐 — 부분 문자열
+  치환 금지(새끼줄·동물 새끼가 깨진다). 활용형은 사전에 열거한다(E13 표기 보정 규율).
+- 자리: 자막 신규 생성·캐시 로드 두 경로가 **수렴한 직후, 편집실 자막 오버라이드 앞** —
+  사람이 고친 문장은 마스킹이 덮지 않는다. 마스킹되면 `subtitle_segments.json` 도
+  재기록한다(화면과 편집실·현지화 자료가 갈리면 안 된다). 전사 원문·TTS cue 텍스트는
+  이 길을 안 지나므로 그대로다(소리 원음 유지 계약).
+- **멱등** — 마스킹 결과는 사전 키와 다시 안 맞아 캐시 재개가 두 번 지나도 안전하다.
+- 기록: 건별 stdout `[자막마스킹]` + run_log `steps[{step:"subtitle_profanity_mask"}]`
+  = `{masked, of, details}`. off(기본)면 단계 자체가 없다(회귀 0).
+- 회귀 가드: `tests/test_e19_profanity_mask.py`(8건 — 완전 일치·부분 문자열 금지·멱등·
+  게이트·배선 자리).
+
+### E19-8 렌더 후 오디오 QA 지표 (2026-08-28)
+
+`app/modules/audio_qa.py` — **렌더를 바꾸지 않는다, 재기만 한다.**
+
+- render 직후 ffmpeg **한 번**(ebur128 → silencedetect 체인, 디코드 1회)으로 통합
+  LUFS·LRA·0.3s+ 무음 수·무음 합계를 재서 run_log render 단계 `audio_qa` 에 남긴다.
+  임계(−30dB·0.3s)는 벤치마크 분석과 같은 자다 — 바꾸면 실측 수치와 비교가 안 된다.
+- 실패는 `audio_qa_error` 로 사유만 — 관측 장치가 본편 발행을 막지 않는다.
+- **목표값 판정은 엔진이 하지 않는다**(−13.5 LUFS·무음 ≤2 는 프리셋의 qa 지표) —
+  ves evaluate 가 읽고 대시보드에 띄우는 것은 별건.
+- 게이트 없음(전 렌더 공통 관측) — run_log 키 추가는 가산적이고 비용은 디코드 1회다.
+- 회귀 가드: `tests/test_e19_audio_qa.py`(6건 — 파서 순수·실 ffmpeg 실측(합성 사인+
+  무음)·실패 무해·임계 고정·배선).
