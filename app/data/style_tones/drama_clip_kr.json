@@ -5,6 +5,7 @@
     "tone": "recall_first_person",
     "max_cues": 5,
     "cue_len_chars": [3, 12],
+    "cue_duration_sec": [1.2, 1.8],
     "relay_rule": true,
     "placement": "dialogue_gaps_only"
   },

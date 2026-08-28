@@ -95,6 +95,7 @@ def test_bad_name_format_fails():
     ("narration.tone", "explainer"),             # 모르는 enum
     ("narration.max_cues", 0),
     ("narration.cue_len_chars", [12, 3]),        # 최소>최대
+    ("narration.cue_duration_sec", [1.8, 1.2]),  # 최소>최대 (선택 필드지만 있으면 검증)
     ("labels.density_max", st.DENSITY_MAX_LIMIT + 1),
     ("labels.categories", ["state_paren", "bgm"]),
     ("labels.color_map", {"state": "#FF9EC4"}),  # 키 부족
@@ -126,6 +127,7 @@ def test_profile_matches_preset():
     assert tone.narration["tone"] == n["tone"]["value"]
     assert tone.narration["max_cues"] == n["max_cues"]["value"]
     assert tone.narration["cue_len_chars"] == n["cue_len_chars"]["value"]
+    assert tone.narration["cue_duration_sec"] == n["cue_duration_sec"]["value"]
     assert tone.narration["relay_rule"] is n["relay_rule"]["value"]
     assert tone.narration["placement"] == n["placement"]["value"]
 
@@ -152,6 +154,7 @@ def test_story_block_carries_values():
     assert "drama_clip_kr" in b
     assert "1인칭 회상체" in b and "고민하는데" in b        # tone=recall_first_person
     assert "3~12자" in b                                    # cue_len_chars
+    assert "1.2~1.8초" in b                                 # cue_duration_sec (김부장 실측 후속)
     assert "5개 이하" in b                                  # max_cues
     assert "대사가 없는 틈" in b                            # placement
     assert "받아치는" in b                                  # relay_rule

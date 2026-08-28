@@ -123,6 +123,11 @@ def validate_tone_data(data: Any, name: str) -> dict[str, Any]:
     if not (1 <= mc <= 10):
         _fail(name, f"narration.max_cues 는 1~10 이어야 합니다({mc})")
     _need_range(nar, "cue_len_chars", name, "narration", 1, 40)
+    # 김부장 실측(2026-08-28) 후속: cue 창(duration_sec)이 스토리 기본(2~6초)대로 나오면
+    # 대사가 빽빽한 소재에서 들어갈 gap 이 없다(3/3 경고). 초단문 톤은 창도 짧아야 한다.
+    # 선택 필드 — 없으면 창 지시를 안 얹는다(종전 프롬프트 그대로).
+    if nar.get("cue_duration_sec") is not None:
+        _need_range(nar, "cue_duration_sec", name, "narration", 0.5, 6.0)
     _need(nar, "relay_rule", bool, name, "narration")
     _need_enum(nar, "placement", NARRATION_PLACEMENTS, name, "narration")
 
@@ -259,6 +264,11 @@ def story_prompt_block(tone: StyleTone | None) -> str:
         f"- 개수: storyline 전체 {int(nar['max_cues'])}개 이하 — 대사가 서사를 끌고, cue 는 "
         f"대사 사이 틈만 잇는다.",
     ]
+    if nar.get("cue_duration_sec") is not None:
+        dlo, dhi = (float(nar["cue_duration_sec"][0]), float(nar["cue_duration_sec"][1]))
+        lines.append(
+            f"- 창: 한 cue 의 duration_sec 은 {dlo:g}~{dhi:g}초 — 초단문은 짧게 말하고 "
+            f"끝난다(위 '보통 2~6초' 대신 이 값). 창이 길면 대사 틈에 들어가지 못한다.")
     if nar["placement"] == "dialogue_gaps_only":
         lines.append("- 배치: **대사가 없는 틈에만** 둔다. 대사 위에 겹치는 cue 는 만들지 마라.")
     if nar["relay_rule"]:

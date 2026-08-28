@@ -63,6 +63,8 @@
     "tone":          { "value": "recall_first_person", "status": "prompt", "note": "1인칭 회상체 초단문 (「고민하는데」「지목당했고」) — 설명형 금지. 스토리 cue 프롬프트 채널 톤" },
     "max_cues":      { "value": 5,          "status": "prompt", "note": "벤치마크 51초에 3줄 — 대사:내레이션 ≈ 12:1" },
     "cue_len_chars": { "value": [3, 12],    "status": "prompt", "note": "접착제형 초단문" },
+    "cue_duration_sec": { "value": [1.2, 1.8], "status": "prompt",
+                          "note": "김부장 실측(8/28) 후속 — 창이 2.5s 면 대사 빽빽한 소재에서 gap 성립 0/3. 초단문은 창도 짧아야 릴레이가 선다" },
     "relay_rule":    { "value": true,       "status": "prompt", "note": "직전 대사의 질문을 받아치는 문구 우선 (「어디다 버리지?」→「누구나 갈 수 있는 곳」)" },
     "placement":     { "value": "dialogue_gaps_only", "status": "e19", "note": "갭 ③-c — cue 창과 subtitle_segments 겹침 검출 → 가까운 gap으로 스냅/경고" }
   },
