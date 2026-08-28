@@ -324,6 +324,14 @@ def story_prompt_block(tone: StyleTone | None) -> str:
         lines.append(
             f"- 훅 상한: hook 클립은 {st['hook_max_sec']:g}초 이내로 — 도입을 길게 "
             f"끌면 첫 이탈 곡선이 무너진다(위 클립 길이 가이드보다 이 값이 이긴다).")
+    # E20-B4 1차 방어(v4·v5 실측: LLM 이 대사 없는 액션 구간으로 편을 구성했다 —
+    # 후처리 가드가 전량 거절하는 상황을 프롬프트에서 먼저 줄인다)
+    if (tone.pacing or {}).get("min_speech_coverage"):
+        lines.append(
+            "- 재료 제한: 대사가 거의 없는 액션·몽타주 구간을 주 재료로 쓰지 마라 — "
+            "후보의 transcript 가 비었거나 몇 마디뿐이면 그 후보는 피하고 대사가 밀한 "
+            "장면으로 구성하라. 이 채널은 오디오(대사·내레이션)가 비지 않는 것이 "
+            "계약이다(대사 커버리지가 낮은 구성은 후처리에서 거절된다).")
     lines += [
         "",
         f"[채널 톤 — TTS cue 규칙 (위 'TTS cue 작성'의 톤·길이·개수 규칙을 다음으로 대체한다)]",

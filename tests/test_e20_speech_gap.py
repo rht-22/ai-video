@@ -223,6 +223,26 @@ def test_coverage_guard_wired_into_storyline_selection():
     assert src.index("validate_story_clips(\n                sl_clips") < guard
 
 
+def test_all_rejected_falls_back_to_best_coverage():
+    """v5 실측: 세 스토리라인이 전부 커버리지 미달(4%·43%·48%)로 탈락하자
+    selected_storyline 폴백이 **가드를 우회해** 최저 커버리지(4%) 구성을 그대로
+    렌더했다. 전량 탈락이면 탈락분 중 **최고 커버리지**를 경고와 함께 쓴다 —
+    48% 가 4% 보다 낫고, 무인 노드에서 편이 통째로 죽는 것보다도 낫다."""
+    src = (REPO / "app" / "pipeline.py").read_text("utf-8")
+    assert "_cov_rejected" in src
+    best = src.index("전량 커버리지 미달")
+    fallback = src.index("폴백: 유효한 스토리가 없으면")
+    assert best < fallback                    # 최고 커버리지 채택이 폴백보다 먼저
+
+
+def test_story_block_warns_against_speechless_material():
+    """톤 story 블록의 1차 방어 — 대사 빈약 후보를 재료로 쓰지 말라는 지시.
+    pacing.min_speech_coverage 가 있는 톤에만 붙는다."""
+    tone = st.load_style_tone("drama_clip_kr")
+    b = st.story_prompt_block(tone)
+    assert "transcript" in b and "대사가 거의 없는" in b
+
+
 def test_pipeline_wires_pacing_after_gap_fill_before_clamp():
     """자리 고정: gap-fill **뒤**(되메움 방지) · length-clamp **앞**(클램프가 조여진
     총량을 본다). 게이트는 톤 pacing 절이다."""

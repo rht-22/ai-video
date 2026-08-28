@@ -3421,6 +3421,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         # 라운드 11.1-A: _fit_storyline_to_duration이 clips 변경하면 그 시점 자막 캐시는
         # 옛 storyline 영역 기준이라 무효화해야 한다. 루프 안에서 변경 감지 후 종료 시 일괄 처리.
         _storyline_fit_changed = False
+        # E20-B4: 커버리지 미달로 탈락한 스토리라인 보관 — 전량 탈락이면 이 중 최고를
+        # 경고와 함께 쓴다(selected_storyline 폴백은 가드를 우회한다 — v5 실측).
+        _cov_rejected: list[tuple[float, list, str, float, list]] = []
         for sl_idx, sl_data in enumerate(diverse_pool):
             if len(all_storyline_variants) >= max_shorts:
                 break
@@ -3516,6 +3519,20 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             for w in coh_warnings:
                 print(f"  [COHERENCE] 스토리라인 {sl_idx + 1}: {w}")
 
+            # PR-4: storyline 의 tts_cues 정규화 — 커버리지 가드 **앞**에서 한다
+            # (E20-B4 전량 탈락 폴백이 탈락분의 cue 까지 함께 보존해야 하므로).
+            # sl_data 의 직접 필드 또는 sl_data["storyline"] 안 어디든 위치 가능 (LLM 변형 대응).
+            _raw_cues = sl_data.get("tts_cues") if isinstance(sl_data.get("tts_cues"), list) else None
+            if _raw_cues is None and isinstance(sl_data.get("storyline"), dict):
+                _raw_cues = sl_data["storyline"].get("tts_cues") if isinstance(sl_data["storyline"].get("tts_cues"), list) else None
+            # 중복 제거로 clip 이 빠졌으면 cue 의 clip_index 도 새 배열 기준으로 옮긴다.
+            _raw_cues = _remap_cue_clip_indexes(_raw_cues, _cue_index_map)
+            _normalized_cues = _normalize_storyline_tts_cues(
+                _raw_cues or [],
+                anchor_clips=_anchor_clips,
+                max_cues=5,
+            )
+
             # ── E20-B4 발화 커버리지 가드 (2026-08-28) ─────────────────────
             # v4 실측: 새 스토리가 대사 없는 액션 구간을 골라 21.4초 무발화 구멍 —
             # hook 은 40.5초짜리 환각성 전사 1줄(0.17자/초)이 전체를 '발화 있음'으로
@@ -3535,27 +3552,32 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     print(f"  [SKIP] 스토리라인 {sl_idx + 1} 발화 커버리지 "
                           f"{_cov:.0%} < 하한 {_min_cov:.0%} — 대사 없는 구간 위주 "
                           f"구성(오디오가 비지 않게 하라는 채널 계약 위반)")
+                    _cov_rejected.append(
+                        (_cov, sl_clips, sl_title, score, _normalized_cues))
                     continue
 
             all_storyline_variants.append((sl_clips, sl_title, score))
-            # PR-4: storyline 의 tts_cues 정규화 후 parallel pool 에 append.
-            # sl_data 의 직접 필드 또는 sl_data["storyline"] 안 어디든 위치 가능 (LLM 변형 대응).
-            _raw_cues = sl_data.get("tts_cues") if isinstance(sl_data.get("tts_cues"), list) else None
-            if _raw_cues is None and isinstance(sl_data.get("storyline"), dict):
-                _raw_cues = sl_data["storyline"].get("tts_cues") if isinstance(sl_data["storyline"].get("tts_cues"), list) else None
-            # 중복 제거로 clip 이 빠졌으면 cue 의 clip_index 도 새 배열 기준으로 옮긴다.
-            _raw_cues = _remap_cue_clip_indexes(_raw_cues, _cue_index_map)
-            _normalized_cues = _normalize_storyline_tts_cues(
-                _raw_cues or [],
-                anchor_clips=_anchor_clips,
-                max_cues=5,
-            )
             storyline_tts_cues_pool.append(_normalized_cues)
             _cue_voices = sorted({c["voice"] for c in _normalized_cues})
             print(
                 f"  - 스토리라인 {sl_idx + 1}: {len(sl_clips)}개 클립, 점수 {score:.2f}, 제목: {sl_title}"
                 + (f" [story tts_cues={len(_normalized_cues)} voice={_cue_voices}]" if _normalized_cues else " [story tts_cues=0]")
             )
+
+        # E20-B4 후속(v5 실측): 전량 커버리지 미달이면 탈락분 중 **최고 커버리지**를
+        # 경고와 함께 쓴다 — 아래 selected_storyline 폴백은 커버리지 가드를 우회해
+        # 최저(4%) 구성을 그대로 되살렸다. 48% 가 4% 보다 낫고, 무인 노드에서 편이
+        # 통째로 죽는 것보다도 낫다(발행 여부는 검수가 판단할 수 있게 크게 남긴다).
+        if not all_storyline_variants and _cov_rejected:
+            _cov_rejected.sort(key=lambda x: -x[0])
+            _bc, _bclips, _btitle, _bscore, _bcues = _cov_rejected[0]
+            print(f"  [커버리지 폴백] ⚠ 전량 커버리지 미달 — 최고 {_bc:.0%} 스토리라인을 "
+                  f"경고와 함께 사용: {_btitle.splitlines()[0][:24]}")
+            all_storyline_variants.append((_bclips, _btitle, _bscore))
+            storyline_tts_cues_pool.append(_bcues)
+            run_log.setdefault("steps", []).append(
+                {"step": "story_coverage_fallback", "coverage": round(_bc, 3),
+                 "rejected": len(_cov_rejected)})
 
         # 폴백: 유효한 스토리가 없으면 selected_storyline에서 1개 생성
         if not all_storyline_variants:
