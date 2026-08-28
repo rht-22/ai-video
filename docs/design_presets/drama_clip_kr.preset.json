@@ -1,0 +1,129 @@
+{
+  "preset": "drama_clip_kr",
+  "version": "2026-08-28.1",
+  "title": "드라마 클립 쇼츠 (신병4 벤치마크)",
+  "benchmark_sources": [
+    "https://www.youtube.com/shorts/0WAsPEB5cxs  (일병 · 신병4, 51.9s)",
+    "https://www.youtube.com/shorts/J8QqIeEJcS8  (꿀벌무비 · 쿠팡플레이, 46s)"
+  ],
+  "_status_legend": {
+    "native": "채널 design 키로 오늘 적용 가능 (ves adapters/aivideo.py CHANNEL_DESIGN_FLAGS/SWITCHES)",
+    "auto": "값을 주지 않는 것이 곧 설정 — 엔진 계약이 자동 계산 (건드리면 계약이 깨진다)",
+    "env": "실행 노드 환경변수",
+    "work_asset": "채널이 아니라 작품 층 (작품 권리물 — work_image 경로)",
+    "prompt": "엔진 기능은 있음 — 스토리/E15 프롬프트에 채널 톤으로 넣는 소형 작업",
+    "e19": "신규 엔진 기능 필요 (E19 발주 대상)",
+    "ves": "오케스트레이터(발행) 몫",
+    "qa": "산출물 검사 지표 (렌더를 바꾸지 않음)"
+  },
+
+  "canvas_layout": {
+    "aspect_ratio":  { "value": "1:1",  "status": "native", "note": "실측 밴드 비율 ≈1.07:1" },
+    "video_y":       { "value": 450,    "status": "native", "note": "밴드 상단 y (실측 ≈450px)" },
+    "video_width":   { "value": 1080,   "status": "native", "note": "⚠ 1080을 '명시'해야 자막·TTS margin이 밴드 앵커를 탄다 (E10 계약)" },
+    "face_tracking": { "value": true,   "status": "native", "note": "인물 중심 세로 크롭 — 드라마 클립 필수" }
+  },
+
+  "title": {
+    "title_font":    { "value": "Jalnan",  "status": "native" },
+    "title_size":    { "value": 66,        "status": "native", "note": "1줄 (엔진 기본 70) — 실렌더 튜닝 대상" },
+    "title_size2":   { "value": 84,        "status": "native", "note": "2줄 강조 (기본 90). ⚠ 신 CLI 플래그 — 엔진 전 노드 배포 후" },
+    "title_color":   { "value": "white",   "status": "native", "note": "1줄 = 흰색 (벤치마크 공통)" },
+    "title_color2":  { "value": "#FF4632", "status": "native", "note": "2줄 = 빨강 계열 훅 (신병4/꿀벌무비 공통)" },
+    "title_bold":    { "value": true,      "status": "native" },
+    "title_bold2":   { "value": true,      "status": "native" },
+    "title_box":     { "value": "none",    "status": "native", "note": "벤치마크는 박스 없음 + 검정 외곽선" },
+    "title_rotate":  { "value": 0,         "status": "native", "note": "벤치마크는 수평. AI 회전은 E18-3으로 이미 차단" },
+    "title_y_fixed": { "value": false,     "status": "native", "note": "동적 배치 유지 (밴드 위 20px — E10)" },
+    "always_on":     { "value": true,      "status": "auto",   "note": "제목 공백 금지는 E18-1이 이미 강제 — 벤치마크와 같은 방향" },
+    "keyword_highlight": { "value": "{{X같은}}",  "status": "e19", "note": "한 줄 안 단어 단위 색 강조 (갭 ①) — 인라인 마크업 제안" }
+  },
+
+  "subtitle_dialogue": {
+    "subtitle_font":     { "value": "여기어때 잘난체 2 TTF", "status": "native" },
+    "subtitle_size":     { "value": 58,        "status": "native", "note": "기본 65보다 소폭 축소 — 잘게 끊는 리듬(줄당 2~9자)에 맞춤. 실렌더 튜닝 대상" },
+    "subtitle_color":    { "value": "#FFFFFF", "status": "native", "note": "기본 화자(다수) = 흰색" },
+    "subtitle_style":    { "value": "auto",    "status": "native", "note": "장르 자동. 명시 색과 충돌 시 실렌더로 확인" },
+    "subtitle_y_margin": { "value": null,      "status": "auto",   "note": "비워 둔다 — video_width 1080 명시로 밴드 하단 10px 앵커 자동 (E10)" },
+    "subtitle_avoid_burned": { "value": "auto", "status": "native", "note": "원본 번인 자막 회피 (E17-2/E18-6 기본)" },
+    "min_exposure":      { "value": "0.4s · 12자/초", "status": "auto", "note": "E14 상수 — 벤치마크 회전(중앙값 0.9s/줄)과 호환 확인됨" },
+    "speaker_colors":    { "value": { "narrator": "#7DE8D8", "protagonist": "#FFA23C", "secondary": "#FF9EC4", "default": "#FFFFFF" },
+                           "status": "e19", "note": "갭 ② 화자별 색. 내레이션 민트는 아래 tts_color로 오늘 가능. 대사 화자 분리는 diarize 계약 변경 별건" },
+    "profanity_mask":    { "value": "XX",      "status": "e19", "note": "음성은 원음, 자막만 자체검열 (「아 이 XX끼가」) — 플랫폼 노출 안전" }
+  },
+
+  "narration_tts": {
+    "narration":     { "value": true,       "status": "native", "note": "⚠ 끄지 않는다 — 벤치마크 내레이션은 소스(EPK)에 없는 추가 레이어였다" },
+    "tts_color":     { "value": "#7DE8D8",  "status": "native", "note": "내레이션 자막 = 민트. 두 벤치마크 채널의 공통 관용" },
+    "tts_size":      { "value": 58,         "status": "native", "note": "대사와 동일 크기 (벤치마크 실측)" },
+    "tts_y_margin":  { "value": null,       "status": "auto",   "note": "비워 둔다 — 밴드 델타 앵커 자동 (E10)" },
+    "tts_rotate":    { "value": 0,          "status": "native" },
+    "voice":         { "value": "ko_male",  "status": "native", "note": "채널 정체성 — tts.py 불변 라벨 중 선택 (편집실은 elevenlabs:{id} 가능)" },
+    "speed":         { "value": "normal",   "status": "native", "note": "EL_SPEED 라벨" },
+    "tone":          { "value": "recall_first_person", "status": "prompt", "note": "1인칭 회상체 초단문 (「고민하는데」「지목당했고」) — 설명형 금지. 스토리 cue 프롬프트 채널 톤" },
+    "max_cues":      { "value": 5,          "status": "prompt", "note": "벤치마크 51초에 3줄 — 대사:내레이션 ≈ 12:1" },
+    "cue_len_chars": { "value": [3, 12],    "status": "prompt", "note": "접착제형 초단문" },
+    "relay_rule":    { "value": true,       "status": "prompt", "note": "직전 대사의 질문을 받아치는 문구 우선 (「어디다 버리지?」→「누구나 갈 수 있는 곳」)" },
+    "placement":     { "value": "dialogue_gaps_only", "status": "e19", "note": "갭 ③-c — cue 창과 subtitle_segments 겹침 검출 → 가까운 gap으로 스냅/경고" }
+  },
+
+  "labels_fx": {
+    "style_compose": { "value": true,  "status": "native", "note": "⚠ ops channel_style 게이트 + 대시보드 디자인 저장 시 키 증발 주의 (8/24 HANIPJUMAK)" },
+    "categories":    { "value": ["state_paren", "meme_tsukkomi", "wordplay"], "status": "prompt",
+                       "note": "① 괄호 상태 라벨 (폐급 선임/꿋꿋함/놀람) ② 커뮤니티 밈 훈수 (웃참 2222/난가???/귀에서 피남) ③ 의성 워드플레이 (똑 똑)" },
+    "color_map":     { "value": { "state": "#FF9EC4", "comment": "#FFE24A", "tsukkomi": "#FF4632", "laugh": "#FFFFFF", "positive": "#7DFF9E" },
+                       "status": "prompt", "note": "핑크=상황·심리(글로우), 노랑=논평·콜아웃, 빨강=훈수, 흰=ㅋㅋ, 초록=긍정 — 실측 색 문법" },
+    "glow_paren":    { "value": true,  "status": "e19", "note": "괄호형 라벨 전용 글로우 테두리 — v3 texts에 없는 렌더 속성" },
+    "density_max":   { "value": 14,    "status": "prompt", "note": "실측 13건/52초. 현 E15 하드캡 8 → 채널 노브로 상향 (갭 ③)" },
+    "duration_sec":  { "value": [0.6, 2.5], "status": "prompt", "note": "실측 0.6~2.5초, 평균 1.2~1.9초" },
+    "sync_to_speech":{ "value": true,  "status": "prompt", "note": "라벨 시작 = 해당 대사/내레이션 cue 시작 ±0.3s — 19건 전수에서 확인된 규칙" },
+    "fill_gaps":     { "value": true,  "status": "prompt", "note": "자막 공백(리액션 홀드)을 라벨이 채운다 — 텍스트 벽" },
+    "payoff_clean":  { "value": true,  "status": "prompt", "note": "페이오프/카타르시스 구간 라벨 0 (실측 37.4~46.8s 클린)" },
+    "running_gag":   { "value": true,  "status": "prompt", "note": "같은 밈 3연타 변주 (축 당첨→또 당첨 추카추카→3번째 당첨 ㅋㅋ)" },
+    "placement":     { "value": "face_adjacent_clear", "status": "e19",
+                       "note": "얼굴 위/아래 빈 공간, 얼굴·제목·자막 비가림. E18-2 밴드 클램프는 있음 — 얼굴 회피는 신규(face_tracking의 얼굴 검출 재사용 후보). 컷 바뀌면 재배치(대상 추적)" }
+  },
+
+  "sfx": {
+    "enabled":        { "value": true,  "status": "e19", "note": "갭 ③-b — 사용자 청취로 확인 (「쾅」 등). 스티커와 같은 규율: 라이선스 manifest에서 id만 AI에 노출, 빈 목록이 정상" },
+    "max_per_episode":{ "value": 3,     "status": "e19", "note": "벤치마크는 편당 1~3건 — 절제가 문법" },
+    "target_beats":   { "value": ["rage", "surprise", "action_foley"], "status": "e19", "note": "큰 비트에만. 라벨 등장에는 소리를 붙이지 않는다" },
+    "mix_gain_db":    { "value": -6,    "status": "e19", "note": "대사보다 낮게 — amix 입력 하나 추가" }
+  },
+
+  "audio_pacing": {
+    "silence_cut_profile":  { "value": "aggressive", "status": "env", "note": "SILENCE_CUT_PROFILE=aggressive — 소리 벽 (벤치마크 무음 0~2건/편)" },
+    "preserve_beat_pauses": { "value": "0.3-0.5s",   "status": "e19", "note": "반전 직후 연출 정적은 살린다 — 무음 컷 완화 창" },
+    "payoff_longtake":      { "value": true,          "status": "prompt", "note": "페이오프 구간 컷 최소화 (실측 10.8s 롱테이크) — 스토리/무음 컷 파라미터" },
+    "ending":               { "value": "hard_cut",    "status": "prompt", "note": "마지막 대사 종료 즉시 컷 — 여운 0초 = 루프 유도" },
+    "video_speed":          { "value": 1.0,           "status": "native", "note": "A/B 후보: 1.05~1.1 (벤치마크 대사 스팬 10~15% 압축 관측)" },
+    "loudness_target_lufs": { "value": -13.5,         "status": "qa",  "note": "벤치마크 -12.3~-13.4 LUFS · LRA≤4. 산출물 검사 지표" },
+    "silence_qa_max":       { "value": "0.3s+ 무음 ≤ 2건", "status": "qa", "note": "렌더 후 silencedetect로 세는 QA 지표" }
+  },
+
+  "story": {
+    "structure":   { "value": "single_scene_rule_of_three", "status": "prompt", "note": "완결된 한 장면 + 같은 패턴 2번 반복 후 3번째 비틀기 + 카운트다운 리듬 장치" },
+    "length_sec":  { "value": [40, 60],  "status": "auto",   "note": "기존 길이 정책 그대로 (벤치마크 46~52초)" },
+    "title_tone":  { "value": "community_meme", "status": "prompt", "note": "훅 = 밈 화법 한 문장 (「가장 X같은 질문」) — 유튜브 제목 = 화면 제목" }
+  },
+
+  "work_platform": {
+    "work_image":     { "value": "<작품 로고 png>", "status": "work_asset", "note": "채널 design이 아니라 작품 층 — --design-work-image (권리물)" },
+    "work_font_size": { "value": 56,      "status": "native", "note": "로고 없는 작품의 텍스트 폴백" },
+    "work_color":     { "value": "white", "status": "native" },
+    "work_title_y":   { "value": 1560,    "status": "native", "note": "엔진 기본 그대로 — 밴드 클램프(E10)가 지켜 준다" },
+    "platform_text":  { "value": null,    "status": "native", "note": "채널별 결정 (꿀벌무비식 「오직 쿠팡플레이에서」)" }
+  },
+
+  "publish": {
+    "hashtags_from_cast": { "value": true, "status": "ves", "note": "research_work 출연진 → 배우명 해시태그 (#김민호 #오대환 #이현균 패턴)" },
+    "upload_srt_cc":      { "value": true, "status": "ves", "note": "subtitle_segments → SRT를 유튜브 CC 트랙으로 — 접근성·검색 공짜" }
+  },
+
+  "_rollout_warnings": [
+    "style_compose·narration·title_size2·tts_width 는 신 CLI 플래그 — 구 엔진 노드 argparse 즉사. 엔진 전 노드 배포 뒤에만 채널 design에 싣는다.",
+    "style_compose 는 ops_config channel_style 게이트도 필요. 대시보드에서 채널 디자인을 '통째 교체' 저장하면 이 키가 증발한다 (2026-08-24 HANIPJUMAK 사고) — 저장 후 키 생존 확인.",
+    "subtitle_y_margin·tts_y_margin 은 반드시 비워 둔다 — video_width 1080 명시가 밴드 앵커를 켜는 조건이고, 명시값을 주면 앵커 대신 그 값이 이긴다.",
+    "size·색 값은 벤치마크 근사 초기값이다 — 실렌더 1편으로 픽셀 확인 후 확정 (한 입 주막 절차와 동일)."
+  ]
+}
