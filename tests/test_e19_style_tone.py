@@ -195,6 +195,7 @@ def test_pipeline_wires_tone_blocks():
     (E15 의 문자열 가드와 같은 방식 — 배선이 빠지면 톤이 조용히 무시된다)."""
     src = (REPO / "app" / "pipeline.py").read_text("utf-8")
     assert "style_tone_block=(_tonemod.story_prompt_block(style_tone_profile)" in src
-    assert "style_tone_block=(_tonemod.style_prompt_block(style_tone_profile)" in src
+    # style 쪽 블록은 E19-5 부터 SFX 절이 뒤에 이어진다 — 톤 블록 호출 자체를 고정한다.
+    assert "_tonemod.style_prompt_block(style_tone_profile)" in src
     assert src.count("max_texts=(style_tone_profile.density_max") == 2   # compose+validate
     assert 'run_log["provenance"]["style_tone"]' in src

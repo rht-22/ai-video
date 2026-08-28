@@ -621,6 +621,10 @@ class RenderInputs:
     # 편집실 자유 텍스트(edit_overrides/v3 texts, F-411) — build_texts_ass 가 쓴 ASS.
     # 대사 자막·TTS 자막 위, images layer≥1 아래에 입힌다. None/부재 = 레이어 없음.
     text_subtitle_path: Path | None = None
+    # E19-5 효과음(SFX) — {path(파일), start_sec(편집본 시간축), gain_db}. cue 와 같은
+    # 방식으로 입력을 더하고(adelay + volume dB + amix) 원본 오디오를 덕킹하지는 않는다
+    # (짧은 스팅에 덕킹을 걸면 원음이 펌핑한다). None/빈 목록 = 입력·필터 종전과 동일.
+    sfx_audio: list[dict] | None = None
 
 
 def render_short(inputs: RenderInputs) -> list[str]:
@@ -747,6 +751,18 @@ def render_short(inputs: RenderInputs) -> list[str]:
                   f"{str(_c.get('text', ''))[:24]!r}")
         inputs = replace(inputs, tts_cue_files=_kept_cues)
 
+    # E19-5: SFX 도 같은 안전망을 **여기서 한 번만** 탄다 — 아래 두 조립부가 같은 목록을
+    # 봐야 입력 인덱스(클립+cue+si)가 어긋나지 않는다(cue 규율과 동일).
+    if getattr(inputs, "sfx_audio", None):
+        _kept_sfx, _late_sfx = sfx_within_video(
+            inputs.sfx_audio, inputs.clips,
+            float(getattr(inputs.design, "video_speed", 1.0) or 1.0))
+        for _sf in _late_sfx:
+            print(f"  [sfx-late] 영상 밖에서 시작 → 드롭: start={_sf.get('start_sec')} "
+                  f"{Path(str(_sf.get('path', ''))).name}")
+        if _late_sfx:
+            inputs = replace(inputs, sfx_audio=_kept_sfx or None)
+
     num_cue_inputs = len(inputs.tts_cue_files or [])
     filter_script = _build_filtergraph(inputs, num_clip_inputs=len(inputs.clips), num_cue_inputs=num_cue_inputs)
     filter_path = inputs.output_path.with_suffix(".filter.txt")
@@ -776,6 +792,12 @@ def render_short(inputs: RenderInputs) -> list[str]:
                 if cue_path is None:
                     continue
                 args.extend(["-i", str(_relpath_or_abs(cue_path, output_dir))])
+        # E19-5: SFX 입력은 cue 뒤 — _build_audio_filter 의 인덱스(클립+cue+si)와 짝.
+        for sf in (getattr(inputs, "sfx_audio", None) or []):
+            sfx_path = Path(sf["path"]) if isinstance(sf.get("path"), str) else sf.get("path")
+            if sfx_path is None:
+                continue
+            args.extend(["-i", str(_relpath_or_abs(sfx_path, output_dir))])
         return args
 
     # GPU 인코더는 환경(드라이버) 따라 실패할 수 있으므로,
@@ -1877,6 +1899,16 @@ def cues_within_video(cue_files, clips, speed: float = 1.0, epsilon: float = 0.0
     return kept, dropped
 
 
+def sfx_within_video(sfx_items, clips, speed: float = 1.0):
+    """E19-5 — 영상 밖에서 시작하는 SFX 를 걸러낸다. cue 안전망(cues_within_video)을
+    **그대로 재사용**한다(수식 복제 금지 — 판정이 갈리면 언젠가 한쪽만 고쳐진다).
+    Returns: (실을 목록, 버린 목록)."""
+    wrapped = [{"_sfx": s, "cue": {"start_sec": (s or {}).get("start_sec")}}
+               for s in (sfx_items or [])]
+    kept, dropped = cues_within_video(wrapped, clips, speed)
+    return [w["_sfx"] for w in kept], [w["_sfx"] for w in dropped]
+
+
 def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, num_cue_inputs: int) -> str:
     """편집 타임라인 절대 시간 기준 cue 리스트로 오디오 필터를 만든다.
 
@@ -1889,7 +1921,11 @@ def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, num_cue_inpu
     speed = float(getattr(inputs.design, "video_speed", 1.0) or 1.0)
     _tempo = f"atempo={speed:g}," if speed != 1.0 else ""
 
-    if not inputs.tts_cue_files:
+    # E19-5: SFX 는 cue 와 같은 믹스 경로(입력 + volume dB + adelay + amix)를 탄다.
+    # 다만 원본 오디오를 **덕킹하지 않는다**(짧은 스팅에 덕킹을 걸면 원음이 펌핑한다).
+    sfx_items = list(getattr(inputs, "sfx_audio", None) or [])
+
+    if not inputs.tts_cue_files and not sfx_items:
         return f"[acat]{_tempo}volume={inputs.original_audio_gain_db}dB[aout]"
 
     cue_files = list(inputs.tts_cue_files or [])
@@ -1934,6 +1970,20 @@ def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, num_cue_inpu
             mix_inputs.append(f"[cue{ci}_delayed]")
         else:
             mix_inputs.append(f"[cue{ci}_vol]")
+
+    # E19-5: 입력 인덱스 = 클립 수 + cue 수 + si — _build_input_args 가 같은 목록·같은
+    # 순서로 -i 를 쌓으므로(render_video 에서 한 번만 거른 목록) 어긋나지 않는다.
+    for si, sf in enumerate(sfx_items):
+        sfx_input_idx = num_clip_inputs + num_cue_inputs + si
+        gain = float(sf.get("gain_db", -6.0))
+        tts_filters.append(f"[{sfx_input_idx}:a]volume={gain:g}dB[sfx{si}_vol]")
+        start_sec = float(sf.get("start_sec", 0.0)) / speed
+        if start_sec > 0:
+            delay_ms = int(start_sec * 1000)
+            tts_filters.append(f"[sfx{si}_vol]adelay={delay_ms}|{delay_ms}[sfx{si}_delayed]")
+            mix_inputs.append(f"[sfx{si}_delayed]")
+        else:
+            mix_inputs.append(f"[sfx{si}_vol]")
 
     if len(mix_inputs) <= 1:
         return original_vol.replace("[orig_vol]", "[aout]")

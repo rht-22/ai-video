@@ -29,5 +29,10 @@
     "title_tone": "community_meme",
     "ending": "hard_cut",
     "payoff_longtake": true
+  },
+  "sfx": {
+    "max_per_episode": 3,
+    "mix_gain_db": -6,
+    "target_beats": ["rage", "surprise", "action_foley"]
   }
 }

@@ -1,10 +1,12 @@
 # E19 — 드라마 클립 프리셋 갭 묶음 (발주서)
 
-**상태: E19-1·2·3·4 구현 완료(2026-08-28) · 나머지(E19-5~8) 기획.** 구현된 항목의
-계약 정본은 이제 코드다: ai-video `CLAUDE.md`(채널 톤 프로파일 절 + E19-2·3·4 하위 절) ·
+**상태: E19-1~5 구현 완료(2026-08-28) · 나머지(E19-6~8) 기획.** 구현된 항목의
+계약 정본은 이제 코드다: ai-video `CLAUDE.md`(채널 톤 프로파일 절 + E19-2~5 하위 절) ·
 `app/modules/style_tone.py` · `renderer.strip_title_markup`/`extract_title_highlights` ·
-`pipeline.snap_cues_to_dialogue_gaps` · `style_compose.avoid_faces_for_texts` ·
-`reframe.CropKeyframe(face_*)` · `tests/test_e19_*.py`.
+`pipeline.snap_cues_to_dialogue_gaps` · `style_compose.avoid_faces_for_texts`/
+`load_sfx_manifest` · `reframe.CropKeyframe(face_*)` · `renderer.sfx_audio` ·
+`tests/test_e19_*.py`. ⚠ SFX 는 번들이 비어 있으면 닫힌 채로다 — 라이선스 확인된
+효과음 파일을 `app/assets/sfx/` 에 manifest 와 함께 넣어야 실전에서 열린다.
 ⚠ E19-2 의 **AI 마크업 생성**(§2 두 경로 중 AI 쪽)은 구현하지 않았다 — story 산출
 제목의 마크업이 edit_plan·발행 메타(대시보드·유튜브 제목)로 그대로 흘러가는 표면의
 세척이 선행돼야 한다. 사람 경로(편집실·채널 제목 문자열)만 개통. 후속 별건.

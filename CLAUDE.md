@@ -1321,3 +1321,30 @@ face_* 필드 · `[face avoid]` 블록(크롭 타임라인 생성 직후 · 텍�
   no_face}` + 건별 stdout `[face-avoid]`. 순수 함수(사본만).
 - 회귀 가드: `tests/test_e19_label_face_avoid.py`(17건 — 변환 수계산·후보 순서·실패
   유지·컷 분할·구 JSON 호환·글로우 ASS·배선).
+
+### E19-5 효과음(SFX) 레이어 (2026-08-28)
+
+`style_compose.load_sfx_manifest`·`stage_sfx`·`sfx_prompt_block`·validate_plan sfx 절 ·
+`renderer.RenderInputs.sfx_audio`·`sfx_within_video` · 톤 프로파일 `sfx` 절(선택).
+
+- **스티커 규율 그대로**: `app/assets/sfx/manifest.json` 의 **id 만** AI 에 노출,
+  **빈 목록이 정상 상태**(라이선스 확인된 파일만 번들), 없는 id 는 그 항목만 드롭+기록.
+  고른 파일은 `style_assets/` 로 스테이징 — 체크포인트 재적용(편집실 재렌더)이 번들
+  없이도 같은 소리를 재현한다.
+- **게이트 둘**: 톤 프로파일에 `sfx` 절(max_per_episode ≤10·mix_gain_db −30~0·
+  target_beats 화이트리스트)이 있고 + 번들이 비어 있지 않을 때만. 닫혀 있으면 기본
+  프롬프트에 SFX 절 자체가 없고(동결 유지 — LLM 이 어휘를 모른다), 그래도 플랜에
+  실려 오면 **전량 드롭+기록**(unknown 거절은 과하다 — title_rotate 의 '받되 버린다').
+- 플랜 어휘 `sfx: [{id, source_time_sec, gain_db?}]` — 좌표는 다른 항목과 같은 원본
+  절대초, 배치도 **같은 함수**(place_anchored_images probe — 자막 강조와 동일 규율).
+  캡·기본 gain 은 프롬프트와 validate_plan 이 **같은 숫자**를 본다(E19-1 규율).
+  gain 범위 밖은 클램프+기록.
+- **렌더**: cue 와 같은 방식 — 입력 인덱스 = 클립 수 + cue 수 + si, `volume=<g>dB` +
+  `adelay` + amix 합류. **원본 오디오를 덕킹하지 않는다**(짧은 스팅에 덕킹이 걸리면
+  원음이 펌핑한다). 영상 밖 시작 sfx 는 `sfx_within_video` 가 cue 안전망을 **재사용**해
+  render_video 한 곳에서 거른다(같은 목록 규율). sfx 미지정이면 입력·필터 문자열이
+  종전과 동일(회귀 0 — 'sfx' 글자 부재를 테스트가 고정).
+- 첫 variant 한정 + `--no-tts-audio`(믹스 끔) 실행은 효과음도 싣지 않는다.
+- 기록: run_log style 단계에 `sfx_used`·`sfx_dropped`, 드롭 건별 stdout.
+- 회귀 가드: `tests/test_e19_sfx_layer.py`(15건 — 게이트·캡·스테이징·입력 인덱스·
+  회귀 0 문자열·late 가드·프리셋↔프로파일 값 대조).

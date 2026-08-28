@@ -4142,6 +4142,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     _text_clamp: dict[str, Any] | None = None      # 효과 텍스트 밴드 클램프 기록(E18-2)
     _texts_from_style = False                      # E19-4: AI 라벨만 얼굴 회피를 탄다
                                                    # (편집실 텍스트는 사람 배치 — 안 건드린다)
+    _sfx_audio: list[dict[str, Any]] = []          # E19-5: 렌더에 실을 효과음(편집본 시간축)
     checkpoint_style = output_dir / "checkpoint_style.json"
     if payload.style_compose:
         from app.modules import style_compose as _stylemod
@@ -4163,6 +4164,13 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             if not _manifest:
                 print("  [style] 번들된 스티커 없음 — 스티커 없이 구성한다"
                       "(라이선스 확인된 자산만 번들하는 규율)")
+            # E19-5: SFX 게이트 = 톤 프로파일 sfx 절 + 번들. 닫혀 있으면 프롬프트에
+            # SFX 절 자체가 없다(기본 프롬프트 동결 — LLM 이 sfx 어휘를 모른다).
+            _sfx_manifest = _stylemod.load_sfx_manifest(paths.app_root)
+            _sfx_cfg = style_tone_profile.sfx if style_tone_profile is not None else None
+            _sfx_open = bool(_sfx_cfg) and bool(_sfx_manifest)
+            if _sfx_cfg and not _sfx_manifest:
+                print("  [style] 번들된 SFX 없음 — 효과음 없이 구성한다(스티커와 같은 규율)")
             # LLM 입력은 전부 **원본 절대초** 좌표다 — 플랜의 좌표계와 같아야 표를 보고
             # 그대로 베낄 수 있다(편집본 좌표를 섞으면 앵커가 통째로 어긋난다).
             _tl = [{"role": c.role, "source_start": round(c.start_sec, 1),
@@ -4191,8 +4199,16 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                     text_y_range=_stylemod.text_y_range(payload.design),
                     editorial=payload.editorial, reject_note=payload.reject_note,
                     # E19-1 — 프롬프트의 '상한' 줄과 아래 validate_plan 이 같은 숫자를 본다.
-                    style_tone_block=(_tonemod.style_prompt_block(style_tone_profile)
-                                      if style_tone_profile else None),
+                    # E19-5 — SFX 절은 톤 블록 뒤에 잇는다(열린 채널만, 목록이 곧 어휘).
+                    style_tone_block=(
+                        (_tonemod.style_prompt_block(style_tone_profile)
+                         + (_stylemod.sfx_prompt_block(
+                                _sfx_manifest,
+                                max_sfx=int(_sfx_cfg["max_per_episode"]),
+                                gain_db=float(_sfx_cfg["mix_gain_db"]),
+                                target_beats=list(_sfx_cfg["target_beats"]))
+                            if _sfx_open else ""))
+                        if style_tone_profile else None),
                     max_texts=(style_tone_profile.density_max
                                if style_tone_profile else None),
                 )
@@ -4205,7 +4221,11 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                         _raw_plan, manifest=_manifest, app_root=paths.app_root,
                         run_dir=output_dir,
                         max_texts=(style_tone_profile.density_max
-                                   if style_tone_profile else None))
+                                   if style_tone_profile else None),
+                        # E19-5 — 프롬프트가 말한 캡·gain 과 같은 숫자(E19-1 규율).
+                        sfx_manifest=_sfx_manifest if _sfx_open else None,
+                        max_sfx=(int(_sfx_cfg["max_per_episode"]) if _sfx_open else None),
+                        sfx_gain_db=(float(_sfx_cfg["mix_gain_db"]) if _sfx_open else -6.0))
                     checkpoint_style.write_text(
                         json.dumps(_style_plan, ensure_ascii=False, indent=2), encoding="utf-8")
                 except _stylemod.StylePlanError as _e:
@@ -4288,6 +4308,26 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             elif _style_plan.get("texts"):
                 print("  [style] 텍스트는 편집실이 보낸 것이 이깁니다 — AI 텍스트 무시")
 
+            # ── 3.5) 효과음 (E19-5 — 사람 카테고리가 없어 우선순위 분기도 없다) ──
+            # 앵커(원본 절대초) → 편집본 시각은 다른 항목과 **같은 함수**를 태운다
+            # (자막 강조의 probe 규율 — duration 은 0.1s 초과여야 고아 드롭을 안 맞는다).
+            # 체크포인트 재적용도 이 길을 지난다(파일은 style_assets/ 에 스테이징돼 있다).
+            if _style_plan.get("sfx"):
+                _sfx_probe = [{"source_time_sec": s["source_time_sec"],
+                               "duration_sec": 0.5, "_sfx": s}
+                              for s in _style_plan["sfx"]]
+                _sfx_placed, _sfx_dropped = place_anchored_images(_sfx_probe, clips)
+                for _o in _sfx_dropped:
+                    print(f"  [style] 앵커 소재가 최종 타임라인에 없음 → 효과음 드롭"
+                          f"(tts 고아 규칙과 동일): source_time_sec={_o.get('source_time_sec')} "
+                          f"{Path(str(_o.get('_sfx', {}).get('file', ''))).name}")
+                _sfx_audio = [{"path": output_dir / p["_sfx"]["file"],
+                               "start_sec": float(p["start_sec"]),
+                               "gain_db": float(p["_sfx"].get("gain_db", -6.0))}
+                              for p in _sfx_placed]
+                if _sfx_audio:
+                    print(f"  [style] 효과음 {len(_sfx_audio)}건 배치")
+
             if _style_plan.get("images") and not _image_overlays:
                 # 편집실 이미지와 **같은 함수**로 파일을 확인한다(경로 탈출·용량 상한).
                 # ⚠ 편집실 이미지는 파일이 없으면 크게 실패해야 맞다(어댑터 버그이고 사람이
@@ -4356,6 +4396,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                         for t in ((_style_plan or {}).get("texts") or []) if t.get("reason")],
             # E18-2 — 밴드 밖으로 나간 효과 텍스트를 몇 건 당겼는지. 배치가 안 돌았으면 None.
             "text_clamp": _text_clamp,
+            # E19-5 — 실제로 렌더에 실린 효과음 수와 플랜 대비 드롭 수(발주서 §5 기록 계약).
+            "sfx_used": len(_sfx_audio),
+            "sfx_dropped": len((_style_plan or {}).get("sfx") or []) - len(_sfx_audio),
         })
 
     # ═══════════════════════════════════════
@@ -4823,6 +4866,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             title_segments=(_title_segments
                             if (payload.show_title_overlay and _title_segments) else None),
             text_subtitle_path=text_subtitle_path,
+            # E19-5 — 첫 variant 한정(다른 스타일 산출과 같은 규약). 믹스를 끈 실행
+            # (--no-tts-audio)은 효과음도 싣지 않는다 — 소리 레이어를 끈 의도다.
+            sfx_audio=(_sfx_audio if (_sfx_audio and payload.include_tts_audio) else None),
         )
 
         ffmpeg_cmd = render_short(render_inputs)

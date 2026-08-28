@@ -92,6 +92,18 @@ STYLE_SPEEDS = tuple(SPEED_TO_RATE)
 STICKER_DIR_NAME = "stickers"       # app/assets/stickers
 STICKER_RUN_SUBDIR = "style_assets"  # <run_dir>/style_assets — v3 images.file 의 기준
 
+# ── E19-5 효과음(SFX) ──────────────────────────────────────────────────────
+# 스티커와 같은 규율: 라이선스 확인된 파일만 assets/sfx 에 번들하고, AI 는 manifest 의
+# **id 만** 고른다. **빈 목록이 정상 상태다.** 게이트는 톤 프로파일의 sfx 절 —
+# 절이 없는 채널은 프롬프트에도 안 실리고 플랜에 실려 와도 전량 드롭+기록이다.
+SFX_DIR_NAME = "sfx"                 # app/assets/sfx
+SFX_GAIN_RANGE = (-30.0, 0.0)
+SFX_BEAT_TEXT = {
+    "rage": "분노 폭발·고함",
+    "surprise": "서프라이즈·반전 순간",
+    "action_foley": "액션 폴리(부딪힘·쏟아짐 등 화면 속 동작 강조)",
+}
+
 
 class StylePlanError(ValueError):
     """AI 스타일 플랜이 계약을 위반 — 조용히 무시하지 않는다.
@@ -164,6 +176,70 @@ def stage_sticker(sticker_id: str, manifest: dict[str, dict[str, Any]],
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# E19-5: SFX 라이브러리 (스티커 로더와 같은 모양 — 규율이 같으니 코드도 같다)
+# ─────────────────────────────────────────────────────────────────────────
+def load_sfx_manifest(app_root: Path) -> dict[str, dict[str, Any]]:
+    """`app/assets/sfx/manifest.json` → {id: {file, desc}}. 없거나 비면 빈 dict(정상)."""
+    path = Path(app_root) / "assets" / SFX_DIR_NAME / "manifest.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    items = raw.get("sfx") if isinstance(raw, dict) else raw
+    if not isinstance(items, list):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        sid = str(it.get("id") or "").strip()
+        fname = str(it.get("file") or "").strip()
+        if not sid or not fname:
+            continue
+        out[sid] = {"file": fname, "desc": str(it.get("desc") or "")}
+    return out
+
+
+def stage_sfx(sfx_id: str, manifest: dict[str, dict[str, Any]],
+              app_root: Path, run_dir: Path) -> str:
+    """SFX id → run_dir 상대 경로(`style_assets/<파일명>`). 스티커와 같은 스테이징 —
+    체크포인트 재적용(편집실 재렌더)이 번들 없이도 같은 소리를 재현한다."""
+    meta = manifest[sfx_id]                       # KeyError = 없는 id (호출부가 드롭+로그)
+    src = Path(app_root) / "assets" / SFX_DIR_NAME / meta["file"]
+    if not src.is_file():
+        raise KeyError(sfx_id)
+    dest_dir = Path(run_dir) / STICKER_RUN_SUBDIR
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / src.name
+    if not dest.exists():
+        shutil.copy2(src, dest)
+    return f"{STICKER_RUN_SUBDIR}/{src.name}"
+
+
+def sfx_prompt_block(manifest: dict[str, dict[str, Any]], *, max_sfx: int,
+                     gain_db: float, target_beats: list[str]) -> str:
+    """compose_style 프롬프트에 덧붙는 SFX 절. 목록이 비면 빈 문자열(= SFX 언급 없음 —
+    기본 프롬프트는 동결이라 이 절이 없으면 LLM 은 sfx 어휘 자체를 모른다)."""
+    if not manifest:
+        return ""
+    beats = " · ".join(SFX_BEAT_TEXT.get(b, b) for b in target_beats)
+    lines = [
+        "",
+        "[효과음 (SFX) — 아래 목록의 id 만]",
+        '출력에 "sfx" 배열을 더할 수 있다: '
+        '[{"id": "...", "source_time_sec": 743.2, "gain_db": -6, "reason": "한 줄"}]',
+        f"- **큰 비트에만**({beats}) — 편당 {max_sfx}개 이하. 벤치마크 문법은 절제다: "
+        f"넣을 이유가 없으면 배열을 비워라.",
+        "- ⚠ 라벨(효과 텍스트) 등장에는 소리를 붙이지 마라 — 라벨은 무음으로 뜬다.",
+        f"- 좌표는 다른 항목과 같은 **원본 절대초**. gain_db 는 "
+        f"{SFX_GAIN_RANGE[0]:g}~{SFX_GAIN_RANGE[1]:g}(기본 {gain_db:g} — 대사보다 작게).",
+        "[번들 SFX 목록]",
+        *[f"- {sid}: {m['desc'] or sid}" for sid, m in sorted(manifest.items())],
+    ]
+    return "\n".join(lines) + "\n"
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # 검증·정규화
 # ─────────────────────────────────────────────────────────────────────────
 def _cap(items: list, limit: int, what: str, notes: list[str]) -> list:
@@ -188,6 +264,9 @@ def validate_plan(
     app_root: Path,
     run_dir: Path,
     max_texts: int | None = None,
+    sfx_manifest: dict[str, dict[str, Any]] | None = None,
+    max_sfx: int | None = None,
+    sfx_gain_db: float = -6.0,
 ) -> tuple[dict[str, Any], list[str]]:
     """style_plan/v1 → (정규화된 플랜, 기록할 메모들). 계약 위반이면 StylePlanError.
 
@@ -211,7 +290,7 @@ def validate_plan(
         raise StylePlanError(f"알 수 없는 스키마: {schema!r} (기대: {SCHEMA})")
 
     known = {"schema", "texts", "subtitle_styles", "images", "title_segments",
-             "tts", "design", "notes"}
+             "tts", "design", "notes", "sfx"}
     unknown = [k for k in plan if k not in known]
     if unknown:
         raise StylePlanError(f"모르는 최상위 키 {unknown} — 계약은 {sorted(known - {'schema'})} 뿐입니다")
@@ -258,6 +337,44 @@ def validate_plan(
         out["texts"] = overrides_texts({"texts": texts}) or []
     if images:
         out["images"] = images
+
+    # ── 효과음 (E19-5) ───────────────────────────────────────────────────
+    # 게이트: 톤 프로파일 sfx 절(max_sfx)이 있고 번들(manifest)이 비어 있지 않을 때만.
+    # 닫힌 채널에 sfx 가 실려 오면 전량 드롭+기록 — 프롬프트에 없던 어휘를 LLM 이
+    # 지어냈다는 신호라 조용히 무시하면 안 된다(unknown 거절은 과하다: 다른 연출까지
+    # 통째로 날아간다 — title_rotate 의 '받되 버린다' 규율).
+    _sfx_raw = list(plan.get("sfx") or [])
+    if _sfx_raw and (max_sfx is None or not sfx_manifest):
+        notes.append(f"효과음 {len(_sfx_raw)}건 — 이 채널은 SFX 가 닫혀 있어(톤 프로파일 "
+                     f"sfx 절/번들 없음) 전량 버립니다")
+        _sfx_raw = []
+    sfx_items: list[dict[str, Any]] = []
+    for i, sf in enumerate(_cap(_sfx_raw, max_sfx or 0, "효과음", notes)):
+        if not isinstance(sf, dict):
+            raise StylePlanError(f"sfx[{i}]: 객체여야 합니다")
+        t = _num(sf.get("source_time_sec"), f"sfx[{i}]: source_time_sec")
+        if t < 0:
+            raise StylePlanError(f"sfx[{i}]: source_time_sec 은 0 이상이어야 합니다")
+        sid = str(sf.get("id") or "").strip()
+        if not sid:
+            raise StylePlanError(f"sfx[{i}]: id 가 필요합니다 — 엔진은 AI 에게 파일 "
+                                 f"경로를 받지 않습니다(스티커와 같은 규율)")
+        g = sf.get("gain_db")
+        gain = float(g) if isinstance(g, (int, float)) and not isinstance(g, bool) \
+            else float(sfx_gain_db)
+        lo, hi = SFX_GAIN_RANGE
+        if not (lo <= gain <= hi):
+            clamped = min(max(gain, lo), hi)
+            notes.append(f"sfx[{i}] {sid!r}: gain_db {gain:g} 이 범위 밖 → {clamped:g} 로 클램프")
+            gain = clamped
+        try:
+            rel = stage_sfx(sid, sfx_manifest or {}, app_root, run_dir)
+        except KeyError:
+            notes.append(f"없는 SFX id {sid!r} → 그 항목 드롭")
+            continue
+        sfx_items.append({"file": rel, "source_time_sec": t, "gain_db": gain})
+    if sfx_items:
+        out["sfx"] = sfx_items
 
     # ── 자막 강조 ────────────────────────────────────────────────────────
     subs: list[dict[str, Any]] = []

@@ -41,6 +41,10 @@ TITLE_TONES = ("community_meme",)
 ENDINGS = ("hard_cut",)
 LABEL_CATEGORIES = ("state_paren", "meme_tsukkomi", "wordplay")
 COLOR_MAP_KEYS = ("state", "comment", "tsukkomi", "laugh", "positive")
+# E19-5 — SFX 절(선택). 절이 없는 프로파일 = SFX 닫힘(발주서 §5 게이트).
+SFX_BEATS = ("rage", "surprise", "action_foley")
+SFX_GAIN_RANGE = (-30.0, 0.0)
+SFX_MAX_LIMIT = 10
 
 _HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
@@ -56,6 +60,9 @@ class StyleTone:
     narration: dict[str, Any]
     labels: dict[str, Any]
     story: dict[str, Any]
+    # E19-5 — 없으면 None = 이 채널의 SFX 는 닫혀 있다(프롬프트에도 안 실리고
+    # 플랜에 실려 와도 validate_plan 이 전량 드롭+기록한다).
+    sfx: dict[str, Any] | None = None
 
     @property
     def density_max(self) -> int:
@@ -143,6 +150,22 @@ def validate_tone_data(data: Any, name: str) -> dict[str, Any]:
     _need_enum(st, "title_tone", TITLE_TONES, name, "story")
     _need_enum(st, "ending", ENDINGS, name, "story")
     _need(st, "payoff_longtake", bool, name, "story")
+
+    # E19-5 — sfx 절은 선택이다(없음 = SFX 닫힘). 있으면 전부 검증한다.
+    if data.get("sfx") is not None:
+        sx = _need(data, "sfx", dict, name, "")
+        mx = _need(sx, "max_per_episode", int, name, "sfx")
+        if not (1 <= mx <= SFX_MAX_LIMIT):
+            _fail(name, f"sfx.max_per_episode 는 1~{SFX_MAX_LIMIT} 이어야 합니다({mx})")
+        g = sx.get("mix_gain_db")
+        if (not isinstance(g, (int, float)) or isinstance(g, bool)
+                or not (SFX_GAIN_RANGE[0] <= float(g) <= SFX_GAIN_RANGE[1])):
+            _fail(name, f"sfx.mix_gain_db 는 {SFX_GAIN_RANGE[0]:g}~{SFX_GAIN_RANGE[1]:g} "
+                        f"이어야 합니다({g!r})")
+        beats = _need(sx, "target_beats", list, name, "sfx")
+        if not beats or not set(beats) <= set(SFX_BEATS):
+            _fail(name, f"sfx.target_beats 는 {'/'.join(SFX_BEATS)} 의 비어있지 않은 "
+                        f"부분집합이어야 합니다({beats!r})")
     return data
 
 
@@ -168,6 +191,7 @@ def load_style_tone(name: str) -> StyleTone:
         narration=dict(data["narration"]),
         labels=dict(data["labels"]),
         story=dict(data["story"]),
+        sfx=dict(data["sfx"]) if data.get("sfx") is not None else None,
     )
 
 
