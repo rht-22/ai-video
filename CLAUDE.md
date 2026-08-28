@@ -1247,3 +1247,23 @@ E11·E12 는 **모든** 실패를 fail-loud 로 막았다(조용한 목소리 �
   엔진 전 노드 배포 **뒤**(style_compose 와 같은 롤아웃, ops 게이트 channel_style 재사용).
 - 회귀 가드: `tests/test_e19_style_tone.py`(23건 — 회귀 0·fail-loud·프리셋↔프로파일 값
   대조·배선 문자열 고정).
+
+### E19-3 내레이션 cue–대사 겹침 검사기 (2026-08-28)
+
+`pipeline.snap_cues_to_dialogue_gaps` · `[cue gaps]` 블록(앵커 해석 직후 · style 앞).
+
+- **게이트는 톤 프로파일이다** — `narration.placement == "dialogue_gaps_only"` 일 때만
+  돈다. `--style-tone` 미지정 채널은 검사 자체가 없다(회귀 0). 새 플래그 없음.
+- 겹침 판정은 cue 창 vs `final_segments`(대사) 합계가 `CUE_OVERLAP_TOLERANCE_SEC`(0.2s)
+  초과 — 릴레이는 경계가 맞닿는 문법이라 관용치가 필요하다.
+- 스냅은 **cue 길이가 통째로 들어가는 gap** 이 있을 때만, 원위치에서 가장 가까운 배치점
+  으로. 이미 자리 잡은 다른 cue 창도 점유물로 본다(스냅이 cue 끼리 새 겹침을 만들면
+  안 된다). **들어갈 gap 이 없으면 옮기지 않고 `[cue-overlap]` 경고만** — 멀쩡한
+  내레이션을 지우거나 엉뚱한 자리로 보내는 것이 겹침보다 나쁘다(영상 밖 cue 안전망 규율).
+  시간이 깨진 cue 도 판정을 포기하고 그대로 싣는다(같은 규율).
+- **첫 variant 한정** — `final_segments` 좌표가 그 타임라인이다(variant #2·#3 은 자막
+  계열을 안 받는 기존 구멍 — E15 규약과 동일). 자리가 비싼 합성(resources) **앞**인
+  것도 계약이다(합성 뒤에 옮기면 요금이 아깝다).
+- 기록: run_log `steps[{step:"tts_cue_gaps"}]` = `{of, cue_snapped, warned, details,
+  tolerance_sec}` + 건별 stdout. 순수 함수 — 넘겨받은 cue 를 건드리지 않는다.
+- 회귀 가드: `tests/test_e19_cue_overlap.py`(11건 — 게이트·자리·순수성·점유 스냅 고정).

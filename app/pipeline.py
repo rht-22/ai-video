@@ -792,6 +792,126 @@ def _resolve_cue_anchors(
 
 
 # ─────────────────────────────────────────────────────────────
+# E19-3: 내레이션 cue–대사 겹침 검사기 (2026-08-28)
+# ─────────────────────────────────────────────────────────────
+# 발주서: docs/prompts/e19-drama-clip-preset.md §3. 벤치마크(신병4·꿀벌무비 실측)의
+# "끊김 없는 호흡"의 반은 내레이션이 대사와 절대 겹치지 않는 릴레이 문법이다 —
+# 앵커가 어긋나면 TTS 가 원음 대사 위에 그대로 겹쳐 나가던 구멍을 여기서 막는다.
+# 게이트는 톤 프로파일(narration.placement == "dialogue_gaps_only") — 미지정 채널은
+# 이 검사 자체가 없다(회귀 0). 자리는 앵커 해석 직후·resources(비싼 합성) 앞.
+
+# 릴레이는 경계가 맞닿는 문법이라(cue 가 대사 끝에 바로 붙는다) 관용치가 필요하다.
+CUE_OVERLAP_TOLERANCE_SEC = 0.2
+
+
+def snap_cues_to_dialogue_gaps(
+    cues: list[dict],
+    segments: list,          # 대사 자막 — start_sec/end_sec 속성 (final_segments)
+    total_sec: float,
+) -> tuple[list[dict], dict[str, Any]]:
+    """대사와 겹치는 cue 를 가장 가까운 대사 gap 으로 스냅한다.
+
+    - 겹침 합계가 CUE_OVERLAP_TOLERANCE_SEC 이하면 그대로 둔다.
+    - 스냅은 **cue 길이가 통째로 들어가는 gap** 이 있을 때만 — 원위치에서 가장 가까운
+      배치점을 고른다(gap 안에서 원래 시작에 최대한 붙인다). 이미 자리 잡은 다른 cue 의
+      창도 점유물로 본다(스냅이 cue 끼리의 새 겹침을 만들면 안 된다).
+    - 들어갈 gap 이 없으면 **옮기지 않고 경고만** 센다 — 멀쩡한 내레이션을 지우거나
+      엉뚱한 자리로 보내는 것이 겹침보다 나쁘다(영상 밖 cue 안전망의 규율).
+    - 시간이 깨진 cue 는 판정을 포기하고 그대로 싣는다(같은 규율).
+    - 순수: 넘겨받은 cue 를 건드리지 않고 사본을 돌려준다.
+
+    Returns: (새 cue 리스트(시간순), {"of", "cue_snapped", "warned", "details"}).
+    details 항목: {text, from_sec, to_sec(실패 시 None), overlap_sec}.
+    """
+    report: dict[str, Any] = {"of": len(cues), "cue_snapped": 0, "warned": 0, "details": []}
+    out = [dict(c) for c in cues]
+    if not out:
+        return out, report
+
+    # 대사 구간 정리(클램프·병합) — 재료가 없으면 아무것도 안 한다.
+    dialogue: list[tuple[float, float]] = []
+    for seg in segments or []:
+        try:
+            s = float(getattr(seg, "start_sec"))
+            e = float(getattr(seg, "end_sec"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        s, e = max(0.0, s), min(float(total_sec), e)
+        if e > s:
+            dialogue.append((s, e))
+    dialogue.sort()
+    merged: list[list[float]] = []
+    for s, e in dialogue:
+        if merged and s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    if not merged or float(total_sec) <= 0:
+        return out, report
+
+    def _times(c: dict) -> tuple[float, float] | None:
+        try:
+            s, e = float(c["start_sec"]), float(c["end_sec"])
+        except (TypeError, ValueError, KeyError):
+            return None
+        return (s, e) if e > s else None
+
+    def _overlap_sec(s: float, e: float) -> float:
+        return sum(max(0.0, min(e, de) - max(s, ds)) for ds, de in merged)
+
+    for i, cue in enumerate(out):
+        t = _times(cue)
+        if t is None:
+            continue
+        s, e = t
+        ov = _overlap_sec(s, e)
+        if ov <= CUE_OVERLAP_TOLERANCE_SEC:
+            continue
+        cue_len = e - s
+        # 점유물 = 대사 + (자기 자신을 뺀) 다른 cue 들의 현재 창
+        occupied = [(ds, de) for ds, de in merged]
+        for j, other in enumerate(out):
+            if j == i:
+                continue
+            to = _times(other)
+            if to is not None:
+                occupied.append(to)
+        occupied.sort()
+        occ: list[list[float]] = []
+        for os_, oe in occupied:
+            if occ and os_ <= occ[-1][1]:
+                occ[-1][1] = max(occ[-1][1], oe)
+            else:
+                occ.append([os_, oe])
+        gaps: list[tuple[float, float]] = []
+        prev = 0.0
+        for os_, oe in occ:
+            if os_ - prev >= cue_len - 1e-9:
+                gaps.append((prev, os_))
+            prev = max(prev, oe)
+        if float(total_sec) - prev >= cue_len - 1e-9:
+            gaps.append((prev, float(total_sec)))
+        detail = {"text": str(cue.get("text", ""))[:24], "from_sec": round(s, 3),
+                  "to_sec": None, "overlap_sec": round(ov, 2)}
+        if not gaps:
+            report["warned"] += 1
+            report["details"].append(detail)
+            continue
+        best = min(gaps, key=lambda g: (abs(min(max(s, g[0]), g[1] - cue_len) - s), g[0]))
+        new_s = min(max(s, best[0]), best[1] - cue_len)
+        cue["start_sec"] = round(new_s, 3)
+        cue["end_sec"] = round(new_s + cue_len, 3)
+        report["cue_snapped"] += 1
+        detail["to_sec"] = cue["start_sec"]
+        report["details"].append(detail)
+
+    # 시간순 정렬 — 깨진 cue 는 원래 자리 순서를 유지한 채 뒤로 보낸다.
+    order = sorted(range(len(out)),
+                   key=lambda i: (0, _times(out[i])[0]) if _times(out[i]) else (1, i))
+    return [out[i] for i in order], report
+
+
+# ─────────────────────────────────────────────────────────────
 # PR-3: chunk_transcribe — 청크별 transcript segments 선행 생성
 # ─────────────────────────────────────────────────────────────
 # 기존 11단계 transcribe 는 storyline 결정 *후* 선택 clip만 Whisper로 돌리고,
@@ -3977,6 +4097,33 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
 
     # 첫 번째 variant의 cue를 기본으로 사용 (다중 쇼츠는 [14/15]에서 variant마다 따로)
     tts_cues = tts_cues_per_variant[0] if tts_cues_per_variant else []
+
+    # ═══════════════════════════════════════
+    # [cue gaps] E19-3 내레이션 cue–대사 겹침 검사 (2026-08-28)
+    # ═══════════════════════════════════════
+    # 게이트: 톤 프로파일 narration.placement — 미지정 채널은 검사 자체가 없다(회귀 0).
+    # 자리: 앵커 해석 직후 · resources(비싼 합성) 앞 — 합성한 뒤 옮기면 요금이 아깝다
+    # (E17 자격증명 교훈과 같은 방향). **첫 variant 한정** — final_segments 좌표가 그
+    # 타임라인이다(variant #2·#3 은 자막 계열 자체를 안 받는 기존 구멍 — E15 와 같은 규약).
+    if (style_tone_profile is not None
+            and style_tone_profile.narration.get("placement") == "dialogue_gaps_only"
+            and tts_cues):
+        _total_v1 = sum(max(0.0, float(c.end_sec) - float(c.start_sec)) for c in clips)
+        tts_cues, _gap_rep = snap_cues_to_dialogue_gaps(tts_cues, final_segments, _total_v1)
+        tts_cues_per_variant[0] = tts_cues
+        print(f"\n[cue gaps] 대사 겹침 검사: {_gap_rep['of']}개 중 "
+              f"{_gap_rep['cue_snapped']}개 스냅 · {_gap_rep['warned']}개 경고")
+        for _d in _gap_rep["details"]:
+            if _d["to_sec"] is None:
+                # 들어갈 틈이 없다 — 옮기지 않는다. 조용히 넘기지 않고 건별로 남긴다.
+                print(f"  [cue-overlap] ⚠ {_d['text']!r} 대사와 {_d['overlap_sec']}s 겹침 — "
+                      f"들어갈 gap 없음(그대로 둔다)")
+            else:
+                print(f"  [cue gaps] {_d['text']!r} {_d['from_sec']}s → {_d['to_sec']}s "
+                      f"(대사 겹침 {_d['overlap_sec']}s)")
+        run_log.setdefault("steps", []).append(
+            {"step": "tts_cue_gaps", **_gap_rep,
+             "tolerance_sec": CUE_OVERLAP_TOLERANCE_SEC})
 
     # ═══════════════════════════════════════
     # [style] AI 연출 구성 (E15, 2026-08-23)
