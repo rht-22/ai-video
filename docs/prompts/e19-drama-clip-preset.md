@@ -1,7 +1,7 @@
 # E19 — 드라마 클립 프리셋 갭 묶음 (발주서)
 
-**상태: E19-1~5 구현 완료(2026-08-28) · 나머지(E19-6~8) 기획.** 구현된 항목의
-계약 정본은 이제 코드다: ai-video `CLAUDE.md`(채널 톤 프로파일 절 + E19-2~5 하위 절) ·
+**상태: E19-1~6 구현 완료(2026-08-28) · 나머지(E19-7·8) 기획.** 구현된 항목의
+계약 정본은 이제 코드다: ai-video `CLAUDE.md`(채널 톤 프로파일 절 + E19-2~6 하위 절) ·
 `app/modules/style_tone.py` · `renderer.strip_title_markup`/`extract_title_highlights` ·
 `pipeline.snap_cues_to_dialogue_gaps` · `style_compose.avoid_faces_for_texts`/
 `load_sfx_manifest` · `reframe.CropKeyframe(face_*)` · `renderer.sfx_audio` ·

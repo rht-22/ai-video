@@ -3672,6 +3672,12 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         if _sc_data.get("profile", "conservative") != silence_profile.name:
             print(f"\n[silence_cut] 프로파일 변경 ({_sc_data.get('profile')} → {silence_profile.name}) → 캐시 무시, 재계산")
             _sc_cache_ok = False
+        # E19-6: 이름이 같아도 잔여 정적 하한이 다르면 산출이 다르다 — A/B 두 arm 이
+        # 같은 output_dir 를 재사용할 때 stale 방지(프로파일 이름 규약의 확장).
+        elif _sc_data.get("min_residual") != silence_profile.min_residual_pause_sec:
+            print(f"\n[silence_cut] 잔여 정적 하한 변경 ({_sc_data.get('min_residual')} → "
+                  f"{silence_profile.min_residual_pause_sec}) → 캐시 무시, 재계산")
+            _sc_cache_ok = False
     if _sc_cache_ok:
         print(f"\n[silence_cut] 캐시 로드 중... (프로파일: {silence_profile.name})")
         _new_variants: list[tuple[list[StoryClip], str, float]] = []
@@ -3732,6 +3738,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
         checkpoint_silence_cut.write_text(
             json.dumps({
                 "profile": silence_profile.name,
+                "min_residual": silence_profile.min_residual_pause_sec,   # E19-6 캐시 키
                 "variants": [
                     {"clips": [c.__dict__ for c in vc], "title_text": t, "score": s, "tts_cues": new_cues_pool[i]}
                     for i, (vc, t, s) in enumerate(all_storyline_variants)

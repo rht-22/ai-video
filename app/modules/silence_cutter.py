@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, replace
 from typing import NamedTuple
 
 from app.modules.speech import SpeechSegment
@@ -244,6 +245,12 @@ class SilenceCutProfile:
     # 보호 대상 *내부* gap 이라도 이 길이(초) 넘는 무음은 가운데를 잘라 이만큼만 유지.
     # None → 무제한(통째 유지). 값이 있으면 보호 gap 에도 dead-air 상한이 걸린다.
     protected_gap_max_sec: float | None = None
+    # E19-6(2026-08-28) 잔여 정적 하한 — 안전한 gap 을 **잘라도** 이만큼의 정적(초)은
+    # 남긴다(양쪽 절반씩). 벤치마크 실측: 반전 직후 0.3~0.5s 정적이 편의 호흡이다 —
+    # aggressive 가 이것까지 밀면 호흡이 죽는다. None(기본) = 종전 동작 그대로(회귀 0 —
+    # 기존 잔여 정적은 2×padding_sec 이고, 그 이하 값도 불변이다). gap-level 경로에만
+    # 작용한다(conservative 는 손대지 않는다 — 발주서 §6).
+    min_residual_pause_sec: float | None = None
 
 
 # 레거시 정확 재현 — A/B 베이스라인. 기존 cut_silence_with_story_filter 기본값과 동일.
@@ -269,11 +276,32 @@ _PROFILES: dict[str, SilenceCutProfile] = {
 }
 
 
+# env 로 여는 잔여 정적 하한의 허용 범위 — 0 이하는 의미가 없고(끄려면 env 를 지운다),
+# 2초 넘게 남기면 컷 자체가 무의미하다.
+_RESIDUAL_ENV = "SILENCE_CUT_MIN_RESIDUAL_SEC"
+_RESIDUAL_RANGE = (0.0, 2.0)          # (초과, 이하)
+
+
 def get_silence_profile(name: str | None) -> SilenceCutProfile:
-    """프로파일 이름 → SilenceCutProfile. 미지정/미상이면 conservative(베이스라인)."""
-    if not name:
-        return CONSERVATIVE_PROFILE
-    return _PROFILES.get(name.strip().lower(), CONSERVATIVE_PROFILE)
+    """프로파일 이름 → SilenceCutProfile. 미지정/미상이면 conservative(베이스라인).
+
+    E19-6: env `SILENCE_CUT_MIN_RESIDUAL_SEC` 가 있으면 gap-level 프로파일에 잔여 정적
+    하한을 얹는다. 잘못된 값은 **즉시 실패** — 조용히 무시하면 오타가 기본값으로 발행돼
+    'A/B 를 걸었는데 왜 그대로지'가 된다(transcribe-backend 와 같은 규율)."""
+    prof = (_PROFILES.get(name.strip().lower(), CONSERVATIVE_PROFILE)
+            if name else CONSERVATIVE_PROFILE)
+    raw = os.environ.get(_RESIDUAL_ENV)
+    if raw not in (None, ""):
+        try:
+            v = float(raw)
+        except ValueError:
+            raise ValueError(f"{_RESIDUAL_ENV} 가 숫자가 아닙니다({raw!r})") from None
+        lo, hi = _RESIDUAL_RANGE
+        if not (lo < v <= hi):
+            raise ValueError(f"{_RESIDUAL_ENV} 값 {v:g} 이 범위 밖입니다({lo:g} 초과 {hi:g} 이하)")
+        if prof.gap_level:
+            prof = replace(prof, min_residual_pause_sec=v)
+    return prof
 
 
 def _is_gap_safe_to_cut(
@@ -420,10 +448,25 @@ def _cut_clip_gap_level(
             and _is_gap_safe_to_cut(cand, prev_seg, this_seg, profile)
         )
         if should_cut:
-            # 안전한 gap — 현재 섬을 닫고 다음 섬 시작 (사이 무음 제거).
-            # 새 섬은 직전 섬 끝 이전으로 되감지 않는다(겹침 차단).
-            out.append(cur)
-            cur = Interval(max(padded[i].start_sec, cur.end_sec), padded[i].end_sec)
+            resid = profile.min_residual_pause_sec
+            if resid is not None and resid > 2 * pad:
+                # E19-6: 잘라도 이만큼의 정적은 남긴다(양쪽 절반씩 — cap 분기와 같은
+                # 기하). gap 이 하한보다 짧으면 gap 전체가 남는다 — 없는 정적을
+                # 만들어내지 않는다. resid ≤ 2×pad 면 기존 패딩이 이미 그만큼 남기므로
+                # 아래 종전 분기와 산출이 같다(회귀 0 조건의 다른 표현).
+                keep = min(resid, raw_gap)
+                half = keep / 2.0
+                left_end = min(clip.end_sec, cover_end + max(half, pad))
+                right_start = max(clip.start_sec, this_seg.start_sec - max(half, pad))
+                closed = Interval(cur.start_sec, max(cur.end_sec, left_end))
+                out.append(closed)
+                cur = Interval(max(min(padded[i].start_sec, right_start), closed.end_sec),
+                               padded[i].end_sec)
+            else:
+                # 안전한 gap — 현재 섬을 닫고 다음 섬 시작 (사이 무음 제거).
+                # 새 섬은 직전 섬 끝 이전으로 되감지 않는다(겹침 차단).
+                out.append(cur)
+                cur = Interval(max(padded[i].start_sec, cur.end_sec), padded[i].end_sec)
         elif cap is not None and raw_gap > cap:
             # 보호하지만 cap 초과 무음 — 가운데를 잘라 cap(양쪽 cap/2)만 유지
             half = cap / 2.0

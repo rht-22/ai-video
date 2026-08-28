@@ -1348,3 +1348,29 @@ face_* 필드 · `[face avoid]` 블록(크롭 타임라인 생성 직후 · 텍�
 - 기록: run_log style 단계에 `sfx_used`·`sfx_dropped`, 드롭 건별 stdout.
 - 회귀 가드: `tests/test_e19_sfx_layer.py`(15건 — 게이트·캡·스테이징·입력 인덱스·
   회귀 0 문자열·late 가드·프리셋↔프로파일 값 대조).
+
+### E19-6 무음 컷 잔여 정적 하한 (2026-08-28)
+
+`silence_cutter.SilenceCutProfile.min_residual_pause_sec` · env
+`SILENCE_CUT_MIN_RESIDUAL_SEC` · CLI `--silence-min-residual` ·
+A/B 도구 `scripts/e19_silence_residual_ab.py`.
+
+- 벤치마크 실측: 무음은 0~2건으로 밀되 **반전 직후 0.3~0.5s 정적은 남는다**(편 최대
+  호흡·웃음 비트). aggressive 가 이것까지 밀면 호흡이 죽는다 — 그래서 안전한 gap 을
+  **잘라도** 이만큼의 정적(양쪽 절반씩)은 남기는 하한을 더했다.
+- **None(기본) = 산출 불변**(회귀 0). 기존 잔여 정적은 2×padding_sec(aggressive 0.24s)
+  이라 그 이하 값도 불변이다. gap 이 하한보다 짧으면 gap 전체가 남는다(없는 정적을
+  만들지 않는다). **gap-level(aggressive) 경로에만** 작용 — conservative·보호 gap 의
+  cap 분기·`cut_silence_from_clips` 레거시는 안 건드렸다.
+- env 값이 숫자가 아니거나 범위(0 초과 2 이하) 밖이면 `get_silence_profile` 이 **즉시
+  실패** — 조용히 무시하면 오타가 기본값으로 발행된다(transcribe-backend 규율).
+- **캐시 키 확장**: `checkpoint_silence_cut.json` 에 `min_residual` 을 기록하고 프로파일
+  이름이 같아도 값이 다르면 재계산한다 — A/B 두 arm 이 같은 output_dir 를 재사용할 때
+  stale 방지.
+- A/B 는 파이프라인 재실행 없이 잰다 — 도구가 저장된 체크포인트(story 클립·청크 전사·
+  후보)에 파라미터만 다시 태워 두 arm 을 대조한다(E14 방식). ⚠ silence_cut 단계만
+  본다 — 길이 클램프와의 상호작용은 실런 A/B 몫.
+- ⚠ 테스트 함정(기록): `_apply_ab_env` 는 os.environ 을 직접 만지므로 monkeypatch 로
+  정리하면 안 된다 — 되돌리기가 중간값을 복원해 다른 테스트를 오염시킨다(실측).
+- 회귀 가드: `tests/test_e19_silence_residual.py`(14건 — 회귀 0·기하 수계산·보호 분기
+  불변·env/CLI fail-loud·캐시 키·도구 존재).

@@ -44,6 +44,11 @@ def _apply_ab_env(args) -> dict:
     if sp:
         os.environ["SILENCE_CUT_PROFILE"] = sp
         applied["SILENCE_CUT_PROFILE"] = sp
+    # E19-6: 잔여 정적 하한 — 값 검증(범위·숫자)은 get_silence_profile 이 즉시 실패로 한다.
+    smr = getattr(args, "silence_min_residual", None)
+    if smr is not None:
+        os.environ["SILENCE_CUT_MIN_RESIDUAL_SEC"] = str(smr)
+        applied["SILENCE_CUT_MIN_RESIDUAL_SEC"] = str(smr)
     if getattr(args, "length_profile", None) == "tight":
         # 시장 승자(~46s) 쪽으로: 목표 45s, 상한 50s, 톨러런스 1.5→1.1(≈55s 상한).
         for k, v in (("TARGET_DURATION_SEC", "45"), ("MAX_DURATION_SEC", "50"),
@@ -121,6 +126,11 @@ def build_parser() -> argparse.ArgumentParser:
     # A/B 노브 통일(모두 CLI). silence/length 는 env(config)로 전달됨.
     create.add_argument("--silence-profile", choices=["conservative", "aggressive"], default=None,
                         help="무음 컷 프로파일 (A/B). aggressive=gap-단위·무음 적극 제거(벤치마크 가설). 미지정=config 기본(conservative).")
+    create.add_argument("--silence-min-residual", dest="silence_min_residual",
+                        type=float, default=None,
+                        help="(E19-6, A/B) 무음을 잘라도 남길 정적 하한(초, 0 초과 2 이하 — 예: 0.35). "
+                             "aggressive(gap-단위) 프로파일에만 작용한다. 미지정=종전 그대로"
+                             "(기존 잔여 정적 = 2×padding). 벤치마크: 반전 직후 0.3~0.5s 정적이 호흡이다.")
     create.add_argument("--length-profile", choices=["standard", "tight"], default=None,
                         help="길이 프로파일 (A/B). tight=목표 45s·상한 톨러런스 1.1(시장 ~46s). 미지정=config 기본(standard).")
     # E11(2026-08-22) 자막 전사 백엔드 선택. 오케스트레이터 어댑터가 채널 design 키
