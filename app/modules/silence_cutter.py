@@ -530,6 +530,11 @@ def apply_speech_gap_pacing(
     details: list[str] = []
     total_in = sum(c.end_sec - c.start_sec for c in clips)
 
+    # E20-B4: 환각성 전사(수십 초·저밀도 한 줄)는 커버리지로 치지 않는다 —
+    # v4 실측: 40.5초 "누가 보냈어?" 가 hook 전체를 '발화 있음'으로 위장했다.
+    from app.modules.speech import plausible_speech_intervals
+    transcript_segments = plausible_speech_intervals(transcript_segments or [])
+
     for clip in clips:
         cov: list[list[float]] = []
         has_speech = False

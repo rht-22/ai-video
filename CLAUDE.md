@@ -1513,6 +1513,19 @@ design 키 `subtitle_profanity_mask`(기본 "off", `--design-subtitle-profanity-
 - drama_clip_kr: fill_gaps true · hook_max_sec 8 · hook_title_scene true ·
   pacing {1.2, 0.4, 1.0, 2.5}. 값 정본은 preset.json(교차 테스트).
 
+### E20-B4 발화 커버리지 가드 (v4 실측 후속)
+
+v4 실런이 드러낸 다음 층: 새 예산(120s)에서 스토리가 **대사 없는 액션 구간**을 골라
+21.4초 무발화 구멍이 났다. hook 은 40.5초짜리 환각성 전사 1줄("누가 보냈어?" —
+0.17자/초)이 전체를 '발화 있음'으로 위장했고, 25초 build 는 전사 0건이라 페이싱의
+비주얼 비트 보호로 빠져나갔다. **선택이 원인, 조립은 벨트다.**
+
+- `speech.plausible_speech_intervals` — 길이 >8s + 밀도 <0.8자/초 세그먼트는 발화로
+  안 친다(**판정용** — 화면 자막은 불변). 페이싱 커버리지도 이 필터를 지난다.
+- `speech.speech_coverage_ratio` + 스토리라인 검증 루프의 커버리지 가드 — 톤
+  `pacing.min_speech_coverage`(선택, 0.1~0.95 · drama_clip_kr 0.55) 미만 스토리라인은
+  SKIP + 다음 후보(길이 검증과 같은 규약). 전사가 없으면 판정하지 않는다(오판 금지).
+
 ### E20-C1 번인 자막 광범위 경고
 
 - E18-6 창별 회피가 대사 트랙 20%+·5줄+ 움직이면 stdout ⚠ + run_log

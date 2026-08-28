@@ -75,8 +75,9 @@ def test_cue_window_counts_as_coverage():
 
 def test_head_trim_and_tail_hold():
     clips = [_clip(0, 20)]
-    segs = [_seg(3.0, 16.0)]                              # 머리 3s·꼬리 4s 무발화
-    out, stats = apply_speech_gap_pacing(clips, segs, [], PARAMS)
+    seg = _seg(3.0, 16.0)                                 # 머리 3s·꼬리 4s 무발화
+    seg.text = "십삼 초 동안 정상 밀도로 이어지는 대사 텍스트라 환각 필터에 안 걸린다"
+    out, stats = apply_speech_gap_pacing(clips, [seg], [], PARAMS)
     assert _spans(out) == [(2.0, 18.5)]                   # 머리 리드인 1.0 · 꼬리 2.5 유지
 
 
@@ -160,6 +161,66 @@ def test_profile_matches_preset_pacing():
     ap = preset["audio_pacing"]
     assert tone.pacing["max_speech_gap_sec"] == ap["max_speech_gap_sec"]["value"]
     assert tone.pacing["gap_residual_sec"] == ap["gap_residual_sec"]["value"]
+
+
+# ── B4 발화 커버리지 가드 (v4 실측 후속) ──────────────────────────────────
+# v4 실측: 새 스토리가 대사 없는 액션 구간을 골라 21.4초 무발화 구멍이 났다.
+# hook 은 40.5초짜리 환각성 전사 1줄("누가 보냈어?" — 0.17자/초)이 전체를 덮어
+# 페이싱이 커버리지로 오인했고, 25초 build 는 전사 0건이라 비주얼 비트 보호로
+# 빠져나갔다. 그래서 ① 환각성 세그먼트는 판정 커버리지에서 빼고 ② 스토리라인
+# 선택 단계에서 커버리지 하한으로 거른다(선택이 원인, 조립은 벨트).
+def test_plausible_filter_drops_hallucination_segment():
+    from app.modules.speech import plausible_speech_intervals
+    fake = _seg(534.5, 575.0)                             # 40.5s
+    fake.text = "누가 보냈어?"                            # 7자 / 40.5s = 0.17자/초
+    real = _seg(574.0, 575.0)
+    real.text = "내가 보냈어?"
+    out = plausible_speech_intervals([fake, real])
+    assert out == [real]
+
+
+def test_plausible_filter_keeps_long_dense_segment():
+    from app.modules.speech import plausible_speech_intervals
+    s = _seg(0, 12.0)
+    s.text = "긴 문장이지만 글자 밀도가 정상인 대사가 계속 이어지는 세그먼트다 정상"
+    assert plausible_speech_intervals([s]) == [s]
+
+
+def test_coverage_ratio():
+    from app.modules.speech import speech_coverage_ratio
+    clips = [_clip(0, 40), _clip(100, 130)]               # 총 70s
+    segs = [_seg(0, 20), _seg(100, 114)]                  # 커버 34s
+    assert abs(speech_coverage_ratio(clips, segs) - 34 / 70) < 0.01
+    assert speech_coverage_ratio(clips, []) == 0.0
+
+
+def test_pacing_ignores_hallucination_coverage():
+    """페이싱 커버리지도 환각 필터를 지난다 — 40s 가짜 한 줄이 클립을 '전부 발화'로
+    위장하면 안 된다. 가짜만 있는 클립은 유효 전사 0 = 통째 유지(오판 금지 규율)."""
+    clips = [_clip(0, 40)]
+    fake = _seg(0, 40)
+    fake.text = "누가?"
+    out, stats = apply_speech_gap_pacing(clips, [fake], [], PARAMS)
+    assert _spans(out) == [(0, 40)] and stats["gaps_cut"] == 0
+
+
+def test_min_speech_coverage_schema():
+    tone = st.load_style_tone("drama_clip_kr")
+    assert tone.pacing["min_speech_coverage"] == 0.55
+    with pytest.raises(st.StyleToneError):
+        st.validate_tone_data(_data(**{"pacing.min_speech_coverage": 1.5}), "drama_clip_kr")
+    data = _data()
+    data["pacing"].pop("min_speech_coverage", None)       # 선택 키 — 없어도 유효
+    st.validate_tone_data(data, "drama_clip_kr")
+
+
+def test_coverage_guard_wired_into_storyline_selection():
+    src = (REPO / "app" / "pipeline.py").read_text("utf-8")
+    assert "min_speech_coverage" in src
+    assert "발화 커버리지" in src
+    # 자리: validate_story_clips(스토리라인 검증) 절 안 — 탈락은 SKIP + 다음 후보
+    guard = src.index("발화 커버리지")
+    assert src.index("validate_story_clips(\n                sl_clips") < guard
 
 
 def test_pipeline_wires_pacing_after_gap_fill_before_clamp():

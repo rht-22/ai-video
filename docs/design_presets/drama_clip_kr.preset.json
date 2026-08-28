@@ -107,7 +107,8 @@
     "max_speech_gap_sec":   { "value": 1.2,           "status": "prompt", "note": "E20-B1 발화 갭 상한 — dB 무음이 아니라 **무발화**(전사∪내레이션 창) 기준. 조립 마지막(스냅·확장·갭메움 뒤)에 최종 클립을 자른다" },
     "gap_residual_sec":     { "value": 0.4,           "status": "prompt", "note": "잘라도 남기는 정적(양쪽 절반) — 벤치마크 반전 직후 0.3~0.5s 호흡" },
     "head_lead_in_sec":     { "value": 1.0,           "status": "prompt", "note": "클립 머리 무발화 허용치 — 첫 발화까지 이 이상 침묵이면 정리" },
-    "tail_hold_sec":        { "value": 2.5,           "status": "prompt", "note": "클립 꼬리 무발화 허용치 — 리액션 컷(무발화 엔딩 비트)이 사는 자리" }
+    "tail_hold_sec":        { "value": 2.5,           "status": "prompt", "note": "클립 꼬리 무발화 허용치 — 리액션 컷(무발화 엔딩 비트)이 사는 자리" },
+    "min_speech_coverage":  { "value": 0.55,          "status": "prompt", "note": "E20-B4 — 스토리라인 발화 커버리지 하한(환각 전사 배제 후). v4 실측: 대사 없는 액션 구간이 선택돼 21.4초 무발화 — 선택 단계에서 거른다" }
   },
 
   "story": {

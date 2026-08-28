@@ -211,6 +211,13 @@ def validate_tone_data(data: Any, name: str) -> dict[str, Any]:
             _fail(name, "pacing.gap_residual_sec 이 max_speech_gap_sec 이상이면 "
                         f"컷이 성립하지 않습니다({vals['gap_residual_sec']:g} ≥ "
                         f"{vals['max_speech_gap_sec']:g})")
+        # E20-B4 — 선택: 스토리라인 발화 커버리지 하한(0~1 비율).
+        if pc.get("min_speech_coverage") is not None:
+            mc = pc.get("min_speech_coverage")
+            if (not isinstance(mc, (int, float)) or isinstance(mc, bool)
+                    or not (0.1 <= float(mc) <= 0.95)):
+                _fail(name, f"pacing.min_speech_coverage 는 0.1~0.95 비율이어야 "
+                            f"합니다({mc!r})")
 
     # E19-9 — subtitle 절은 선택이다(없음 = 단일 줄 분할 없음). 있으면 전부 검증한다.
     if data.get("subtitle") is not None:

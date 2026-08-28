@@ -47,6 +47,7 @@
     "max_speech_gap_sec": 1.2,
     "gap_residual_sec": 0.4,
     "head_lead_in_sec": 1.0,
-    "tail_hold_sec": 2.5
+    "tail_hold_sec": 2.5,
+    "min_speech_coverage": 0.55
   }
 }

@@ -21,6 +21,54 @@ class SpeechSegment:
 _DEDUP_NORM_RE = re.compile(r"[\s\.,!?…~‥'\"“”‘’·\-]+")
 
 
+def plausible_speech_intervals(segments: list, *, max_low_density_sec: float = 8.0,
+                               min_chars_per_sec: float = 0.8) -> list:
+    """환각성 전사 배제 — **판정용** 필터(화면 자막은 안 건드린다).
+
+    액션·음악 구간에서 전사기가 짧은 문장 하나를 수십 초짜리 세그먼트로 뱉는 일이
+    있다(김부장 v4 실측: 40.5초 "누가 보냈어?" 한 줄이 hook 전체를 '발화 있음'으로
+    위장 → 페이싱·커버리지 판정이 전부 오판). 길이 > max_low_density_sec 이면서
+    글자 밀도 < min_chars_per_sec 인 세그먼트는 발화로 치지 않는다 — 정상 한국어
+    발화는 4~12자/초라 0.8자/초는 확실한 비발화 신호다.
+    """
+    out = []
+    for s in segments or []:
+        dur = float(getattr(s, "end_sec", 0.0)) - float(getattr(s, "start_sec", 0.0))
+        text = str(getattr(s, "text", "") or "").strip()
+        if dur > max_low_density_sec and len(text) / max(dur, 1e-6) < min_chars_per_sec:
+            continue
+        out.append(s)
+    return out
+
+
+def speech_coverage_ratio(clips: list, segments: list) -> float:
+    """클립 합계 대비 발화 커버 비율(0~1) — E20-B4 스토리라인 커버리지 가드용.
+
+    clips 는 start_sec/end_sec 속성만 있으면 된다. segments 는 호출부가
+    plausible_speech_intervals 로 걸러 넘기는 것이 보통이다.
+    """
+    total = sum(max(0.0, float(c.end_sec) - float(c.start_sec)) for c in clips or [])
+    if total <= 0:
+        return 0.0
+    covered = 0.0
+    for c in clips:
+        iv = []
+        for s in segments or []:
+            a = max(float(c.start_sec), float(s.start_sec))
+            b = min(float(c.end_sec), float(s.end_sec))
+            if b > a:
+                iv.append([a, b])
+        iv.sort()
+        merged: list[list[float]] = []
+        for a, b in iv:
+            if merged and a <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], b)
+            else:
+                merged.append([a, b])
+        covered += sum(b - a for a, b in merged)
+    return covered / total
+
+
 def dedup_overlapping_transcripts(segments: list) -> tuple[list, list]:
     """청크 오버랩 중복 전사 제거 (E20-A3, 2026-08-28).
 

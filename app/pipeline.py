@@ -3516,6 +3516,27 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             for w in coh_warnings:
                 print(f"  [COHERENCE] 스토리라인 {sl_idx + 1}: {w}")
 
+            # ── E20-B4 발화 커버리지 가드 (2026-08-28) ─────────────────────
+            # v4 실측: 새 스토리가 대사 없는 액션 구간을 골라 21.4초 무발화 구멍 —
+            # hook 은 40.5초짜리 환각성 전사 1줄(0.17자/초)이 전체를 '발화 있음'으로
+            # 위장했고 25초 build 는 전사 0건. 페이싱(조립)은 벨트고 **선택이 원인**
+            # 이라 여기서 거른다 — 탈락은 SKIP + 다음 후보(길이 검증과 같은 규약).
+            # 게이트: 톤 pacing.min_speech_coverage(없으면 종전 그대로). 전사가
+            # 아예 없으면 판정하지 않는다(오판 금지).
+            _tone_pacing = (getattr(style_tone_profile, "pacing", None) or {}) \
+                if style_tone_profile else {}
+            _min_cov = float(_tone_pacing.get("min_speech_coverage") or 0.0)
+            if _min_cov > 0 and _beat_trim_segs:
+                from app.modules.speech import (plausible_speech_intervals,
+                                                speech_coverage_ratio)
+                _cov = speech_coverage_ratio(
+                    sl_clips, plausible_speech_intervals(_beat_trim_segs))
+                if _cov < _min_cov:
+                    print(f"  [SKIP] 스토리라인 {sl_idx + 1} 발화 커버리지 "
+                          f"{_cov:.0%} < 하한 {_min_cov:.0%} — 대사 없는 구간 위주 "
+                          f"구성(오디오가 비지 않게 하라는 채널 계약 위반)")
+                    continue
+
             all_storyline_variants.append((sl_clips, sl_title, score))
             # PR-4: storyline 의 tts_cues 정규화 후 parallel pool 에 append.
             # sl_data 의 직접 필드 또는 sl_data["storyline"] 안 어디든 위치 가능 (LLM 변형 대응).
