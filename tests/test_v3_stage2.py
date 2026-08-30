@@ -104,11 +104,17 @@ def test_split_chunks_real_ffmpeg(tmp_path):
     man = cs.split_chunks(src, chunks, [], tmp_path / "chunks",
                           only=[(0, 0)], log=lambda *a: None)
     assert man["schema"] == cs.SCHEMA_CHUNK_SPLIT
-    assert man["chunks"][0]["file"] == "chunk_s00_c00.mp4"
+    assert man["chunks"][0]["file"] == "chunk_s00_c00_1.000-3.000.mp4"
     assert man["chunks"][1]["file"] is None                # only 밖 — 미재단(커버리지)
-    assert (tmp_path / "chunks" / "chunk_s00_c00.mp4").exists()
+    assert (tmp_path / "chunks" / man["chunks"][0]["file"]).exists()
     assert man["chunks"][0]["duration_sec"] == 2.0
     assert man["proxy"]["fps"] == 10
+    # 경계가 바뀌면 파일명이 달라져 옛 재단본을 재사용하지 않는다(리뷰 high 수정)
+    chunks2 = [dict(chunks[0], start_sec=2.0, end_sec=5.0)]
+    man2 = cs.split_chunks(src, chunks2, [], tmp_path / "chunks",
+                           only=[(0, 0)], log=lambda *a: None)
+    assert man2["chunks"][0]["file"] == "chunk_s00_c00_2.000-5.000.mp4"
+    assert (tmp_path / "chunks" / man2["chunks"][0]["file"]).exists()
 
 
 # ── Stage 2 순수 검증 ───────────────────────────────────────────────────────
@@ -176,7 +182,7 @@ def test_validate_rejects_unknown_gap_overlap():
     r = _resp_ok()
     r["meanings"][0]["last_span"] = "sp9999"
     _n, p, _ = ca.validate_stage2_response(r, spans, final_attempt=False)
-    assert any("모르는 span id" in x for x in p)
+    assert any("모르는/비문자열 span id" in x for x in p)
 
     r = _resp_ok()
     r["meanings"][0]["last_span"] = "sp0000"               # sp0001 빈틈
@@ -243,6 +249,142 @@ def test_character_cross_check_consistency():
     assert row["consistency"] == 1.0                        # 전 span 이 강비오
     assert ca.character_cross_check(None, norm, spans, 0, 16)["status"] == "skipped"
     assert ca.character_cross_check([], norm, spans, 0, 16)["status"] == "skipped"
+
+
+# ── 리뷰(2026-08-31) 재현 수정 가드 ─────────────────────────────────────────
+
+def test_validate_malformed_ids_are_problems_not_crash():
+    """리스트형 id·id 없는 상세·중복 상세 — TypeError 크래시가 아니라 반려(리뷰 high)."""
+    spans = _spans4()
+    r = {"meanings": [{"first_span": ["sp0000"], "last_span": "sp0003",
+                       "content": "x", "importance": 3, "mood": "m", "spans": []}]}
+    _n, p, _ = ca.validate_stage2_response(r, spans, final_attempt=False)
+    assert any("비문자열" in x for x in p)
+
+    r = _resp_ok()
+    r["meanings"][0]["spans"].append({"scene_script": "id 없음"})
+    r["meanings"][0]["spans"].append({"id": ["sp0000"], "scene_script": "리스트 id"})
+    _n, p, _ = ca.validate_stage2_response(r, spans, final_attempt=False)
+    assert any("id 없는/비문자열" in x for x in p)
+
+    r = _resp_ok()
+    r["meanings"][0]["spans"].append(dict(r["meanings"][0]["spans"][0]))  # 중복 상세
+    _n, p, _ = ca.validate_stage2_response(r, spans, final_attempt=False)
+    assert any("중복" in x for x in p)
+
+
+def test_characters_string_not_char_split():
+    spans = _spans4()
+    r = _resp_ok()
+    r["meanings"][0]["characters"] = "강비오"
+    r["meanings"][0]["spans"][0]["characters"] = "홍재인"
+    norm, p, notes = ca.validate_stage2_response(r, spans, final_attempt=False)
+    assert p == []
+    assert norm[0]["characters"] == ["강비오"]              # ['강','비','오'] 금지
+    assert norm[0]["spans"][0]["characters"] == ["홍재인"]
+    assert any("문자열" in n for n in notes)
+
+
+def test_spans_for_chunk_no_double_assignment_on_tie():
+    """경계가 span 을 정확히 반으로 갈라도 소속은 한 chunk 뿐(중점 반개구간)."""
+    grid = _grid_spans([(8, 12, True, "a")])
+    a = ca.spans_for_chunk(grid, 0.0, 10.0)
+    b = ca.spans_for_chunk(grid, 10.0, 24.0)
+    assert len(a) + len(b) == 1                             # 정확히 한 쪽
+    assert [s["id"] for s in b] == ["sp0000"]               # 중점 10.0 → [10,24)
+
+
+def test_importance_bool_coerced():
+    spans = _spans4()
+    r = _resp_ok()
+    r["meanings"][0]["importance"] = True
+    norm, p, notes = ca.validate_stage2_response(r, spans, final_attempt=False)
+    assert p == [] and norm[0]["importance"] == 3 and any("보정" in n for n in notes)
+
+
+def test_chunk_cache_discarded_on_upstream_change(tmp_path, monkeypatch):
+    """상류(stage1/grid) 재구성 시 청크 캐시 지문 불일치 → 폐기·재분석(리뷰 medium)."""
+    import subprocess
+
+    from app.modules.ffmpeg_utils import find_ffmpeg_command
+    from app.v3 import chunk_analyze as ca_mod
+    from app.v3 import pipeline as v3p
+
+    src = tmp_path / "src.mp4"
+    subprocess.run(
+        [find_ffmpeg_command("ffmpeg"), "-y", "-f", "lavfi",
+         "-i", "testsrc2=size=320x240:rate=12:duration=6",
+         "-f", "lavfi", "-i", "sine=frequency=330:duration=6",
+         "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest",
+         str(src)], check=True, capture_output=True)
+    monkeypatch.setattr(v3p, "transcribe_words",
+                        lambda *a, **k: ([{"t0": 1.0, "t1": 1.4, "text": "테스트",
+                                           "prob": 0.9}], []))
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-used")
+    calls = {"n": 0}
+    monkeypatch.setattr(ca_mod, "run_chunk_analyze",
+                        lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1) or
+                                         ([], {"chunk": "x", "attempts": []})))
+
+    out = v3p.run_v3(video_path=src, work_title="합성", outdir=tmp_path / "o",
+                     skip_research=True, skip_seq_analyze=True, log=lambda *a: None)
+    (out / "stage1.json").write_text(json.dumps(
+        _stage1([(0.0, 5.0, [(0.0, 5.0)])])), encoding="utf-8")
+    v3p.run_v3(video_path=src, work_title="합성", outdir=tmp_path / "o",
+               job_id=out.name, skip_research=True, skip_seq_analyze=True,
+               log=lambda *a: None)
+    assert calls["n"] == 1
+    # stage1 경계 변경(재구성 흉내) → 지문 불일치 → 캐시 폐기 → 재분석
+    (out / "stage1.json").write_text(json.dumps(
+        _stage1([(0.0, 4.0, [(0.0, 4.0)])], exc={"end": (4.0, 6.0)})),
+        encoding="utf-8")
+    v3p.run_v3(video_path=src, work_title="합성", outdir=tmp_path / "o",
+               job_id=out.name, skip_research=True, skip_seq_analyze=True,
+               log=lambda *a: None)
+    assert calls["n"] == 2
+
+
+def test_run_m2_chunk_exception_marks_failed_and_continues(tmp_path, monkeypatch):
+    """청크 하나의 예외가 run 전체를 죽이지 않는다 — 커버리지 표기 + 계속(리뷰 high)."""
+    import subprocess
+
+    from app.modules.ffmpeg_utils import find_ffmpeg_command
+    from app.v3 import chunk_analyze as ca_mod
+    from app.v3 import pipeline as v3p
+
+    src = tmp_path / "src.mp4"
+    subprocess.run(
+        [find_ffmpeg_command("ffmpeg"), "-y", "-f", "lavfi",
+         "-i", "testsrc2=size=320x240:rate=12:duration=6",
+         "-f", "lavfi", "-i", "sine=frequency=330:duration=6",
+         "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest",
+         str(src)], check=True, capture_output=True)
+    monkeypatch.setattr(v3p, "transcribe_words",
+                        lambda *a, **k: ([{"t0": 1.0, "t1": 1.4, "text": "테스트",
+                                           "prob": 0.9}], []))
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-used")
+    seen = []
+    def boom_then_ok(gemini, chunk_file, chunk, *a, **k):
+        seen.append(chunk["chunk_number"])
+        if chunk["chunk_number"] == 0:
+            raise TypeError("unhashable type: 'list'")      # 리뷰 재현 모양
+        return ([{"number": 0, "time": {"start": "00:00:03.000",
+                                        "end": "00:00:05.000"},
+                  "content": "m", "characters": [], "importance": 3, "mood": "x",
+                  "spans": []}], {"chunk": "s0c1", "attempts": []})
+    monkeypatch.setattr(ca_mod, "run_chunk_analyze", boom_then_ok)
+
+    out = v3p.run_v3(video_path=src, work_title="합성", outdir=tmp_path / "o",
+                     skip_research=True, skip_seq_analyze=True, log=lambda *a: None)
+    (out / "stage1.json").write_text(json.dumps(
+        _stage1([(0.0, 5.0, [(0.0, 3.0), (3.0, 5.0)])])), encoding="utf-8")
+    v3p.run_v3(video_path=src, work_title="합성", outdir=tmp_path / "o",
+               job_id=out.name, skip_research=True, skip_seq_analyze=True,
+               log=lambda *a: None)
+    assert seen == [0, 1]                                   # 예외 후에도 다음 청크 진행
+    s2 = json.loads((out / "stage2.json").read_text(encoding="utf-8"))
+    assert s2["coverage"]["failed"] == 1 and s2["coverage"]["analyzed"] == 1
+    assert "예외" in s2["coverage"]["failures"][0]["reason"]
 
 
 # ── 반려 루프 · 파이프라인 배선 ─────────────────────────────────────────────

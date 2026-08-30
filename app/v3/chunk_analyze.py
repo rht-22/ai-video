@@ -32,25 +32,39 @@ from app.v3 import schemas
 from app.v3.seq_analyze import MAX_REASKS, _upload_video
 
 TRANSCRIPT_DIFF_MAX = 0.35     # 정규화 편집거리(공백 제거) — 넘으면 각색으로 보고 복원
-SPAN_OVERLAP_MIN = 0.5         # span 이 chunk 에 속한다 = 겹침이 span 길이의 절반 이상
 MOOD_MAX_CHARS = 20
+
+
+def _name_list(value: Any, notes: list[str], where: str) -> list[str]:
+    """characters 관용 파서 — 문자열이 오면 이름 하나로 받는다(글자 단위로 쪼개져
+    ['강','비','오'] 가 실리던 결함의 리뷰 재현 수정)."""
+    if isinstance(value, str):
+        v = value.strip()
+        if v:
+            notes.append(f"{where} characters 문자열 → [{v!r}] 로 해석")
+        return [v] if v else []
+    if isinstance(value, list):
+        return [str(c).strip() for c in value if str(c).strip()]
+    return []
 
 
 # ── span 소속·전사 정본 ─────────────────────────────────────────────────────
 
 def spans_for_chunk(grid: dict, start_sec: float, end_sec: float) -> list[dict]:
-    """chunk 구간에 속한 span 목록(겹침 ≥ 절반 규칙 · t_in 순). 순수.
+    """chunk 구간에 속한 span 목록(**중점 반개구간 규칙** · t_in 순). 순수.
 
     chunk 경계는 격자 스냅이라 대부분 span 경계와 일치하지만, 유성 span 안의 장면
-    전환에 스냅된 경계는 span 을 가로지를 수 있다 — 그 span 은 겹침이 더 큰 쪽
-    chunk 하나에만 속한다(중복 금지)."""
+    전환에 스냅된 경계는 span 을 가로지를 수 있다. 소속 판정은 span 중점이
+    [start, end) 에 드는가 하나다 — chunk 들이 타임라인을 반개구간으로 타일링하므로
+    어떤 span 도 두 chunk 에 동시에 속할 수 없다(겹침 '≥절반' 규칙은 정확히 반으로
+    갈리는 동률에서 양쪽 다 참이 되는 결함이 리뷰에서 재현돼 교체)."""
     out = []
     for sp in grid.get("span_candidates") or []:
         t0, t1 = float(sp["t_in"]), float(sp["t_out"])
         if t1 <= t0:
             continue
-        lap = min(t1, end_sec) - max(t0, start_sec)
-        if lap >= (t1 - t0) * SPAN_OVERLAP_MIN and lap > 0:
+        mid = (t0 + t1) / 2.0
+        if start_sec <= mid < end_sec:
             out.append(sp)
     return sorted(out, key=lambda s: (float(s["t_in"]), s["id"]))
 
@@ -97,9 +111,12 @@ def validate_stage2_response(resp: Any, chunk_spans: list[dict], *,
             problems.append(f"meanings[{k}] 가 객체가 아님")
             continue
         a, b = m.get("first_span"), m.get("last_span")
-        if a not in idx_of or b not in idx_of:
-            problems.append(f"meanings[{k}] 모르는 span id: {a!r}~{b!r} — "
-                            "이 chunk 의 span 목록에서만 골라라")
+        # id 는 문자열이어야 한다 — 리스트 등이 오면 unhashable 로 TypeError 가 반려
+        # 루프를 뚫고 run 전체를 죽였다(리뷰 재현). 형식 위반도 반려 재료다.
+        if not isinstance(a, str) or not isinstance(b, str) \
+                or a not in idx_of or b not in idx_of:
+            problems.append(f"meanings[{k}] 모르는/비문자열 span id: {a!r}~{b!r} — "
+                            "이 chunk 의 span 목록에서 문자열 id 로만 골라라")
             continue
         ia, ib = idx_of[a], idx_of[b]
         if ib < ia:
@@ -129,14 +146,32 @@ def validate_stage2_response(resp: Any, chunk_spans: list[dict], *,
         if not content:
             problems.append(f"meanings[{k}] content 없음")
         imp = m.get("importance")
-        if not isinstance(imp, int) or not 1 <= imp <= 5:
+        if not isinstance(imp, int) or isinstance(imp, bool) or not 1 <= imp <= 5:
             notes.append(f"meanings[{k}] importance {imp!r} → 3 보정")
             imp = 3
         mood = str(m.get("mood") or "").strip()[:MOOD_MAX_CHARS]
-        chars = [str(c).strip() for c in (m.get("characters") or []) if str(c).strip()]
+        chars = _name_list(m.get("characters"), notes, f"meanings[{k}]")
 
-        span_entries = {s.get("id"): s for s in (m.get("spans") or [])
-                        if isinstance(s, dict)}
+        span_entries: dict[str, dict] = {}
+        dup_ids: list[str] = []
+        bad_ids = 0
+        for s in m.get("spans") or []:
+            if not isinstance(s, dict):
+                bad_ids += 1
+                continue
+            sid = s.get("id")
+            if not isinstance(sid, str):        # None·리스트 키는 sorted/셋 연산을 깨뜨린다
+                bad_ids += 1
+                continue
+            if sid in span_entries:
+                dup_ids.append(sid)             # last-wins 무성 병합 금지 — 반려로 되묻는다
+            span_entries[sid] = s
+        if bad_ids:
+            problems.append(f"meanings[{k}] id 없는/비문자열 span 상세 {bad_ids}건 — "
+                            "모든 상세에 문자열 id 를 달아라")
+        if dup_ids:
+            problems.append(f"meanings[{k}] span 상세 중복: {sorted(set(dup_ids))[:5]} — "
+                            "span 당 상세는 하나다")
         unknown = sorted(set(span_entries) - set(order[ia:ib + 1]))
         if unknown:
             problems.append(f"meanings[{k}] 범위 밖 span 상세: {unknown[:5]}")
@@ -162,13 +197,13 @@ def validate_stage2_response(resp: Any, chunk_spans: list[dict], *,
             elif audio_in:
                 notes.append(f"{sid} 무성 span 의 audio 제안 폐기(전사에 발화 없음)")
             sp_imp = entry.get("importance")
-            if not isinstance(sp_imp, int) or not 1 <= sp_imp <= 5:
+            if not isinstance(sp_imp, int) or isinstance(sp_imp, bool) \
+                    or not 1 <= sp_imp <= 5:
                 sp_imp = imp
             spans_out.append({
                 "span_id": sid,
                 "scene_script": str(entry.get("scene_script") or "").strip(),
-                "characters": [str(c).strip() for c in (entry.get("characters") or [])
-                               if str(c).strip()],
+                "characters": _name_list(entry.get("characters"), notes, sid),
                 "importance": sp_imp,
                 "audio": audio,
             })

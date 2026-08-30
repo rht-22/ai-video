@@ -70,8 +70,14 @@ def assert_no_exception_overlap(chunks: list[dict], exceptions: list[dict],
                     f"({x['start_sec']}~{x['end_sec']}) = {lap:.3f}s")
 
 
-def chunk_file_name(seq_number: int, chunk_number: int) -> str:
-    return f"chunk_s{seq_number:02d}_c{chunk_number:02d}.mp4"
+def chunk_file_name(seq_number: int, chunk_number: int,
+                    start_sec: float, end_sec: float) -> str:
+    """파일명에 **경계까지** 박는다 — (seq, chunk) 번호만으로 키를 잡으면 Stage 1
+    재구성으로 같은 번호의 경계가 바뀌었을 때 옛 재단본을 조용히 재사용해
+    매니페스트(시각 환산 정본)와 실파일이 갈린다(리뷰 재현: ffprobe 로 확인).
+    경계가 이름에 있으면 바뀐 계획은 새 파일이 되고 옛 파일은 그저 남는다."""
+    return (f"chunk_s{seq_number:02d}_c{chunk_number:02d}"
+            f"_{start_sec:.3f}-{end_sec:.3f}.mp4")
 
 
 def split_chunks(video_path: Path, chunks: list[dict], exceptions: list[dict],
@@ -86,7 +92,8 @@ def split_chunks(video_path: Path, chunks: list[dict], exceptions: list[dict],
     ffmpeg = find_ffmpeg_command("ffmpeg")
     manifest_chunks: list[dict] = []
     for c in chunks:
-        name = chunk_file_name(c["seq_number"], c["chunk_number"])
+        name = chunk_file_name(c["seq_number"], c["chunk_number"],
+                               c["start_sec"], c["end_sec"])
         entry = {**c, "duration_sec": round(c["end_sec"] - c["start_sec"], 3),
                  "file": None}
         wanted = only is None or (c["seq_number"], c["chunk_number"]) in only

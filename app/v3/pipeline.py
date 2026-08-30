@@ -361,12 +361,25 @@ def _run_m2(*, output_dir: Path, video_path: Path, stage1_path: Path, grid: dict
     if ci_path.exists():
         appearances = _read_json(ci_path)
 
+    # 캐시 유효성은 from_step 이 아니라 **상류 내용**에 묶는다 — stage1/grid 를
+    # 재구성하면 같은 번호의 chunk 라도 다른 경계·다른 span 체계다. 지문이 다르면
+    # 캐시를 통째로 버린다(옛 grid 의 meanings 가 새 문서에 접합되던 리뷰 재현 수정).
+    import hashlib
+    fingerprint = hashlib.sha1(json.dumps(
+        {"plan": chunks_plan,
+         "spans": [[s["id"], s["t_in"], s["t_out"]] for s in
+                   grid.get("span_candidates") or []]},
+        sort_keys=True).encode("utf-8")).hexdigest()[:16]
     ca_ckpt = output_dir / "checkpoint_chunk_analyze.json"
     done: dict[str, Any] = {}
     if ca_ckpt.exists() and from_step not in ("chunk_split", "chunk_analyze"):
-        done = _read_json(ca_ckpt)
-        if done:
-            log(f"  [v3/stage2] 청크 캐시 {len(done)}건 로드")
+        cached = _read_json(ca_ckpt)
+        if cached.get("fingerprint") == fingerprint:
+            done = cached.get("chunks") or {}
+            if done:
+                log(f"  [v3/stage2] 청크 캐시 {len(done)}건 로드")
+        elif cached:
+            log("  [v3/stage2] ⚠ 상류(stage1/grid) 변경 감지 — 청크 캐시 폐기")
 
     research_ctx = (research or {}).get("work_context") or ""
     names = [c["character_name"] for c in (research or {}).get("cast_images") or []
@@ -378,12 +391,20 @@ def _run_m2(*, output_dir: Path, video_path: Path, stage1_path: Path, grid: dict
         key = f"s{entry['seq_number']}c{entry['chunk_number']}"
         if key in done:
             continue
-        meanings, audit = run_chunk_analyze(
-            get_gemini(), output_dir / "chunks" / entry["file"], entry,
-            stage1_doc, grid, appearances=appearances,
-            research_context=research_ctx, character_names=names or None, log=log)
+        try:
+            meanings, audit = run_chunk_analyze(
+                get_gemini(), output_dir / "chunks" / entry["file"], entry,
+                stage1_doc, grid, appearances=appearances,
+                research_context=research_ctx, character_names=names or None, log=log)
+        except Exception as e:  # noqa: BLE001 — 부분 실패 계약: 다른 chunk 는 계속 간다
+            meanings = None
+            audit = {"chunk": key, "attempts": [],
+                     "failed": f"예외: {type(e).__name__}: {e}"}
+            log(f"  [v3/stage2] ⚠ {key} 예외 — 커버리지 표기 후 계속: {e}")
         done[key] = {"meanings": meanings, "audit": audit}
-        _write_json(ca_ckpt, done)                 # 청크마다 증분 저장(요금 보호)
+        # 청크마다 증분 저장(요금 보호 — 실패 기록도 저장해 재실행 재과금을 막는다.
+        # 실패 chunk 재시도는 --from-step chunk_analyze 로 명시적으로만)
+        _write_json(ca_ckpt, {"fingerprint": fingerprint, "chunks": done})
 
     # ── stage2.json 조립 — stage1 문서에 meanings 를 채운다(§4 스키마 그대로) ──
     analyzed = failed = not_split = 0
