@@ -140,8 +140,9 @@ def render_markdown(doc: dict) -> str:
     L.append("# 리플레이 하네스 리포트 (V3-M0)")
     L.append("")
     L.append(f"- 아카이브: `{meta.get('path', '?')}` (레이아웃 {meta.get('layout', '?')})")
-    if meta.get("window"):
-        L.append(f"- 창: {meta['window']}")
+    w = meta.get("window") or {}
+    if w.get("since") or w.get("until"):
+        L.append(f"- 창: {w.get('since') or '(처음)'} ~ {w.get('until') or '(끝)'}")
     L.append(f"- 편수: {agg['n_rows']} (집계 가능 {agg['n_usable']} · 제외 {agg['n_skipped']}"
              f" · 사람 손 탄 편 {agg['n_human_edited']})")
     if agg["n_skipped"]:
