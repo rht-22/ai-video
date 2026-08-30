@@ -1232,13 +1232,21 @@ STYLE_COMPOSITION_PROMPT = """너는 한국어 쇼츠의 **연출 감독**이다
    fx: none|pop|shake (pop=톡 튀어나옴, shake=흔들림). size 는 48~160 이 보통이다.
 2) subtitle_styles — **핵심 대사 한두 줄**만 크게/색으로 강조. 그 줄이 이 쇼츠의 승부처일 때만.
 3) images — 스티커. 아래 [스티커] 목록의 id 만 쓸 수 있다. 목록이 비어 있으면 쓰지 마라.
-4) title_segments — 시간대별 제목. 구간(from_anchor~to_anchor, 원본 절대초)마다 **제목 문구를
-   바꾼다**. ⚠ **제목은 편 내내 반드시 떠 있어야 한다** — 창이 못 덮은 시간에는 엔진이 기본
-   제목을 되돌려 넣는다(제목이 없는 시간은 만들 수 없다). 그러니 '중간에 제목을 없애는'
-   용도로는 쓰지 마라. 창끼리 겹치면 안 된다. 문구를 안 바꿀 거면 배열을 비워라
-   (그러면 기본 제목이 처음부터 끝까지 나온다).
+4) title_fixed + title_segments — 시간대별 제목. **제목의 두 줄 형식은 반드시 지킨다.**
+   · title_fixed = 편 전체에서 **바뀌지 않는 윗줄**. 그 한 줄만 읽어도 무슨 영상인지 알 수
+     있게 **단독으로 완결된 짧은 구절**로 써라(10~13자 권장 · {title_line_max}자 상한).
+   · title_segments[].text = 시간대별로 갈아 끼우는 **아랫줄 한 줄**이다. 줄바꿈을 넣지 마라
+     ({title_line_max}자 이내) — 윗줄은 엔진이 붙인다.
+   · **아랫줄은 그 구간에서 지금 벌어지는 일을 말한다.** 아직 안 나온 장면의 결말을 미리
+     쓰지 마라 — 뒤에 올 문구는 그 구간에 가서 쓴다(엔진은 빈 시간을 **직전 문구**로
+     잇는다. 다음 문구를 앞당겨 오지 않는다).
+   · 구간은 원본 절대초(from_anchor~to_anchor)이고 창끼리 겹치면 안 된다.
+     ⚠ **제목은 편 내내 반드시 떠 있어야 한다** — '중간에 제목을 없애는' 용도로는 쓰지 마라.
+   · 문구를 안 바꿀 거면 배열을 비워라(그러면 기본 제목이 처음부터 끝까지 나온다).
 5) tts — 이미 정해진 내레이션의 **목소리·속도만** 장면 톤에 맞게 바꾼다. 문구는 못 바꾼다.
-6) design — 이 편 전체에 걸리는 것. 제목 배경 박스·굵게 정도만.
+6) design — 이 편 전체에 걸리는 것. 제목 배경 박스 정도만.
+   ⚠ **제목을 굵게 하지 않는다.** `title_bold`·`title_bold2` 는 쓰지 마라 — 제목 폰트가
+     이미 굵어서 볼드로 그리면 글자가 뭉개진다(보내도 엔진이 버린다).
    ⚠ **제목은 기울이지 않는다.** `title_rotate` 는 쓰지 마라 — 보내도 엔진이 버린다.
      제목 기울기는 채널·편집실이 정하는 값이다. 내레이션 자막 기울기(tts_rotate)는 쓸 수 있다.
 
@@ -1257,8 +1265,9 @@ STYLE_COMPOSITION_PROMPT = """너는 한국어 쇼츠의 **연출 감독**이다
     {{"sticker": "목록의 id", "source_time_sec": 748.0, "duration_sec": 1.5,
       "x": 0.55, "y": 0.30, "w": 0.2, "layer": 0, "rotate": 0, "reason": "한 줄"}}
   ],
+  "title_fixed": "고정 윗줄",
   "title_segments": [
-    {{"text": "제목\\n둘째 줄", "from_anchor": 743.0, "to_anchor": 756.0}}
+    {{"text": "바뀌는 아랫줄", "from_anchor": 743.0, "to_anchor": 756.0}}
   ],
   "tts": [
     {{"source_time_sec": 743.0, "voice": "ko_male_low", "speed": "slow", "reason": "한 줄"}}
@@ -1276,7 +1285,9 @@ STYLE_COMPOSITION_PROMPT = """너는 한국어 쇼츠의 **연출 감독**이다
 - tts.speed: {speeds}
 - design.title_rotate: **쓸 수 없다**(보내면 그 키만 버려진다)
 - design.tts_rotate: -180~180
-- design.title_box(2)/title_box_color(2)/title_bold(2): 박스는 none|round|rect
+- design.title_bold(2): **쓸 수 없다**(보내면 그 키만 버려진다 — 글자가 뭉갠다)
+- design.title_box(2)/title_box_color(2): 박스는 none|round|rect
+- title_fixed · title_segments[].text: 각각 **한 줄** · {title_line_max}자 이내
 - 상한: 효과 텍스트 {max_texts}개 · 스티커 {max_images}개 · 자막 강조 {max_subs}개 · 제목 창 {max_titles}개
 
 [작품] {work_title}
@@ -2374,6 +2385,7 @@ class GeminiClient:
             speeds="/".join(_sc.STYLE_SPEEDS),
             text_y_lo=f"{float(text_y_range[0]):.2f}",
             text_y_hi=f"{float(text_y_range[1]):.2f}",
+            title_line_max=_sc.MAX_TITLE_LINE_CHARS,
             max_texts=(max_texts if max_texts is not None else _sc.MAX_TEXTS),
             max_images=_sc.MAX_IMAGES,
             max_subs=_sc.MAX_SUBTITLE_STYLES, max_titles=_sc.MAX_TITLE_SEGMENTS,

@@ -41,21 +41,29 @@ class _Clip:
 # 제목은 무조건 있어야 한다
 # ══════════════════════════════════════════════════════════════════════════
 def test_the_real_incident_gap_is_filled():
-    """혜미리예채파 2화 — 창 하나가 18.5s 에서 끝나고 51.0s 까지 제목이 없었다."""
+    """혜미리예채파 2화 — 창 하나가 18.5s 에서 끝나고 51.0s 까지 제목이 없었다.
+
+    ⚠ E21(8/25)에서 **메우는 내용이 바뀌었다** — 기본 제목이 아니라 **직전 제목**이
+    잇는다(기본 제목의 아랫줄은 결말 후킹이라 앞 구간에 붙으면 내용이 어긋난다).
+    빈 시간이 없다는 계약은 그대로다."""
     segs = [{"text": "AI 제목", "start_sec": 0.0, "end_sec": 18.5}]
     out, notes = sc.fill_title_gaps(segs, "기본 제목", 51.0)
-    assert [(s["start_sec"], s["end_sec"]) for s in out] == [(0.0, 18.5), (18.5, 51.0)]
-    assert out[1]["text"] == "기본 제목"
-    assert any("메움" in n for n in notes)          # 조용한 보정 금지
+    assert [(s["start_sec"], s["end_sec"]) for s in out] == [(0.0, 51.0)]
+    assert out[0]["text"] == "AI 제목"              # 기본 제목이 끼어들지 않는다
+    assert any("이어짐" in n for n in notes)        # 조용한 보정 금지
 
 
 def test_coverage_is_total_for_gaps_at_both_ends_and_in_between():
+    """앞머리는 첫 창을 당기고, 사이와 꼬리는 직전 창이 문다 — 0~끝이 빈틈없이 이어진다.
+
+    **다음 문구를 앞당겨 오지 않는다**(E21): 아직 화면에 안 나온 내용이 미리 새면
+    안 된다 — 사용자 지적("앞에는 바비큐 안 좋아하는 내용이라")이 이 규칙의 이유다."""
     segs = [{"text": "A", "start_sec": 5.0, "end_sec": 10.0},
             {"text": "B", "start_sec": 20.0, "end_sec": 25.0}]
     out, _ = sc.fill_title_gaps(segs, "기본", 30.0)
     spans = [(s["start_sec"], s["end_sec"]) for s in out]
-    assert spans == [(0.0, 5.0), (5.0, 10.0), (10.0, 20.0), (20.0, 25.0), (25.0, 30.0)]
-    assert [s["text"] for s in out] == ["기본", "A", "기본", "B", "기본"]
+    assert spans == [(0.0, 20.0), (20.0, 30.0)]
+    assert [s["text"] for s in out] == ["A", "B"]
 
 
 def test_a_fully_covered_plan_is_untouched():
@@ -66,20 +74,23 @@ def test_a_fully_covered_plan_is_untouched():
     assert out == segs and notes == []
 
 
-def test_a_tiny_gap_extends_the_neighbour_instead_of_flashing():
-    """0.2초짜리 기본 제목이 깜빡이면 구멍보다 나쁘다 — 창을 늘려 잇는다."""
+def test_a_tiny_gap_is_absorbed_without_a_note():
+    """0.2초짜리 틈은 직전 제목이 그대로 물고 지나간다 — 메모조차 남기지 않는다
+    (MIN_TITLE_GAP_SEC 은 E21 부터 '메모를 남길 만한 틈인가'의 기준이다)."""
     segs = [{"text": "A", "start_sec": 0.0, "end_sec": 10.0},
             {"text": "B", "start_sec": 10.2, "end_sec": 20.0}]
-    out, _ = sc.fill_title_gaps(segs, "기본", 20.1)
-    assert [(s["start_sec"], s["end_sec"]) for s in out] == [(0.0, 10.0), (10.0, 20.1)]
+    out, notes = sc.fill_title_gaps(segs, "기본", 20.1)
+    assert [(s["start_sec"], s["end_sec"]) for s in out] == [(0.0, 10.2), (10.2, 20.1)]
     assert [s["text"] for s in out] == ["A", "B"]     # 기본 제목이 끼어들지 않는다
+    assert notes == []
 
 
 def test_a_window_past_the_video_is_dropped_and_the_rest_still_covers():
     segs = [{"text": "A", "start_sec": 0.0, "end_sec": 10.0},
             {"text": "밖", "start_sec": 60.0, "end_sec": 70.0}]
     out, notes = sc.fill_title_gaps(segs, "기본", 40.0)
-    assert [(s["start_sec"], s["end_sec"]) for s in out] == [(0.0, 10.0), (10.0, 40.0)]
+    assert [(s["start_sec"], s["end_sec"]) for s in out] == [(0.0, 40.0)]
+    assert out[0]["text"] == "A"
     assert any("밖" in n for n in notes)
 
 
@@ -100,7 +111,7 @@ def test_placement_fills_gaps_when_a_base_title_is_given():
     clips = [_Clip(100.0, 130.0)]                    # 편집본 0~30s
     plan = [{"text": "AI 제목", "from_anchor": 100.0, "to_anchor": 110.0}]
     segs, _ = sc.title_segments_from_anchors(plan, clips, base_title="기본 제목")
-    assert [(s["start_sec"], s["end_sec"]) for s in segs] == [(0.0, 10.0), (10.0, 30.0)]
+    assert [(s["start_sec"], s["end_sec"]) for s in segs] == [(0.0, 30.0)]
     plain, _ = sc.title_segments_from_anchors(plan, clips)      # base 없으면 종전 그대로
     assert [(s["start_sec"], s["end_sec"]) for s in plain] == [(0.0, 10.0)]
 

@@ -40,6 +40,13 @@ MAX_IMAGES = 4
 MAX_SUBTITLE_STYLES = 10
 MAX_TITLE_SEGMENTS = 5
 
+# ── 제목 한 줄 글자수 (E21, 2026-08-25) ────────────────────────────────────
+# 스토리 단계의 `_enforce_title_line_limit(max_chars=20)` 과 같은 수치다. 렌더러는 제목을
+# 20자에서 접으므로(`split_text_smart(text, 20)`) 이보다 길면 한 줄이 두 줄이 되고, 제목
+# 블록이 3줄이 되면 글자가 0.85배로 작아진다 — **2줄 형식을 지키려면** 여기서 막아야 한다
+# (사용자 지시: "다른 쇼츠들처럼 두 줄 형식은 유지").
+MAX_TITLE_LINE_CHARS = 20
+
 # ── AI 에게 여는 자막 강조 키 ───────────────────────────────────────────────
 # v3 의 줄 스타일은 넷(size·y·color·rotate)이지만 AI 에게는 **강조 둘만** 연다.
 # 위치(y)·회전(rotate)은 자막 가독성을 직접 깨뜨리는 축이라 사람 전용으로 남긴다
@@ -62,7 +69,6 @@ SUBTITLE_SIZE_RANGE = (30.0, 140.0)
 STYLE_DESIGN_ALLOWED = (
     "tts_rotate",
     "title_box", "title_box2", "title_box_color", "title_box_color2",
-    "title_bold", "title_bold2",
 )
 TITLE_BOX_KINDS = ("none", "round", "rect")
 ROTATE_RANGE_DEG = 180.0
@@ -80,7 +86,21 @@ ROTATE_RANGE_DEG = 180.0
 #   테고, 그때마다 효과 텍스트·제목 창까지 통째로 날아간다. 그래서 '받되 버린다'.
 # ⚠ 사람·채널의 `--design-title-rotate` 는 그대로다(-180~180) — 닫는 것은 **AI 산출**
 #   뿐이고, 사람이 화면을 보고 정한 값은 사람 것이다(E17-1 에서 정한 규율 유지).
-STYLE_DESIGN_IGNORED = ("title_rotate",)
+# ── 제목 굵게도 AI 에게 **닫혀 있다** (E21, 2026-08-25) ─────────────────────
+# 사용자 지시: "제목은 굵게 하기 금지(볼드체 금지) — 애초에 굵은 폰트를 써서 볼드체로
+# 바꾸면 글씨가 뭉개져서 안 보임". 번들 제목 폰트(Jalnan)는 원래 극굵이라 획을 더 얹으면
+# 글자 속이 메워진다(렌더러 주석의 2026-08-21 bold.png 실측과 같은 관찰).
+# 닫는 방식은 title_rotate 와 같다 — **드롭+메모**(플랜 전체를 거절하면 효과 텍스트·제목
+# 창까지 같이 날아간다). 막는 것은 **AI 산출뿐**이고 채널·편집실의 `--design-title-bold(2)`
+# 는 그대로다(사람이 화면을 보고 정한 값은 사람 것 — E17-1 에서 정한 규율).
+STYLE_DESIGN_IGNORED = ("title_rotate", "title_bold", "title_bold2")
+
+# 닫힌 키마다 '누가 대신 정하는가'를 한 줄로 — 메모가 그 자리에서 길을 알려 준다.
+STYLE_DESIGN_IGNORED_WHY = {
+    "title_rotate": "제목 기울기는 채널·편집실이 정합니다",
+    "title_bold": "제목 굵게는 폰트가 이미 굵어 글자가 뭉갭니다 — 채널·편집실이 정합니다",
+    "title_bold2": "제목 굵게는 폰트가 이미 굵어 글자가 뭉갭니다 — 채널·편집실이 정합니다",
+}
 
 # ── TTS 라벨 ───────────────────────────────────────────────────────────────
 # 불변 계약(E11·E12)을 **한 곳에서** 가져온다 — 여기 문자열을 베끼면 tts.py 가 라벨을
@@ -274,7 +294,9 @@ def validate_plan(
       texts[]           — overrides_texts 가 기본값을 채운 완전한 dict (앵커 좌표 유지)
       images[]          — file 이 run_dir 상대 경로로 바뀐 v3 images
       subtitle_styles[] — {source_time_sec, style{size?,color?}}
-      title_segments[]  — {text, from_anchor, to_anchor} (편집본 변환은 배치 단계에서)
+      title_fixed       — 편 전체에서 안 바뀌는 **윗줄**(없으면 스토리 title_line1)
+      title_segments[]  — {text, from_anchor, to_anchor} — text 는 **아랫줄 한 줄뿐**
+                          (윗줄 결합·빈틈 잇기는 배치 단계에서)
       tts[]             — {source_time_sec, voice?, speed?}
       design{}          — CLI 단수 키 (파생은 design_overrides 가 한다)
 
@@ -290,7 +312,7 @@ def validate_plan(
         raise StylePlanError(f"알 수 없는 스키마: {schema!r} (기대: {SCHEMA})")
 
     known = {"schema", "texts", "subtitle_styles", "images", "title_segments",
-             "tts", "design", "notes", "sfx"}
+             "title_fixed", "tts", "design", "notes", "sfx"}
     unknown = [k for k in plan if k not in known]
     if unknown:
         raise StylePlanError(f"모르는 최상위 키 {unknown} — 계약은 {sorted(known - {'schema'})} 뿐입니다")
@@ -420,6 +442,17 @@ def validate_plan(
         text = str(sg.get("text") or "").strip()
         if not text:
             raise StylePlanError(f"title_segments[{i}]: text 가 비었습니다")
+        # 2줄 형식 고정(E21, 2026-08-25) — 창이 바꾸는 것은 **아랫줄 한 줄뿐**이고 윗줄은
+        # 편 전체에서 고정이다. 두 줄을 통째로 보내던 종전 산출은 여기서 걸린다(조용히
+        # 이어 붙이면 3줄 제목이 나간다).
+        if "\n" in text:
+            raise StylePlanError(
+                f"title_segments[{i}]: text 는 한 줄이어야 합니다 — 창은 아랫줄만 "
+                f"바꾸고 윗줄(title_fixed)은 편 전체에서 고정입니다")
+        if len(text) > MAX_TITLE_LINE_CHARS:
+            raise StylePlanError(
+                f"title_segments[{i}]: text 가 {len(text)}자입니다 — "
+                f"{MAX_TITLE_LINE_CHARS}자 이내여야 합니다(넘으면 줄이 접혀 3줄이 됩니다)")
         a = _num(sg.get("from_anchor"), f"title_segments[{i}]: from_anchor")
         b = _num(sg.get("to_anchor"), f"title_segments[{i}]: to_anchor")
         if a < 0 or b <= a:
@@ -428,6 +461,23 @@ def validate_plan(
         segs.append({"text": text, "from_anchor": a, "to_anchor": b})
     if segs:
         out["title_segments"] = segs
+
+    # ── 고정 윗줄 (제목 창과 한 벌) ───────────────────────────────────────
+    if plan.get("title_fixed") is not None:
+        fixed = str(plan["title_fixed"]).strip()
+        if not fixed:
+            raise StylePlanError("title_fixed 가 비었습니다 (안 쓸 거면 키를 빼세요)")
+        if "\n" in fixed:
+            raise StylePlanError("title_fixed 는 한 줄이어야 합니다 (제목 윗줄 하나)")
+        if len(fixed) > MAX_TITLE_LINE_CHARS:
+            raise StylePlanError(
+                f"title_fixed 가 {len(fixed)}자입니다 — {MAX_TITLE_LINE_CHARS}자 이내여야 "
+                f"합니다(넘으면 줄이 접혀 제목이 3줄이 됩니다)")
+        if segs:
+            out["title_fixed"] = fixed
+        else:
+            # 창이 없으면 붙일 자리가 없다 — 제목 전체를 갈아 끼우는 값이 아니다.
+            notes.append("title_fixed 는 제목 창과 같이 쓰는 값입니다 — 창이 없어 무시")
 
     # ── 내레이션 톤 ──────────────────────────────────────────────────────
     tts: list[dict[str, Any]] = []
@@ -471,7 +521,7 @@ def validate_plan(
             if k in STYLE_DESIGN_IGNORED:
                 # 받되 버린다(위 상수 주석) — 조용히는 아니고 건별로 남긴다.
                 notes.append(f"design.{k} 는 AI 에게 닫힌 키입니다 — 값 {v!r} 무시"
-                             f"(제목 기울기는 채널·편집실이 정합니다)")
+                             f"({STYLE_DESIGN_IGNORED_WHY.get(k, '사람이 정합니다')})")
                 continue
             if k == "tts_rotate":
                 deg = _num(v, f"design.{k}")
@@ -484,12 +534,8 @@ def validate_plan(
                     raise StylePlanError(
                         f"design.{k}: {v!r} — {'/'.join(TITLE_BOX_KINDS)} 중 하나여야 합니다")
                 norm_design[k] = str(v)
-            elif k in ("title_box_color", "title_box_color2"):
+            else:                                       # title_box_color, title_box_color2
                 norm_design[k] = str(v)
-            else:                                       # title_bold, title_bold2
-                if not isinstance(v, bool):
-                    raise StylePlanError(f"design.{k}: true/false 여야 합니다({v!r})")
-                norm_design[k] = v
         if norm_design:
             out["design"] = norm_design
 
@@ -527,19 +573,21 @@ def design_overrides(plan_design: dict[str, Any] | None,
     # ⚠ title_rotate 는 여기서 **한 번 더** 막는다 — validate_plan 이 이미 버리지만,
     #   E17-1 시절(±15° 허용)에 저장된 checkpoint_style.json 은 재검증 없이 그대로
     #   재적용된다(E15 재개 계약). 그 경로로 되살아나면 지시가 무력해진다.
-    if "title_rotate" in plan_design:
-        notes.append(f"design.title_rotate 는 AI 에게 닫힌 키입니다 — 값 "
-                     f"{plan_design['title_rotate']!r} 무시(옛 체크포인트 포함)")
+    for _closed in STYLE_DESIGN_IGNORED:
+        if _closed in plan_design:
+            notes.append(f"design.{_closed} 는 AI 에게 닫힌 키입니다 — 값 "
+                         f"{plan_design[_closed]!r} 무시(옛 체크포인트 포함)")
     if "tts_rotate" in plan_design and not _blocked("tts_rotate", "tts_rotate"):
         kwargs["tts_rotate"] = float(plan_design["tts_rotate"])
 
-    # 줄별 리스트 3종은 cli._build_design_config 와 **같은 조립**이다: 기본값에서 시작해
+    # 줄별 리스트 2종은 cli._build_design_config 와 **같은 조립**이다: 기본값에서 시작해
     # 지정한 줄만 치환한다(한 줄만 바꿔도 다른 줄은 그대로). 렌더러는 리스트만 읽는다.
+    # ⚠ `title_bolds` 는 여기 없다 — 굵게는 AI 에게 닫혔다(STYLE_DESIGN_IGNORED, E21-1).
+    #   채널이 `--design-title-bold` 로 준 값은 base_design 에 이미 있어 그대로 간다.
     for keys, field, default in (
         (("title_box", "title_box2"), "title_boxes", list(base_design.title_boxes)),
         (("title_box_color", "title_box_color2"), "title_box_colors",
          list(base_design.title_box_colors)),
-        (("title_bold", "title_bold2"), "title_bolds", list(base_design.title_bolds)),
     ):
         if not any(k in plan_design for k in keys):
             continue
@@ -553,15 +601,45 @@ def design_overrides(plan_design: dict[str, Any] | None,
     return kwargs, notes
 
 
-# 제목 창 사이의 빈 구간을 **기본 제목으로 메우는** 최소 길이 (E18, 2026-08-24).
-# 이보다 짧은 틈은 메우지 않고 **앞 창을 늘려** 잇는다 — 0.2초짜리 기본 제목이 깜빡이면
-# 구멍보다 더 나쁘다. 어느 쪽이든 결과는 같다: **빈 시간이 남지 않는다.**
+# 제목 창 사이의 빈 구간 처리 기준 (E18, 2026-08-24 → **E21 에서 규칙이 바뀌었다**).
+# E18 은 이보다 긴 틈을 '기본 제목'으로 메웠지만, E21 부터는 길이와 무관하게 **직전 창을
+# 늘려** 잇는다(아래 fill_title_gaps 주석). 상수는 '이보다 짧은 틈은 메모조차 남기지
+# 않는다'는 잡음 기준으로만 남는다 — 어느 쪽이든 결과는 같다: **빈 시간이 남지 않는다.**
 MIN_TITLE_GAP_SEC = 0.4
+
+
+def split_title_lines(title_text: str) -> tuple[str, str]:
+    """편 제목("윗줄\n아랫줄") → (윗줄, 아랫줄). 줄이 하나뿐이면 아랫줄은 빈 문자열.
+
+    스토리 단계가 만든 `title_line1\ntitle_line2` 가 정본이고(폴백은 topic 한 줄), 여기서는
+    **읽기만** 한다 — 제목 문구를 정하는 것은 스토리 단계다.
+    """
+    parts = [ln.strip() for ln in str(title_text or "").split("\n")]
+    parts = [p for p in parts if p]
+    if not parts:
+        return "", ""
+    return parts[0], " ".join(parts[1:])
+
+
+def join_title_lines(fixed: str, second: str) -> str:
+    """(윗줄, 아랫줄) → 렌더러가 받는 제목 문자열. 한쪽이 비면 한 줄짜리."""
+    fixed, second = str(fixed or "").strip(), str(second or "").strip()
+    if fixed and second:
+        return f"{fixed}\n{second}"
+    return fixed or second
 
 
 def fill_title_gaps(segs: list[dict[str, Any]], base_title: str,
                     total_sec: float) -> tuple[list[dict[str, Any]], list[str]]:
     """제목 창 목록의 빈 시간을 없앤다 → (창 목록, 메모). 순수(테스트 대상).
+
+    ⚠ **E21(2026-08-25)에서 메우는 내용이 바뀌었다** — 빈틈은 이제 `base_title` 이 아니라
+    **직전 창의 문구**가 잇는다. E18 은 틈마다 기본 제목을 끼웠는데, 기본 제목의 아랫줄은
+    스토리가 만든 **결말 후킹**이라 아직 그 내용이 아닌 앞 구간에 붙으면 어긋난다.
+    사용자 지적(유재석 캠프 편): "앞에는 바비큐 안 좋아하는 내용이라" — 그 편은 앞 구간이
+    '바비큐 안 좋아한다더니', 맛본 뒤가 '고기 앞에서 무너짐'이었다. **아직 안 나온 내용이
+    미리 새면 안 된다**가 규칙의 이유다. 직전 문구는 '방금까지 나온 내용'이라 항상 맞는다.
+    `base_title` 은 **AI 경로 표시**로 남는다(사람 경로는 안 주므로 종전 그대로).
 
     **사용자 지시(2026-08-24): "ai가 작업할 때는 제목은 무조건 있어야 해".**
 
@@ -607,30 +685,39 @@ def fill_title_gaps(segs: list[dict[str, Any]], base_title: str,
     cursor = 0.0
     for item in kept:
         gap = item["start_sec"] - cursor
-        if gap >= MIN_TITLE_GAP_SEC:
-            out.append({"text": base_title, "start_sec": cursor, "end_sec": item["start_sec"]})
-            notes.append(f"제목 빈 구간 {cursor:.2f}~{item['start_sec']:.2f}초 "
-                         f"→ 기본 제목으로 메움")
-        elif gap > 0:
-            item["start_sec"] = cursor          # 짧은 틈은 창을 당겨 잇는다(깜빡임 방지)
+        if gap > 0:
+            if out:
+                out[-1]["end_sec"] = item["start_sec"]   # 직전 제목이 그 자리를 잇는다
+                if gap >= MIN_TITLE_GAP_SEC:
+                    notes.append(f"제목 빈 구간 {cursor:.2f}~{item['start_sec']:.2f}초 "
+                                 f"→ 직전 제목이 이어짐")
+            else:
+                item["start_sec"] = 0.0                  # 맨 앞 틈은 첫 창을 당긴다
+                if gap >= MIN_TITLE_GAP_SEC:
+                    notes.append(f"제목 시작 전 {gap:.2f}초 → 첫 제목을 0초로 당김")
         out.append(item)
         cursor = item["end_sec"]
-    tail = total - cursor
-    if tail >= MIN_TITLE_GAP_SEC:
-        out.append({"text": base_title, "start_sec": cursor, "end_sec": total})
-        notes.append(f"제목 빈 구간 {cursor:.2f}~{total:.2f}초 → 기본 제목으로 메움")
-    elif tail > 0:
-        out[-1]["end_sec"] = total
+    if total > cursor:
+        if total - cursor >= MIN_TITLE_GAP_SEC:
+            notes.append(f"제목 빈 구간 {cursor:.2f}~{total:.2f}초 → 마지막 제목이 이어짐")
+        out[-1]["end_sec"] = total                       # 꼬리는 마지막 창이 문다
     return out, notes
 
 
 def title_segments_from_anchors(segs: list[dict[str, Any]], clips: list,
-                                *, base_title: str = "",
+                                *, base_title: str = "", fixed_line: str = "",
                                 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """앵커 쌍(from/to, 원본 절대초) → E8 `title.segments`(편집본 시간축).
 
-    `base_title` 을 주면 창 사이의 빈 시간을 그 제목으로 메운다(`fill_title_gaps`) —
+    `base_title` 을 주면 창 사이의 빈 시간을 없앤다(`fill_title_gaps`) —
     **AI 가 만든 창은 제목을 없애지 못한다**(2026-08-24 사용자 지시). 안 주면 종전대로다.
+
+    `fixed_line` 을 주면 창의 text 를 **아랫줄로 보고 그 위에 윗줄을 붙인다**(E21,
+    2026-08-25 사용자 지시: "다른 쇼츠들처럼 두 줄 형식은 유지하고 위에 큰 제목은 고정,
+    아랫줄만 바뀌게"). 모든 창의 첫 줄이 같아지므로 화면에서는 윗줄이 고정돼 보이고,
+    줄별 색·크기(`title_colors`·`title_sizes`)도 종전 그대로 적용된다.
+    ⚠ 이미 두 줄인 text(E21 이전 체크포인트)는 **그대로 둔다** — 재개는 플랜을 재검증
+      없이 재적용하므로(E15 계약) 윗줄을 또 붙이면 3줄 제목이 나간다.
 
     변환은 자막·이미지 앵커와 **같은 규칙**(담은 클립의 편집 오프셋 + 클립 내 상대시각)을
     쓴다 — 배치 함수(place_anchored_images)를 그대로 재사용해 수식을 베끼지 않는다.
@@ -650,7 +737,9 @@ def title_segments_from_anchors(segs: list[dict[str, Any]], clips: list,
               "duration_sec": max(0.001, s["to_anchor"] - s["from_anchor"]),
               "text": s["text"]} for s in segs]
     placed, dropped = place_anchored_images(probe, clips)
-    out = [{"text": p["text"], "start_sec": p["start_sec"], "end_sec": p["end_sec"]}
+    out = [{"text": (p["text"] if "\n" in p["text"]
+                     else join_title_lines(fixed_line, p["text"])),
+            "start_sec": p["start_sec"], "end_sec": p["end_sec"]}
            for p in placed]
     out.sort(key=lambda x: (x["start_sec"], x["end_sec"]))
     # 겹침은 E8 계약상 거절이다(제목은 한 벌 자리라 포개진다). AI 산출이 겹치면 뒤엣것을

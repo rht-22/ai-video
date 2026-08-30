@@ -286,3 +286,32 @@ def test_pairs_without_style_plan_is_empty():
         out = Path(tmp) / "out"; out.mkdir()
         pairs = build_ko_ja_pairs(backup, out, {"segments": [], "tts_cues": []})
         assert pairs["style_texts"] == []
+
+
+def test_fixed_top_line_is_translated_too():
+    """고정 윗줄(title_fixed, 2026-08-25)이 목록에서 빠지면 JP 편에 한국어 윗줄이
+    그대로 번인된다 — 목록의 **0번이 윗줄**이고 그 뒤가 시간대별 아랫줄이다."""
+    plan = {"schema": "style_plan/v1",
+            "title_fixed": "고정 윗줄",
+            "title_segments": [{"text": "아랫줄A", "from_anchor": 100.0, "to_anchor": 110.0},
+                               {"text": "아랫줄B", "from_anchor": 150.0, "to_anchor": 160.0}]}
+    _, titles = style_plan_strings(plan)
+    assert titles == ["고정 윗줄", "아랫줄A", "아랫줄B"]
+
+    tr = {"style_titles": [{"index": 0, "ja": "固定"}, {"index": 1, "ja": "下段A"},
+                           {"index": 2, "ja": "下段B"}]}
+    out = apply_style_translation(plan, tr)
+    assert out["title_fixed"] == "固定"
+    assert [sg["text"] for sg in out["title_segments"]] == ["下段A", "下段B"]
+    # 구간은 연출 의도라 불변
+    assert out["title_segments"][0]["from_anchor"] == 100.0
+
+
+def test_plan_without_fixed_line_keeps_the_old_alignment():
+    """윗줄이 없는 편(구 체크포인트)은 목록이 종전과 같아야 한다 — 1:1 정렬이 밀리면
+    다른 문구가 다른 자리에 박힌다."""
+    plan = {"schema": "style_plan/v1",
+            "title_segments": [{"text": "아랫줄", "from_anchor": 100.0, "to_anchor": 110.0}]}
+    assert style_plan_strings(plan)[1] == ["아랫줄"]
+    out = apply_style_translation(plan, {"style_titles": [{"index": 0, "ja": "下段"}]})
+    assert out["title_segments"][0]["text"] == "下段" and "title_fixed" not in out

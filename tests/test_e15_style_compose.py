@@ -44,6 +44,21 @@ def _valid(plan, tmp_path, manifest=None, app_root=None):
                             app_root=app_root or tmp_path, run_dir=tmp_path)
 
 
+def _render_prompt(prompt: str) -> str:
+    """STYLE_COMPOSITION_PROMPT 를 더미 값으로 채워 완성된 문장을 본다.
+
+    포맷 인자가 늘면 **여기만** 고친다(compose_style 의 .format 과 같은 키여야 한다 —
+    빠뜨리면 KeyError 로 여기서 먼저 걸린다).
+    """
+    return prompt.format(
+        fonts="", sub_lo="", sub_hi="", voices="", speeds="",
+        text_y_lo="0.34", text_y_hi="0.66",
+        title_line_max=sc.MAX_TITLE_LINE_CHARS,
+        max_texts=0, max_images=0, max_subs=0, max_titles=0,
+        work_title="", title_text="",
+        timeline_block="", transcript_block="", cues_block="", stickers_block="")
+
+
 def _design(*extra):
     p = build_parser()
     args = p.parse_args(["create_shorts", "--title", "T", "--video", "x.mp4",
@@ -273,12 +288,7 @@ def test_prompt_forbids_title_rotation_and_names_the_band_y_range():
     from app.modules.gemini_client import STYLE_COMPOSITION_PROMPT as P
 
     assert "제목은 기울이지 않는다" in P
-    filled = P.format(
-        fonts="", sub_lo="", sub_hi="", voices="", speeds="",
-        text_y_lo="0.34", text_y_hi="0.66",
-        max_texts=0, max_images=0, max_subs=0, max_titles=0,
-        work_title="", title_text="",
-        timeline_block="", transcript_block="", cues_block="", stickers_block="")
+    filled = _render_prompt(P)
     assert "0.34~0.66" in filled                 # 하드코딩 0.15~0.35 가 아니라 계산값
     assert "0.15~0.35" not in filled
 
@@ -541,3 +551,109 @@ def test_ai_plan_still_restricted_to_bundled_fonts():
     """
     from app.modules.gemini_client import STYLE_COMPOSITION_PROMPT
     assert "ArialUnicode" not in STYLE_COMPOSITION_PROMPT
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 제목 굵게 금지 · 두 줄 형식 고정 (E21, 2026-08-25 사용자 지시)
+# ══════════════════════════════════════════════════════════════════════════
+def test_ai_cannot_bold_the_title(tmp_path):
+    """"제목은 굵게 하기 금지 — 굵은 폰트에 볼드를 얹으면 글자가 뭉개진다."
+
+    회전과 **같은 방식**으로 닫는다(드롭+메모) — 플랜 전체를 거절하면 효과 텍스트·제목
+    창까지 같이 날아간다. 사람·채널 값은 그대로다.
+    """
+    for key in ("title_bold", "title_bold2"):
+        assert key not in sc.STYLE_DESIGN_ALLOWED
+        assert key in sc.STYLE_DESIGN_IGNORED
+        out, notes = _valid(_plan(design={key: True, "title_box": "round"}), tmp_path)
+        assert key not in out.get("design", {})          # 버려진다
+        assert out["design"]["title_box"] == "round"     # 나머지는 산다
+        assert any(key in n and "굵게" in n for n in notes)   # 조용한 드롭 금지
+
+
+def test_old_checkpoint_cannot_bring_bold_back(tmp_path):
+    """옛 체크포인트는 재검증 없이 재적용된다(E15 재개 계약) — 조립에서 한 번 더 막는다."""
+    kwargs, notes = sc.design_overrides({"title_bold": True, "title_box": "round"},
+                                        set(), DesignConfig())
+    assert "title_bolds" not in kwargs
+    assert kwargs["title_boxes"][0] == "round"
+    assert any("title_bold" in n for n in notes)
+
+
+def test_channel_can_still_bold_the_title():
+    """막은 것은 AI 뿐이다 — 사람이 보고 정한 값은 사람 것이다(E17-1 규율 유지)."""
+    assert _build_design_config(_design("--design-title-bold")).title_bolds[0] is True
+
+
+def test_title_window_text_is_the_second_line_only(tmp_path):
+    """창은 아랫줄만 바꾼다 — 두 줄을 통째로 보내던 종전 산출은 여기서 걸린다."""
+    ok = _plan(title_segments=[{"text": "아랫줄", "from_anchor": 105.0, "to_anchor": 110.0}])
+    assert _valid(ok, tmp_path)[0]["title_segments"][0]["text"] == "아랫줄"
+
+    with pytest.raises(sc.StylePlanError) as e:
+        _valid(_plan(title_segments=[{"text": "윗줄\n아랫줄",
+                                      "from_anchor": 105.0, "to_anchor": 110.0}]), tmp_path)
+    assert "한 줄" in str(e.value)
+
+    with pytest.raises(sc.StylePlanError):        # 20자 초과 = 줄이 접혀 3줄이 된다
+        _valid(_plan(title_segments=[{"text": "가" * (sc.MAX_TITLE_LINE_CHARS + 1),
+                                      "from_anchor": 105.0, "to_anchor": 110.0}]), tmp_path)
+
+
+def test_title_fixed_is_one_short_line_and_needs_windows(tmp_path):
+    p = _plan(title_fixed="고정 윗줄",
+              title_segments=[{"text": "아랫줄", "from_anchor": 105.0, "to_anchor": 110.0}])
+    assert _valid(p, tmp_path)[0]["title_fixed"] == "고정 윗줄"
+
+    out, notes = _valid(_plan(title_fixed="고정 윗줄"), tmp_path)     # 창이 없으면 무의미
+    assert "title_fixed" not in out and any("창이 없어" in n for n in notes)
+
+    with pytest.raises(sc.StylePlanError):
+        _valid(_plan(title_fixed="가" * (sc.MAX_TITLE_LINE_CHARS + 1),
+                     title_segments=[{"text": "아", "from_anchor": 105.0,
+                                      "to_anchor": 110.0}]), tmp_path)
+
+
+def test_the_fixed_line_is_repeated_in_every_window():
+    """모든 구간의 **첫 줄이 같아야** 한다 — 그게 '두 줄 형식 유지'의 실체다."""
+    segs, _ = sc.title_segments_from_anchors(
+        [{"text": "아랫줄A", "from_anchor": 105.0, "to_anchor": 110.0},
+         {"text": "아랫줄B", "from_anchor": 205.0, "to_anchor": 208.0}],
+        _clips(), base_title="기본 윗줄\n기본 아랫줄", fixed_line="고정 윗줄")
+    assert {sg["text"].split("\n")[0] for sg in segs} == {"고정 윗줄"}
+    assert [sg["text"].split("\n")[1] for sg in segs] == ["아랫줄A", "아랫줄B"]
+    # 빈 시간 없음 + 다음 문구가 미리 새지 않음(앞 구간은 계속 아랫줄A)
+    assert segs[0]["start_sec"] == 0.0 and segs[0]["end_sec"] == pytest.approx(25.0)
+    assert segs[-1]["end_sec"] == pytest.approx(30.0)
+
+
+def test_the_second_line_never_leaks_the_next_scene():
+    """사용자 지적("앞에는 바비큐 안 좋아하는 내용이라") — 뒤 문구를 앞당겨 오지 않는다."""
+    segs, _ = sc.title_segments_from_anchors(
+        [{"text": "안 좋아한다더니", "from_anchor": 100.0, "to_anchor": 105.0},
+         {"text": "고기 앞에서 무너짐", "from_anchor": 205.0, "to_anchor": 210.0}],
+        _clips(), base_title="기본\n제목", fixed_line="캠프 첫날 바비큐")
+    at_2s = [sg for sg in segs if sg["start_sec"] <= 2.0 < sg["end_sec"]][0]
+    assert at_2s["text"] == "캠프 첫날 바비큐\n안 좋아한다더니"
+    assert "무너짐" not in at_2s["text"]
+
+
+def test_pipeline_passes_the_fixed_line():
+    """파이프라인이 fixed_line 을 안 넘기면 윗줄 고정이 화면에 반영되지 않는다."""
+    import inspect
+    from app import pipeline
+    src = inspect.getsource(pipeline.run_pipeline)
+    block = src.split("[style] AI 연출 구성 (E15", 1)[1].split("[13/15] 리소스 생성", 1)[0]
+    assert "fixed_line=_fixed_line" in block
+    assert "_stylemod.split_title_lines(title_text)" in block
+    assert 'get("title_fixed")' in block
+
+
+def test_prompt_states_the_two_line_title_contract():
+    """검증기만 바꾸면 모델이 매 편 거절당하는 값을 계속 낸다(E17-1 에서 배운 것)."""
+    from app.modules.gemini_client import STYLE_COMPOSITION_PROMPT as P
+    rendered = _render_prompt(P)
+    assert "title_fixed" in rendered
+    assert "제목을 굵게 하지 않는다" in rendered
+    assert "직전 문구" in rendered                  # 빈틈 규칙을 모델도 알아야 한다
+    assert str(sc.MAX_TITLE_LINE_CHARS) in rendered

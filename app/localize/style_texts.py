@@ -40,10 +40,18 @@ def load_json_or_none(path: Path):
 
 
 def style_plan_strings(plan: dict | None) -> tuple[list[str], list[str]]:
-    """style_plan/v1 → (효과 텍스트 문구, 시간대별 제목 문구). 순수(테스트 대상)."""
+    """style_plan/v1 → (효과 텍스트 문구, 제목 문구). 순수(테스트 대상).
+
+    ⚠ 제목 목록은 **고정 윗줄(`title_fixed`)이 있으면 그것이 0번**이고 그 뒤가 시간대별
+    아랫줄이다(2026-08-25 계약 — 창은 아랫줄만 바꾸고 윗줄은 편 전체 고정). 윗줄을
+    빼면 JP 재렌더에서 한국어 윗줄이 그대로 번인된다. 인덱스가 좌표이므로 이 순서는
+    `apply_style_translation` 의 되돌리기와 **한 벌**이다.
+    """
     p = plan or {}
-    return ([str(t.get("text", "")) for t in (p.get("texts") or [])],
-            [str(sg.get("text", "")) for sg in (p.get("title_segments") or [])])
+    fixed = str(p.get("title_fixed") or "").strip()
+    titles = ([fixed] if fixed else []) + [
+        str(sg.get("text", "")) for sg in (p.get("title_segments") or [])]
+    return ([str(t.get("text", "")) for t in (p.get("texts") or [])], titles)
 
 
 def editor_text_strings(ov: dict | None) -> list[str]:
@@ -85,8 +93,12 @@ def apply_style_translation(plan: dict, tr: dict, font: str | None = None) -> di
                         for i, t in enumerate(out["texts"])]
     if titles_ko:
         ja = ja_by_index(tr.get("style_titles"), len(titles_ko), "style_titles")
-        out["title_segments"] = [{**sg, "text": ja[i]}
-                                 for i, sg in enumerate(out["title_segments"])]
+        # style_plan_strings 와 **같은 순서**로 되돌린다 — 고정 윗줄이 있으면 0번이 그것.
+        if str(out.get("title_fixed") or "").strip():
+            out["title_fixed"], ja = ja[0], ja[1:]
+        if out.get("title_segments"):
+            out["title_segments"] = [{**sg, "text": ja[i]}
+                                     for i, sg in enumerate(out["title_segments"])]
     return out
 
 

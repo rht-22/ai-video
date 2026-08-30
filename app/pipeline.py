@@ -238,13 +238,21 @@ def _dedup_storyline_clips(
             msgs.append(f"{clip.role}({clip.start_sec:.1f}~{clip.end_sec:.1f}s) 전체 중복 → 제거")
             continue
         new_start, new_end = max(pieces, key=lambda p: p[1] - p[0])
-        if new_end - new_start < min_keep_sec:
+        trimmed = (new_start, new_end) != (clip.start_sec, clip.end_sec)
+        # min_keep_sec 는 **겹침을 잘라내고 남은 부스러기**를 버리는 규칙이다 —
+        # 0.3s 짜리 조각이 화면에 한 번 번쩍하면 글리치로 보이기 때문. 그런데 판정이
+        # trim 여부보다 **먼저** 오는 바람에, 겹침이 하나도 없어 원본 그대로인 clip 도
+        # 짧기만 하면 부스러기 취급을 받았다. 그건 '자투리'가 아니라 **의도된 선택**이다
+        # (2026-08-25 실측: 스토리 단계 1327 clip 중 겹침 없이 1.5s 미만은 3건뿐이고,
+        #  무음컷을 지난 최종본에는 1.5s 미만 클립이 111개 이미 발행돼 있다 — 짧다는 것
+        #  자체는 결함이 아니다). 대사 한 줄 단위 편집(≈1s 조각)의 선행 조건이기도 하다.
+        if trimmed and new_end - new_start < min_keep_sec:
             msgs.append(
                 f"{clip.role}({clip.start_sec:.1f}~{clip.end_sec:.1f}s) 잔여 "
                 f"{new_end - new_start:.1f}s < {min_keep_sec}s → 제거"
             )
             continue
-        if (new_start, new_end) != (clip.start_sec, clip.end_sec):
+        if trimmed:
             msgs.append(
                 f"{clip.role} {clip.start_sec:.1f}~{clip.end_sec:.1f}s → "
                 f"{new_start:.1f}~{new_end:.1f}s (겹침 제거)"
@@ -4536,12 +4544,18 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 print("  [style] 이미지는 편집실이 보낸 것이 이깁니다 — AI 스티커 무시")
 
             # ── 4) 시간대별 제목 (편집실 title.segments 가 이긴다) ─────────
+            # base_title: 창이 못 덮은 시간을 없앤다 — **AI 가 만든 창은 제목을 없애지
+            #   못한다**(2026-08-24 지시). 빈틈은 직전 제목이 잇는다(E21 교정).
+            # fixed_line: 창의 text 는 **아랫줄**이고 윗줄은 편 전체 고정이다(E21 지시).
+            #   AI 가 낸 title_fixed, 없으면 스토리 title_line1.
+            # ⚠ 편집실 title.segments 는 종전 계약 그대로다(사람이 보낸 text 가 곧 화면).
             if _style_plan.get("title_segments") and not _title_segments:
+                _base_line1, _ = _stylemod.split_title_lines(title_text)
+                _fixed_line = str(_style_plan.get("title_fixed") or _base_line1).strip()
                 try:
-                    # base_title 을 주면 창이 못 덮은 시간을 기본 제목으로 메운다 —
-                    # **AI 가 만든 창은 제목을 없애지 못한다**(2026-08-24 사용자 지시).
                     _segs, _seg_drop = _stylemod.title_segments_from_anchors(
-                        _style_plan["title_segments"], clips, base_title=title_text)
+                        _style_plan["title_segments"], clips,
+                        base_title=title_text, fixed_line=_fixed_line)
                     for _o in _seg_drop:
                         if _o.get("note"):
                             print(f"  [style] {_o.get('why', '')}")
@@ -4550,8 +4564,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                               f"{str(_o.get('text', ''))[:20]!r}")
                     if _segs:
                         _title_segments = _segs
-                        print(f"  [style] 시간대별 제목 {len(_segs)}개 창 "
-                              f"— 빈 시간은 기본 제목으로 채웁니다")
+                        print(f"  [style] 시간대별 제목 {len(_segs)}개 창 — 윗줄 고정 "
+                              f"{_fixed_line[:20]!r} · 아랫줄만 교체(빈 시간 없음)")
                 except EditOverrideError as _e:
                     print(f"  [style] 제목 창이 계약 위반 → 제목은 종전대로: {_e}")
             elif _style_plan.get("title_segments"):
@@ -4572,6 +4586,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             "images": len((_style_plan or {}).get("images") or []),
             "subtitle_styles": len((_style_plan or {}).get("subtitle_styles") or []),
             "title_segments": len((_style_plan or {}).get("title_segments") or []),
+            "title_fixed": (_style_plan or {}).get("title_fixed"),
             "tts_tone": len((_style_plan or {}).get("tts") or []),
             "design": sorted((_style_plan or {}).get("design") or {}),
             "notes": _style_notes,

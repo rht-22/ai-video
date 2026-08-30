@@ -167,3 +167,39 @@ def test_preview_does_not_shield_a_third_duplicate():
         ("payoff", 90.0, 110.0),
     ]
     assert index_map == {0: 0, 1: 1}
+
+
+# ── 2026-08-25: 짧은 clip 은 '잘린 것'일 때만 부스러기다 ────────────────────────
+# min_keep_sec 판정이 trim 여부보다 먼저 와서, 겹침이 전혀 없는 짧은 clip 까지
+# 지워지고 있었다. 실물 렌더에서 1.04s 훅("기억상실입니다")이 통째로 사라져 발견.
+# 대사 한 줄 단위(≈1s) 편집의 선행 조건이라 규칙의 적용 범위를 좁힌다.
+
+def test_짧아도_겹침없으면_살린다():
+    clips = [_clip("hook", 62.1, 64.1), _clip("build", 64.1, 65.14, cand=1)]
+    kept, index_map, msg = _dedup_storyline_clips(clips)
+    assert len(kept) == 2, f"겹침 없는 1.04s clip 이 지워졌다: {msg}"
+    assert kept[1].start_sec == 64.1 and kept[1].end_sec == 65.14
+    assert index_map == {0: 0, 1: 1}
+
+
+def test_겹쳐서_잘린_부스러기는_계속_버린다():
+    # 앞 clip 이 10~20 을 쓰고, 뒤 clip 은 19.2~20.5 → 잔여 0.5s (부스러기).
+    # 진부분집합이 아니라 _is_intended_preview(선공개 예외)에 걸리지 않는다.
+    clips = [_clip("hook", 10.0, 20.0), _clip("build", 19.2, 20.5, cand=1)]
+    kept, _, msg = _dedup_storyline_clips(clips)
+    assert len(kept) == 1, f"부스러기가 살아남았다: {msg}"
+    assert "잔여" in msg and "제거" in msg
+
+
+def test_겹쳐서_잘려도_충분히_길면_남는다():
+    clips = [_clip("hook", 10.0, 20.0), _clip("build", 15.0, 30.0, cand=1)]
+    kept, _, msg = _dedup_storyline_clips(clips)
+    assert len(kept) == 2
+    assert kept[1].start_sec == 20.0 and kept[1].end_sec == 30.0
+    assert "겹침 제거" in msg
+
+
+def test_전체중복은_그대로_제거():
+    clips = [_clip("hook", 10.0, 20.0), _clip("build", 12.0, 18.0, cand=1)]
+    kept, _, msg = _dedup_storyline_clips(clips)
+    assert len(kept) == 1, f"완전 포함된 뒤 clip 이 남았다: {msg}"
