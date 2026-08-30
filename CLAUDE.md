@@ -1833,3 +1833,28 @@ meaning/span 은 내부 표현, v3 는 additive 만). **"영상을 보는" 마�
   데이터 쌓인 뒤).
 - 회귀 가드: `tests/test_v3_stage3.py`(21건 — 검증·예산·슬롯·조립·자막·좌표·
   결정성·골든 접점). 전체 1568 통과.
+
+## V3-M4·M5·M6 + 적대 리뷰 (2026-08-31)
+
+M4 `app/v3/stage4.py`(draft+Stage4 스타일)·`finalize.py`(렌더 어댑터+validate 확장),
+M5 `app/v3/overrides.py`(edit_overrides C4 — 스냅 정착·cue 신원 승계) + ves 어댑터
+v3 분기(이중 게이트 off 출고), M6 `app/v3/variants.py`(훅 변형)·`feedback.py`+
+`scripts/feedback_report.py`(youtube_studio 미러 조인). 발주서 3부는
+ai-premiere-pro `orders/v3-m4~m6-*.md`.
+
+- **2-pass 실측(포핸즈)**: draft 480p 19.6s/4.4MB(최종 4.4s/24MB 대비 — 멈춤 ②
+  기준 50% 미만이나 시간은 4.5×: draft 는 스타일 재료로만 정당) · style 1발 통과
+  (프리셋 diff 0 — 검정 밴드 위 제목이라 화면 무관 판단) · 최종 1080×1920 60.3s ·
+  validate hard_fail 없음 · 프레임 QC(글리프 항목 포함) 0건.
+- **폰트 이원화**(스모크 두부 실측 2건): drawtext=파일 경로 · ASS=패밀리명.
+  렌더는 진입점 dotenv 로드로 FFMPEG_BIN(ffmpeg 7) 결정 — 8.x 는
+  -filter_complex_script 거부.
+- **적대 리뷰**(find 4관점→반박 검증 워크플로): 확정 17건 전부 수정(6e2e959) —
+  핵심: renderer `muted_windows` additive(기본 None=v1 바이트 동일), M4 캐시
+  상류 지문 사이드카, to_edited_sec 용도별 반개구간, 슬롯 소스 갭·과잉 뮤트,
+  cue 창 물리 트림. 반박 기각 5건 무변경.
+- **M6 조인 실측**: 발행 298편 — 전체 69.1% · matchable 74.1%. **95% 미달의
+  실체는 조인 로직이 아니라 발행 데이터**: absent 42(깔때기 미유입 — 비공개
+  유지·노출 0)·window_miss 30(private→공개 전환 지연)·미러 8일 지연(perf_sync
+  점검 신호). per-video 식별 스탬프는 발행 플로우 변경 — 사용자 결정 대기
+  (발주서 멈춤 1). 훅 변형 N=2 실측: 본편 불변·훅만 교체·1발 통과.
