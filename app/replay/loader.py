@@ -84,6 +84,27 @@ def _record_from_snapshot(path: Path, bundles_dir: Path) -> dict:
     return rec
 
 
+def _v3_story_clips(cs: dict) -> list[dict]:
+    """v3 checkpoint_story({fingerprint, story:{beats}}) → 원안 구간 목록(additive).
+
+    v1 의 "원안(checkpoint_story.clips) → 최종(edit_plan.timeline)" 대응이 v3 에선
+    "비트 편성 → 클립"이다 — 비트를 원안으로 읽어야 §3 분포 집계(usable)가 v3 편에도
+    붙는다("집계 0" 리뷰 재현 수정). 시각 문자열은 초로 환산해 clip_span 이 읽는
+    start_sec/end_sec 로 싣는다."""
+    beats = ((cs.get("story") or {}).get("beats")) or []
+    out: list[dict] = []
+    for b in beats:
+        tm = b.get("time") or {}
+        try:
+            from app.v3.schemas import parse_ts
+            s, e = parse_ts(tm.get("start")), parse_ts(tm.get("end"))
+        except (ValueError, TypeError):
+            continue
+        out.append({"start_sec": round(s, 3), "end_sec": round(e, 3),
+                    "role": b.get("role"), "span_ids": b.get("span_ids") or []})
+    return out
+
+
 def _record_from_jobdir(d: Path) -> dict | None:
     ep_path = d / "edit_plan.json"
     if not ep_path.exists():
@@ -108,7 +129,7 @@ def _record_from_jobdir(d: Path) -> dict | None:
         "run_id": rl.get("job_id") or d.name,
         "created_at": "",
         "git_sha": (rl.get("provenance") or {}).get("git_sha") or "",
-        "story_clips": cs.get("clips") or [],
+        "story_clips": cs.get("clips") or _v3_story_clips(cs),
         "raw_response": cs.get("raw_response") or {},
         "timeline": (ep.get("timeline") or []) if isinstance(ep, dict) else [],
         "config": ((rl.get("provenance") or {}).get("config") or {}).get("app") or {},

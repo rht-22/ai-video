@@ -151,7 +151,16 @@ def _lines_for_span(words: list[dict], t_in: float, t_out: float) -> list[dict]:
         limit = lines[i + 1]["start"] if i + 1 < len(lines) else t_out
         if ln["end"] - ln["start"] < SUB_MIN_SEC:
             ln["end"] = min(max(limit, ln["end"]), ln["start"] + SUB_MIN_SEC)
-    return lines
+    # 그래도 미달인 꼬리(span 끝이 상한이라 못 늘린 "같아?"류 실측 3건)는 **이전
+    # 라인에 병합**한다(기획 §6 "미달 병합" — 12자 규칙보다 노출 규칙이 우선).
+    merged: list[dict] = []
+    for ln in lines:
+        if merged and ln["end"] - ln["start"] < SUB_MIN_SEC - 1e-9:
+            merged[-1]["text"] = f"{merged[-1]['text']} {ln['text']}"
+            merged[-1]["end"] = max(merged[-1]["end"], ln["end"])
+        else:
+            merged.append(ln)
+    return merged
 
 
 def word_subtitles(timeline: list[dict], span_index: dict[str, dict],

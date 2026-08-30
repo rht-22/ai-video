@@ -301,6 +301,16 @@ def test_subtitle_line_rules():
         assert a["end"] - a["start"] >= 0.35 - 1e-9
 
 
+def test_subtitle_short_tail_merges_back():
+    # span 끝에 낀 0.35s 미달 꼬리("같아?" 실측 3건)는 이전 라인에 병합된다(§6)
+    words = [{"t0": 0.5, "t1": 2.0, "text": "나 때문인 것"},
+             {"t0": 2.0, "t1": 2.2, "text": "같아?"}]
+    lines = assemble._lines_for_span(words, 0.0, 2.2)
+    assert len(lines) == 1
+    assert lines[0]["text"] == "나 때문인 것 같아?"
+    assert lines[0]["end"] == pytest.approx(2.2)
+
+
 def test_subtitles_skip_muted_and_use_edited_coords():
     grid2 = _mk_grid([(0, 2, True, "잡담"), (2, 4, True, "중요한 말")])
     grid2["words"] = [{"t0": 0.2, "t1": 1.0, "text": "잡담"},

@@ -566,16 +566,22 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
     from app.modules.tts import (
         active_backend,
         elevenlabs_disabled,
-        get_audio_duration,
-        synthesize_tts,
+        synthesize_tts_with_fit,
     )
     tts_cue_files = []
     for ci, cue in enumerate(cues):
         tts_path = output_dir / f"tts_cue_{ci}.mp3"
         try:
-            synthesize_tts(cue["text"], tts_path,
-                           voice=cue["voice"], speed=cue["speed"])
-            cue["fit_actual_sec"] = round(get_audio_duration(tts_path), 3)
+            # v1 과 같은 fit 합성 — 실측이 창(duration_sec)을 넘으면 다음 대사를
+            # 밟는다(스모크 실측: 5.198s > 창 4.133s). 배속 재시도는 tts.py 몫.
+            # 창 초과 시 축약은 v1 과 같이 Flash(shorten_text)에 맡긴다 —
+            # shorten_fn 없이는 '단순 절단'이 문장을 중간에서 잘라먹는다(스모크 실측)
+            shorten = getattr(get_gemini(), "shorten_text", None)
+            final_text, actual = synthesize_tts_with_fit(
+                cue["text"], tts_path, target_sec=float(cue["duration_sec"]),
+                voice=cue["voice"], speed=cue["speed"], shorten_fn=shorten)
+            cue["text"] = final_text
+            cue["fit_actual_sec"] = round(actual, 3)
         except Exception as e:  # noqa: BLE001 — 합성 실패가 계획 산출을 막지 않는다
             log(f"  [v3/resources] ⚠ cue {ci} 합성 실패 — 계획만 유지: {e}")
             cue["fit_actual_sec"] = None
