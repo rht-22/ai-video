@@ -28,6 +28,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--episode", type=int, default=None)
     p.add_argument("--outdir", default="outputs")
     p.add_argument("--job-id", default=None, help="기존 job 재개")
+    p.add_argument("--edit-overrides", default=None,
+                   help="편집실 수정 JSON(edit_overrides/v1~v3) — --job-id 재개 필수. "
+                        "clip 경계는 최근접 grid span 경계로 정착(오차 run_log 기록)")
     p.add_argument("--from-step", default=None,
                    choices=["grid", "seq_analyze", "chunk_split", "chunk_analyze",
                             "story", "resources",
@@ -63,6 +66,9 @@ def main(argv: list[str] | None = None) -> int:
     srt = Path(args.srt) if args.srt else None
     if srt and not srt.is_file():
         raise SystemExit(f"자막 파일 없음: {srt}")
+    if args.edit_overrides and not args.job_id:
+        raise SystemExit("--edit-overrides 는 --job-id 재개와 함께여야 한다 "
+                         "(기존 산출 위에 정착시키는 수정이다 — C4)")
     # 비싼 단계(전사·프록시) **앞**에서 자격 검사 — E11 규율
     needs_gemini = not (args.skip_seq_analyze and args.skip_research)
     if needs_gemini and not os.environ.get("GEMINI_API_KEY"):
@@ -77,6 +83,8 @@ def main(argv: list[str] | None = None) -> int:
                  skip_seq_analyze=args.skip_seq_analyze,
                  skip_stage2=args.skip_stage2, skip_stage3=args.skip_stage3,
                  skip_stage4=args.skip_stage4,
+                 edit_overrides_path=(Path(args.edit_overrides)
+                                      if args.edit_overrides else None),
                  story_target_sec=args.story_target_sec,
                  story_max_sec=args.story_max_sec, max_chunks=args.max_chunks,
                  scene_threshold=args.scene_threshold)

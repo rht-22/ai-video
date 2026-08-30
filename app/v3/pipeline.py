@@ -98,7 +98,7 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
            job_id: str | None = None, from_step: str | None = None,
            skip_research: bool = False, skip_seq_analyze: bool = False,
            skip_stage2: bool = False, skip_stage3: bool = False,
-           skip_stage4: bool = False,
+           skip_stage4: bool = False, edit_overrides_path: Path | None = None,
            story_target_sec: float | None = None,
            story_max_sec: float | None = None,
            max_chunks: int | None = None,
@@ -352,6 +352,14 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
                     story_target_sec=story_target_sec,
                     story_max_sec=story_max_sec,
                     get_gemini=get_gemini, step=step, log=log)
+
+        # ── M5(C4): 편집실 edit_overrides 반영 — M3 산출 위에, M4 앞에 ─────
+        if edit_overrides_path is not None:
+            _apply_edit_overrides(output_dir=output_dir,
+                                  overrides_path=Path(edit_overrides_path),
+                                  grid=grid, step=step, log=log)
+            # 사람 수정이 timeline 을 움직였으니 draft·style·렌더는 재구성이 맞다
+            from_step = "draft_render"
 
         # ── M4: draft_render → style → render → validate ──────────────────
         if skip_stage4:
@@ -716,3 +724,34 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
          exception_violations=len(vdoc["exception_ingress"]["violations"]))
     log(f"  [v3/validate] 완료 — hard_fail={vdoc['hard_fail']} · "
         f"경고 {vdoc['warnings_total']}건 · 스냅 {vdoc['snap_belt']['pct']}%")
+
+
+def _apply_edit_overrides(*, output_dir: Path, overrides_path: Path, grid: dict,
+                          step, log) -> None:
+    """C4 — 편집실 수정 JSON 을 v3 산출 위에 정착시킨다(발주서 v3-m5 §B).
+
+    계약 검증은 기존 모듈 재사용(같은 JSON 은 v1/v3 어디서든 같은 이유로 거절).
+    스냅 오차·unhandled 키는 run_log 에 남는다 — 조용한 무시 금지."""
+    from app.modules.edit_overrides import load_edit_overrides
+    from app.v3.overrides import apply_overrides_to_plan
+
+    ov = load_edit_overrides(overrides_path)
+    if not ov:
+        log("  [v3/overrides] 파일이 비어 있다 — 건너뜀")
+        return
+    plan = _read_json(output_dir / "edit_plan.json")
+    segments = _read_json(output_dir / "subtitle_segments.json") \
+        if (output_dir / "subtitle_segments.json").exists() else []
+    resources = _read_json(output_dir / "checkpoint_resources.json") \
+        if (output_dir / "checkpoint_resources.json").exists() else {}
+    new_plan, new_segments, new_resources, record = apply_overrides_to_plan(
+        ov, plan, grid, segments, resources)
+    _write_json(output_dir / "edit_plan.json", new_plan)
+    _write_json(output_dir / "subtitle_segments.json", new_segments)
+    _write_json(output_dir / "checkpoint_resources.json", new_resources)
+    step("edit_overrides", **record)
+    if record["unhandled"]:
+        log(f"  [v3/overrides] ⚠ 미처리 키 {record['unhandled']} — run_log 기록"
+            "(후속 마일스톤 재료, 조용한 무시 아님)")
+    log(f"  [v3/overrides] 적용 {record['applied']} · 스냅 보정 "
+        f"{len(record['snap_log'])}건 · cue 드랍 {len(record['cues_dropped'])}건")
