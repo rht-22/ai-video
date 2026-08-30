@@ -1664,3 +1664,51 @@ E18-1(빈틈 메우기)·E18-3(회전 차단)은 이미 화면에 반영된 상�
   실소재 채점은 M3 에서 소스 시간 컷 리스트 정답지로.
 - 회귀 가드: `tests/test_v3_replay_harness.py`(24건 — 지표 정의·결정성·오염 진단·
   Storage 키 규약·CLI 스모크). 네트워크 없이 돈다.
+
+## V3-M1 — 정본 격자(grid) + Stage 1 전체 간단 분석 (2026-08-31)
+
+`app/v3/` · 엔트리 `python -m app.v3`(create_shorts_v3). 기획 정본: 아티팩트
+「리캡 쇼츠 기법 이식안」(8/30 v3) §1·§3·부록A. **병행 신규** — 기존 14단계 코드
+무변경(공유 모듈 import 재사용만), app/cli.py 도 안 건드렸다(M5 전환 때 합류 별건).
+산출은 기존 job 레이아웃(run_log/checkpoint_*)이라 M0 하네스 로더가 그대로 붙는다
+(edit_plan 없는 M1 잡은 기록 0건으로 인식 — loader 가 v3 마커로 판별).
+
+- **시간 정본 원칙(933 방어 계승)**: LLM 은 경계를 제안만, 확정 시각은 grid 스냅.
+  스냅 어휘 = span 경계 ∪ 장면 전환 ∪ {0, 러닝타임}. 오차 >2s 는 반려·재질의(≤2회),
+  소진 시 크게 실패. 인접 구간이 어긋나게 낸 공유 경계는 1s 클러스터 정준화 후
+  스냅(각자 스냅이 만드는 인공 빈틈 방지). 커버리지: 러닝타임 = sequences ∪
+  exception, 빈틈·겹침 0(eps 0.05 · 끝 잔차 0.5s 관용).
+- **grid 재료 4종과 재사용**: ① 전사 단어 — speech 의 whisper 설정 그대로
+  (large-v3-turbo·temp 0·vad 500ms, `_get_whisper_model`/`_build_whisper_prompt`
+  재사용), 전체 실패 시 600s 창 재시도 + 실패 창은 scene 폴백·run_log 명시.
+  ② 장면 전환 — ⚠ 기존 `detect_scenes` 재사용 **안 함**: pyscenedetect 가
+  requirements 에 없어 전 환경이 등간격 산술 폴백(픽셀 안 봄)이라 격자 눈금으로
+  부적합 — v3 는 ffmpeg `select=gt(scene,0.3)` 하나로 고정(전 환경 동일 산출).
+  ③ 무음 — 신규 silencedetect 래퍼(-30dB=audio_qa 값·0.5s=cue 공백 값).
+  ④ arousal — 4피처(energy·pitch_var·dynamics·speech_density) 0.5s hop,
+  **생성까지만**(가중 소비·±0.5 보정은 M3 — 기획 §9-B).
+- **span 재단**: 유성 = `stt_elevenlabs.words_to_segments` **그 함수**를 호출
+  (0.5s·종결부호·44자·6.0s — 발주서의 '40자'는 merge config 값, word→cue 정본은
+  44, E14 기록). 무성 = 장면 전환 → 무음 경계 → 등분(≤6.0s) 재단, 0.5s 미만
+  슬리버는 흡수. time_authority 는 stt|scene 둘뿐.
+- **Stage 1**: scan 프록시(360p/1fps 파일)를 Files API 업로드,
+  `video_metadata.fps=0.5` + `media_resolution=LOW` + **temperature=0.0**(결정성
+  합격 조항 — GeminiConfig 에 온도 필드가 없는 3.x 규약의 의도적 예외, 이 호출
+  한정) + Pro 슬롯(영상을 실제로 보는 호출 규칙). 67분 ≈ 26만 토큰 — 2시간+ 소재가
+  넘치면 발주서 멈춤 시점 2. chunk: ≤10분 sequence 는 코드가 1개 자동 채움,
+  >10분 chunk 부재는 반려 → 소진 시 격자 눈금 등분 폴백(기록). 휴리스틱
+  (`detect_exclusion_zones` — 2-zone 모델·dead code 였음) 후보를 프롬프트 힌트로
+  주고 모델 확정과의 불일치를 run_log `heuristic_mismatch` 로 남긴다(검수 신호).
+- **character_index 병렬 슬롯**: 기획서는 유지·병렬이라 했지만 face_id 모듈은
+  014335e(8/25, 사용자 "필요없어")가 지웠다 — 배선만 유지하고 부재를 run_log
+  `character_index.status=module_absent` 로 명시. 복원 여부는 사용자 결정 사안
+  (M2 characters 교차 검증·M4 크롭 앵커가 소비 예정).
+- **스모크 실측(포핸즈 1회 67분, 2026-08-31)**: 단어 2,402(실패 창 0) · 장면컷
+  680 · 무음 855 · arousal 8,124 · span 1,872(유성 609) — grid 359s.
+  Stage 1 **1차 시도 통과**: sequence 6·chunk 10, 경계 36/36 격자 오차 0,
+  커버리지 위반 0, intro [0,43.0]·teaser [4029.25,끝] — 실물 프레임 대조로 둘 다
+  오차 ≤2s(43.0 = 고지문→본편 검은 전환 정확히 그 프레임). exception 레이블
+  샘플은 이 1편뿐 — 정확도 합격선은 레이블 5~10편 확보 후(멈춤 시점 3 보고).
+- 회귀 가드: `tests/test_v3_grid.py`(15건) · `tests/test_v3_stage1.py`(13건) —
+  LLM·whisper 없이 돈다(가짜 응답·주입 전사). 로더 v3 인식은
+  `tests/test_v3_replay_harness.py` 에 1건 추가.

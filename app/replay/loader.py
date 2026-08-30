@@ -160,9 +160,16 @@ def load_archive(root: str | Path) -> dict:
             if rec is not None:
                 records.append(rec)
         if not records and not broken:
-            raise FileNotFoundError(
-                f"아카이브 레이아웃을 인식할 수 없습니다: {root} — "
-                "runs/*.json (스냅샷) 또는 <dir>/edit_plan.json (job 디렉토리) 필요")
+            # v3 초기 마일스톤(M1)의 job 디렉토리는 grid.json/run_log.json 만 있고
+            # edit_plan.json 이 아직 없다 — 레이아웃은 인식하되 기록 0건으로 로드한다
+            # (M2+ 에서 edit_plan 이 생기면 그대로 기록이 붙는다).
+            v3_markers = any(
+                (d / "run_log.json").exists() or (d / "grid.json").exists()
+                for d in candidates)
+            if not v3_markers:
+                raise FileNotFoundError(
+                    f"아카이브 레이아웃을 인식할 수 없습니다: {root} — "
+                    "runs/*.json (스냅샷) 또는 <dir>/edit_plan.json (job 디렉토리) 필요")
 
     records.sort(key=lambda r: str(r.get("key", "")))
     return {"layout": layout, "records": records, "baselines": baselines, "broken": broken}

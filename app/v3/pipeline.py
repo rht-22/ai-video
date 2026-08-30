@@ -103,17 +103,26 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
     log(f"[v3] job: {job_id} → {output_dir}")
 
     config = AppConfig()
-    run_log: dict[str, Any] = {
-        "job_id": job_id,
-        "pipeline": "v3_m1",
-        "input": {"video_path": str(video_path), "work_title": work_title,
-                  "srt_path": str(srt_path) if srt_path else None,
-                  "episode": episode, "language": "ko"},
-        "provenance": build_provenance(config),
-        "steps": [],
-    }
+    run_log_path = output_dir / "run_log.json"
+    if run_log_path.exists():
+        # 재개는 기존 run_log 에 **이어 쓴다** — 통째로 새로 만들면 전사 실패 창·
+        # 휴리스틱 불일치 같은 감사 기록이 지워진다(리뷰 재현 수정 · 기존 파이프라인의
+        # 재개 규약과 동일). 깨진 파일이면 크게 실패한다(조용한 초기화 금지).
+        run_log = _read_json(run_log_path)
+        run_log.setdefault("steps", []).append(
+            {"step": "resume", "from_step": from_step})
+    else:
+        run_log = {
+            "job_id": job_id,
+            "pipeline": "v3_m1",
+            "input": {"video_path": str(video_path), "work_title": work_title,
+                      "srt_path": str(srt_path) if srt_path else None,
+                      "episode": episode, "language": "ko"},
+            "provenance": build_provenance(config),
+            "steps": [],
+        }
     # v3 신규 호출의 모델 역할 — provenance 모듈(공유)을 고치지 않고 가산 키로 남긴다
-    run_log["provenance"].setdefault("models", {})["roles_v3"] = {
+    run_log.setdefault("provenance", {}).setdefault("models", {})["roles_v3"] = {
         "seq_analyze": "pro", "grid_transcribe": f"local:{WHISPER_MODEL_NAME}"}
 
     def step(name: str, **fields) -> None:

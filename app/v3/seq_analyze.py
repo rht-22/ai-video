@@ -26,6 +26,7 @@ from app.modules.ffmpeg_utils import find_ffmpeg_command
 from app.modules.gemini_client import (
     _extract_json_from_markdown,
     _loads_first_json,
+    _max_tokens_usage,
     _safe_upload_path,
 )
 from app.modules.intro_credits_detector import detect_exclusion_zones
@@ -225,11 +226,22 @@ def snap_stage1(norm: dict, grid_times: list[float], duration_sec: float,
     for k, v in norm["exception_sector"].items():
         out["exception_sector"][k] = None if v is None else {
             "start": fix(v["start"]), "end": fix(v["end"])}
-    for sq in out["sequences"]:
-        if sq["end"] <= sq["start"]:
-            failures.append({"boundary_sec": sq["start"],
-                             "boundary_ts": schemas.format_ts(sq["start"]),
-                             "nearest_err": 0.0, "reason": "스냅 후 구간 소멸"})
+    # 스냅·정준화 후 0길이로 붕괴한 구간은 **전부** 실패로 기록한다 — sequence 만 보면
+    # 1초 미만 exception(정준화 클러스터 1.0s 가 반드시 붕괴시킨다)이 무기록으로
+    # stage1.json 에 start==end 로 실리고, 중간 붕괴는 커버리지 오진을 만든다(리뷰 재현).
+    def _collapsed(name: str, s: float, e: float) -> None:
+        if e <= s:
+            failures.append({"boundary_sec": s, "boundary_ts": schemas.format_ts(s),
+                             "nearest_err": 0.0,
+                             "reason": f"{name} 스냅/정준화 후 구간 소멸 — 1초 미만 "
+                                       "구간은 넓히거나 빼고 다시 제안하라"})
+    for i, sq in enumerate(out["sequences"]):
+        _collapsed(f"sequence[{i}]", sq["start"], sq["end"])
+        for j, c in enumerate(sq["chunks"]):
+            _collapsed(f"sequence[{i}].chunk[{j}]", c["start"], c["end"])
+    for k, v in out["exception_sector"].items():
+        if v is not None:
+            _collapsed(f"exception.{k}", v["start"], v["end"])
     return out, failures
 
 
@@ -260,20 +272,41 @@ def normalize_chunks(norm: dict, grid_times: list[float], *,
                 f"sequence[{i}] ({dur:.0f}s > 600s)의 chunk 분할이 없거나 10분 상한 위반 — "
                 "의미 기준으로 10분 이하 chunk 들을 제안하라")
             continue
+        # 등분점을 격자 눈금으로 당기되 **단조·10분 상한을 지키는 후보만** 고른다 —
+        # 무제약 최근접은 성긴 격자에서 600s 초과·겹침 chunk 를 만들고, 그 위반이
+        # 마지막 시도의 커버리지 검증에 걸려 폴백 자신이 Stage 1 을 죽인다(리뷰 재현).
+        # 조건에 맞는 눈금이 없으면 등분 원값을 쓴다(수학적으로 항상 상한 안 —
+        # dur/n < 600) — 그 경계는 격자 밖이므로 노트로 크게 남긴다.
         n = int(dur // schemas.CHUNK_MAX_SEC) + 1
         bounds = [sq["start"]]
         inner = [t for t in grid_times if sq["start"] < t < sq["end"]]
+        off_grid = 0
         for j in range(1, n):
             target = sq["start"] + dur * j / n
-            cand = min(inner, key=lambda t: (abs(t - target), t)) if inner else target
-            if cand <= bounds[-1]:
+            remaining = n - j                      # 이 경계 뒤에 남을 chunk 수
+            feasible = [
+                t for t in inner
+                if bounds[-1] < t < sq["end"]
+                and t - bounds[-1] <= schemas.CHUNK_MAX_SEC
+                and sq["end"] - t <= remaining * schemas.CHUNK_MAX_SEC]
+            if feasible:
+                cand = min(feasible, key=lambda t: (abs(t - target), t))
+            else:
                 cand = target
+                off_grid += 1
             bounds.append(cand)
         bounds.append(sq["end"])
+        if any(b <= a for a, b in zip(bounds, bounds[1:])):
+            # 혼합 선택이 단조를 깨는 극단 케이스 — 전부 등분 원값으로(항상 유효)
+            bounds = [sq["start"] + dur * j / n for j in range(n)] + [sq["end"]]
+            off_grid = n - 1
         sq["chunks"] = [{"start": a, "end": b} for a, b in zip(bounds, bounds[1:])
                         if b > a]
-        notes.append(f"sequence[{i}] {dur:.0f}s — 재질의 소진 → 격자 눈금 등분 "
-                     f"{len(sq['chunks'])}개 코드 분할(폴백)")
+        note = (f"sequence[{i}] {dur:.0f}s — 재질의 소진 → 격자 눈금 등분 "
+                f"{len(sq['chunks'])}개 코드 분할(폴백)")
+        if off_grid:
+            note += f" · ⚠ 조건 맞는 눈금 부족으로 등분 원값 경계 {off_grid}개(격자 밖)"
+        notes.append(note)
     return notes, problems
 
 
@@ -338,14 +371,23 @@ def _call_model(gemini, uploaded, prompt: str) -> dict:
             thinking_config=types.ThinkingConfig(
                 thinking_level=gemini.config.analysis_thinking_level),
         ))
+    truncated = _max_tokens_usage(response)
     text = _extract_json_from_markdown(response.text or "")
     try:
         return json.loads(text)
-    except json.JSONDecodeError:
-        obj, _rest = _loads_first_json(text)
+    except json.JSONDecodeError as e:
+        try:
+            obj, _rest = _loads_first_json(text)
+        except json.JSONDecodeError:
+            obj = None
         if isinstance(obj, dict):
             return obj
-        raise
+        # 파싱 실패는 이 레포 실측의 상시 모드(analyze_chunk 22회 중 12회) — 크래시가
+        # 아니라 ValueError 로 올려 재질의 루프의 반려 재료가 되게 한다(리뷰 재현 수정).
+        raise ValueError(
+            "응답 JSON 파싱 실패"
+            + (f" (MAX_TOKENS 절단: {truncated})" if truncated else "")
+            + f": {e} — 앞 200자: {text[:200]!r}") from e
 
 
 def run_seq_analyze(gemini, scan_proxy: Path, grid: dict, *,
@@ -364,14 +406,18 @@ def run_seq_analyze(gemini, scan_proxy: Path, grid: dict, *,
             prompt = build_prompt(grid, research_context=research_context,
                                   hints=hints, reject_note=reject_note)
             log(f"  [v3/stage1] Pro 제안 요청 (시도 {attempt + 1}/{1 + MAX_REASKS})")
-            raw = _call_model(gemini, uploaded, prompt)
             problems: list[str] = []
             try:
+                raw = _call_model(gemini, uploaded, prompt)
                 norm = schemas.normalize_stage1_response(raw)
             except ValueError as e:
-                problems.append(f"구조 오류: {e}")
+                # 파싱 실패·구조 오류 둘 다 반려 재료다 — 루프 밖으로 새면 Pro 비용을
+                # 치른 뒤 재질의 0회로 즉사한다(리뷰 재현).
+                problems.append(f"응답 오류: {e}")
                 audit["attempts"].append({"attempt": attempt + 1, "problems": problems})
-                reject_note = "\n".join(f"- {p}" for p in problems)
+                reject_note = ("- 직전 응답이 유효한 JSON/스키마가 아니었다. 지시한 "
+                               "JSON 형식만, 다른 텍스트 없이 출력하라.\n"
+                               + "\n".join(f"- {p}" for p in problems))
                 continue
 
             snapped, snap_failures = snap_stage1(norm, grid_times, duration)

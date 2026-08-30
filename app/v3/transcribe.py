@@ -47,6 +47,12 @@ def _transcribe_range(model, audio_path: Path, *, prompt: str,
         vad_parameters=dict(min_silence_duration_ms=500),
     )
     if clip_start is not None:
+        # faster-whisper 는 clip_timestamps 지정 시 vad_filter 를 조용히 무시한다
+        # (리뷰 확인) — 조용한 불일치 대신 명시적으로 끈다. 이 경로는 전체 전사가
+        # 실패했을 때의 창 단위 구제라, VAD 부재로 인한 환각 위험은 no_speech_threshold
+        # 가 1차로 막고 잔여는 실패 창 기록이 감사 대상으로 남긴다.
+        kwargs["vad_filter"] = False
+        del kwargs["vad_parameters"]
         kwargs["clip_timestamps"] = [clip_start, clip_end]
     segments, _info = model.transcribe(str(audio_path), **kwargs)
     words: list[dict] = []

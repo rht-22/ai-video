@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 
 SCHEMA_STAGE1 = "v3_stage1/v1"
@@ -37,8 +38,10 @@ def parse_ts(value: Any) -> float:
     LLM 산출을 읽는 자리라 관용적으로 받되, 못 읽으면 ValueError 로 크게 실패한다 —
     조용히 0 이 되면 커버리지 검증이 엉뚱한 곳을 가리킨다."""
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        if value < 0:
-            raise ValueError(f"음수 시각: {value}")
+        # json.loads 는 NaN/Infinity 토큰을 허용한다 — 통과시키면 스냅 dict 재조회에서
+        # KeyError: nan 으로 뒤늦게 죽는다(리뷰 재현). 여기서 크게 거른다.
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"시각이 유한한 양수가 아님: {value!r}")
         return float(value)
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"시각이 아님: {value!r}")
@@ -50,8 +53,8 @@ def parse_ts(value: Any) -> float:
         nums = [float(p) for p in parts]
     except ValueError as e:
         raise ValueError(f"시각 형식 오류: {value!r}") from e
-    if any(n < 0 for n in nums):
-        raise ValueError(f"음수 시각 성분: {value!r}")
+    if any(n < 0 or not math.isfinite(n) for n in nums):
+        raise ValueError(f"시각 성분이 유한한 양수가 아님: {value!r}")
     sec = 0.0
     for n in nums:
         sec = sec * 60 + n
@@ -107,6 +110,10 @@ def _range_of(node: Any, where: str) -> tuple[float, float]:
     if not isinstance(node, dict) or "time" not in node:
         raise ValueError(f"{where}: time 없음")
     t = node["time"]
+    if not isinstance(t, dict):
+        # LLM 이 time 을 문자열·리스트로 내는 모양 — AttributeError 로 재질의 루프를
+        # 뚫으면 Pro 호출 비용을 치른 뒤 즉사한다(리뷰 재현). ValueError 로 반려 재료화.
+        raise ValueError(f"{where}: time 이 객체가 아님({type(t).__name__}): {t!r}")
     s, e = parse_ts(t.get("start")), parse_ts(t.get("end"))
     if e <= s:
         raise ValueError(f"{where}: 구간 역전 {t}")

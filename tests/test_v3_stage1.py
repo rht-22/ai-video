@@ -130,6 +130,118 @@ def test_to_stage1_doc_schema_shape():
     assert doc["exception_sector"]["intro"]["end"] == "00:01:40.000"
 
 
+# ── 리뷰(2026-08-31) 재현 수정 가드 ─────────────────────────────────────────
+
+def test_normalize_rejects_non_dict_time_as_value_error():
+    """time 이 문자열·리스트여도 ValueError(재질의 재료) — AttributeError 로 새면
+    Pro 비용을 치른 뒤 재질의 0회로 즉사한다(리뷰 high)."""
+    for bad_time in ("00:00:00.000 ~ 00:10:00.000", ["00:00:00.000", "00:10:00.000"]):
+        with pytest.raises(ValueError):
+            schemas.normalize_stage1_response({
+                "sequences": [{"time": bad_time, "content": "x", "chunks": []}],
+                "exception_sector": {k: None for k in schemas.EXCEPTION_KEYS}})
+    with pytest.raises(ValueError):                        # exception 값이 문자열
+        schemas.normalize_stage1_response({
+            "sequences": [{"time": {"start": "00:00:00.000", "end": "00:01:00.000"},
+                           "content": "x", "chunks": []}],
+            "exception_sector": {**{k: None for k in schemas.EXCEPTION_KEYS},
+                                 "intro": "00:00:00.000"}})
+
+
+def test_parse_ts_rejects_nan_inf():
+    for bad in (float("nan"), float("inf"), "nan", "inf"):
+        with pytest.raises(ValueError):
+            schemas.parse_ts(bad)
+
+
+def test_snap_collapsed_exception_recorded_as_failure():
+    """1초 미만 exception 은 정준화(1.0s 클러스터)가 0길이로 붕괴시킨다 — 무기록
+    통과가 아니라 스냅 실패로 반려돼야 한다(리뷰 medium)."""
+    grid = [0.0, 25.0, 50.0, 75.0, 99.5, 100.0]
+    norm = schemas.normalize_stage1_response(_resp(
+        [(0, 50, [(0, 50)]), (50, 99.5, [(50, 99.5)])], exc={"end": (99.5, 100.0)}))
+    _snapped, failures = s1.snap_stage1(norm, grid, 100.0)
+    assert any("구간 소멸" in (f.get("reason") or "") for f in failures)
+
+
+def test_chunk_fallback_sparse_grid_keeps_cap_and_monotonic():
+    """성긴 격자에서도 폴백 chunk 는 600s 상한·단조를 지킨다(리뷰 medium) —
+    조건 맞는 눈금이 없으면 등분 원값(격자 밖)으로 가고 노트에 남는다."""
+    dur = 1199.9
+    grid = [0.0] + [3.0 + 6.0 * k for k in range(200)] + [dur]
+    norm = schemas.normalize_stage1_response(_resp([(0, dur, [])]))
+    notes, problems = s1.normalize_chunks(norm, grid, allow_fallback=True)
+    assert problems == []
+    chunks = norm["sequences"][0]["chunks"]
+    assert all(c["end"] - c["start"] <= schemas.CHUNK_MAX_SEC + 1e-6 for c in chunks)
+    assert all(b["start"] == a["end"] for a, b in zip(chunks, chunks[1:]))
+    assert schemas.validate_coverage(norm, dur) == []      # 폴백이 스스로 죽지 않는다
+
+    grid2 = [0.0, 1290.0, 1300.0]                          # 리뷰 입력 ③ — 비단조 유발형
+    norm2 = schemas.normalize_stage1_response(_resp([(0, 1300, [])]))
+    _n2, p2 = s1.normalize_chunks(norm2, grid2, allow_fallback=True)
+    assert p2 == []
+    c2 = norm2["sequences"][0]["chunks"]
+    assert all(c["end"] - c["start"] <= schemas.CHUNK_MAX_SEC + 1e-6 for c in c2)
+    assert schemas.validate_coverage(norm2, 1300.0) == []
+
+
+def test_parse_failure_is_reasked_not_crash(monkeypatch):
+    """모델이 JSON 아닌 텍스트를 내면 — 즉사가 아니라 반려·재질의(리뷰 medium)."""
+    grid = _fake_grid()
+    calls = []
+    good = _resp([(0, 550, [(0, 550)]), (550, 1000, [(550, 1000)])])
+    def fake_call(gemini, uploaded, prompt):
+        calls.append(prompt)
+        if len(calls) == 1:
+            raise ValueError("응답 JSON 파싱 실패: Expecting value")
+        return good
+    monkeypatch.setattr(s1, "_upload_video",
+                        lambda g, p, log=print: type("U", (), {"name": "f", "uri": "u"})())
+    monkeypatch.setattr(s1, "_call_model", fake_call)
+
+    class _Files:
+        def delete(self, name):
+            pass
+    _FakeGemini.client = type("C", (), {"files": _Files()})()
+    doc, audit = s1.run_seq_analyze(_FakeGemini(), None, grid)
+    assert len(calls) == 2 and "JSON" in calls[1]
+    assert audit["attempts"][0]["problems"]
+    assert doc["sequences"]
+
+
+def test_transcribe_window_disables_vad_explicitly():
+    """clip_timestamps 지정 시 faster-whisper 가 vad 를 조용히 무시한다 — 명시적으로
+    끄고 간다(리뷰 medium). 전체 경로는 vad 유지."""
+    from app.v3.transcribe import _transcribe_range
+
+    captured = {}
+
+    class _Model:
+        def transcribe(self, path, **kwargs):
+            captured.update(kwargs)
+            return [], None
+    _transcribe_range(_Model(), Path := __import__("pathlib").Path("x.wav"),
+                      prompt="p")
+    assert captured["vad_filter"] is True
+    captured.clear()
+    _transcribe_range(_Model(), Path, prompt="p", clip_start=0.0, clip_end=10.0)
+    assert captured["vad_filter"] is False
+    assert captured["clip_timestamps"] == [0.0, 10.0]
+    assert "vad_parameters" not in captured
+
+
+def test_silencedetect_failure_raises(monkeypatch, tmp_path):
+    import subprocess as sp
+
+    from app.v3 import audio as a
+    monkeypatch.setattr(a, "find_ffmpeg_command", lambda n: "/bin/ffmpeg")
+    monkeypatch.setattr(sp, "run", lambda *args, **kw: type(
+        "P", (), {"returncode": 1, "stderr": "boom", "stdout": b""})())
+    with pytest.raises(RuntimeError, match="silencedetect"):
+        a.detect_silence_intervals(tmp_path / "x.wav", 10.0)
+
+
 # ── 반려 루프(가짜 모델) ────────────────────────────────────────────────────
 
 class _FakeGemini:
@@ -253,9 +365,14 @@ def test_pipeline_grid_smoke(tmp_path, monkeypatch):
     assert (out / "checkpoint_probe.json").exists()
     assert (out / "checkpoint_grid_words.json").exists()
     assert (out / "run_log.json").exists()
-    # 재실행(캐시) — grid 바이트 동일(결정성)
+    # 재실행(캐시) — grid 바이트 동일(결정성) + run_log 이어쓰기(감사 기록 보존)
     g1 = (out / "grid.json").read_bytes()
     v3p.run_v3(video_path=src, work_title="합성 소재", outdir=tmp_path / "out",
                job_id=out.name, skip_research=True, skip_seq_analyze=True,
                log=lambda *a: None)
     assert (out / "grid.json").read_bytes() == g1
+    rl2 = json.loads((out / "run_log.json").read_text(encoding="utf-8"))
+    steps2 = [s["step"] for s in rl2["steps"]]
+    assert "grid" in steps2 and "resume" in steps2        # 통째 덮어쓰기 금지(리뷰 high)
+    assert next(s for s in rl2["steps"] if s["step"] == "grid")[
+        "transcribe_failed_windows"] == [[3.0, 4.0]]

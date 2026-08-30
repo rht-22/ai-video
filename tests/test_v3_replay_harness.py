@@ -271,6 +271,16 @@ def test_loader_unknown_layout(tmp_path):
         loader.load_archive(tmp_path)
 
 
+def test_loader_v3_m1_jobdir_without_edit_plan(tmp_path):
+    """M1 산출(grid.json·run_log.json 만) — 레이아웃 인식 + 기록 0건(에러 아님)."""
+    d = tmp_path / "포핸즈_v3"
+    d.mkdir()
+    (d / "grid.json").write_text("{}", encoding="utf-8")
+    (d / "run_log.json").write_text(json.dumps({"job_id": "포핸즈_v3"}), encoding="utf-8")
+    arc = loader.load_archive(tmp_path)
+    assert arc["layout"] == "jobdir" and arc["records"] == [] and arc["broken"] == []
+
+
 # ── 리포트 — 결정성 · §3 대조 ───────────────────────────────────────────────
 
 def test_report_deterministic_and_reference_table():

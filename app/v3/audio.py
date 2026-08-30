@@ -60,4 +60,8 @@ def detect_silence_intervals(audio_path: Path, duration_sec: float, *,
         [ffmpeg, "-v", "info", "-i", str(audio_path),
          "-af", f"silencedetect=noise={noise_db}dB:d={min_sec}", "-f", "null", "-"],
         capture_output=True, text=True)
+    if proc.returncode != 0:
+        # 조용한 빈 목록은 '무음 0건'과 구분이 안 된다 — 격자 재료는 크게 실패한다.
+        raise RuntimeError(f"silencedetect 실패(rc={proc.returncode}): "
+                           f"{proc.stderr[-300:]}")
     return parse_silence_log(proc.stderr, duration_sec)
