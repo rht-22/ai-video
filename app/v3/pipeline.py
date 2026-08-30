@@ -44,7 +44,8 @@ from app.v3.scenecut import SCENE_THRESHOLD, detect_scene_cuts
 from app.v3.timegrid import build_grid_doc, carve_spans
 from app.v3.transcribe import WHISPER_MODEL_NAME, transcribe_words
 
-V3_STEPS = ("init", "research", "probe", "proxy", "grid", "seq_analyze")
+V3_STEPS = ("init", "research", "probe", "proxy", "grid", "seq_analyze",
+            "chunk_split", "chunk_analyze")
 
 
 def _write_json(path: Path, doc: Any) -> None:
@@ -95,8 +96,11 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
            srt_path: Path | None = None, episode: int | None = None,
            job_id: str | None = None, from_step: str | None = None,
            skip_research: bool = False, skip_seq_analyze: bool = False,
+           skip_stage2: bool = False, max_chunks: int | None = None,
            scene_threshold: float = SCENE_THRESHOLD, log=print) -> Path:
-    """v3 M1 실행 → output_dir 반환. 실패해도 run_log 는 남긴다(finally)."""
+    """v3 실행(M1 grid·Stage1 + M2 chunk_split·Stage2) → output_dir 반환.
+    실패해도 run_log 는 남긴다(finally). max_chunks 는 스모크용 — 계획 앞에서부터
+    N 개만 재단·분석하고 나머지는 매니페스트에 file=null 로 남는다(커버리지 표기)."""
     if from_step is not None and from_step not in V3_STEPS:
         raise ValueError(f"--from-step 은 {V3_STEPS} 중 하나: {from_step}")
 
@@ -124,7 +128,7 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
     else:
         run_log = {
             "job_id": job_id,
-            "pipeline": "v3_m1",
+            "pipeline": "v3_m2",
             "input": {"video_path": str(video_path), "work_title": work_title,
                       "srt_path": str(srt_path) if srt_path else None,
                       "episode": episode, "language": "ko"},
@@ -133,7 +137,8 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
         }
     # v3 신규 호출의 모델 역할 — provenance 모듈(공유)을 고치지 않고 가산 키로 남긴다
     run_log.setdefault("provenance", {}).setdefault("models", {})["roles_v3"] = {
-        "seq_analyze": "pro", "grid_transcribe": f"local:{WHISPER_MODEL_NAME}"}
+        "seq_analyze": "pro", "chunk_analyze": "pro",
+        "grid_transcribe": f"local:{WHISPER_MODEL_NAME}"}
 
     def step(name: str, **fields) -> None:
         run_log["steps"].append({"step": name, **fields})
@@ -307,6 +312,136 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
                 log(f"  [v3/stage1] ⚠ 휴리스틱-모델 불일치 {len(mism)}건(검수 신호) — "
                     "run_log 기록")
             log(f"  [v3/stage1] 완료 — sequence {len(doc['sequences'])}개")
+
+        # ── M2: chunk_split → Stage 2 chunk_analyze ───────────────────────
+        if skip_stage2:
+            log("  [v3/stage2] 건너뜀(--skip-stage2)")
+        elif not stage1_path.exists():
+            log("  [v3/stage2] stage1.json 없음 — 건너뜀(Stage 1 이 선행돼야 한다)")
+        else:
+            _run_m2(output_dir=output_dir, video_path=Path(video_path),
+                    stage1_path=stage1_path, grid=grid, research=research,
+                    from_step=from_step, max_chunks=max_chunks,
+                    get_gemini=get_gemini, step=step, log=log)
         return output_dir
     finally:
         _write_json(output_dir / "run_log.json", run_log)
+
+
+def _run_m2(*, output_dir: Path, video_path: Path, stage1_path: Path, grid: dict,
+            research: dict | None, from_step: str | None, max_chunks: int | None,
+            get_gemini, step, log) -> None:
+    """chunk_split + Stage 2 — run_v3 본체에서 분리(단계 블록이 길어져서).
+
+    청크별 결과는 checkpoint_chunk_analyze.json 에 **증분 저장**된다 — Pro 호출이
+    청크당 1회라 중단·재개 시 이미 분석한 청크의 요금을 다시 내면 안 된다."""
+    from app.v3.chunk_analyze import run_chunk_analyze
+    from app.v3.chunk_split import plan_chunks, split_chunks
+
+    stage1_doc = _read_json(stage1_path)
+    chunks_plan, exceptions = plan_chunks(stage1_doc)
+    only = None
+    if max_chunks is not None:
+        only = [(c["seq_number"], c["chunk_number"]) for c in chunks_plan[:max_chunks]]
+
+    t0 = time.time()
+    manifest = split_chunks(video_path, chunks_plan, exceptions,
+                            output_dir / "chunks", only=only, log=log)
+    _write_json(output_dir / "checkpoint_chunk_split.json", manifest)
+    n_split = sum(1 for c in manifest["chunks"] if c["file"])
+    step("chunk_split", elapsed=round(time.time() - t0, 1),
+         planned=len(manifest["chunks"]), split=n_split,
+         exceptions_removed=exceptions,
+         proxy=manifest["proxy"])
+    log(f"  [v3/chunk_split] 계획 {len(manifest['chunks'])} · 재단 {n_split} · "
+        f"exception 제거 {len(exceptions)}")
+
+    appearances = None
+    ci_path = output_dir / "checkpoint_character_index.json"
+    if ci_path.exists():
+        appearances = _read_json(ci_path)
+
+    ca_ckpt = output_dir / "checkpoint_chunk_analyze.json"
+    done: dict[str, Any] = {}
+    if ca_ckpt.exists() and from_step not in ("chunk_split", "chunk_analyze"):
+        done = _read_json(ca_ckpt)
+        if done:
+            log(f"  [v3/stage2] 청크 캐시 {len(done)}건 로드")
+
+    research_ctx = (research or {}).get("work_context") or ""
+    names = [c["character_name"] for c in (research or {}).get("cast_images") or []
+             if c.get("character_name")]
+    t0 = time.time()
+    for entry in manifest["chunks"]:
+        if not entry["file"]:
+            continue
+        key = f"s{entry['seq_number']}c{entry['chunk_number']}"
+        if key in done:
+            continue
+        meanings, audit = run_chunk_analyze(
+            get_gemini(), output_dir / "chunks" / entry["file"], entry,
+            stage1_doc, grid, appearances=appearances,
+            research_context=research_ctx, character_names=names or None, log=log)
+        done[key] = {"meanings": meanings, "audit": audit}
+        _write_json(ca_ckpt, done)                 # 청크마다 증분 저장(요금 보호)
+
+    # ── stage2.json 조립 — stage1 문서에 meanings 를 채운다(§4 스키마 그대로) ──
+    analyzed = failed = not_split = 0
+    fail_notes: list[dict] = []
+    for sq in stage1_doc.get("sequences") or []:
+        for ch in sq.get("chunks") or []:
+            key = f"s{sq['number']}c{ch['number']}"
+            rec = done.get(key)
+            if rec is None:
+                not_split += 1
+                continue
+            if rec.get("meanings"):
+                ch["meanings"] = rec["meanings"]
+                analyzed += 1
+            else:
+                failed += 1
+                fail_notes.append({"chunk": key,
+                                   "reason": (rec.get("audit") or {}).get("failed")})
+    # 검증 3종 집계(발주서 — 수치로)
+    ta_checked = ta_ok = restored = voiced = 0
+    cc_top = cc_all = 0
+    attempts_total = 0
+    for rec in done.values():
+        a = rec.get("audit") or {}
+        attempts_total += len(a.get("attempts") or [])
+        ta = a.get("time_alignment") or {}
+        ta_checked += ta.get("checked", 0)
+        ta_ok += ta.get("from_grid", 0)
+        tg = a.get("transcript_guard") or {}
+        restored += tg.get("restored", 0)
+        voiced += tg.get("voiced_spans", 0)
+        cc = a.get("character_check") or {}
+        if cc.get("status") == "ok":
+            for row in cc.get("clusters") or []:
+                if row.get("consistency") is not None:
+                    cc_top += round(row["consistency"] * row["assignments"])
+                    cc_all += row["assignments"]
+    validation = {
+        "time_alignment": {"checked": ta_checked, "from_grid": ta_ok,
+                           "pct": round(ta_ok / ta_checked * 100, 2) if ta_checked else None},
+        "transcript_guard": {"voiced_spans": voiced, "restored": restored},
+        "character_check": {"overall_consistency":
+                            round(cc_top / cc_all, 3) if cc_all else None,
+                            "assignments": cc_all,
+                            "status": "ok" if cc_all else "skipped"},
+    }
+    stage2_doc = {**stage1_doc, "schema": "v3_stage2/v1",
+                  "coverage": {"chunks_planned": len(manifest["chunks"]),
+                               "analyzed": analyzed, "failed": failed,
+                               "not_split": not_split, "failures": fail_notes},
+                  "validation": validation}
+    _write_json(output_dir / "stage2.json", stage2_doc)
+    step("chunk_analyze", elapsed=round(time.time() - t0, 1),
+         analyzed=analyzed, failed=failed, not_split=not_split,
+         attempts_total=attempts_total, validation=validation,
+         failures=fail_notes,
+         audits=[rec.get("audit") or {} for rec in done.values()])
+    log(f"  [v3/stage2] 완료 — 분석 {analyzed} · 실패 {failed} · 미재단 {not_split} · "
+        f"시각정합 {validation['time_alignment']['pct']}% · "
+        f"전사복원 {restored}/{voiced} · "
+        f"인물일관성 {validation['character_check']['overall_consistency']}")

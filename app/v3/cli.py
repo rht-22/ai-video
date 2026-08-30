@@ -28,11 +28,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--episode", type=int, default=None)
     p.add_argument("--outdir", default="outputs")
     p.add_argument("--job-id", default=None, help="기존 job 재개")
-    p.add_argument("--from-step", default=None, choices=["grid", "seq_analyze"],
+    p.add_argument("--from-step", default=None,
+                   choices=["grid", "seq_analyze", "chunk_split", "chunk_analyze"],
                    help="캐시를 무시하고 이 단계부터 재구성")
     p.add_argument("--skip-research", action="store_true")
     p.add_argument("--skip-seq-analyze", action="store_true",
                    help="Stage 1(Pro 호출) 없이 grid 까지만")
+    p.add_argument("--skip-stage2", action="store_true",
+                   help="M2(chunk_split + Stage 2) 없이 Stage 1 까지만")
+    p.add_argument("--max-chunks", type=int, default=None,
+                   help="계획 앞에서부터 N개 청크만 재단·분석(스모크용 — Pro 요금 상한)")
     p.add_argument("--scene-threshold", type=float, default=SCENE_THRESHOLD,
                    help=f"ffmpeg scene score 임계(기본 {SCENE_THRESHOLD})")
     return p
@@ -60,6 +65,7 @@ def main(argv: list[str] | None = None) -> int:
                  job_id=args.job_id, from_step=args.from_step,
                  skip_research=args.skip_research,
                  skip_seq_analyze=args.skip_seq_analyze,
+                 skip_stage2=args.skip_stage2, max_chunks=args.max_chunks,
                  scene_threshold=args.scene_threshold)
     print(f"[v3] 완료 → {out}")
     return 0

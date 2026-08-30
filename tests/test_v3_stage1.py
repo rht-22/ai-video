@@ -357,7 +357,7 @@ def test_pipeline_grid_smoke(tmp_path, monkeypatch):
     assert grid["transcript"]["failed_windows"] == [[3.0, 4.0]]
     assert grid["span_candidates"], "span 이 나와야 한다"
     rl = json.loads((out / "run_log.json").read_text(encoding="utf-8"))
-    assert rl["pipeline"] == "v3_m1"
+    assert rl["pipeline"] == "v3_m2"
     steps = {s["step"] for s in rl["steps"]}
     assert {"probe", "proxy", "grid", "character_index"} <= steps
     ci = next(s for s in rl["steps"] if s["step"] == "character_index")
