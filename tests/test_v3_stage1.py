@@ -361,7 +361,11 @@ def test_pipeline_grid_smoke(tmp_path, monkeypatch):
     steps = {s["step"] for s in rl["steps"]}
     assert {"probe", "proxy", "grid", "character_index"} <= steps
     ci = next(s for s in rl["steps"] if s["step"] == "character_index")
-    assert ci["status"] == "module_absent"                 # 부재가 명시된다(조용한 누락 금지)
+    # face_id 복원(2026-08-31) 후 계약: 의존 갖춘 노드는 ok, 아니면 deps_absent —
+    # 어느 쪽이든 조용한 누락 없이 상태가 명시된다.
+    assert ci["status"] in {"ok", "deps_absent"}
+    if ci["status"] == "deps_absent":
+        assert "requirements-faceid" in ci.get("note", "")
     assert (out / "checkpoint_probe.json").exists()
     assert (out / "checkpoint_grid_words.json").exists()
     assert (out / "run_log.json").exists()

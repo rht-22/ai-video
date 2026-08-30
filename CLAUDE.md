@@ -1712,3 +1712,23 @@ E18-1(빈틈 메우기)·E18-3(회전 차단)은 이미 화면에 반영된 상�
 - 회귀 가드: `tests/test_v3_grid.py`(15건) · `tests/test_v3_stage1.py`(13건) —
   LLM·whisper 없이 돈다(가짜 응답·주입 전사). 로더 v3 인식은
   `tests/test_v3_replay_harness.py` 에 1건 추가.
+
+## V3-M1 후속 — face_id 복원 (레퍼런스-프리, 2026-08-31)
+
+014335e 가 지운 `app/modules/face_id.py` 를 사용자 지시로 복원하되 **죽은 사슬은
+되살리지 않았다** — 구판은 TMDb 배우 사진 레퍼런스가 필수였고(한 번도 없었음),
+복원판은 레퍼런스 없이 감지 얼굴을 ArcFace 임베딩 greedy 코사인 클러스터링
+(`assign_cluster`, threshold 0.55, running-mean)해 익명 라벨 person_N 의 등장
+인덱스를 만든다. 레퍼런스가 있으면(선택) 실명 매칭이 우선. 라벨↔실명 매핑은
+Stage 2(M2)의 일 — 여기서 하지 않는다.
+
+- 의존은 `requirements-faceid.txt` 별도 파일(deepface·tf-keras) — 본 requirements 에
+  넣지 않는다(014335e 가 걷어낸 tensorflow 무게 유지). 미설치 노드는 v3 슬롯이
+  `deps_absent` 로 기록하고 본편 진행(조용한 누락 금지).
+- ⚠ find_spec 검사는 부족 — deepface 가 있어도 tf-keras 부재면 import 가
+  **ValueError** 로 터진다(이 머신 venv 실측). `FaceIdentifier.__init__` 이 실사용
+  import 로 검사해 모든 실패를 ImportError 로 정규화한다(deps_absent 계약의 근거).
+- TMDb(`tmdb_client.py`)는 복원하지 않았다 — 레퍼런스-프리 설계라 불필요.
+- 회귀 가드: `tests/test_v3_face_id.py`(7건 — 클러스터 순수 로직·deps_absent 경로,
+  deepface 없이 돈다). `test_v3_stage1.py` 스모크의 module_absent 기대는
+  {ok, deps_absent} 계약으로 갱신. 전체 1528 통과.

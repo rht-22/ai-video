@@ -1,0 +1,4 @@
+# face_id(인물 인덱스) 전용 의존 — 본 requirements 와 분리 (tensorflow 무게 때문).
+# v3 character_index 슬롯을 실제 가동할 노드에서만: pip install -r requirements-faceid.txt
+deepface>=0.0.93
+tf-keras

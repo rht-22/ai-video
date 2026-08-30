@@ -14,8 +14,9 @@ checkpoint_*.json)을 그대로 따라 리플레이 하네스 로더가 자동 �
   stage1.json                 Stage 1 스키마(기획서 §3 그대로)
   <제목>_480.mp4 / <제목>_scan.mp4 / <제목>_16k.wav
 
-character_index 병렬 슬롯: 기획서는 ArcFace 인덱스를 grid 와 병렬 실행하라고
-하지만 그 모듈(face_id.py)은 2026-08-25 커밋 014335e 가 사용자 결정("필요없어")으로
+character_index 병렬 슬롯: ArcFace 인덱스를 grid 와 병렬 실행한다.
+face_id.py 는 014335e 가 지웠다가 2026-08-31 사용자 지시로 복원(레퍼런스-프리 클러스터링) —
+아래 이력 주석은 보존한다. 구판 삭제 사유: 모듈은 2026-08-25 커밋 014335e 가 사용자 결정("필요없어")으로
 지웠다 — 여기서는 **배선만 유지**한다: 모듈이 돌아오면 그대로 도는 병렬 슬롯 +
 부재를 run_log 에 명시(조용한 누락 금지). 복원 여부는 사용자 결정 사안.
 """
@@ -58,24 +59,33 @@ def _character_index_slot(output_dir: Path, proxy_path: Path,
                           research: dict | None, out: dict, log=print) -> None:
     """grid 와 병렬로 도는 인물 인덱스 슬롯 — 모듈이 있으면 실행, 없으면 부재 기록."""
     try:
-        from app.modules.face_id import FaceIdentifier  # noqa: F401 — 014335e 가 제거
+        from app.modules.face_id import FaceIdentifier  # 2026-08-31 복원 (레퍼런스-프리)
     except ImportError:
         out.update({"status": "module_absent",
-                    "note": "face_id 모듈 부재(014335e 제거, 사용자 결정) — 배선만 유지. "
-                            "복원되면 이 슬롯이 그대로 병렬 실행된다."})
+                    "note": "face_id 모듈 부재 — 배선만 유지."})
         log("  [v3/character_index] 모듈 부재 — 건너뜀(run_log 기록)")
         return
     try:
-        from app.modules.face_id import FaceIdentifier
+        fi = FaceIdentifier()
+    except ImportError as e:
+        out.update({"status": "deps_absent",
+                    "note": "deepface 미설치 — pip install -r requirements-faceid.txt "
+                            "후 이 슬롯이 자동 활성화된다. 본편 진행에는 영향 없음.",
+                    "error": str(e)})
+        log("  [v3/character_index] deepface 미설치 — 건너뜀(run_log 기록)")
+        return
+    try:
         cast = []
         for c in (research or {}).get("cast_images") or []:
             if c.get("image_path"):
                 cast.append(c)
-        fi = FaceIdentifier()
-        fi.build_references(cast)
+        fi.build_references(cast)  # 레퍼런스는 선택 — 없으면 클러스터 라벨(person_N)
         appearances = fi.build_appearance_index(proxy_path)
         _write_json(output_dir / "checkpoint_character_index.json", appearances)
-        out.update({"status": "ok", "appearances": len(appearances)})
+        labels = {a.get("character") for a in appearances}
+        out.update({"status": "ok", "appearances": len(appearances),
+                    "labels": len(labels),
+                    "reference_free": not cast})
     except Exception as e:  # noqa: BLE001 — 기존 규약: 인덱스 실패는 본편을 막지 않는다
         out.update({"status": "failed", "error": f"{type(e).__name__}: {e}"})
         log(f"  [v3/character_index] WARN 실패 — 인덱스 없이 진행: {e}")
