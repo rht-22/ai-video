@@ -1,0 +1,24 @@
+{
+ "schema": "golden_cuts/v1",
+ "space": "source",
+ "derived": false,
+ "note": "포핸즈 1회 리캡 쇼츠 v2 — 프리미어 수동 제작 최종본(2026-08-30 세션)의 소스 컷 리스트 14세그먼트. golden.py docstring 의 'M3 정답지는 소스 시간 컷 리스트를 직접 싣는다' 이행.",
+ "work_title": "포핸즈",
+ "episode": 1,
+ "segments": [
+  {"start_sec": 570.0,  "end_sec": 574.65},
+  {"start_sec": 574.65, "end_sec": 579.95},
+  {"start_sec": 580.15, "end_sec": 582.85},
+  {"start_sec": 583.0,  "end_sec": 584.55},
+  {"start_sec": 605.9,  "end_sec": 613.9},
+  {"start_sec": 615.45, "end_sec": 617.95},
+  {"start_sec": 625.85, "end_sec": 628.35},
+  {"start_sec": 645.5,  "end_sec": 649.3},
+  {"start_sec": 669.3,  "end_sec": 675.2},
+  {"start_sec": 675.8,  "end_sec": 679.5},
+  {"start_sec": 699.45, "end_sec": 701.45},
+  {"start_sec": 704.3,  "end_sec": 710.3},
+  {"start_sec": 711.4,  "end_sec": 716.55},
+  {"start_sec": 723.05, "end_sec": 726.95}
+ ]
+}

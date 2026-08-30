@@ -45,7 +45,7 @@ from app.v3.timegrid import build_grid_doc, carve_spans
 from app.v3.transcribe import WHISPER_MODEL_NAME, transcribe_words
 
 V3_STEPS = ("init", "research", "probe", "proxy", "grid", "seq_analyze",
-            "chunk_split", "chunk_analyze")
+            "chunk_split", "chunk_analyze", "story", "resources")
 
 
 def _write_json(path: Path, doc: Any) -> None:
@@ -96,7 +96,10 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
            srt_path: Path | None = None, episode: int | None = None,
            job_id: str | None = None, from_step: str | None = None,
            skip_research: bool = False, skip_seq_analyze: bool = False,
-           skip_stage2: bool = False, max_chunks: int | None = None,
+           skip_stage2: bool = False, skip_stage3: bool = False,
+           story_target_sec: float | None = None,
+           story_max_sec: float | None = None,
+           max_chunks: int | None = None,
            scene_threshold: float = SCENE_THRESHOLD, log=print) -> Path:
     """v3 실행(M1 grid·Stage1 + M2 chunk_split·Stage2) → output_dir 반환.
     실패해도 run_log 는 남긴다(finally). max_chunks 는 스모크용 — 계획 앞에서부터
@@ -128,7 +131,7 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
     else:
         run_log = {
             "job_id": job_id,
-            "pipeline": "v3_m2",
+            "pipeline": "v3_m3",
             "input": {"video_path": str(video_path), "work_title": work_title,
                       "srt_path": str(srt_path) if srt_path else None,
                       "episode": episode, "language": "ko"},
@@ -137,7 +140,7 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
         }
     # v3 신규 호출의 모델 역할 — provenance 모듈(공유)을 고치지 않고 가산 키로 남긴다
     run_log.setdefault("provenance", {}).setdefault("models", {})["roles_v3"] = {
-        "seq_analyze": "pro", "chunk_analyze": "pro",
+        "seq_analyze": "pro", "chunk_analyze": "pro", "story": "flash",
         "grid_transcribe": f"local:{WHISPER_MODEL_NAME}"}
 
     def step(name: str, **fields) -> None:
@@ -323,6 +326,20 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
                     stage1_path=stage1_path, grid=grid, research=research,
                     from_step=from_step, max_chunks=max_chunks,
                     get_gemini=get_gemini, step=step, log=log)
+
+        # ── M3: Stage 3 story → edit_plan·자막·TTS cue ────────────────────
+        stage2_path = output_dir / "stage2.json"
+        if skip_stage3:
+            log("  [v3/story] 건너뜀(--skip-stage3)")
+        elif not stage2_path.exists():
+            log("  [v3/story] stage2.json 없음 — 건너뜀(Stage 2 가 선행돼야 한다)")
+        else:
+            _run_m3(output_dir=output_dir, video_path=Path(video_path),
+                    work_title=work_title, grid=grid, research=research,
+                    from_step=from_step,
+                    story_target_sec=story_target_sec,
+                    story_max_sec=story_max_sec,
+                    get_gemini=get_gemini, step=step, log=log)
         return output_dir
     finally:
         _write_json(output_dir / "run_log.json", run_log)
@@ -466,3 +483,118 @@ def _run_m2(*, output_dir: Path, video_path: Path, stage1_path: Path, grid: dict
         f"시각정합 {validation['time_alignment']['pct']}% · "
         f"전사복원 {restored}/{voiced} · "
         f"인물일관성 {validation['character_check']['overall_consistency']}")
+
+
+def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
+            research: dict | None, from_step: str | None,
+            story_target_sec: float | None, story_max_sec: float | None,
+            get_gemini, step, log) -> None:
+    """Stage 3(story) + 경계면 조립 + resources(TTS 합성) — 발주서 v3-m3.
+
+    story 캐시는 M2 와 같은 규율로 **상류 지문**에 묶는다 — stage2 의 meaning/span
+    편성이 바뀌면 같은 job 이라도 다른 재료다(사이드카 무효화 규율)."""
+    import hashlib
+
+    from app.v3 import assemble, story as st
+
+    stage2_doc = _read_json(output_dir / "stage2.json")
+    span_index, span_order = st.build_span_index(stage2_doc, grid)
+    if not span_index:
+        log("  [v3/story] 분석된 span 이 없다 — 건너뜀(커버리지 표기)")
+        step("story", skipped="analyzed span 0")
+        return
+    fingerprint = hashlib.sha1(json.dumps(
+        {"spans": [[sid, span_index[sid]["t_in"], span_index[sid]["t_out"],
+                    span_index[sid]["importance"]] for sid in span_order]},
+        sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+    target = story_target_sec if story_target_sec is not None else st.STORY_TARGET_SEC
+    max_sec = story_max_sec if story_max_sec is not None else st.STORY_MAX_SEC
+
+    story_ckpt = output_dir / "checkpoint_story.json"
+    story_doc = None
+    if story_ckpt.exists() and from_step not in ("story", "resources"):
+        cached = _read_json(story_ckpt)
+        if cached.get("fingerprint") == fingerprint:
+            story_doc = cached.get("story")
+            log("  [v3/story] 캐시 로드(--from-step story 로 재구성)")
+        else:
+            log("  [v3/story] ⚠ 상류(stage2) 변경 감지 — story 캐시 폐기")
+    if story_doc is None and from_step != "resources":
+        t0 = time.time()
+        research_ctx = (research or {}).get("work_context") or ""
+        story_doc, audit = st.run_story(
+            get_gemini(), stage2_doc, grid, work_title=work_title,
+            research_context=research_ctx, target_sec=target, max_sec=max_sec,
+            log=log)
+        _write_json(story_ckpt, {"fingerprint": fingerprint, "story": story_doc})
+        step("story", elapsed=round(time.time() - t0, 1),
+             attempts=len(audit["attempts"]), fallback=audit.get("fallback", False),
+             template=story_doc["template"], pieces=audit.get("pieces"),
+             budget=story_doc["budget"],
+             narration_dropped=len(story_doc.get("narration_dropped") or []),
+             audit_attempts=audit["attempts"])
+        log(f"  [v3/story] 완료 — {story_doc['template']} · 비트 "
+            f"{len(story_doc['beats'])}개 · {story_doc['budget']['total_after_sec']}s")
+    elif story_doc is None:
+        if not story_ckpt.exists():
+            log("  [v3/story] --from-step resources 인데 story 캐시가 없다 — 건너뜀")
+            step("story", skipped="checkpoint_story 없음")
+            return
+        story_doc = _read_json(story_ckpt).get("story")
+
+    # ── 경계면 조립(C1·C2·C6) — 순수, LLM 없음 ────────────────────────────
+    plan = assemble.assemble_edit_plan(
+        story_doc, span_index, video_path=str(video_path), work_title=work_title)
+    belt = assemble.verify_edit_plan(plan, grid)
+    if belt["pct"] is not None and belt["pct"] < 100.0:
+        # Stage 2 벨트와 같은 규율 — 구조상 100% 여야 하고 아니면 코드 결함
+        raise AssertionError(f"edit_plan 시각 정합 벨트 위반: {belt}")
+    _write_json(output_dir / "edit_plan.json", plan)
+
+    segments = assemble.word_subtitles(plan["timeline"], span_index,
+                                       grid.get("words") or [])
+    _write_json(output_dir / "subtitle_segments.json", segments)
+
+    cues = assemble.finalize_cues(story_doc.get("narration_cues") or [],
+                                  plan["timeline"], voice="ko_female", speed="normal")
+    lost = [c for c in cues if c.get("start_sec") is None]
+    cues = [c for c in cues if c.get("start_sec") is not None]
+
+    # ── resources — TTS 합성(기존 tts.py 재사용 · fail-soft) ──────────────
+    t0 = time.time()
+    from app.modules.tts import (
+        active_backend,
+        elevenlabs_disabled,
+        get_audio_duration,
+        synthesize_tts,
+    )
+    tts_cue_files = []
+    for ci, cue in enumerate(cues):
+        tts_path = output_dir / f"tts_cue_{ci}.mp3"
+        try:
+            synthesize_tts(cue["text"], tts_path,
+                           voice=cue["voice"], speed=cue["speed"])
+            cue["fit_actual_sec"] = round(get_audio_duration(tts_path), 3)
+        except Exception as e:  # noqa: BLE001 — 합성 실패가 계획 산출을 막지 않는다
+            log(f"  [v3/resources] ⚠ cue {ci} 합성 실패 — 계획만 유지: {e}")
+            cue["fit_actual_sec"] = None
+        tts_cue_files.append({"cue_index": ci, "path": str(tts_path), "cue": cue})
+    backend = active_backend()
+    resources = {"tts_cue_files": tts_cue_files, "tts_backend": backend}
+    _write_json(output_dir / "checkpoint_resources.json", resources)
+
+    stats = assemble.clip_stats(plan)
+    entry = {"step": "resources", "elapsed": round(time.time() - t0, 1),
+             "tts_backend": backend, "tts_cues": len(tts_cue_files),
+             "cues_lost_to_trim": [c["text"][:40] for c in lost],
+             "time_alignment": belt, "clip_stats": stats,
+             "subtitle_segments": len(segments)}
+    fallback = elevenlabs_disabled()
+    if fallback:
+        entry["tts_fallback_reason"] = "elevenlabs_auth_expired"
+        entry["tts_fallback_detail"] = fallback[:200]
+    step("resources", **{k: v for k, v in entry.items() if k != "step"})
+    log(f"  [v3/resources] 완료 — 클립 {stats['clips']}개 {stats['total_sec']}s · "
+        f"자막 {len(segments)}줄 · cue {len(tts_cue_files)}개({backend}) · "
+        f"시각정합 {belt['pct']}%")

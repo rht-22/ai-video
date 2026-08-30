@@ -1,0 +1,363 @@
+"""V3-M3 — Stage 3 story·경계면 조립 회귀 가드(순수 로직 — LLM 없이 돈다).
+
+발주서 합격 기준의 코드 몫: span id 검증·반려 재료, 길이 예산(통삭제 금지·보호
+목록·arousal 타이브레이커 상한), TTS 슬롯 3규칙(ⓐⓑⓒ)과 충돌 벨트 0, C1/C2/C6
+동결 필드, 어절 자막 규칙, 소스↔편집본 좌표, 결정성, 골든 채점 인터페이스 접점.
+"""
+from __future__ import annotations
+
+import copy
+import json
+from pathlib import Path
+
+import pytest
+
+from app.replay.golden import load_golden, score_cuts
+from app.v3 import assemble, schemas
+from app.v3 import story as st
+
+
+# ── 픽스처(순수 dict — 실측 grid 축소판) ────────────────────────────────────
+
+def _mk_grid(spans):
+    return {"span_candidates": [
+        {"id": f"sp{i:04d}", "t_in": t0, "t_out": t1, "is_audio": aud,
+         "time_authority": "stt" if aud else "scene", "text": txt}
+        for i, (t0, t1, aud, txt) in enumerate(spans)],
+        "arousal": [], "words": []}
+
+
+def _mk_stage2(grid, meanings):
+    """meanings: [(first_idx, last_idx, importance, content)] — chunk 하나로 감싼다."""
+    spans_all = grid["span_candidates"]
+    ms = []
+    for num, (a, b, imp, content) in enumerate(meanings):
+        spans_doc = []
+        for j, sp in enumerate(spans_all[a:b + 1]):
+            spans_doc.append({
+                "number": j, "span_id": sp["id"],
+                "time": {"start": schemas.format_ts(sp["t_in"]),
+                         "end": schemas.format_ts(sp["t_out"])},
+                "is_audio": sp["is_audio"],
+                "audio_script": ([{"speaker": "갑", "line": sp["text"]}]
+                                 if sp["is_audio"] else []),
+                "scene_script": "" if sp["is_audio"] else "장면",
+                "characters": ["갑"], "importance": imp,
+                "time_authority": sp["time_authority"],
+            })
+        ms.append({"number": num,
+                   "time": {"start": spans_doc[0]["time"]["start"],
+                            "end": spans_doc[-1]["time"]["end"]},
+                   "content": content, "characters": ["갑"], "importance": imp,
+                   "mood": "평온", "spans": spans_doc})
+    return {"sequences": [{"number": 0,
+                           "time": {"start": schemas.format_ts(spans_all[0]["t_in"]),
+                                    "end": schemas.format_ts(spans_all[-1]["t_out"])},
+                           "content": "테스트", "chunks": [
+                               {"number": 0,
+                                "time": {"start": schemas.format_ts(spans_all[0]["t_in"]),
+                                         "end": schemas.format_ts(spans_all[-1]["t_out"])},
+                                "meanings": ms}]}]}
+
+
+GRID = _mk_grid([
+    (0.0, 2.0, True, "안녕."),          # sp0000
+    (2.0, 5.0, False, ""),              # sp0001 무성
+    (5.0, 8.0, True, "잘 지냈어?"),     # sp0002
+    (8.0, 11.0, True, "그럭저럭."),     # sp0003
+    (11.0, 14.0, False, ""),            # sp0004 무성
+    (14.0, 20.0, True, "이게 핵심 대사다."),  # sp0005
+    (20.0, 23.0, True, "떡밥 대사."),   # sp0006
+])
+S2 = _mk_stage2(GRID, [(0, 2, 3, "인사"), (3, 4, 2, "근황"), (5, 6, 5, "핵심")])
+IDX, ORDER = st.build_span_index(S2, GRID)
+
+
+# ── 재료 색인 ───────────────────────────────────────────────────────────────
+
+def test_span_index_only_analyzed_and_ordered():
+    grid2 = _mk_grid([(0, 1, True, "a"), (1, 2, True, "b"), (2, 3, True, "c")])
+    s2 = _mk_stage2(grid2, [(0, 1, 3, "앞")])   # sp0002 는 분석 밖
+    idx, order = st.build_span_index(s2, grid2)
+    assert order == ["sp0000", "sp0001"]
+    assert "sp0002" not in idx
+    assert idx["sp0001"]["pos"] == 1
+
+
+# ── 모델 응답 검증 ──────────────────────────────────────────────────────────
+
+def _resp(beats):
+    return {"template": "recap_dialogue", "reason": "r",
+            "title": {"line1": "상황", "line2": "펀치"}, "beats": beats}
+
+
+def test_validate_ok_and_label_paren_note():
+    story, problems, notes = st.validate_story_response(_resp([
+        {"role": "hook", "span_ids": ["sp0000", "sp0001"], "narration": "내레이션",
+         "label": None},
+        {"role": "climax", "span_ids": ["sp0005"], "narration": None,
+         "label": "팩폭"},
+    ]), IDX, ORDER)
+    assert problems == []
+    assert story["beats"][1]["label"] == "(팩폭)"
+    assert any("괄호 보정" in n for n in notes)
+
+
+def test_validate_rejects_unknown_and_noncontiguous_and_reuse():
+    _, p1, _ = st.validate_story_response(
+        _resp([{"role": "hook", "span_ids": ["sp9999"]}]), IDX, ORDER)
+    assert any("모르는" in x for x in p1)
+    _, p2, _ = st.validate_story_response(
+        _resp([{"role": "climax", "span_ids": ["sp0000", "sp0002"]}]), IDX, ORDER)
+    assert any("연속 범위가 아니다" in x for x in p2)
+    _, p3, _ = st.validate_story_response(_resp([
+        {"role": "hook", "span_ids": ["sp0000"]},
+        {"role": "climax", "span_ids": ["sp0000"]}]), IDX, ORDER)
+    assert any("재사용" in x for x in p3)
+
+
+def test_validate_requires_climax_and_title():
+    _, p, _ = st.validate_story_response(
+        _resp([{"role": "build", "span_ids": ["sp0000"]}]), IDX, ORDER)
+    assert any("climax" in x for x in p)
+    bad = _resp([{"role": "climax", "span_ids": ["sp0005"]}])
+    bad["title"] = {"line1": "혼자"}
+    _, p2, _ = st.validate_story_response(bad, IDX, ORDER)
+    assert any("두 줄" in x for x in p2)
+
+
+# ── 길이 예산 ───────────────────────────────────────────────────────────────
+
+def test_trim_removes_low_importance_edge_and_protects():
+    beats = [
+        {"role": "hook", "span_ids": ["sp0000", "sp0001", "sp0002"],
+         "narration": None, "label": None},                       # imp 3
+        {"role": "build", "span_ids": ["sp0003", "sp0004"],
+         "narration": None, "label": None},                       # imp 2
+        {"role": "climax", "span_ids": ["sp0005", "sp0006"],
+         "narration": None, "label": None},                       # imp 5 · climax
+    ]
+    total = st.story_duration(beats, IDX)
+    removed = st.trim_to_budget(beats, IDX, [], total - 1.0)      # 한 번만 덜게
+    assert len(removed) == 1
+    assert removed[0]["importance"] == 2                          # 낮은 importance 먼저
+    assert beats[2]["span_ids"] == ["sp0005", "sp0006"]           # climax 보호
+    assert all(b["span_ids"] for b in beats)                      # 통삭제 금지
+
+
+def test_trim_never_empties_beat():
+    beats = [{"role": "build", "span_ids": ["sp0003", "sp0004"],
+              "narration": None, "label": None}]
+    st.trim_to_budget(beats, IDX, [], 0.1)                        # 불가능한 예산
+    assert len(beats[0]["span_ids"]) == 1                         # 마지막 1개는 남는다
+
+
+def test_arousal_is_tiebreaker_not_override():
+    # 같은 importance 후보 둘 — arousal 낮은 쪽이 먼저 빠진다
+    grid2 = _mk_grid([(0, 3, True, "a"), (3, 6, True, "b"), (6, 9, True, "c")])
+    s2 = _mk_stage2(grid2, [(0, 2, 3, "m")])
+    idx, _ = st.build_span_index(s2, grid2)
+    arous = [{"t": 1.0, "score": -2.0}, {"t": 7.0, "score": 2.0}]  # 앞 낮음·뒤 높음
+    beats = [{"role": "build", "span_ids": ["sp0000", "sp0001", "sp0002"],
+              "narration": None, "label": None}]
+    removed = st.trim_to_budget(beats, idx, arous, 6.0)
+    assert removed[0]["span_id"] == "sp0000"
+    # 상한 ±0.5 — importance 1 차이를 뒤집을 수 없다
+    assert st.arousal_adjust(arous, 6.0, 9.0) == pytest.approx(0.5)
+    assert st.arousal_adjust(arous, 0.0, 3.0) == pytest.approx(-0.5)
+
+
+# ── TTS 슬롯 ────────────────────────────────────────────────────────────────
+
+def test_narration_prefers_silent_run():
+    beats = [{"role": "hook", "span_ids": ["sp0000", "sp0001", "sp0002"],
+              "narration": "짧은 내레이션", "label": None}]        # sp0001 무성 3s
+    cues, dropped = st.plan_narration_slots(beats, IDX)
+    assert not dropped
+    assert cues[0]["mode"] == "silent"
+    assert cues[0]["source_time_sec"] == 2.0                      # 무성 span 시작
+    assert cues[0]["muted_span_ids"] == []
+    assert st.verify_tts_conflicts(cues, beats, IDX) == []
+
+
+def test_narration_mutes_low_importance_voiced():
+    grid2 = _mk_grid([(0, 4, True, "잡담"), (4, 8, True, "잡담2")])
+    s2 = _mk_stage2(grid2, [(0, 1, 2, "m")])                      # imp 2 — 뮤트 가능
+    idx, _ = st.build_span_index(s2, grid2)
+    beats = [{"role": "context", "span_ids": ["sp0000", "sp0001"],
+              "narration": "여덟자내레이션쯤", "label": None}]
+    cues, dropped = st.plan_narration_slots(beats, idx)
+    assert not dropped
+    assert cues[0]["mode"] == "muted"
+    assert cues[0]["muted_span_ids"] == ["sp0000", "sp0001"]
+    assert st.verify_tts_conflicts(cues, beats, idx) == []
+
+
+def test_narration_dropped_over_high_importance():
+    grid2 = _mk_grid([(0, 4, True, "핵심대사")])
+    s2 = _mk_stage2(grid2, [(0, 0, 5, "m")])                      # imp 5 — 절대 불가
+    idx, _ = st.build_span_index(s2, grid2)
+    beats = [{"role": "bridge", "span_ids": ["sp0000"],
+              "narration": "얹을 곳이 없다", "label": None}]
+    cues, dropped = st.plan_narration_slots(beats, idx)
+    assert cues == []
+    assert len(dropped) == 1 and dropped[0]["beat"] == 0
+    assert beats[0]["narration"] is None                          # 드랍 반영
+
+
+# ── 폴백 ────────────────────────────────────────────────────────────────────
+
+def test_fallback_highlight_orders_by_time():
+    doc = st.fallback_highlight(IDX, ORDER, [], target_sec=15.0, work_title="작품")
+    assert doc["template"] == "highlight"
+    assert doc["beats"]                                            # 최소 1개 보장
+    starts = [IDX[b["span_ids"][0]]["t_in"] for b in doc["beats"]]
+    assert starts == sorted(starts)
+
+
+# ── edit_plan 조립(C1) ─────────────────────────────────────────────────────
+
+def _story_doc():
+    beats = [
+        {"role": "hook", "span_ids": ["sp0000", "sp0001", "sp0002"],
+         "narration": "내레이션", "label": None},
+        {"role": "climax", "span_ids": ["sp0005", "sp0006"],
+         "narration": None, "label": "(핵심)"},
+    ]
+    cues, _ = st.plan_narration_slots(beats, IDX)
+    return {"schema": st.SCHEMA_STORY, "template": "recap_dialogue", "reason": "",
+            "title": {"line1": "상황", "line2": "펀치"},
+            "beats": [dict(b, number=i) for i, b in enumerate(beats)],
+            "narration_cues": cues, "narration_dropped": [],
+            "budget": {}}
+
+
+def test_edit_plan_frozen_fields_and_additive():
+    plan = assemble.assemble_edit_plan(_story_doc(), IDX,
+                                       video_path="/v.mp4", work_title="작품")
+    assert plan["schema"] == "edit_plan/v3"
+    assert plan["layout"]["top_title"] == "상황\n펀치"
+    assert plan["layout"]["bottom_label"] == "작품"
+    for c in plan["timeline"]:
+        for key in ("role", "clip_start_sec", "clip_end_sec", "subtitle",
+                    "use_original_audio", "reframe", "span_ids"):
+            assert key in c
+    # 라벨은 비트 첫 클립의 subtitle 로
+    climax = [c for c in plan["timeline"] if c["role"] == "climax"]
+    assert climax[0]["subtitle"] == "(핵심)"
+    # grid_marks 는 채택 span 경계 집합
+    assert 14.0 in plan["grid_marks"] and 23.0 in plan["grid_marks"]
+    belt = assemble.verify_edit_plan(plan, GRID)
+    assert belt["pct"] == 100.0
+
+
+def test_edit_plan_splits_on_mute_flip():
+    grid2 = _mk_grid([(0, 2, True, "잡담"), (2, 4, True, "잡담2"), (4, 6, True, "중요")])
+    s2 = _mk_stage2(grid2, [(0, 1, 2, "m"), (2, 2, 4, "n")])
+    idx, _ = st.build_span_index(s2, grid2)
+    beats = [{"role": "context", "span_ids": ["sp0000", "sp0001", "sp0002"],
+              "narration": "긴 내레이션 텍스트", "label": None}]
+    cues, dropped = st.plan_narration_slots(beats, idx)
+    assert not dropped and cues[0]["muted_span_ids"] == ["sp0000", "sp0001"]
+    doc = {"title": {"line1": "a", "line2": "b"},
+           "beats": [dict(beats[0], number=0)]}
+    plan = assemble.assemble_edit_plan(doc, idx, video_path="/v", work_title="w")
+    assert len(plan["timeline"]) == 2                              # 뮤트 경계에서 분할
+    assert plan["timeline"][0]["use_original_audio"] is False
+    assert plan["timeline"][1]["use_original_audio"] is True
+
+
+# ── 좌표 변환 ───────────────────────────────────────────────────────────────
+
+def test_edited_mapping_and_identity():
+    plan = assemble.assemble_edit_plan(_story_doc(), IDX,
+                                       video_path="/v", work_title="w")
+    offs = assemble.edited_offsets(plan["timeline"])
+    # hook 8s(0~8) + climax 9s(14~23) — 소스 14.0 은 편집본 8.0
+    assert assemble.to_edited_sec(14.0, offs) == pytest.approx(8.0)
+    assert assemble.to_edited_sec(0.0, offs) == pytest.approx(0.0)
+    assert assemble.to_edited_sec(12.0, offs) is None              # 미편성 구간
+
+
+# ── 어절 자막(C6) ───────────────────────────────────────────────────────────
+
+def test_subtitle_line_rules():
+    words = [
+        {"t0": 0.5, "t1": 0.9, "text": "웬만하면"},
+        {"t0": 0.9, "t1": 1.3, "text": "이런"},
+        {"t0": 1.3, "t1": 1.7, "text": "부탁"},
+        {"t0": 1.7, "t1": 2.4, "text": "안하는데."},   # 문장부호 → 라인 종료
+        {"t0": 2.6, "t1": 3.4, "text": "하나같이"},
+        {"t0": 3.4, "t1": 4.3, "text": "맘에안들어"},   # 12자 초과 지점에서 분할
+    ]
+    lines = assemble._lines_for_span(words, 0.0, 5.0)
+    assert lines[0]["text"] == "웬만하면 이런 부탁"       # 12자 규칙(공백 포함)
+    assert lines[0]["start"] == pytest.approx(0.45)        # −0.05 선행
+    assert lines[1]["text"] == "안하는데."
+    assert lines[2]["text"] == "하나같이 맘에안들어"
+    # 최소 노출 0.35 — 라인 겹침 없음
+    for a, b in zip(lines, lines[1:]):
+        assert b["start"] >= a["end"] - 1e-9
+        assert a["end"] - a["start"] >= 0.35 - 1e-9
+
+
+def test_subtitles_skip_muted_and_use_edited_coords():
+    grid2 = _mk_grid([(0, 2, True, "잡담"), (2, 4, True, "중요한 말")])
+    grid2["words"] = [{"t0": 0.2, "t1": 1.0, "text": "잡담"},
+                      {"t0": 2.2, "t1": 3.0, "text": "중요한"},
+                      {"t0": 3.0, "t1": 3.8, "text": "말"}]
+    s2 = _mk_stage2(grid2, [(0, 0, 2, "m"), (1, 1, 4, "n")])
+    idx, _ = st.build_span_index(s2, grid2)
+    timeline = [
+        {"role": "context", "clip_start_sec": 0.0, "clip_end_sec": 2.0,
+         "subtitle": "", "use_original_audio": False, "reframe": {"mode": "center"},
+         "span_ids": ["sp0000"]},
+        {"role": "climax", "clip_start_sec": 2.0, "clip_end_sec": 4.0,
+         "subtitle": "", "use_original_audio": True, "reframe": {"mode": "center"},
+         "span_ids": ["sp0001"]},
+    ]
+    segs = assemble.word_subtitles(timeline, idx, grid2["words"])
+    assert all("잡담" not in s["text"] for s in segs)               # 뮤트 클립 제외
+    assert segs[0]["text"] == "중요한 말"
+    assert segs[0]["start_sec"] == pytest.approx(2.15 - 2.0 + 2.0)  # 편집본 좌표(=2.15)
+
+
+# ── TTS cue(C2) ────────────────────────────────────────────────────────────
+
+def test_finalize_cues_contract():
+    sdoc = _story_doc()
+    plan = assemble.assemble_edit_plan(sdoc, IDX, video_path="/v", work_title="w")
+    cues = assemble.finalize_cues(sdoc["narration_cues"], plan["timeline"],
+                                  voice="ko_female", speed="normal")
+    assert cues and cues[0]["source_time_sec"] == 2.0               # 신원 = 원본 절대초
+    assert cues[0]["start_sec"] == pytest.approx(2.0)               # 편집본 좌표
+    assert cues[0]["voice"] == "ko_female" and cues[0]["speed"] == "normal"
+    assert cues[0]["duration_sec"] == pytest.approx(
+        cues[0]["end_sec"] - cues[0]["start_sec"])
+
+
+def test_finalize_cues_marks_lost_windows():
+    cues = assemble.finalize_cues(
+        [{"beat": 0, "text": "t", "mode": "silent", "source_time_sec": 100.0,
+          "source_end_sec": 102.0, "muted_span_ids": []}],
+        [{"clip_start_sec": 0.0, "clip_end_sec": 5.0}], voice="v", speed="s")
+    assert cues[0]["start_sec"] is None                             # 조용한 0 금지
+
+
+# ── 결정성·골든 접점 ────────────────────────────────────────────────────────
+
+def test_determinism():
+    a = assemble.assemble_edit_plan(_story_doc(), IDX, video_path="/v", work_title="w")
+    b = assemble.assemble_edit_plan(copy.deepcopy(_story_doc()), IDX,
+                                    video_path="/v", work_title="w")
+    assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+
+
+def test_golden_file_loads_and_scores_timeline_shape():
+    golden = load_golden(Path(__file__).parent / "data" / "golden_cuts"
+                         / "fourhands_ep1_recap.json")
+    assert golden["space"] == "source" and not golden["derived"]
+    assert len(golden["segments"]) == 14
+    # 우리 timeline 모양(clip_start_sec/clip_end_sec)이 채점기에 그대로 물린다
+    score = score_cuts([{"clip_start_sec": 570.0, "clip_end_sec": 574.65}], golden)
+    assert score["matched_n"] == 1 and score["matches"][0]["iou"] == 1.0
