@@ -30,7 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--job-id", default=None, help="기존 job 재개")
     p.add_argument("--from-step", default=None,
                    choices=["grid", "seq_analyze", "chunk_split", "chunk_analyze",
-                            "story", "resources"],
+                            "story", "resources",
+                            "draft_render", "style", "render", "validate"],
                    help="캐시를 무시하고 이 단계부터 재구성")
     p.add_argument("--skip-research", action="store_true")
     p.add_argument("--skip-seq-analyze", action="store_true",
@@ -39,6 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="M2(chunk_split + Stage 2) 없이 Stage 1 까지만")
     p.add_argument("--skip-stage3", action="store_true",
                    help="M3(story + edit_plan·자막·TTS cue) 없이 Stage 2 까지만")
+    p.add_argument("--skip-stage4", action="store_true",
+                   help="M4(draft·style·최종 렌더·validate) 없이 M3 까지만")
     p.add_argument("--story-target-sec", type=float, default=None,
                    help="편성 목표 길이(채널 노브 — 기본 53s)")
     p.add_argument("--story-max-sec", type=float, default=None,
@@ -73,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
                  skip_research=args.skip_research,
                  skip_seq_analyze=args.skip_seq_analyze,
                  skip_stage2=args.skip_stage2, skip_stage3=args.skip_stage3,
+                 skip_stage4=args.skip_stage4,
                  story_target_sec=args.story_target_sec,
                  story_max_sec=args.story_max_sec, max_chunks=args.max_chunks,
                  scene_threshold=args.scene_threshold)

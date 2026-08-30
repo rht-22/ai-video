@@ -45,7 +45,8 @@ from app.v3.timegrid import build_grid_doc, carve_spans
 from app.v3.transcribe import WHISPER_MODEL_NAME, transcribe_words
 
 V3_STEPS = ("init", "research", "probe", "proxy", "grid", "seq_analyze",
-            "chunk_split", "chunk_analyze", "story", "resources")
+            "chunk_split", "chunk_analyze", "story", "resources",
+            "draft_render", "style", "render", "validate")
 
 
 def _write_json(path: Path, doc: Any) -> None:
@@ -97,6 +98,7 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
            job_id: str | None = None, from_step: str | None = None,
            skip_research: bool = False, skip_seq_analyze: bool = False,
            skip_stage2: bool = False, skip_stage3: bool = False,
+           skip_stage4: bool = False,
            story_target_sec: float | None = None,
            story_max_sec: float | None = None,
            max_chunks: int | None = None,
@@ -106,6 +108,15 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
     N 개만 재단·분석하고 나머지는 매니페스트에 file=null 로 남는다(커버리지 표기)."""
     if from_step is not None and from_step not in V3_STEPS:
         raise ValueError(f"--from-step 은 {V3_STEPS} 중 하나: {from_step}")
+
+    # .env(FFMPEG_BIN=ffmpeg 7 고정 등)를 진입점에서 결정적으로 로드한다 — 종전에는
+    # gemini_client 가 로드될 때만 실려, style 캐시가 있으면 렌더가 PATH 의 ffmpeg 8
+    # (-filter_complex_script 거부)로 떨어져 죽었다(M4 스모크 재현 — 우연 의존 금지).
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
+    except ImportError:
+        pass
 
     # ── init — 기존 job_id 규약 그대로 ────────────────────────────────────
     safe_title = work_title.replace(" ", "_")
@@ -141,6 +152,7 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
     # v3 신규 호출의 모델 역할 — provenance 모듈(공유)을 고치지 않고 가산 키로 남긴다
     run_log.setdefault("provenance", {}).setdefault("models", {})["roles_v3"] = {
         "seq_analyze": "pro", "chunk_analyze": "pro", "story": "flash",
+        "style": "flash", "frame_qc": "flash",
         "grid_transcribe": f"local:{WHISPER_MODEL_NAME}"}
 
     def step(name: str, **fields) -> None:
@@ -339,6 +351,16 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
                     from_step=from_step,
                     story_target_sec=story_target_sec,
                     story_max_sec=story_max_sec,
+                    get_gemini=get_gemini, step=step, log=log)
+
+        # ── M4: draft_render → style → render → validate ──────────────────
+        if skip_stage4:
+            log("  [v3/stage4] 건너뜀(--skip-stage4)")
+        elif not (output_dir / "edit_plan.json").exists():
+            log("  [v3/stage4] edit_plan.json 없음 — 건너뜀(M3 이 선행돼야 한다)")
+        else:
+            _run_m4(output_dir=output_dir, video_path=Path(video_path),
+                    grid=grid, from_step=from_step,
                     get_gemini=get_gemini, step=step, log=log)
         return output_dir
     finally:
@@ -604,3 +626,93 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
     log(f"  [v3/resources] 완료 — 클립 {stats['clips']}개 {stats['total_sec']}s · "
         f"자막 {len(segments)}줄 · cue {len(tts_cue_files)}개({backend}) · "
         f"시각정합 {belt['pct']}%")
+
+
+def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
+            from_step: str | None, get_gemini, step, log) -> None:
+    """M4 — 2-pass 렌더 + validate 확장 (발주서 v3-m4).
+
+    draft/최종 렌더는 산출 파일 존재로 캐시(--from-step 으로 재구성). style 은
+    M3 과 같은 상류 지문 규율 — edit_plan timeline 이 바뀌면 폐기."""
+    import hashlib
+
+    from app.v3 import finalize, stage4
+
+    plan = _read_json(output_dir / "edit_plan.json")
+    story_ckpt = _read_json(output_dir / "checkpoint_story.json")
+    story_doc = story_ckpt.get("story") or {}
+    segments = _read_json(output_dir / "subtitle_segments.json") \
+        if (output_dir / "subtitle_segments.json").exists() else []
+    resources = _read_json(output_dir / "checkpoint_resources.json") \
+        if (output_dir / "checkpoint_resources.json").exists() else {}
+
+    m4_invalidate = from_step in ("draft_render", "style", "render", "validate")
+
+    # ── draft_render (11) ─────────────────────────────────────────────────
+    draft_path = output_dir / "draft_480.mp4"
+    frames_dir = output_dir / "draft_frames"
+    windows = stage4.edited_beat_windows(story_doc, plan["timeline"])
+    if draft_path.exists() and frames_dir.is_dir() \
+            and from_step not in ("draft_render",):
+        log("  [v3/draft] 캐시 존재 — 재사용(--from-step draft_render 로 재구성)")
+        frames = sorted(frames_dir.glob("beat*.jpg"))
+        frame_list = [{"path": str(p)} for p in frames]
+    else:
+        cost = stage4.render_draft(video_path, plan["timeline"], draft_path, log=log)
+        frame_list = stage4.sample_beat_frames(draft_path, windows, frames_dir,
+                                               log=log)
+        step("draft_render", **cost, frames=len(frame_list))
+
+    # ── style (12) — 상류 지문 규율 ───────────────────────────────────────
+    fingerprint = hashlib.sha1(json.dumps(
+        [[c["clip_start_sec"], c["clip_end_sec"], c.get("span_ids")]
+         for c in plan["timeline"]], sort_keys=True).encode()).hexdigest()[:16]
+    style_ckpt = output_dir / "checkpoint_style.json"
+    style_doc = None
+    if style_ckpt.exists() and from_step not in ("draft_render", "style"):
+        cached = _read_json(style_ckpt)
+        if cached.get("fingerprint") == fingerprint:
+            style_doc = cached.get("style")
+            log("  [v3/style] 캐시 로드")
+        else:
+            log("  [v3/style] ⚠ 상류(edit_plan) 변경 감지 — 캐시 폐기")
+    if style_doc is None:
+        t0 = time.time()
+        style_doc, audit = stage4.run_style(get_gemini(), frame_list, story_doc,
+                                            log=log)
+        _write_json(style_ckpt, {"fingerprint": fingerprint, "style": style_doc})
+        step("style", elapsed=round(time.time() - t0, 1),
+             attempts=len(audit["attempts"]), fallback=audit.get("fallback", False),
+             diff_keys=audit.get("diff_keys"), audit_attempts=audit["attempts"])
+        log(f"  [v3/style] 완료 — 프리셋 diff {len(style_doc.get('diff') or {})}키")
+    _write_json(output_dir / "style.json", style_doc)
+
+    # ── render (13) ───────────────────────────────────────────────────────
+    final_path = output_dir / "final_1080x1920.mp4"
+    if final_path.exists() and from_step not in ("draft_render", "style", "render"):
+        log("  [v3/render] 캐시 존재 — 재사용(--from-step render 로 재구성)")
+    else:
+        final_path, cost = finalize.render_final(
+            video_path=video_path, plan=plan, style_doc=style_doc,
+            segments=segments, resources=resources, story_doc=story_doc,
+            output_dir=output_dir, log=log)
+        step("render", **cost)
+
+    # ── validate (14) — 항상 재계산(산출이 아니라 검증이다) ───────────────
+    t0 = time.time()
+    stage1_doc = _read_json(output_dir / "stage1.json")
+    stage2_doc = _read_json(output_dir / "stage2.json")
+    tmp_dir = output_dir / "validate_tmp"
+    tmp_dir.mkdir(exist_ok=True)
+    vdoc = finalize.run_validate(
+        plan=plan, grid=grid, stage1_doc=stage1_doc, stage2_doc=stage2_doc,
+        segments=segments, resources=resources, final_path=final_path,
+        tmp_dir=tmp_dir, gemini=get_gemini(), log=log)
+    _write_json(output_dir / "validation.json", vdoc)
+    step("validate", elapsed=round(time.time() - t0, 1),
+         hard_fail=vdoc["hard_fail"], warnings=vdoc["warnings_total"],
+         snap_pct=vdoc["snap_belt"]["pct"],
+         tts_violations=len(vdoc["tts_conflicts"]["violations"]),
+         exception_violations=len(vdoc["exception_ingress"]["violations"]))
+    log(f"  [v3/validate] 완료 — hard_fail={vdoc['hard_fail']} · "
+        f"경고 {vdoc['warnings_total']}건 · 스냅 {vdoc['snap_belt']['pct']}%")
