@@ -1629,3 +1629,38 @@ E18-1(빈틈 메우기)·E18-3(회전 차단)은 이미 화면에 반영된 상�
 - 회귀 가드: `tests/test_e15_style_compose.py`(53건 — 굵게 드롭·한 줄 강제·윗줄 고정·
   다음 문구 미리 새지 않음), `tests/test_e18_style_placement.py`(15건 — 빈틈 규칙 재작성),
   `tests/test_localize_style_texts.py`(21건). 전체 1461 통과.
+
+## V3-M0 — 리플레이 하네스 (분포 저울, 2026-08-30)
+
+`app/replay/` + `python -m scripts.replay_harness {fetch|report|diff|golden}`.
+발주: v3(4단계 재구성) 병행 구축 전에 **합격 저울부터** — LLM 재실행 없이(비용 0 ·
+결정적) 저장 아카이브만으로 구간 분포 지표를 재계산·대조한다. 근거 문서:
+`docs/cut-granularity-problem.md`(문제 정의 §3).
+
+- **아카이브 정본은 오케스트레이터 DB `clip_metadata` 표다**(실물 확인 2026-08-30).
+  편(clip_id)당 한 행에 checkpoint_story·edit_plan·run_log(요약)가 jsonb 로 통째로
+  있고 2026-07-15 부터 전 기간. §3의 "저장된 614편"이 이 표다 — 창 상한을 측정 시점
+  (8/24 06:26Z)으로 좁히면 **614편이 그대로 나오고 §3 전 셀이 MATCH** 로 재현된다
+  (`report --until 2026-08-24T06:26` 실측 EXPLAIN 0). Storage `ves-runs` 번들
+  (`sha256(run_id)[:16]/bundle/`)은 8/13 이후 런에만 있다 — 문장 절단·맥락 확장
+  초 단위는 번들 있는 편만 계산되고 리포트가 커버리지를 함께 찍는다.
+- **지표 정의 동결**: 원안 = `checkpoint_story.clips`(조립 끝·무음 컷 앞) · 최종 =
+  `edit_plan.timeline`. ⚠ raw_response 의 storyline 구조(hook/build/payoff)로 세면
+  §3 분포가 재현되지 않는다(실측 — 그건 raw_storyline_n 보조 신호로만).
+- ⚠ **clip_metadata.edit_plan 은 편집 재렌더가 덮는다** — '최종' 쪽 수치는 측정 시점
+  종속이다(실측: 기준선 대조 가능 48편 중 24편 덮임). 하네스가 editor_baselines 와
+  대조해 오염 편수를 리포트에 찍고(`contamination`), AI↔사람 29쌍 표는 절대값이 아니라
+  **방향 판정**으로만 대조한다(§3 스스로 "방향만 참고").
+- 사람 기준선: `editor_baselines`(AI 원안 스냅샷) + `job_queue` params.edit_overrides.
+  AI 쪽 우선순위 baseline → edit_plan 폴백(오염 플래그).
+- `fetch` 는 표준 라이브러리 urllib + PostgREST 만 쓴다(이 레포 venv 에 DB 드라이버가
+  없다 — 의존 추가 금지 규율). SUPABASE_URL/SERVICE_KEY 없으면 즉시 실패.
+  `report`·`diff`·`golden` 은 네트워크 0 · 순수 — 같은 아카이브면 바이트까지 같은 출력
+  (결정성 합격 기준, 테스트 고정). 백분위는 보간 없는 `sorted[int(q*(n-1))]` 하나다.
+- 로더는 두 레이아웃 자동 판별: fetch 스냅샷(`runs/*.json`) + **job 디렉토리**(엔진
+  산출 그대로 — v3 산출도 이 모양이라 `diff --b <v3_dir>` 가 바로 붙는다).
+- 골든 케이스(M0 은 인터페이스까지): `golden_cuts/v1` 정답지 채점(IoU 매칭 + 경계
+  정밀/재현율). fh_captions 류 자막 파일은 cue 뭉치 근사(derived=true)로 자동 변환 —
+  실소재 채점은 M3 에서 소스 시간 컷 리스트 정답지로.
+- 회귀 가드: `tests/test_v3_replay_harness.py`(24건 — 지표 정의·결정성·오염 진단·
+  Storage 키 규약·CLI 스모크). 네트워크 없이 돈다.
