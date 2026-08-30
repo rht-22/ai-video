@@ -1,0 +1,29 @@
+{
+ "schema": "exception_label/v1",
+ "labeled_by": "Claude — 프레임 실측(타일+이분탐색)",
+ "date": "2026-08-31",
+ "policy": "exception = 화면의 주 내용이 본편이 아닌 구간(전용 카드·예고 영상). 본편 화면 위 글자 오버레이(스태프롤·협찬)는 exception 아님 — aux.credit_overlay 로 보조 기록.",
+ "source_hint": "2회 - 8_30(일) 22시 이후 릴리즈.mp4",
+ "duration_sec": 3560.341,
+ "labels": {
+  "intro": {
+   "start": 0.0,
+   "end": 42.5,
+   "tol": 1.0,
+   "desc": "타이틀 모션(부서지는 악보)→포핸즈 로고+광고고지→제작지원→고지문 카드 → 42.5 본편"
+  },
+  "recap": null,
+  "credit": null,
+  "teaser": null,
+  "end": null
+ },
+ "aux": {
+  "credit_overlay": {
+   "start": 3496.0,
+   "end": 3560.341,
+   "tol": 4.0,
+   "desc": "엔딩 씬 위 제작지원·협찬·스태프롤·OST 배너 오버레이 — 예고 없음"
+  }
+ },
+ "notes": "2회인데 recap('이전 이야기') 없음 — 타이틀 시퀀스가 그 역할 겸하는 구성. 예고 없이 클리프행어 씬+오버레이로 종료."
+}

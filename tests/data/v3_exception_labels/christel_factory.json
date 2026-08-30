@@ -1,0 +1,17 @@
+{
+ "schema": "exception_label/v1",
+ "labeled_by": "Claude — 프레임 실측(타일+이분탐색)",
+ "date": "2026-08-31",
+ "policy": "exception = 화면의 주 내용이 본편이 아닌 구간(전용 카드·예고 영상). 본편 화면 위 글자 오버레이(스태프롤·협찬)는 exception 아님 — aux.credit_overlay 로 보조 기록.",
+ "source_hint": "크리스텔_공장_홍보.mp4",
+ "duration_sec": 43.81,
+ "labels": {
+  "intro": null,
+  "recap": null,
+  "credit": null,
+  "teaser": null,
+  "end": null
+ },
+ "aux": {},
+ "notes": "예외 구간 없음(네거티브 케이스) — 처음/끝 타일 전수 확인."
+}

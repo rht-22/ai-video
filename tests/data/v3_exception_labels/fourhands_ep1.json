@@ -1,0 +1,39 @@
+{
+ "schema": "exception_label/v1",
+ "labeled_by": "Claude — 프레임 실측(타일+이분탐색)",
+ "date": "2026-08-31",
+ "policy": "exception = 화면의 주 내용이 본편이 아닌 구간(전용 카드·예고 영상). 본편 화면 위 글자 오버레이(스태프롤·협찬)는 exception 아님 — aux.credit_overlay 로 보조 기록.",
+ "source_hint": "1회 - 8_29(토) 22시 이후 릴리즈.mp4",
+ "duration_sec": 4062.848,
+ "labels": {
+  "intro": {
+   "start": 0.0,
+   "end": 43.0,
+   "tol": 0.5,
+   "desc": "고지문 카드 → 43.0 검은 전환 후 프라하 본편"
+  },
+  "recap": null,
+  "credit": {
+   "start": 4027.0,
+   "end": 4029.5,
+   "tol": 1.0,
+   "desc": "'포핸즈' 엔드타이틀 전용 카드(짧음). 스태프롤은 전부 오버레이라 aux 로"
+  },
+  "teaser": {
+   "start": 4051.5,
+   "end": 4062.848,
+   "tol": 1.0,
+   "desc": "다음화 예고 몽타주(새 씬 전개 + OST 배너·제작사 로고)"
+  },
+  "end": null
+ },
+ "aux": {
+  "credit_overlay": {
+   "start": 4005.0,
+   "end": 4051.5,
+   "tol": 2.0,
+   "desc": "본편 몽타주 위 협찬·스태프롤 오버레이"
+  }
+ },
+ "notes": "M1 Stage1 은 [4029.25,끝]을 통째 teaser 로 판정 — 실측은 카드(4027~4029.5)+오버레이 몽타주(~4051.5)+예고(4051.5~)의 3층 구조. 채점 정책 수립 시 이 케이스가 기준점."
+}
