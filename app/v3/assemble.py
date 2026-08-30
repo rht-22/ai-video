@@ -100,13 +100,23 @@ def edited_offsets(timeline: list[dict]) -> list[tuple[float, float, float]]:
 
 
 def to_edited_sec(source_sec: float,
-                  offsets: list[tuple[float, float, float]]) -> float | None:
+                  offsets: list[tuple[float, float, float]],
+                  *, kind: str = "start") -> float | None:
     """원본 절대초 → 편집본 초. 어느 클립에도 없으면 None(조용한 0 금지).
 
-    같은 소스 구간이 두 번 편성될 일은 없지만(“한 span 은 한 비트에만”), 경계
-    동률(클립 끝 == 다음 클립 시작인 소스 시각)은 **이른 클립** — 결정성."""
+    경계 동률은 **용도별 반개구간**으로 푼다(적대 리뷰 확정 결함 — 원거리 편성에서
+    grid 인접 span 의 공유 경계값이 타임라인상 이른 클립으로 매핑되어 자막 드랍·
+    cue 오배치가 재현됐다):
+      kind="start"(시작 좌표): [s, e) — 클립 끝과 동률이면 그 클립이 아니다.
+      kind="end"(끝 좌표):     (s, e] — 클립 시작과 동률이면 그 클립이 아니다.
+    비트 안(클립 신원을 아는) 변환은 이 함수 대신 클립 offset 직접 계산을 쓴다."""
+    eps = 1e-9
     for s, e, off in offsets:
-        if s - 1e-9 <= source_sec <= e + 1e-9:
+        if kind == "end":
+            hit = s + eps < source_sec <= e + eps
+        else:
+            hit = s - eps <= source_sec < e - eps
+        if hit:
             return round(off + (min(max(source_sec, s), e) - s), 3)
     return None
 
@@ -169,10 +179,12 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
 
     단어 소속은 중점 기준(span 재단과 같은 규율). 자막은 원본 오디오 인용에만 —
     내레이션 텍스트는 cue 가 나른다(편집실이 cue.text 로 오버레이)."""
-    offsets = edited_offsets(timeline)
     segments: list[dict] = []
+    off = 0.0
     for c in timeline:
+        c0, c1 = float(c["clip_start_sec"]), float(c["clip_end_sec"])
         if not c.get("use_original_audio"):
+            off += c1 - c0
             continue
         for sid in c.get("span_ids") or []:
             sp = span_index[sid]
@@ -181,11 +193,13 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
             in_span = [w for w in grid_words
                        if sp["t_in"] <= (float(w["t0"]) + float(w["t1"])) / 2 < sp["t_out"]]
             for ln in _lines_for_span(in_span, sp["t_in"], sp["t_out"]):
-                e0 = to_edited_sec(ln["start"], offsets)
-                e1 = to_edited_sec(ln["end"], offsets)
-                if e0 is None or e1 is None or e1 <= e0:
+                # 소속 클립을 이미 안다 — offset 직접 계산(동률 스캔 매핑 금지)
+                e0 = round(off + (max(ln["start"], c0) - c0), 3)
+                e1 = round(off + (min(ln["end"], c1) - c0), 3)
+                if e1 <= e0:
                     continue
                 segments.append({"start_sec": e0, "end_sec": e1, "text": ln["text"]})
+        off += c1 - c0
     segments.sort(key=lambda s: (s["start_sec"], s["end_sec"]))
     return segments
 
@@ -198,8 +212,8 @@ def finalize_cues(narration_cues: list[dict], timeline: list[dict], *,
     offsets = edited_offsets(timeline)
     out: list[dict] = []
     for cue in narration_cues:
-        e0 = to_edited_sec(cue["source_time_sec"], offsets)
-        e1 = to_edited_sec(cue["source_end_sec"], offsets)
+        e0 = to_edited_sec(cue["source_time_sec"], offsets, kind="start")
+        e1 = to_edited_sec(cue["source_end_sec"], offsets, kind="end")
         if e0 is None or e1 is None or e1 <= e0:
             # 창이 트리밍으로 사라졌다 — 드랍 기록은 호출자가 남긴다
             out.append({**cue, "start_sec": None, "end_sec": None})

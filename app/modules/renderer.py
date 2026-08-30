@@ -625,6 +625,11 @@ class RenderInputs:
     # 방식으로 입력을 더하고(adelay + volume dB + amix) 원본 오디오를 덕킹하지는 않는다
     # (짧은 스팅에 덕킹을 걸면 원음이 펌핑한다). None/빈 목록 = 입력·필터 종전과 동일.
     sfx_audio: list[dict] | None = None
+    # V3-M4(2026-08-31): 원본 오디오 뮤트 창 — (start_sec, end_sec) 편집본 시간축.
+    # v3 의 use_original_audio=False 클립(TTS 슬롯 ⓑ 뮤트)이 여기 실린다 — 원본
+    # 트랙([acat])에만 volume=0 을 걸어 cue 오디오는 그대로 산다. None/빈 목록 =
+    # 필터 종전과 완전히 동일(v1 회귀 0 — sfx_audio 와 같은 additive 규약).
+    muted_windows: list[tuple[float, float]] | None = None
 
 
 def render_short(inputs: RenderInputs) -> list[str]:
@@ -1921,12 +1926,21 @@ def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, num_cue_inpu
     speed = float(getattr(inputs.design, "video_speed", 1.0) or 1.0)
     _tempo = f"atempo={speed:g}," if speed != 1.0 else ""
 
+    # V3-M4: 원본 트랙 뮤트 창 — 덕킹과 같은 출력 시각(×1/S) 규약. 미지정 = 빈 문자열
+    # (필터 종전과 바이트 동일).
+    _mw = [(float(a) / speed, float(b) / speed)
+           for a, b in (getattr(inputs, "muted_windows", None) or []) if b > a]
+    _mute = ""
+    if _mw:
+        _mute_expr = "+".join(f"between(t,{s:.3f},{e:.3f})" for s, e in _mw)
+        _mute = f"volume=enable='{_mute_expr}':volume=0,"
+
     # E19-5: SFX 는 cue 와 같은 믹스 경로(입력 + volume dB + adelay + amix)를 탄다.
     # 다만 원본 오디오를 **덕킹하지 않는다**(짧은 스팅에 덕킹을 걸면 원음이 펌핑한다).
     sfx_items = list(getattr(inputs, "sfx_audio", None) or [])
 
     if not inputs.tts_cue_files and not sfx_items:
-        return f"[acat]{_tempo}volume={inputs.original_audio_gain_db}dB[aout]"
+        return f"[acat]{_tempo}{_mute}volume={inputs.original_audio_gain_db}dB[aout]"
 
     cue_files = list(inputs.tts_cue_files or [])
 
@@ -1944,11 +1958,11 @@ def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, num_cue_inpu
             f"between(t,{s:.3f},{e:.3f})" for s, e in duck_ranges
         )
         original_vol = (
-            f"[acat]{_tempo}volume=enable='{duck_expr}':volume=0.5,"
+            f"[acat]{_tempo}{_mute}volume=enable='{duck_expr}':volume=0.5,"
             f"volume={inputs.original_audio_gain_db}dB[orig_vol]"
         )
     else:
-        original_vol = f"[acat]{_tempo}volume={inputs.original_audio_gain_db}dB[orig_vol]"
+        original_vol = f"[acat]{_tempo}{_mute}volume={inputs.original_audio_gain_db}dB[orig_vol]"
 
     tts_filters: list[str] = []
     mix_inputs: list[str] = ["[orig_vol]"]

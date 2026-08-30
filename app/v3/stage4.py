@@ -89,13 +89,19 @@ def render_draft(video_path: Path, timeline: list[dict], out_path: Path,
     filters.append("".join(f"{v}{a}" for v, a in zip(parts_v, parts_a))
                    + f"concat=n={n}:v=1:a=1[vout][aout]")
     t0 = time.time()
-    subprocess.run(
-        [ffmpeg, "-y", "-i", str(video_path),
-         "-filter_complex", ";".join(filters),
-         "-map", "[vout]", "-map", "[aout]",
-         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-         "-c:a", "aac", "-ac", "1", str(out_path)],
-        check=True, capture_output=True)
+    try:
+        subprocess.run(
+            [ffmpeg, "-y", "-i", str(video_path),
+             "-filter_complex", ";".join(filters),
+             "-map", "[vout]", "-map", "[aout]",
+             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+             "-c:a", "aac", "-ac", "1", str(out_path)],
+            check=True, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        # capture_output 이 stderr 를 삼키면 원인 추적이 불가(리뷰 지적) — 꼬리를 싣는다
+        raise RuntimeError(
+            f"draft 렌더 실패 — ffmpeg stderr 꼬리: "
+            f"{(e.stderr or b'')[-400:].decode('utf-8', 'replace')}") from e
     cost = {"elapsed": round(time.time() - t0, 1),
             "bytes": out_path.stat().st_size, "height": height,
             "clips": n}
@@ -184,6 +190,13 @@ def validate_style_response(resp: Any, n_beats: int) \
             elif not isinstance(v, str) or not rule.match(v):
                 problems.append(f"design.{k} 형식 위반: {v!r}")
                 continue
+            if k == "aspect_ratio":
+                w, h = (int(x) for x in str(v).split(":"))
+                # 영상 밴드는 세로 캔버스 안의 가로형 조각 — h/w 가 1.2 를 넘으면
+                # 밴드가 캔버스를 뚫는다('1:2' 통과 시 렌더 사망 — 리뷰 지적)
+                if w == 0 or h == 0 or h / w > 1.2 or h / w < 0.4:
+                    problems.append(f"design.aspect_ratio 비율 밖(0.4~1.2): {v!r}")
+                    continue
             design[k] = v
 
     beats_out: list[dict] = []

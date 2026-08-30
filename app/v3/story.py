@@ -230,17 +230,23 @@ def plan_narration_slots(beats: list[dict], span_index: dict[str, dict]) \
         est = max(NARRATION_MIN_SEC, len("".join(text.split())) / NARRATION_CPS)
 
         def runs(allow_mute: bool) -> list[list[str]]:
+            """덮을 수 있는 span 의 **소스 연속** 런 — grid 인덱스 인접이어도 0.5s
+            미만 전사 구멍으로 소스가 끊길 수 있다(적대 리뷰 확정: 창 끝이 구멍에
+            떨어져 cue 소실+뮤트만 남는 재현). 구멍에서도 런을 끊는다."""
             out: list[list[str]] = []
             cur: list[str] = []
             for sid in b["span_ids"]:
                 sp = span_index[sid]
                 ok = (not sp["is_audio"]) or \
                     (allow_mute and sp["importance"] <= MUTE_MAX_IMPORTANCE)
-                if ok:
+                broken = bool(cur) and \
+                    abs(sp["t_in"] - span_index[cur[-1]]["t_out"]) > 0.005
+                if ok and not broken:
                     cur.append(sid)
-                elif cur:
-                    out.append(cur)
-                    cur = []
+                else:
+                    if cur:
+                        out.append(cur)
+                    cur = [sid] if ok else []
             if cur:
                 out.append(cur)
             return out
@@ -269,7 +275,11 @@ def plan_narration_slots(beats: list[dict], span_index: dict[str, dict]) \
             continue
         w0 = span_index[chosen[0]]["t_in"]
         w1 = min(span_index[chosen[-1]]["t_out"], w0 + max(est, NARRATION_MIN_SEC))
-        muted = [s for s in chosen if span_index[s]["is_audio"]]
+        # 뮤트는 **창과 겹치는** 유성 span 만 — 런 전체 뮤트는 창 밖 대사까지
+        # 무음으로 만들었다(적대 리뷰 확정: 내레이션도 대사도 없는 구간 재현)
+        muted = [s for s in chosen if span_index[s]["is_audio"]
+                 and span_index[s]["t_in"] < w1 - 0.01
+                 and span_index[s]["t_out"] > w0 + 0.01]
         b["muted_span_ids"] = muted
         cues.append({"beat": bi, "text": text, "mode": mode,
                      "source_time_sec": round(w0, 3),
@@ -306,9 +316,19 @@ def fallback_highlight(span_index: dict[str, dict], span_order: list[str],
 
     meaning importance 상위부터 그 meaning 의 span 연속 덩어리를 시각순으로 담는다.
     동점은 arousal 보정(±0.5) — 여기가 §9-B 의 '동점 타이브레이커' 소비처다."""
-    groups: dict[str, list[str]] = {}
+    # 그룹 = meaning content 가 같고 **grid 연속**인 런 — content 문자열만으로
+    # 묶으면 동일 문구의 떨어진 meaning 이 병합돼 비연속 비트가 나온다(적대 리뷰
+    # 확정: validate 였다면 반려될 편성을 폴백이 직접 생성).
+    group_list: list[list[str]] = []
     for sid in span_order:
-        groups.setdefault(span_index[sid]["meaning_content"], []).append(sid)
+        if group_list and \
+                span_index[group_list[-1][-1]]["meaning_content"] == span_index[sid]["meaning_content"] \
+                and span_index[sid]["pos"] - span_index[group_list[-1][-1]]["pos"] == 1:
+            group_list[-1].append(sid)
+        else:
+            group_list.append([sid])
+    groups = {f"{span_index[ids[0]]['meaning_content']}#{i}": ids
+              for i, ids in enumerate(group_list)}
 
     slot_sec = max(NARRATION_MIN_SEC, target_sec / PIECES_MIN)
 

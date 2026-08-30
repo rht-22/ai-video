@@ -148,9 +148,11 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     for b in story_doc.get("beats") or []:
         if not b.get("label"):
             continue
-        s0 = assemble.to_edited_sec(schemas.parse_ts(b["time"]["start"]), offsets)
-        s1 = assemble.to_edited_sec(schemas.parse_ts(b["time"]["end"]), offsets)
-        if s0 is None or s1 is None:
+        s0 = assemble.to_edited_sec(schemas.parse_ts(b["time"]["start"]), offsets,
+                                    kind="start")
+        s1 = assemble.to_edited_sec(schemas.parse_ts(b["time"]["end"]), offsets,
+                                    kind="end")
+        if s0 is None or s1 is None or s1 <= s0:   # 역전 = 음수 길이 ASS(리뷰 확정)
             continue
         labels.append({"text": b["label"], "start_sec": s0,
                        "end_sec": min(s1, s0 + 4.0),      # 라벨은 최대 4s(템플릿 관행)
@@ -160,6 +162,16 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     if labels:
         texts_path = output_dir / "v3_labels.ass"
         build_texts_ass(labels, texts_path)
+
+    # 적대 리뷰 확정(critical): renderer 는 use_original_audio 를 읽지 않았다 —
+    # 뮤트 창(편집본 좌표)을 additive 필드로 넘겨 원본 트랙에만 volume=0 (cue 는 산다).
+    muted_windows: list[tuple[float, float]] = []
+    _off = 0.0
+    for c in clips:
+        _dur = c.end_sec - c.start_sec
+        if not c.use_original_audio:
+            muted_windows.append((round(_off, 3), round(_off + _dur, 3)))
+        _off += _dur
 
     out_path = output_dir / out_name
     audio_mix = plan.get("audio_mix") or {}
@@ -180,11 +192,13 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
         original_audio_gain_db=int(audio_mix.get("original_gain_db", -3)),
         tts_audio_gain_db=int(audio_mix.get("tts_gain_db", -3)),
         text_subtitle_path=texts_path,
+        muted_windows=muted_windows or None,
     )
     t0 = time.time()
     render_short(inputs)
     cost = {"elapsed": round(time.time() - t0, 1), "bytes": out_path.stat().st_size,
-            "clips": len(clips), "cues": len(cue_files), "labels": len(labels)}
+            "clips": len(clips), "cues": len(cue_files),
+            "muted_windows": len(inputs.muted_windows or []), "labels": len(labels)}
     log(f"  [v3/render] {out_path.name} — {cost['elapsed']}s · "
         f"{cost['bytes'] // (1024 * 1024)}MB")
     return out_path, cost
@@ -222,7 +236,10 @@ def check_tts_conflicts(resources: dict, plan: dict, stage2_doc: dict,
         if cue.get("start_sec") is None:
             continue
         c0 = float(cue["source_time_sec"])
-        c1 = c0 + float(cue.get("duration_sec") or 0)
+        # 계획 창이 아니라 **실측 오디오 길이**가 실제 겹침이다(적대 리뷰 —
+        # fit 소진 '잘림 감수' 오디오가 창을 넘어 다음 대사를 밟는 재현)
+        c1 = c0 + max(float(cue.get("duration_sec") or 0),
+                      float(cue.get("fit_actual_sec") or 0))
         muted = set(cue.get("muted_span_ids") or [])
         for sid in selected:
             sp = span_index.get(sid)
@@ -271,11 +288,11 @@ def check_loop_continuity(video_path: Path, tmp_dir: Path) -> dict:
     """§9-D ② 루프 정합 — 첫/끝 프레임의 평균 절대 오차(0~255). 경고 모드."""
     ffmpeg = find_ffmpeg_command("ffmpeg")
     first, last = tmp_dir / "loop_first.png", tmp_dir / "loop_last.png"
-    subprocess.run([ffmpeg, "-y", "-i", str(video_path), "-frames:v", "1",
-                    str(first)], check=True, capture_output=True)
-    subprocess.run([ffmpeg, "-y", "-sseof", "-0.5", "-i", str(video_path),
-                    "-frames:v", "1", str(last)], check=True, capture_output=True)
     try:
+        subprocess.run([ffmpeg, "-y", "-i", str(video_path), "-frames:v", "1",
+                        str(first)], check=True, capture_output=True)
+        subprocess.run([ffmpeg, "-y", "-sseof", "-0.5", "-i", str(video_path),
+                        "-frames:v", "1", str(last)], check=True, capture_output=True)
         from PIL import Image
         import numpy as np
         a = np.asarray(Image.open(first).convert("L").resize((90, 160)), dtype=float)
@@ -305,13 +322,18 @@ def frame_vision_qc(gemini, video_path: Path, tmp_dir: Path, *,
     except ValueError:
         return {"status": "skipped", "reason": "duration 측정 실패"}
     frames = []
-    for i in range(n_frames):
-        t = dur * (i + 0.5) / n_frames
-        p = tmp_dir / f"qc_{i}.jpg"
-        subprocess.run([ffmpeg, "-y", "-ss", f"{t:.2f}", "-i", str(video_path),
-                        "-frames:v", "1", "-q:v", "5", str(p)],
-                       check=True, capture_output=True)
-        frames.append(p)
+    try:
+        for i in range(n_frames):
+            t = dur * (i + 0.5) / n_frames
+            p = tmp_dir / f"qc_{i}.jpg"
+            subprocess.run([ffmpeg, "-y", "-ss", f"{t:.2f}", "-i", str(video_path),
+                            "-frames:v", "1", "-q:v", "5", str(p)],
+                           check=True, capture_output=True)
+            frames.append(p)
+    except subprocess.CalledProcessError as e:
+        # 경고 모드 — 추출 실패가 파이프라인을 죽이면 안 된다
+        return {"status": "skipped",
+                "reason": f"프레임 추출 실패: {(e.stderr or b'')[-200:]!r}"}
     types = gemini.types
     parts = [types.Part.from_bytes(data=p.read_bytes(), mime_type="image/jpeg")
              for p in frames]

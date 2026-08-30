@@ -180,17 +180,43 @@ def test_narration_prefers_silent_run():
     assert st.verify_tts_conflicts(cues, beats, IDX) == []
 
 
-def test_narration_mutes_low_importance_voiced():
+def test_narration_mutes_only_window_overlap():
+    # 적대 리뷰 확정 수정: 뮤트는 cue **창과 겹치는** 유성 span 만 — 런 전체 뮤트는
+    # 창 밖 대사까지 무음으로 만들었다(내레이션도 대사도 없는 구간).
     grid2 = _mk_grid([(0, 4, True, "잡담"), (4, 8, True, "잡담2")])
     s2 = _mk_stage2(grid2, [(0, 1, 2, "m")])                      # imp 2 — 뮤트 가능
     idx, _ = st.build_span_index(s2, grid2)
     beats = [{"role": "context", "span_ids": ["sp0000", "sp0001"],
-              "narration": "여덟자내레이션쯤", "label": None}]
+              "narration": "여덟자내레이션쯤", "label": None}]     # est ≈ 1.07s
     cues, dropped = st.plan_narration_slots(beats, idx)
     assert not dropped
     assert cues[0]["mode"] == "muted"
-    assert cues[0]["muted_span_ids"] == ["sp0000", "sp0001"]
+    assert cues[0]["muted_span_ids"] == ["sp0000"]                # 창(0~1.07)과 겹침만
     assert st.verify_tts_conflicts(cues, beats, idx) == []
+
+
+def test_narration_run_breaks_at_source_gap():
+    # 적대 리뷰 확정 수정: grid 인덱스 인접이어도 0.5s 미만 전사 구멍이면 런을 끊어
+    # cue 창이 구멍에 떨어지지 않는다(cue 소실+뮤트만 남던 재현).
+    grid2 = {"span_candidates": [
+        {"id": "sp0000", "t_in": 10.0, "t_out": 12.0, "is_audio": True,
+         "time_authority": "stt", "text": "a"},
+        {"id": "sp0001", "t_in": 12.4, "t_out": 14.0, "is_audio": True,
+         "time_authority": "stt", "text": "b"},
+    ], "arousal": [], "words": []}
+    idx = {"sp0000": {"t_in": 10.0, "t_out": 12.0, "is_audio": True,
+                      "importance": 2, "pos": 0, "audio_script": [],
+                      "scene_script": "", "meaning_content": "m", "mood": ""},
+           "sp0001": {"t_in": 12.4, "t_out": 14.0, "is_audio": True,
+                      "importance": 2, "pos": 1, "audio_script": [],
+                      "scene_script": "", "meaning_content": "m", "mood": ""}}
+    beats = [{"role": "context", "span_ids": ["sp0000", "sp0001"],
+              "narration": "열입곱자짜리내레이션대본입니다", "label": None}]  # est≈2.0s
+    cues, dropped = st.plan_narration_slots(beats, idx)
+    # 갭을 걸치는 3.6s 런 대신 — 각 런(2.0s/1.6s)에 fit 배치, 창은 소스 연속 구간 안
+    assert not dropped and cues
+    w0, w1 = cues[0]["source_time_sec"], cues[0]["source_end_sec"]
+    assert (w0 >= 10.0 and w1 <= 12.0) or (w0 >= 12.4 and w1 <= 14.0)
 
 
 def test_narration_dropped_over_high_importance():
@@ -256,8 +282,9 @@ def test_edit_plan_splits_on_mute_flip():
     s2 = _mk_stage2(grid2, [(0, 1, 2, "m"), (2, 2, 4, "n")])
     idx, _ = st.build_span_index(s2, grid2)
     beats = [{"role": "context", "span_ids": ["sp0000", "sp0001", "sp0002"],
-              "narration": "긴 내레이션 텍스트", "label": None}]
+              "narration": "이건 좀 많이 긴 서른자쯤 되는 내레이션 대본이었죠", "label": None}]
     cues, dropped = st.plan_narration_slots(beats, idx)
+    # est ≈ 3.1s → 창이 sp0000(0~2)+sp0001(2~4) 에 걸침 — 둘만 뮤트, sp0002 는 원음
     assert not dropped and cues[0]["muted_span_ids"] == ["sp0000", "sp0001"]
     doc = {"title": {"line1": "a", "line2": "b"},
            "beats": [dict(beats[0], number=0)]}
@@ -268,6 +295,17 @@ def test_edit_plan_splits_on_mute_flip():
 
 
 # ── 좌표 변환 ───────────────────────────────────────────────────────────────
+
+def test_to_edited_sec_boundary_kind_disambiguation():
+    # 적대 리뷰 확정 수정: 원거리 편성에서 공유 경계값(103.0)이 이른-타임라인 클립에
+    # 오매핑되던 결함 — 용도별 반개구간(start=[s,e) · end=(s,e])으로 해소
+    offs = assemble.edited_offsets([
+        {"clip_start_sec": 103.0, "clip_end_sec": 106.0},   # beatA (타임라인 앞)
+        {"clip_start_sec": 94.0, "clip_end_sec": 103.0},    # beatC (타임라인 뒤)
+    ])
+    assert assemble.to_edited_sec(103.0, offs, kind="start") == pytest.approx(0.0)
+    assert assemble.to_edited_sec(103.0, offs, kind="end") == pytest.approx(12.0)
+
 
 def test_edited_mapping_and_identity():
     plan = assemble.assemble_edit_plan(_story_doc(), IDX,

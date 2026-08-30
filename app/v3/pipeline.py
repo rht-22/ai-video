@@ -344,8 +344,10 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
         stage2_path = output_dir / "stage2.json"
         if skip_stage3:
             log("  [v3/story] 건너뜀(--skip-stage3)")
+            step("story", skipped="--skip-stage3")
         elif not stage2_path.exists():
             log("  [v3/story] stage2.json 없음 — 건너뜀(Stage 2 가 선행돼야 한다)")
+            step("story", skipped="stage2.json 없음")
         else:
             _run_m3(output_dir=output_dir, video_path=Path(video_path),
                     work_title=work_title, grid=grid, research=research,
@@ -371,8 +373,10 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
         # ── M4: draft_render → style → render → validate ──────────────────
         if skip_stage4:
             log("  [v3/stage4] 건너뜀(--skip-stage4)")
+            step("draft_render", skipped="--skip-stage4")
         elif not (output_dir / "edit_plan.json").exists():
             log("  [v3/stage4] edit_plan.json 없음 — 건너뜀(M3 이 선행돼야 한다)")
+            step("draft_render", skipped="edit_plan.json 없음")
         else:
             _run_m4(output_dir=output_dir, video_path=Path(video_path),
                     grid=grid, from_step=from_step,
@@ -540,13 +544,15 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
         log("  [v3/story] 분석된 span 이 없다 — 건너뜀(커버리지 표기)")
         step("story", skipped="analyzed span 0")
         return
-    fingerprint = hashlib.sha1(json.dumps(
-        {"spans": [[sid, span_index[sid]["t_in"], span_index[sid]["t_out"],
-                    span_index[sid]["importance"]] for sid in span_order]},
-        sort_keys=True).encode("utf-8")).hexdigest()[:16]
-
     target = story_target_sec if story_target_sec is not None else st.STORY_TARGET_SEC
     max_sec = story_max_sec if story_max_sec is not None else st.STORY_MAX_SEC
+    # 길이 노브도 지문 재료다 — 빠지면 --story-max-sec 재실행이 캐시에 먹혀 조용히
+    # 무시된다(적대 리뷰 확정 · --job-id 재개 재현)
+    fingerprint = hashlib.sha1(json.dumps(
+        {"spans": [[sid, span_index[sid]["t_in"], span_index[sid]["t_out"],
+                    span_index[sid]["importance"]] for sid in span_order],
+         "target": target, "max": max_sec},
+        sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
     story_ckpt = output_dir / "checkpoint_story.json"
     story_doc = None
@@ -622,6 +628,26 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
         except Exception as e:  # noqa: BLE001 — 합성 실패가 계획 산출을 막지 않는다
             log(f"  [v3/resources] ⚠ cue {ci} 합성 실패 — 계획만 유지: {e}")
             cue["fit_actual_sec"] = None
+            # 이전 실행의 같은 이름 mp3 가 남아 있으면 낡은 대본이 최종 믹스에
+            # 들어간다(적대 리뷰 확정) — 지우고 경로도 비운다(렌더 필터가 걸러냄)
+            tts_path.unlink(missing_ok=True)
+            tts_cue_files.append({"cue_index": ci, "path": None, "cue": cue})
+            continue
+        # fit 소진 '잘림 감수' 오디오가 창을 넘으면 다음 대사를 밟는다(리뷰 확정)
+        # — 창 길이로 물리 트림(+페이드아웃 0.12s)해 계약(창 안 오디오)을 강제한다
+        window = float(cue["duration_sec"])
+        if cue["fit_actual_sec"] and cue["fit_actual_sec"] > window + 0.05:
+            from app.modules.ffmpeg_utils import find_ffmpeg_command
+            trimmed = tts_path.with_suffix(".trim.mp3")
+            subprocess.run(
+                [find_ffmpeg_command("ffmpeg"), "-y", "-i", str(tts_path),
+                 "-t", f"{window:.3f}",
+                 "-af", f"afade=t=out:st={max(0.0, window - 0.12):.3f}:d=0.12",
+                 str(trimmed)], check=True, capture_output=True)
+            trimmed.replace(tts_path)
+            log(f"  [v3/resources] cue {ci} 실측 {cue['fit_actual_sec']}s > 창 "
+                f"{window}s — 창 길이로 트림")
+            cue["fit_actual_sec"] = window
         tts_cue_files.append({"cue_index": ci, "path": str(tts_path), "cue": cue})
     backend = active_backend()
     resources = {"tts_cue_files": tts_cue_files, "tts_backend": backend}
@@ -661,27 +687,44 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
     resources = _read_json(output_dir / "checkpoint_resources.json") \
         if (output_dir / "checkpoint_resources.json").exists() else {}
 
-    m4_invalidate = from_step in ("draft_render", "style", "render", "validate")
+    # M4 캐시 전부 **상류 지문**에 묶는다 — 파일 존재만 보면 상류(edit_plan) 변경
+    # 후 낡은 draft 프레임으로 style 이 돌고 낡은 final 이 납품된다(적대 리뷰 확정).
+    fingerprint = hashlib.sha1(json.dumps(
+        [[c["clip_start_sec"], c["clip_end_sec"], c.get("span_ids"),
+          c.get("use_original_audio")]
+         for c in plan["timeline"]], sort_keys=True).encode()).hexdigest()[:16]
+
+    def _sidecar_ok(name: str) -> bool:
+        f = output_dir / name
+        if not f.exists():
+            return False
+        try:
+            return _read_json(f).get("fingerprint") == fingerprint
+        except (json.JSONDecodeError, OSError):
+            return False
 
     # ── draft_render (11) ─────────────────────────────────────────────────
     draft_path = output_dir / "draft_480.mp4"
     frames_dir = output_dir / "draft_frames"
     windows = stage4.edited_beat_windows(story_doc, plan["timeline"])
-    if draft_path.exists() and frames_dir.is_dir() \
+    expected = [frames_dir / f"beat{w['beat']:02d}_{tag}.jpg"
+                for w in windows for tag in ("start", "mid")]
+    if draft_path.exists() and _sidecar_ok("draft_fingerprint.json") \
+            and all(f.exists() for f in expected) \
             and from_step not in ("draft_render",):
-        log("  [v3/draft] 캐시 존재 — 재사용(--from-step draft_render 로 재구성)")
-        frames = sorted(frames_dir.glob("beat*.jpg"))
-        frame_list = [{"path": str(p)} for p in frames]
+        log("  [v3/draft] 캐시 유효(지문 일치) — 재사용")
+        # 생성 순서(비트별 start→mid)와 동일하게 재구성 — glob 정렬은 mid<start 라
+        # 캐시 유무에 따라 Flash 입력 순서가 갈렸다(적대 리뷰 확정 · 결정성)
+        frame_list = [{"path": str(f)} for f in expected]
     else:
         cost = stage4.render_draft(video_path, plan["timeline"], draft_path, log=log)
         frame_list = stage4.sample_beat_frames(draft_path, windows, frames_dir,
                                                log=log)
+        _write_json(output_dir / "draft_fingerprint.json",
+                    {"fingerprint": fingerprint})
         step("draft_render", **cost, frames=len(frame_list))
 
     # ── style (12) — 상류 지문 규율 ───────────────────────────────────────
-    fingerprint = hashlib.sha1(json.dumps(
-        [[c["clip_start_sec"], c["clip_end_sec"], c.get("span_ids")]
-         for c in plan["timeline"]], sort_keys=True).encode()).hexdigest()[:16]
     style_ckpt = output_dir / "checkpoint_style.json"
     style_doc = None
     if style_ckpt.exists() and from_step not in ("draft_render", "style"):
@@ -702,15 +745,19 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
         log(f"  [v3/style] 완료 — 프리셋 diff {len(style_doc.get('diff') or {})}키")
     _write_json(output_dir / "style.json", style_doc)
 
-    # ── render (13) ───────────────────────────────────────────────────────
+    # ── render (13) — 캐시는 지문 사이드카로만 유효(파일 존재만 보면 낡은
+    # 최종본이 납품된다 — 적대 리뷰 확정 critical) ─────────────────────────
     final_path = output_dir / "final_1080x1920.mp4"
-    if final_path.exists() and from_step not in ("draft_render", "style", "render"):
-        log("  [v3/render] 캐시 존재 — 재사용(--from-step render 로 재구성)")
+    if final_path.exists() and _sidecar_ok("render_fingerprint.json") \
+            and from_step not in ("draft_render", "style", "render"):
+        log("  [v3/render] 캐시 유효(지문 일치) — 재사용")
     else:
         final_path, cost = finalize.render_final(
             video_path=video_path, plan=plan, style_doc=style_doc,
             segments=segments, resources=resources, story_doc=story_doc,
             output_dir=output_dir, log=log)
+        _write_json(output_dir / "render_fingerprint.json",
+                    {"fingerprint": fingerprint})
         step("render", **cost)
 
     # ── validate (14) — 항상 재계산(산출이 아니라 검증이다) ───────────────

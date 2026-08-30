@@ -47,6 +47,14 @@ def test_style_ok_and_beat_normalization():
     assert any("보정" in n for n in notes)
 
 
+def test_style_aspect_ratio_band_range():
+    # '1:2'(세로 2160px 밴드)는 렌더를 죽인다 — 비율 범위 검증(적대 리뷰 지적)
+    _, p1, _ = stage4.validate_style_response({"design": {"aspect_ratio": "1:2"}}, 3)
+    assert any("비율 밖" in x for x in p1)
+    ok, p2, _ = stage4.validate_style_response({"design": {"aspect_ratio": "16:9"}}, 3)
+    assert p2 == [] and ok["design"]["aspect_ratio"] == "16:9"
+
+
 def test_style_rejects_out_of_range_beat_number():
     styled, problems, _ = stage4.validate_style_response(
         {"design": {}, "beats": [{"number": 9}]}, 3)
@@ -194,3 +202,21 @@ def test_run_validate_hard_fail_logic(tmp_path):
         segments=[], resources={}, final_path=None, tmp_dir=tmp_path,
         gemini=None, log=lambda *a: None)
     assert doc2["hard_fail"] is True
+
+
+def test_renderer_muted_windows_additive():
+    # 적대 리뷰 확정(critical) 수정: use_original_audio 는 renderer 가 안 읽었다 —
+    # muted_windows additive 필드가 원본 트랙에만 volume=0 (미지정 = 종전 바이트 동일)
+    from pathlib import Path
+
+    from app.modules.renderer import RenderInputs, _build_audio_filter
+    from app.modules.story_builder import StoryClip
+    base = dict(video_path=Path("/v.mp4"),
+                clips=[StoryClip("hook", 0, 5, "", True)],
+                subtitle_path=None, crop_timeline_map={}, title_text="",
+                work_title="", output_path=Path("/o.mp4"), canvas_width=1080,
+                canvas_height=1920, top_title_height=250, bottom_label_height=200)
+    assert "volume=enable" not in _build_audio_filter(RenderInputs(**base), 1, 0)
+    muted = _build_audio_filter(
+        RenderInputs(**base, muted_windows=[(5.0, 10.0)]), 1, 0)
+    assert "volume=enable='between(t,5.000,10.000)':volume=0," in muted
