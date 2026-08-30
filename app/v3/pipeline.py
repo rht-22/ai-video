@@ -99,6 +99,7 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
            skip_research: bool = False, skip_seq_analyze: bool = False,
            skip_stage2: bool = False, skip_stage3: bool = False,
            skip_stage4: bool = False, edit_overrides_path: Path | None = None,
+           hook_variants: int | None = None,
            story_target_sec: float | None = None,
            story_max_sec: float | None = None,
            max_chunks: int | None = None,
@@ -352,6 +353,12 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
                     story_target_sec=story_target_sec,
                     story_max_sec=story_max_sec,
                     get_gemini=get_gemini, step=step, log=log)
+
+        # ── M6-A: 훅 변형 — M3 산출 위에(본편 불변 · 렌더는 변형 발주 시) ──
+        if hook_variants and (output_dir / "edit_plan.json").exists():
+            _run_hook_variants(output_dir=output_dir, video_path=Path(video_path),
+                               work_title=work_title, grid=grid, n=hook_variants,
+                               get_gemini=get_gemini, step=step, log=log)
 
         # ── M5(C4): 편집실 edit_overrides 반영 — M3 산출 위에, M4 앞에 ─────
         if edit_overrides_path is not None:
@@ -755,3 +762,51 @@ def _apply_edit_overrides(*, output_dir: Path, overrides_path: Path, grid: dict,
             "(후속 마일스톤 재료, 조용한 무시 아님)")
     log(f"  [v3/overrides] 적용 {record['applied']} · 스냅 보정 "
         f"{len(record['snap_log'])}건 · cue 드랍 {len(record['cues_dropped'])}건")
+
+
+def _run_hook_variants(*, output_dir: Path, video_path: Path, work_title: str,
+                       grid: dict, n: int, get_gemini, step, log) -> None:
+    """M6-A — 훅 변형 N개: edit_plan_variant_<k>.json + 변형별 자막·cue 계획.
+
+    본편 산출은 건드리지 않는다. TTS 합성은 변형 렌더 시점의 일 — cue 계획까지만
+    (synthesis: deferred 기록). variant_id 는 성과 조인의 키(additive)."""
+    from app.v3 import assemble, variants as va
+    from app.v3.story import build_span_index
+
+    stage2_doc = _read_json(output_dir / "stage2.json")
+    story_doc = (_read_json(output_dir / "checkpoint_story.json") or {}).get("story")
+    if not story_doc:
+        log("  [v3/variants] checkpoint_story 없음 — 건너뜀")
+        return
+    t0 = time.time()
+    docs, audit = va.run_hook_variants(get_gemini(), story_doc, stage2_doc, grid,
+                                       n=n, log=log)
+    span_index, _ = build_span_index(stage2_doc, grid)
+    produced = []
+    for k, vdoc in enumerate(docs, start=1):
+        plan = assemble.assemble_edit_plan(vdoc, span_index,
+                                           video_path=str(video_path),
+                                           work_title=work_title)
+        plan["variant_id"] = vdoc["variant_id"]          # additive — 성과 조인 키
+        belt = assemble.verify_edit_plan(plan, grid)
+        if belt["pct"] is not None and belt["pct"] < 100.0:
+            raise AssertionError(f"변형 {k} 시각 정합 벨트 위반: {belt}")
+        segs = assemble.word_subtitles(plan["timeline"], span_index,
+                                       grid.get("words") or [])
+        cues = [c for c in assemble.finalize_cues(
+                    vdoc.get("narration_cues") or [], plan["timeline"],
+                    voice="ko_female", speed="normal")
+                if c.get("start_sec") is not None]
+        _write_json(output_dir / f"edit_plan_variant_{k}.json", plan)
+        _write_json(output_dir / f"subtitle_segments_variant_{k}.json", segs)
+        _write_json(output_dir / f"checkpoint_resources_variant_{k}.json",
+                    {"tts_cue_files": [{"cue_index": i, "path": None, "cue": c}
+                                       for i, c in enumerate(cues)],
+                     "synthesis": "deferred"})
+        produced.append({"variant_id": vdoc["variant_id"],
+                         "title": vdoc["title"], "clips": len(plan["timeline"]),
+                         "belt_pct": belt["pct"]})
+    step("hook_variants", elapsed=round(time.time() - t0, 1),
+         requested=n, produced=produced,
+         attempts=len(audit["attempts"]), failed=audit.get("failed", False))
+    log(f"  [v3/variants] 완료 — 변형 {len(produced)}개 산출")
