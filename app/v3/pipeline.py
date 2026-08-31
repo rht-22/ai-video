@@ -248,6 +248,10 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
             if not audio_path.exists():
                 extract_audio_from_video(Path(video_path), audio_path)
 
+            # M8-B: silence 를 전사 **앞**에 계산 — 공백 재전사가 진짜 무음 창을
+            # 건너뛰는 근거다(무음에 vad off 전사를 돌리면 환각 위험만 산다)
+            silence = detect_silence_intervals(audio_path, duration)
+
             words_ckpt = output_dir / "checkpoint_grid_words.json"
             if words_ckpt.exists():
                 wdata = _read_json(words_ckpt)
@@ -260,14 +264,21 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
                     audio_path, duration, work_title=work_title,
                     character_names=names or None,
                     work_context=(research or {}).get("work_context") or None, log=log)
+                # M8-B: 단어 간 긴 공백(≥6s)만 완화 재전사 — VAD 가 현장음 속
+                # 발화를 삼킨 구간 복원(가왕쇼 자막 공백 실사고). carve 전 병합이라
+                # span id 안정성 유지. 캐시에도 병합본이 실린다.
+                from app.v3.transcribe import retranscribe_gaps
+                words, gap_audit = retranscribe_gaps(
+                    audio_path, words, duration, silence, log=log)
+                step("grid_gap_retry", **gap_audit)
                 _write_json(words_ckpt, {"model": WHISPER_MODEL_NAME, "words": words,
-                                         "failed_windows": [list(f) for f in failed]})
+                                         "failed_windows": [list(f) for f in failed],
+                                         "gap_retry": gap_audit})
             if failed:
                 log(f"  [v3/grid] ⚠ 전사 실패 창 {len(failed)}건 — scene 폴백(무성 취급): "
                     + ", ".join(f"{a:.0f}~{b:.0f}s" for a, b in failed))
 
             scene_cuts = detect_scene_cuts(proxy_path, threshold=scene_threshold)
-            silence = detect_silence_intervals(audio_path, duration)
             arousal = compute_arousal(load_pcm(audio_path), duration, words)
             spans = carve_spans(words, scene_cuts, silence, duration)
 
@@ -313,8 +324,15 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
             research_ctx = (research or {}).get("work_context") or ""
             doc, audit = s1.run_seq_analyze(get_gemini(), scan_proxy, grid,
                                             research_context=research_ctx, log=log)
+            # M8-A: exception 경계 정밀 2-pass — 트리거 명시·Flash ≤5콜·scene cut
+            # 스냅·실패 시 원판정 유지. 이동 시 sequences 재타일링(커버리지 유지).
+            from app.v3.refine import refine_exception
+            doc, refine_audit = refine_exception(
+                get_gemini(), doc, grid, Path(video_path),
+                output_dir / "refine_probes", log=log)
             _write_json(stage1_path, doc)
             step("seq_analyze", elapsed=round(time.time() - t0, 1),
+                 refine=refine_audit,
                  attempts=len(audit["attempts"]),
                  sequences=len(doc["sequences"]),
                  chunks=sum(len(sq["chunks"]) for sq in doc["sequences"]),

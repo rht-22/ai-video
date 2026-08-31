@@ -107,3 +107,75 @@ def transcribe_words(audio_path: Path, duration_sec: float, *,
             failed.append((round(t, 3), round(end, 3)))
         t = end
     return sorted(words, key=lambda w: (w["t0"], w["t1"])), failed
+
+
+# ── M8-B: 전사 공백 재전사 (발주서 v3-m8 — 트리거 실측 수정판) ────────────────
+GAP_RETRY_SEC = 6.0          # 단어 간 공백 트리거 — 긴 공백은 드물어 상한 불필요
+GAP_SILENCE_SKIP = 0.8       # 창의 이 비율 이상이 silencedetect 무음이면 진짜 무음
+GAP_MIN_PROB = 0.4           # vad off 재전사의 환각 방어 — 저확신 단어 버림
+
+
+def retranscribe_gaps(audio_path: Path, words: list[dict], duration_sec: float,
+                      silence: list[tuple[float, float]], *,
+                      prompt: str = "", log=print) -> tuple[list[dict], dict]:
+    """단어 간 긴 공백(≥6s)만 완화 설정으로 재전사해 병합. 입력 불변 — 사본 반환.
+
+    가왕쇼 실사고: VAD 가 시끄러운 현장음 속 발화를 삼켜 11.5s 대사 구간이 무성
+    오분류 → 쇼츠 자막 공백. 완화 재전사(vad off·no_speech 0.9)가 실제 대사를
+    복원함을 착수 실측으로 확인. 진짜 무음 창(silencedetect 겹침 ≥80%)은 건너뛴다
+    — 무음에 vad off 전사를 돌리면 환각 위험만 산다. 에너지 트리거는 실측 기각
+    (유성 −27.8dB vs 무성 −26.9dB — 예능은 무성도 시끄럽다)."""
+    ws = sorted(words, key=lambda w: (w["t0"], w["t1"]))
+    gaps = []
+    prev_end = 0.0
+    for w in ws:
+        if w["t0"] - prev_end >= GAP_RETRY_SEC:
+            gaps.append((prev_end, w["t0"]))
+        prev_end = max(prev_end, w["t1"])
+    if duration_sec - prev_end >= GAP_RETRY_SEC:
+        gaps.append((prev_end, duration_sec))
+
+    def silence_frac(a: float, b: float) -> float:
+        ov = sum(max(0.0, min(b, s1) - max(a, s0)) for s0, s1 in silence or [])
+        return ov / (b - a) if b > a else 1.0
+
+    audit = {"gaps": len(gaps), "windows": [], "recovered_words": 0}
+    todo = [(a, b) for a, b in gaps if silence_frac(a, b) < GAP_SILENCE_SKIP]
+    audit["skipped_silence"] = len(gaps) - len(todo)
+    if not todo:
+        return list(words), audit
+
+    device, compute_type = _detect_device_and_compute()
+    model = _get_whisper_model(WHISPER_MODEL_NAME, device, compute_type)
+    merged = list(words)
+    for a, b in todo:
+        t0, t1 = max(0.0, a - 1.0), min(duration_sec, b + 1.0)
+        rec = {"window": [round(a, 1), round(b, 1)], "found": 0}
+        try:
+            segs, _info = model.transcribe(
+                str(audio_path), language="ko", temperature=0.0,
+                initial_prompt=prompt or None, word_timestamps=True,
+                vad_filter=False, no_speech_threshold=0.9,
+                condition_on_previous_text=False, clip_timestamps=[t0, t1])
+            found = []
+            for s in segs:
+                for w in s.words or []:
+                    if w.probability is None or w.probability < GAP_MIN_PROB:
+                        continue
+                    if not (a + 0.1 < float(w.start) and float(w.end) < b - 0.1):
+                        continue          # 기존 단어와의 경계 중복 방지 — 공백 안만
+                    text = (w.word or "").strip()
+                    if text:
+                        found.append({"t0": round(float(w.start), 3),
+                                      "t1": round(float(w.end), 3),
+                                      "text": text,
+                                      "prob": round(float(w.probability), 3)})
+            merged.extend(found)
+            rec["found"] = len(found)
+            audit["recovered_words"] += len(found)
+            if found:
+                log(f"  [v3/전사] 공백 재전사 {a:.0f}~{b:.0f}s — 단어 {len(found)}개 복원")
+        except Exception as e:  # noqa: BLE001 — 재전사 실패는 현행 유지(경고 모드)
+            rec["error"] = f"{type(e).__name__}: {e}"
+        audit["windows"].append(rec)
+    return sorted(merged, key=lambda w: (w["t0"], w["t1"])), audit
