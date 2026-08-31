@@ -28,9 +28,7 @@ def test_style_range_and_format_validation():
     _, p2, _ = stage4.validate_style_response(
         {"design": {"subtitle_color": "빨강"}}, 3)
     assert any("형식 위반" in x for x in p2)
-    _, p3, _ = stage4.validate_style_response(
-        {"design": {"title_bold": "yes"}}, 3)
-    assert any("불리언" in x for x in p3)
+    # 굵게는 어휘에서 내려갔다 — 값이 뭐든 **드롭+메모**(별도 테스트에서 전수)
 
 
 def test_style_ok_and_beat_normalization():
@@ -72,14 +70,13 @@ def test_design_mapping_and_ass_color_conversion():
     d = finalize.design_from_style({
         "title_color": "#FFE94A", "title_color2": "#FF3B2D",
         "title_size": 88, "title_size2": 92,
-        "title_bold": True, "title_bold2": True,
         "subtitle_color": "#FFFFFF", "subtitle_size": 62,
         "tts_color": "#FFE94A", "tts_size": 60,
         "aspect_ratio": "5:4",
     })
     assert d.title_colors == ["#FFE94A", "#FF3B2D"]
     assert d.title_sizes == [88, 92]
-    assert d.title_bolds == [True, True]
+    assert d.title_bolds == finalize.DesignConfig().title_bolds   # 굵게는 닫혀 있다
     assert d.aspect_ratio == "5:4"
     # tts 색은 DesignConfig 가 ASS 표기 — hex 그대로 새면 렌더가 색을 못 읽는다
     assert d.tts_line_color.startswith("&H")
@@ -249,13 +246,52 @@ def test_style_validates_label_positions_and_clamps():
     assert any("위치 보정" in n for n in notes)
 
 
-def test_style_rejects_malformed_label_entries():
-    _, problems, _ = stage4.validate_style_response(
-        {"design": {}, "labels": [{"index": "0", "x": 0.5, "y": 0.5}]}, 3)
-    assert any("index" in p for p in problems)
-    _, p2, _ = stage4.validate_style_response(
-        {"design": {}, "labels": [{"index": 0}]}, 3)
-    assert any("x·y" in p for p in p2)
+def test_malformed_label_entries_never_kill_the_plan():
+    """라벨 좌표 한 칸 때문에 비트 crop/pop/sfx·design 까지 잃으면 안 된다(리뷰 H2)."""
+    band = (0.275, 0.725)
+    styled, problems, notes = stage4.validate_style_response(
+        {"design": {"subtitle_color": "#FFFFFF"},
+         "labels": [{"index": "0", "x": 0.5, "y": 0.5},      # index 형식 오류
+                    {"index": 1}]}, 3, band=band,            # x·y 누락
+        labels=[{"index": 0, "text": "(놀람)"}, {"index": 1, "text": "(월척)"}])
+    assert problems == [] and styled["design"] == {"subtitle_color": "#FFFFFF"}
+    assert styled["labels"] == []                            # 둘 다 기본 위치로
+    assert any("2개 미배치" in n for n in notes)
+
+
+def test_label_index_out_of_range_or_duplicated_is_dropped():
+    """1-based 응답이면 전 라벨이 한 칸씩 밀려 **남의 자리**에 렌더된다(리뷰 C3)."""
+    band = (0.275, 0.725)
+    plan = [{"index": 0, "text": "(놀람)"}, {"index": 1, "text": "(월척)"}]
+    styled, problems, notes = stage4.validate_style_response(
+        {"design": {}, "labels": [{"index": 1, "x": 0.3, "y": 0.4},
+                                  {"index": 2, "x": 0.7, "y": 0.4},
+                                  {"index": 1, "x": 0.8, "y": 0.5}]},
+        3, band=band, labels=plan)
+    assert problems == []
+    assert [l["index"] for l in styled["labels"]] == [1]      # 2 는 범위 밖, 중복은 선착순
+    assert styled["labels"][0]["x"] == pytest.approx(0.3)
+    assert any("밖" in n for n in notes) and any("중복" in n for n in notes)
+
+
+def test_band_is_recomputed_from_the_design_the_model_actually_chose():
+    """모델이 aspect_ratio 를 바꾸면 프리셋 밴드는 렌더 기하와 어긋난다(리뷰 C1)."""
+    styled, problems, _ = stage4.validate_style_response(
+        {"design": {"aspect_ratio": "16:9"}, "labels": [{"index": 0, "x": 0.5, "y": 0.68}]},
+        1, labels=[{"index": 0, "text": "(놀람)"}], preset=stage4.RECAP_PRESET)
+    assert problems == []
+    # 16:9 밴드는 0.342~0.658 — 프리셋(5:4) 기준이면 0.68 이 그대로 통과해 검정 밴드 침범
+    assert styled["labels"][0]["y"] <= 0.658 - stage4.LABEL_BAND_MARGIN + 1e-9
+
+
+def test_long_label_cannot_be_pushed_off_screen():
+    """\an5 는 글자 **중심** 기준 — 13자 라벨은 x=0.82 에서 106px 잘린다(리뷰 H1)."""
+    band = (0.275, 0.725)
+    styled, _, notes = stage4.validate_style_response(
+        {"design": {}, "labels": [{"index": 0, "x": 0.82, "y": 0.4}]}, 1, band=band,
+        labels=[{"index": 0, "text": "(여기서 판이 뒤집힌다)"}])
+    assert styled["labels"][0]["x"] < 0.70
+    assert any("위치 보정" in n for n in notes)
 
 
 def test_plan_labels_uses_anchor_and_is_shared():
@@ -298,3 +334,20 @@ def test_render_labels_fall_back_when_style_silent():
     """스타일이 위치를 못 주면 종전 기본값 — 위치 실패가 라벨 소실이 되면 안 된다."""
     assert finalize._cycle_color(0) == stage4.LABEL_COLOR_CYCLE[0]
     assert finalize._cycle_color(5) == stage4.LABEL_COLOR_CYCLE[1]
+
+
+def test_title_bold_is_closed_to_ai():
+    """E21 사용자 지시 — 제목 폰트가 이미 굵어 볼드를 얹으면 글자가 뭉갠다.
+
+    반려가 아니라 **드롭+메모**: 굵게 한 키 때문에 플랜 전체(비트·라벨)를 잃으면 안 된다."""
+    assert "title_bold" not in stage4.RECAP_PRESET
+    assert "title_bold" not in stage4.STYLE_ALLOWED
+    styled, problems, notes = stage4.validate_style_response(
+        {"design": {"title_bold": True, "title_bold2": True,
+                    "subtitle_color": "#FFFFFF"}}, 1)
+    assert problems == []                                  # 플랜은 산다
+    assert "title_bold" not in styled["design"]
+    assert len([n for n in notes if "무시" in n]) == 2
+    # 옛 체크포인트가 되살리지 못한다
+    assert finalize.design_from_style({"title_bold": True, "title_bold2": True}) \
+        .title_bolds == finalize.DesignConfig().title_bolds

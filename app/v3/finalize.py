@@ -32,11 +32,11 @@ from app.modules.subtitle import (
     build_texts_ass,
     build_tts_ass,
 )
-from app.v3 import assemble, schemas
+from app.v3 import assemble, schemas, stage4
 
 PROGRESSION_MAX_GAP_SEC = 3.0     # §9-D 진행감 — 2~3초마다 화면 변화
 LOOP_DIFF_WARN = 60.0             # 첫/끝 프레임 평균 절대 오차(0~255) 경고 임계
-LABEL_Y_RATIO = 0.526             # 괄호 라벨 세로 위치 — 템플릿 1010/1920 실측
+LABEL_Y_RATIO = stage4.LABEL_Y_FALLBACK   # 괄호 라벨 세로 기본 — 템플릿 1010/1920 실측
 LABEL_MAX_SEC = 4.0               # 라벨 표시 상한 — 레퍼런스 실측 3.54~4.00s
 # 색 순환은 Stage 4 계약(stage4.LABEL_PALETTE)과 한 곳에서 관리한다
 QC_FRAME_COUNT = 4
@@ -63,8 +63,9 @@ def design_from_style(design: dict) -> DesignConfig:
                           str(design.get("title_color2", base.title_colors[1]))]
     up["title_sizes"] = [int(design.get("title_size", base.title_sizes[0])),
                          int(design.get("title_size2", base.title_sizes[1]))]
-    up["title_bolds"] = [bool(design.get("title_bold", False)),
-                         bool(design.get("title_bold2", False))]
+    # ⚠ title_bolds 는 **조립하지 않는다** — 제목 굵게는 닫혀 있다(E21·stage4
+    # STYLE_DESIGN_IGNORED). 옛 체크포인트에 title_bold 가 남아 있어도 되살아나지
+    # 않게 여기서 끊는다. 채널·편집실이 정한 base 값은 그대로 간다.
     if design.get("subtitle_color"):
         up["subtitle_color"] = str(design["subtitle_color"])
     if design.get("subtitle_size"):
@@ -84,29 +85,20 @@ def design_from_style(design: dict) -> DesignConfig:
     return dataclasses.replace(base, **up)
 
 
-def video_band_ratio(design) -> tuple[float, float]:
+def video_band_ratio(design, *, canvas_height: int = 1920) -> tuple[float, float]:
     """영상 밴드의 세로 범위(캔버스 대비 0~1) — 라벨은 이 **안**에 있어야 한다.
 
-    renderer 의 기하와 같은 식(밴드 폭 기준 scaled_h · video_y 미지정이면 중앙).
-    검정 밴드 위에 라벨을 놓으면 제목·로고와 충돌하므로 클램프 근거가 된다."""
-    H, W = 1920, 1080
-    try:
-        r_w, r_h = (int(x) for x in str(getattr(design, "aspect_ratio", "1:1")).split(":"))
-    except (ValueError, AttributeError):
-        r_w = r_h = 1
-    width = getattr(design, "video_width", None) or W
-    scaled_h = int(width * r_h / r_w) if r_w else width
-    scaled_h = min(scaled_h, H)
-    vy = getattr(design, "video_y", None)
-    y0 = min(max(0, int(vy)), max(0, H - scaled_h)) if vy is not None \
-        else (H - scaled_h) // 2
-    return y0 / H, (y0 + scaled_h) / H
+    기하는 subtitle_region.band_geometry 를 **재사용**한다 — 수식을 베끼면 언젠가
+    화면과 어긋난다(E17-2 규율). 실제로 처음 베낀 판은 렌더러의 짝수 보정이 빠져
+    16:9·11:9 에서 1px 어긋나 있었다(적대 리뷰 M1 확정)."""
+    from app.modules.subtitle_region import band_geometry
+    g = band_geometry(design, canvas_height=canvas_height)
+    return g.top / canvas_height, g.bottom / canvas_height
 
 
 def _cycle_color(index: int) -> str:
     """Stage 4 가 색을 안 줬을 때의 결정적 순환 — 라벨이 전부 같은 색이 되지 않게."""
-    from app.v3.stage4 import LABEL_COLOR_CYCLE
-    return LABEL_COLOR_CYCLE[index % len(LABEL_COLOR_CYCLE)]
+    return stage4.LABEL_COLOR_CYCLE[index % len(stage4.LABEL_COLOR_CYCLE)]
 
 
 def plan_labels(story_doc: dict, plan: dict) -> list[dict]:
@@ -213,7 +205,7 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                        "x": float(pos.get("x", 0.5)),
                        "y": float(pos.get("y", LABEL_Y_RATIO)),
                        "rotate": float(pos.get("rotate", 0.0)),
-                       "size": 58, "stroke": "dark",
+                       "size": stage4.LABEL_SIZE, "stroke": "dark",
                        "fx": str(pos.get("fx") or "pop"),
                        "color": str(pos.get("color") or _cycle_color(lb["index"]))})
     texts_path = None

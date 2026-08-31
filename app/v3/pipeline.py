@@ -750,17 +750,22 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
 
     # M4 캐시 전부 **상류 지문**에 묶는다 — 파일 존재만 보면 상류(edit_plan) 변경
     # 후 낡은 draft 프레임으로 style 이 돌고 낡은 final 이 납품된다(적대 리뷰 확정).
+    # 라벨도 재료다 — story 의 라벨만 고치면 타임라인이 그대로라 지문이 안 움직여
+    # **옛 라벨이 든 final 이 그대로 납품**된다(적대 리뷰 C2 확정). 개수가 바뀌면
+    # plan_labels 의 index 가 통째로 밀려 라벨이 남의 자리에 렌더되기도 한다.
+    label_plan = finalize.plan_labels(story_doc, plan)
     fingerprint = hashlib.sha1(json.dumps(
-        [[c["clip_start_sec"], c["clip_end_sec"], c.get("span_ids"),
-          c.get("use_original_audio")]
-         for c in plan["timeline"]], sort_keys=True).encode()).hexdigest()[:16]
+        [[[c["clip_start_sec"], c["clip_end_sec"], c.get("span_ids"),
+           c.get("use_original_audio")]
+          for c in plan["timeline"]], label_plan],
+        sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
 
-    def _sidecar_ok(name: str) -> bool:
+    def _sidecar_ok(name: str, expect: str | None = None) -> bool:
         f = output_dir / name
         if not f.exists():
             return False
         try:
-            return _read_json(f).get("fingerprint") == fingerprint
+            return _read_json(f).get("fingerprint") == (expect or fingerprint)
         except (json.JSONDecodeError, OSError):
             return False
 
@@ -802,9 +807,8 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
                for w in windows]
         # M12: 라벨을 화면 보고 배치하려면 Stage 4 가 **무엇이 언제 뜨는지** 알아야
         # 한다 — 렌더와 같은 계획(plan_labels)·같은 밴드 기하를 넘긴다.
-        label_plan = finalize.plan_labels(story_doc, plan)
-        # 밴드는 **채널 프리셋** 기준(이 시점 style_doc 은 아직 None) — 렌더가 쓸
-        # 기하와 같아야 라벨이 검정 밴드를 침범하지 않는다
+        # 밴드는 **채널 프리셋** 기준으로 프롬프트에 싣고, 모델이 aspect_ratio 를
+        # 바꾸면 validate 가 확정 design 으로 다시 재서 클램프한다(리뷰 C1).
         band = finalize.video_band_ratio(
             finalize.design_from_style(stage4.RECAP_PRESET))
         style_doc, audit = stage4.run_style(get_gemini(), draft_path, story_doc,
@@ -820,7 +824,11 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
     # ── render (13) — 캐시는 지문 사이드카로만 유효(파일 존재만 보면 낡은
     # 최종본이 납품된다 — 적대 리뷰 확정 critical) ─────────────────────────
     final_path = output_dir / "final_1080x1920.mp4"
-    if final_path.exists() and _sidecar_ok("render_fingerprint.json") \
+    # 렌더 지문 = 상류 지문 + **확정 스타일** — 라벨 좌표·색·crop/pop 이 바뀌었는데
+    # 캐시가 옛 화면을 내보내면 안 된다(리뷰 C2)
+    render_fp = hashlib.sha1(json.dumps([fingerprint, style_doc], sort_keys=True,
+                                        ensure_ascii=False).encode()).hexdigest()[:16]
+    if final_path.exists() and _sidecar_ok("render_fingerprint.json", render_fp) \
             and from_step not in ("draft_render", "style", "render"):
         log("  [v3/render] 캐시 유효(지문 일치) — 재사용")
     else:
@@ -829,7 +837,7 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
             segments=segments, resources=resources, story_doc=story_doc,
             output_dir=output_dir, log=log)
         _write_json(output_dir / "render_fingerprint.json",
-                    {"fingerprint": fingerprint})
+                    {"fingerprint": render_fp})
         step("render", **cost)
 
     # ── validate (14) — 항상 재계산(산출이 아니라 검증이다) ───────────────

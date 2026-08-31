@@ -17,6 +17,7 @@ style.json 계약(C5 — design 어휘 동결):
 from __future__ import annotations
 
 import json
+import math
 import re
 import subprocess
 import time
@@ -39,8 +40,6 @@ RECAP_PRESET: dict[str, Any] = {
     "title_color2": "#FF3B2D",      # 2줄 = 펀치(빨강)
     "title_size": 88,
     "title_size2": 92,
-    "title_bold": True,
-    "title_bold2": True,
     "subtitle_color": "#FFFFFF",    # 대사 = 흰색
     "subtitle_size": 62,
     "tts_color": "#FFE94A",         # 내레이션 = 노랑
@@ -54,15 +53,26 @@ _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 STYLE_ALLOWED: dict[str, Any] = {
     "title_color": _HEX, "title_color2": _HEX,
     "title_size": (40, 120), "title_size2": (40, 120),
-    "title_bold": bool, "title_bold2": bool,
     "subtitle_color": _HEX, "subtitle_size": (36, 90),
     "subtitle_y_margin": (200, 900),
     "tts_color": _HEX, "tts_size": (36, 90), "tts_y_margin": (200, 1200),
     "work_color": _HEX,
     "aspect_ratio": re.compile(r"^\d{1,2}:\d{1,2}$"),
 }
+# E21(v1 style_compose 와 같은 처리) — 제목 굵게는 AI 에게 닫혀 있다. 제목 폰트가
+# 이미 굵어 볼드를 얹으면 글자 속이 메워진다(2026-08-21 bold.png 실측). 반려하면
+# 플랜 전체가 날아가므로 **그 키만 버리고 메모**한다. 사람이 정한 채널·편집실 값은 그대로.
+STYLE_DESIGN_IGNORED = {
+    "title_bold": "제목 굵게는 폰트가 이미 굵어 글자가 뭉갭니다 — 채널·편집실이 정합니다",
+    "title_bold2": "제목 굵게는 폰트가 이미 굵어 글자가 뭉갭니다 — 채널·편집실이 정합니다",
+}
 POP_LEVELS = ("none", "soft", "strong")
-LABEL_X_RANGE = (0.18, 0.82)   # 가로 여백 — 캔버스 끝에 붙으면 글자가 잘린다
+LABEL_SIZE = 58                # 라벨 글자 크기(px) — 렌더(finalize)와 한 곳에서 관리
+LABEL_X_RANGE = (0.18, 0.82)   # 가로 여백 상한 — 폭 계산 결과와 **교집합**으로 쓴다
+LABEL_CHAR_W = 0.80            # 한글 1자 폭 ÷ 글자크기 (Jalnan 58px 실측 40.8~46.3px)
+LABEL_FX_OVERSHOOT = 1.10      # pop 등장 순간 110% 로 커진다 — 그 폭까지 화면 안이어야
+LABEL_EDGE_PAD = 24            # 캔버스 가장자리 여백(px)
+LABEL_Y_FALLBACK = 0.526       # 스타일이 위치를 안 줬을 때 렌더가 쓰는 세로(= finalize)
 LABEL_BAND_MARGIN = 0.04       # 영상 밴드 안쪽 여백(검정 밴드 침범 방지)
 LABEL_ROTATE_LIMIT = 8.0       # 기울기 상한(°, 시계방향 +) — 넘으면 가독성이 깨진다
 LABEL_PALETTE = {              # 모델은 **이름**으로 고른다(자유 hex 는 안 읽히는 색이 나온다)
@@ -73,6 +83,20 @@ LABEL_COLOR_CYCLE = ("#FF4A3B", "#FFD400", "#37E2F0", "#B6FF3B")  # 미지정 �
 # ("띠용" 오버슈트 30%→110%→100%, 220ms). 미지정이 none 이면 라벨이 그냥 튀어나온다.
 LABEL_FX = ("pop", "glow", "shake", "none")
 CROP_ANCHORS = ("left", "center", "right")
+
+
+def label_x_range(text: str, *, size: int = LABEL_SIZE,
+                  canvas_w: int = 1080) -> tuple[float, float]:
+    r"""그 라벨이 잘리지 않는 x(중심) 범위. 순수.
+
+    ASS 는 \an5\pos = **글자 중심** 기준이라 반폭이 캔버스를 넘으면 그냥 잘린다
+    (libass 는 \pos 에서 자동 줄바꿈을 하지 않는다). 13자 라벨은 x=0.82 에서
+    106px 잘린다 — 적대 리뷰 H1 실측."""
+    half = (len(str(text)) * size * LABEL_CHAR_W * LABEL_FX_OVERSHOOT) / 2
+    half += size * 0.07 + LABEL_EDGE_PAD           # 외곽선 + 가장자리 여백
+    lo = max(LABEL_X_RANGE[0], half / canvas_w)
+    hi = min(LABEL_X_RANGE[1], 1.0 - half / canvas_w)
+    return (0.5, 0.5) if lo >= hi else (lo, hi)
 
 
 # ── draft_render (11) ───────────────────────────────────────────────────────
@@ -171,7 +195,9 @@ def sample_beat_frames(draft_path: Path, windows: list[dict], out_dir: Path,
 # ── Stage 4 — style (12) ────────────────────────────────────────────────────
 
 def validate_style_response(resp: Any, n_beats: int,
-                            band: tuple[float, float] = (0.28, 0.72)) \
+                            band: tuple[float, float] | None = None,
+                            labels: list[dict] | None = None,
+                            preset: dict | None = None) \
         -> tuple[dict | None, list[str], list[str]]:
     """모델 응답 → (정규화 스타일 | None, 반려 사유, 노트). 순수.
 
@@ -187,6 +213,9 @@ def validate_style_response(resp: Any, n_beats: int,
         problems.append("design 은 객체여야 한다")
     elif isinstance(design_in, dict):
         for k, v in design_in.items():
+            if k in STYLE_DESIGN_IGNORED:
+                notes.append(f"design.{k} 무시 — {STYLE_DESIGN_IGNORED[k]}")
+                continue
             rule = STYLE_ALLOWED.get(k)
             if rule is None:
                 problems.append(f"design.{k} 는 어휘 밖 키 — 허용 키: "
@@ -213,22 +242,52 @@ def validate_style_response(resp: Any, n_beats: int,
                     continue
             design[k] = v
 
-    # M12: 라벨 위치 — 모델이 화면을 보고 정한 x·y(0~1). 밴드 밖·형식 오류는
-    # 기본값으로 보정(라벨을 잃지 않는다 — 위치 실패가 라벨 소실이 되면 안 된다).
+    # ── M12 라벨 배치 — 모델이 화면을 보고 정한 x·y·기울기·색·등장효과 ───────
+    # 원칙: **라벨을 잃지 않는다.** 어떤 항목이 잘못돼도 반려가 아니라 그 항목만
+    # 버리고(→ 렌더가 기본 위치로) 노트를 남긴다. 위치 판단 실패가 스타일 전체
+    # (비트 crop/pop/sfx·design) 실패로 번지면 매 편 손해다(적대 리뷰 H2 확정).
+    #
+    # 밴드는 **확정된 design 기준**으로 다시 잰다 — 모델이 aspect_ratio 를 바꾸면
+    # 프리셋으로 계산한 밴드는 렌더 기하와 어긋난다(적대 리뷰 C1 확정: 16:9 로
+    # 바꾸면 y=0.68 이 검정 밴드 43px 침범).
+    if preset is not None:
+        from app.v3.finalize import design_from_style, video_band_ratio
+        band = video_band_ratio(design_from_style({**preset, **design}))
+    label_items = resp.get("labels") or []
+    if label_items and band is None:
+        # 밴드를 모르면 검정 밴드 침범을 못 막는다 → 배치를 포기하되 **플랜은 살린다**
+        notes.append("밴드 기하 미상 — 라벨은 기본 위치로 둔다")
+        label_items = []
+    by_index = {int(lb["index"]): lb for lb in labels or [] if "index" in lb}
+    n_labels = len(labels) if labels is not None else None
     labels_out: list[dict] = []
-    for item in resp.get("labels") or []:
+    seen: set[int] = set()
+    for item in label_items:
         if not isinstance(item, dict):
+            notes.append(f"labels 항목이 객체가 아님 — 버린다: {item!r}")
             continue
         idx = item.get("index")
         if not isinstance(idx, int) or isinstance(idx, bool) or idx < 0:
-            problems.append(f"labels index 가 정수가 아님: {idx!r}")
+            notes.append(f"labels index 가 정수가 아님 — 버린다: {idx!r}")
+            continue
+        if n_labels is not None and idx >= n_labels:
+            # 모델이 1-based 로 답하면 전 라벨이 조용히 한 칸씩 밀린다(리뷰 C3)
+            notes.append(f"labels index {idx} 는 라벨 {n_labels}개 밖 — 버린다")
+            continue
+        if idx in seen:
+            notes.append(f"labels[{idx}] 중복 — 먼저 온 것을 쓴다")
             continue
         try:
             x, y = float(item["x"]), float(item["y"])
         except (KeyError, TypeError, ValueError):
-            problems.append(f"labels[{idx}] x·y 가 필요하다(0~1 비율)")
+            notes.append(f"labels[{idx}] x·y 없음/형식 오류 — 기본 위치로 둔다")
             continue
-        cx = min(max(x, LABEL_X_RANGE[0]), LABEL_X_RANGE[1])
+        if not (math.isfinite(x) and math.isfinite(y)):     # NaN 은 렌더를 죽인다
+            notes.append(f"labels[{idx}] 좌표가 수가 아님 — 기본 위치로 둔다")
+            continue
+        seen.add(idx)
+        x_lo, x_hi = label_x_range(str((by_index.get(idx) or {}).get("text", "")))
+        cx = min(max(x, x_lo), x_hi)
         cy = min(max(y, band[0] + LABEL_BAND_MARGIN), band[1] - LABEL_BAND_MARGIN)
         if (cx, cy) != (x, y):
             notes.append(f"labels[{idx}] 위치 보정: ({x:.2f},{y:.2f})→({cx:.2f},{cy:.2f})")
@@ -237,6 +296,8 @@ def validate_style_response(resp: Any, n_beats: int,
         except (TypeError, ValueError):
             rot = 0.0
             notes.append(f"labels[{idx}] rotate 형식 오류 → 0°")
+        if not math.isfinite(rot):
+            rot = 0.0
         cr = min(max(rot, -LABEL_ROTATE_LIMIT), LABEL_ROTATE_LIMIT)
         if cr != rot:
             notes.append(f"labels[{idx}] 기울기 보정: {rot:g}°→{cr:g}°")
@@ -254,6 +315,11 @@ def validate_style_response(resp: Any, n_beats: int,
             fx = "pop"
         labels_out.append({"index": idx, "x": round(cx, 3), "y": round(cy, 3),
                            "rotate": round(cr, 1), "color": color, "fx": fx})
+    if n_labels:
+        # 기능이 조용히 no-op 이 되면 사용자가 신고할 때까지 모른다(리뷰 M4)
+        missed = n_labels - len(labels_out)
+        if missed:
+            notes.append(f"라벨 {n_labels}개 중 {missed}개 미배치 — 기본 위치로 렌더")
 
     beats_out: list[dict] = []
     for b in resp.get("beats") or []:
@@ -298,7 +364,7 @@ STYLE_PROMPT = """당신은 쇼츠 아트디렉터다. 첨부한 영상은 리�
 
 ## 판단 기준
 0. **라벨 배치** — 위 각 라벨의 시각으로 가서 그 순간 화면을 보고 정하라.
-   - `x`·`y`(0~1 비율): 인물 얼굴·방송 자체 자막(보통 화면 중앙~하단)·자막 밴드를 **피해서** 빈 곳에. 세로는 영상 밴드({band_lo:.2f}~{band_hi:.2f}) 안, 가로는 0.18~0.82.
+   - `x`·`y`(0~1 비율): 인물 얼굴·방송 자체 자막(보통 화면 중앙~하단)·자막 밴드를 **피해서** 빈 곳에. 세로는 영상 밴드({band_lo:.2f}~{band_hi:.2f}) 안, 가로는 라벨마다 아래 목록에 적힌 허용 범위 안(긴 라벨일수록 좁다 — 넘기면 글자가 잘려서 보정된다).
    - **양옆으로도 움직여라.** 위아래로만 피하면 화면이 단조롭다 — 인물이 왼쪽에 서 있으면 오른쪽 여백, 오른쪽이면 왼쪽 여백으로 보낸다. 라벨마다 x 를 다시 판단하고, 가운데(0.5)는 **양쪽이 다 막혔을 때만** 쓴다.
    - `rotate`(-8~8°, 시계방향 +): 감정이 튀는 라벨은 살짝 기울인다(3~6°). 차분한 설명 라벨은 0. 전부 기울이면 산만하다.
    - `color`: {palette_names} 중 하나. 그 순간 화면에서 **가장 눈에 띄는** 색을 고르고, 연달아 나오는 라벨은 서로 다른 색으로.
@@ -307,6 +373,7 @@ STYLE_PROMPT = """당신은 쇼츠 아트디렉터다. 첨부한 영상은 리�
 2. 제목 밴드: 기본 유지 — 화면과 무관(검정 밴드 위)이라 특별한 사유 없으면 손대지 않는다.
 3. 비트별: crop(인물이 왼/오른쪽에 쏠린 구간 → left/right, 기본 center) · pop(팝인 강도 none/soft/strong — **실제 컷 리듬을 보고**: 컷이 잦고 호흡 빠른 비트만 soft+) · sfx(리듬 전환점의 효과음 큐 한 줄, 필수 아님).
 4. 허용 design 키(이 밖은 금지): {allowed_keys}
+   ⚠ **제목을 굵게 하지 마라** — `title_bold`·`title_bold2` 는 쓸 수 없다(보내면 그 키만 버려진다). 제목 폰트가 이미 굵어서 볼드를 얹으면 글자 속이 메워진다.
 {reject_block}
 ## 출력 (JSON 만)
 {{"design": {{"subtitle_color": "#FFFFFF"}},
@@ -335,14 +402,16 @@ def build_style_prompt(preset: dict, story_doc: dict, reject_note: str = "",
     reject_block = ""
     if reject_note:
         reject_block = f"\n## ⚠ 직전 제안 반려 — 고쳐서 다시\n{reject_note}\n"
-    labels_block = "\n".join(
-        f"- index {lb['index']} · {lb['start_sec']:.1f}~{lb['end_sec']:.1f}s · "
-        f"{lb['text']}" for lb in labels or []) or "- (라벨 없음)"
+    def _label_line(lb: dict) -> str:
+        lo, hi = label_x_range(str(lb.get("text", "")))
+        return (f"- index {lb['index']} · {lb['start_sec']:.1f}~{lb['end_sec']:.1f}s · "
+                f"{lb['text']} (x 허용 {lo:.2f}~{hi:.2f})")
+    labels_block = "\n".join(_label_line(lb) for lb in labels or []) or "- (라벨 없음)"
     return STYLE_PROMPT.format(
         preset_block=json.dumps(preset, ensure_ascii=False, indent=1),
         beats_block=beats_block, labels_block=labels_block,
         band_lo=band[0] + LABEL_BAND_MARGIN, band_hi=band[1] - LABEL_BAND_MARGIN,
-        band_mid=(band[0] + band[1]) / 2,
+        band_mid=LABEL_Y_FALLBACK,
         palette_names=" · ".join(LABEL_PALETTE),
         allowed_keys=", ".join(sorted(STYLE_ALLOWED)),
         reject_block=reject_block)
@@ -408,7 +477,8 @@ def run_style(gemini, draft_path: Path, story_doc: dict, *,
         notes: list[str] = []
         try:
             resp = _call_style_model(gemini, draft_path, prompt)
-            styled, problems, notes = validate_style_response(resp, n_beats, band=band)
+            styled, problems, notes = validate_style_response(
+                resp, n_beats, band=band, labels=labels, preset=preset)
         except ValueError as e:
             styled, problems = None, [f"응답 오류: {e}"]
         audit["attempts"].append({"attempt": attempt + 1,
