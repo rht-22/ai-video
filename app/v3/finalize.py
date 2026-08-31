@@ -421,16 +421,22 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
 
     # 적대 리뷰 확정(critical): renderer 는 use_original_audio 를 읽지 않았다 —
     # 뮤트 창(편집본 좌표)을 additive 필드로 넘겨 원본 트랙에만 volume=0 (cue 는 산다).
+    # M15: 창은 **클립 전체가 아니라 내레이션이 실제로 점유한 구간**이다. 클립 전체를
+    # 끄면 내레이션이 끝난 뒤가 완전 무음이 된다(실측 도입부 3.57초).
+    src_windows = assemble.narration_windows(story_doc)
+    all_windows = sorted(w for wins in src_windows.values() for w in wins)
     muted_windows: list[tuple[float, float]] = []
     _off = 0.0
-    for c in clips:
-        _dur = c.end_sec - c.start_sec
-        if not c.use_original_audio:
-            muted_windows.append((round(_off, 3), round(_off + _dur, 3)))
+    for c in plan["timeline"]:
+        _dur = float(c["clip_end_sec"]) - float(c["clip_start_sec"])
+        if not c.get("use_original_audio"):
+            for a, z, on in assemble.split_by_windows(
+                    float(c["clip_start_sec"]), float(c["clip_end_sec"]), all_windows):
+                if not on:
+                    muted_windows.append((round(_off + (a - float(c["clip_start_sec"])), 3),
+                                          round(_off + (z - float(c["clip_start_sec"])), 3)))
         _off += _dur
 
-    out_path = output_dir / out_name
-    audio_mix = plan.get("audio_mix") or {}
     inputs = RenderInputs(
         video_path=Path(video_path),
         clips=clips,

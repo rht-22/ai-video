@@ -50,6 +50,11 @@ def split_by_windows(t0: float, t1: float,
                      windows: list[tuple[float, float]]) -> list[tuple[float, float, bool]]:
     """[t0,t1] 을 창 안(뮤트)/창 밖(원음)으로 쪼갠다 → [(a, z, use_original_audio)]. 순수.
 
+    ⚠ **클립을 쪼개지 않는다.** timeline 경계는 grid span 경계여야 하고(시간 정본
+    벨트) 내레이션 창 끝은 격자 위가 아니다 — 실제로 벨트가 이 시도를 막았다
+    (`edit_plan 시각 정합 벨트 위반 … 82.35%`). 그래서 분할은 **소리(뮤트 창)와
+    자막**에만 적용한다: 클립은 그대로 두고, 창 밖 구간만 원음·자막을 되살린다.
+
     창이 없으면 통째로 뮤트(종전 동작). MUTE_TAIL_MIN_SEC 미만의 자투리는 만들지
     않는다 — 0.2초짜리 원음 조각은 살아난 게 아니라 잡음이다."""
     cover = [(max(a, t0), min(z, t1)) for a, z in windows if z > t0 and a < t1]
@@ -80,7 +85,6 @@ def assemble_edit_plan(story_doc: dict, span_index: dict[str, dict], *,
     분할 지점: (a) 소스 시간 불연속(원거리는 비트가 나뉘므로 방어) (b) 뮤트 여부가
     바뀌는 곳 — use_original_audio 는 클립 단위 계약이라 뮤트 span 은 제 클립을 갖는다."""
     timeline: list[dict] = []
-    cue_windows = narration_windows(story_doc)
     for b in story_doc["beats"]:
         muted = set(b.get("muted_span_ids") or [])
         group: list[str] = []
@@ -91,25 +95,15 @@ def assemble_edit_plan(story_doc: dict, span_index: dict[str, dict], *,
             t0 = span_index[group[0]]["t_in"]
             t1 = span_index[group[-1]]["t_out"]
 
-            def emit(a: float, z: float, audio: bool) -> None:
-                timeline.append({
-                    "role": beat["role"],
-                    "clip_start_sec": round(a, 3),
-                    "clip_end_sec": round(z, 3),
-                    "subtitle": "",
-                    "use_original_audio": audio,
-                    "reframe": {"mode": "center"},
-                    "span_ids": list(group),
-                })
-
-            if group[0] not in muted:
-                emit(t0, t1, True)
-                return
-            # 뮤트 span 이 내레이션 창보다 길면 그 꼬리는 **소리도 자막도 없는**
-            # 구간이 된다(실측: 도입부 5.49s 창에 내레이션 1.92s → 무음 3.57s).
-            # 창 밖은 원음을 되살린다 — span 은 자를 수 없어도 클립은 자를 수 있다.
-            for a, z, audio in split_by_windows(t0, t1, cue_windows.get(beat["number"], [])):
-                emit(a, z, audio)
+            timeline.append({
+                "role": beat["role"],
+                "clip_start_sec": round(t0, 3),
+                "clip_end_sec": round(t1, 3),
+                "subtitle": "",
+                "use_original_audio": group[0] not in muted,
+                "reframe": {"mode": "center"},
+                "span_ids": list(group),
+            })
 
         for sid in b["span_ids"]:
             if group:
@@ -311,17 +305,26 @@ def span_speaker(sp: dict) -> str:
 
 
 def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
-                   grid_words: list[dict]) -> list[dict]:
+                   grid_words: list[dict],
+                   mute_windows: list[tuple[float, float]] | None = None) -> list[dict]:
     """채택 유성 span(뮤트 제외) → 어절 자막 세그먼트(**편집본 좌표** — C6).
 
     단어 소속은 중점 기준(span 재단과 같은 규율). 자막은 원본 오디오 인용에만 —
     내레이션 텍스트는 cue 가 나른다(편집실이 cue.text 로 오버레이)."""
     segments: list[dict] = []
     colors = speaker_colors(span_index)
+    # 뮤트 클립이라도 내레이션 창 **밖**은 원음이 살아 있다(finalize 의 muted_windows
+    # 와 같은 계산) — 그 구간 대사는 자막이 있어야 한다. 창을 모르면 종전대로 전부 제외.
+    mw = list(mute_windows or [])
     off = 0.0
     for c in timeline:
         c0, c1 = float(c["clip_start_sec"]), float(c["clip_end_sec"])
-        if not c.get("use_original_audio"):
+        audible: list[tuple[float, float]] = []
+        if c.get("use_original_audio"):
+            audible = [(c0, c1)]
+        elif mw:
+            audible = [(a, z) for a, z, on in split_by_windows(c0, c1, mw) if on]
+        if not audible:
             off += c1 - c0
             continue
         for sid in c.get("span_ids") or []:
@@ -352,6 +355,9 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                 e1 = round(off + (min(ln["end"], c1) - c0), 3)
                 if e1 <= e0:
                     continue
+                mid = (ln["start"] + ln["end"]) / 2      # 소속은 중점 기준(span 재단과 같은 규율)
+                if not any(a <= mid < z for a, z in audible):
+                    continue                      # 뮤트 창 안 — 소리가 없으니 자막도 없다
                 # speaker·color 는 additive — 옛 소비자는 세 키만 읽는다(C6)
                 segments.append({"start_sec": e0, "end_sec": e1, "text": ln["text"],
                                  "speaker": speaker, "color": color})

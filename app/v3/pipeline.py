@@ -644,8 +644,11 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
         raise AssertionError(f"edit_plan 시각 정합 벨트 위반: {belt}")
     _write_json(output_dir / "edit_plan.json", plan)
 
+    # 내레이션 창 밖은 원음이 살아 있다 → 그 구간 대사는 자막을 낸다(M15)
+    _mw = sorted(w for wins in assemble.narration_windows(story_doc).values()
+                 for w in wins)
     segments = assemble.word_subtitles(plan["timeline"], span_index,
-                                       grid.get("words") or [])
+                                       grid.get("words") or [], _mw)
     # ── M9-A/B: 자막 텍스트 신뢰 검사(순수 코드 · LLM 0콜) ────────────────
     from app.v3 import textcheck
     segments, rep_warns = textcheck.drop_repetition(segments)   # B 예방
@@ -937,8 +940,9 @@ def _run_hook_variants(*, output_dir: Path, video_path: Path, work_title: str,
         belt = assemble.verify_edit_plan(plan, grid)
         if belt["pct"] is not None and belt["pct"] < 100.0:
             raise AssertionError(f"변형 {k} 시각 정합 벨트 위반: {belt}")
-        segs = assemble.word_subtitles(plan["timeline"], span_index,
-                                       grid.get("words") or [])
+        segs = assemble.word_subtitles(
+            plan["timeline"], span_index, grid.get("words") or [],
+            sorted(w for wins in assemble.narration_windows(vdoc).values() for w in wins))
         cues = [c for c in assemble.finalize_cues(
                     vdoc.get("narration_cues") or [], plan["timeline"],
                     voice="ko_female", speed="normal")

@@ -664,18 +664,16 @@ def test_narration_windows_merge_adjacent_cues():
     assert 3 not in w                          # 끝이 없는 큐는 창이 아니다
 
 
-def test_edit_plan_splits_muted_clip_at_window_end():
-    span = {"s1": {"t_in": 100.0, "t_out": 101.0, "pos": 0, "is_audio": True},
-            "s2": {"t_in": 101.0, "t_out": 107.0, "pos": 1, "is_audio": True}}
-    doc = {"beats": [{"number": 0, "role": "hook", "span_ids": ["s1", "s2"],
-                      "muted_span_ids": ["s2"],
-                      "time": {"start": schemas.format_ts(100.0),
-                               "end": schemas.format_ts(107.0)}}],
-           "narration_cues": [{"beat": 0, "source_time_sec": 100.5,
-                               "source_end_sec": 103.0}],
-           "title": {"line1": "윗줄", "line2": "아랫줄"}}
-    tl = assemble.assemble_edit_plan(doc, span, video_path="v.mp4",
-                                     work_title="w")["timeline"]
-    assert [(c["clip_start_sec"], c["clip_end_sec"], c["use_original_audio"])
-            for c in tl] == [(100.0, 101.0, True), (101.0, 103.0, False),
-                             (103.0, 107.0, True)]
+def test_muted_clip_keeps_subtitles_outside_the_narration_window():
+    """클립은 못 쪼갠다(벨트) — 대신 창 밖 대사는 자막이 살아난다."""
+    span = {"s1": {"t_in": 100.0, "t_out": 107.0, "pos": 0, "is_audio": True,
+                   "text_source": "heard", "heard_text": "하나 둘 셋 넷 다섯 여섯",
+                   "audio_script": [{"speaker": "갑"}]}}
+    tl = [{"clip_start_sec": 100.0, "clip_end_sec": 107.0,
+           "use_original_audio": False, "span_ids": ["s1"]}]
+    # 창을 모르면 종전대로 전부 제외(회귀 0)
+    assert assemble.word_subtitles(tl, span, []) == []
+    # 창(100~102) 밖 구간은 자막이 나온다
+    segs = assemble.word_subtitles(tl, span, [], [(100.0, 102.0)])
+    # 중점이 창 밖인 줄만 산다 — 첫 줄(중점 101.75)은 뮤트 안이라 빠진다
+    assert [s["text"] for s in segs] == ["다섯 여섯"]
