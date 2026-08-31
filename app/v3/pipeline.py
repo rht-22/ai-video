@@ -763,8 +763,11 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
             log("  [v3/style] ⚠ 상류(edit_plan) 변경 감지 — 캐시 폐기")
     if style_doc is None:
         t0 = time.time()
-        style_doc, audit = stage4.run_style(get_gemini(), frame_list, story_doc,
-                                            log=log)
+        # 편집본 좌표 비트 창 — draft 영상 속 시각과 정합(원본 절대초 금지)
+        win = [{"beat": w["beat"], "start": w["start"], "end": w["end"]}
+               for w in windows]
+        style_doc, audit = stage4.run_style(get_gemini(), draft_path, story_doc,
+                                            windows=win, log=log)
         _write_json(style_ckpt, {"fingerprint": fingerprint, "style": style_doc})
         step("style", elapsed=round(time.time() - t0, 1),
              attempts=len(audit["attempts"]), fallback=audit.get("fallback", False),

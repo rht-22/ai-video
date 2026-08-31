@@ -28,6 +28,9 @@ from app.modules.gemini_client import _extract_json_from_markdown, _loads_first_
 from app.v3.seq_analyze import MAX_REASKS
 
 DRAFT_HEIGHT = 480
+STYLE_SAMPLE_FPS = 6.0    # Stage 4 가 draft 를 영상으로 볼 때의 Gemini 표본 fps
+                          # (2026-08-31 사용자 설정 — 종전 비트 스틸 16장. 컷 리듬
+                          #  기반 팝인·효과음 큐 판단은 정지 프레임으론 불가 — §7)
 
 # 채널 프리셋 초기값 — templates/recap_shorts/template.json 실측(프리미어 수동 제작).
 # 키는 어댑터 design-* 어휘와 1:1(ves CHANNEL_DESIGN_FLAGS) — C5 동결의 이행.
@@ -229,18 +232,18 @@ def style_diff(preset: dict, design: dict) -> dict:
             for k, v in design.items() if preset.get(k) != v}
 
 
-STYLE_PROMPT = """당신은 쇼츠 아트디렉터다. 첨부한 프레임들은 리캡 쇼츠 초벌(draft)의 비트별 장면 샘플이다. 채널 프리셋을 기준으로, 이 편의 화면에 맞는 미세 조정만 제안하라.
+STYLE_PROMPT = """당신은 쇼츠 아트디렉터다. 첨부한 영상은 리캡 쇼츠 초벌(draft — 디자인 미적용 중립 캔버스, 편집본 전체)이다. 채널 프리셋을 기준으로, 이 편의 화면·리듬에 맞는 미세 조정만 제안하라.
 
 ## 채널 프리셋 (기준값 — 바꿀 필요 없으면 빈 design)
 {preset_block}
 
-## 비트 구성
+## 비트 구성 (영상 내 시각 — 편집본 좌표)
 {beats_block}
 
 ## 판단 기준
 1. 자막 가독성: 화면 하단이 밝거나 복잡하면 subtitle_color/외곽선 대비, 필요시 subtitle_y_margin 조정.
 2. 제목 밴드: 기본 유지 — 화면과 무관(검정 밴드 위)이라 특별한 사유 없으면 손대지 않는다.
-3. 비트별: crop(인물이 왼/오른쪽에 쏠린 프레임 → left/right, 기본 center) · pop(팝인 강도 none/soft/strong — 컷 리듬이 빠른 비트만 soft+) · sfx(효과음 큐 한 줄 제안, 필수 아님).
+3. 비트별: crop(인물이 왼/오른쪽에 쏠린 구간 → left/right, 기본 center) · pop(팝인 강도 none/soft/strong — **실제 컷 리듬을 보고**: 컷이 잦고 호흡 빠른 비트만 soft+) · sfx(리듬 전환점의 효과음 큐 한 줄, 필수 아님).
 4. 허용 design 키(이 밖은 금지): {allowed_keys}
 {reject_block}
 ## 출력 (JSON 만)
@@ -249,11 +252,21 @@ STYLE_PROMPT = """당신은 쇼츠 아트디렉터다. 첨부한 프레임들은
  "notes": "판단 근거 한두 문장"}}"""
 
 
-def build_style_prompt(preset: dict, story_doc: dict, reject_note: str = "") -> str:
-    beats_block = "\n".join(
-        f"- beat{b['number']} {b['role']} ({b['time']['start'][3:]}~"
-        f"{b['time']['end'][3:]})" + (f" | {b['label']}" if b.get("label") else "")
-        for b in story_doc.get("beats") or [])
+def build_style_prompt(preset: dict, story_doc: dict, reject_note: str = "",
+                       windows: list[dict] | None = None) -> str:
+    if windows:
+        # draft 는 편집본 좌표 — 원본 절대초(b.time)를 보여주면 영상 속 시각과 어긋난다
+        by_beat = {w["beat"]: w for w in windows}
+        beats_block = "\n".join(
+            f"- beat{b['number']} {b['role']} "
+            f"({by_beat[b['number']]['start']:.1f}~{by_beat[b['number']]['end']:.1f}s)"
+            + (f" | {b['label']}" if b.get("label") else "")
+            for b in story_doc.get("beats") or [] if b["number"] in by_beat)
+    else:
+        beats_block = "\n".join(
+            f"- beat{b['number']} {b['role']} ({b['time']['start'][3:]}~"
+            f"{b['time']['end'][3:]})" + (f" | {b['label']}" if b.get("label") else "")
+            for b in story_doc.get("beats") or [])
     reject_block = ""
     if reject_note:
         reject_block = f"\n## ⚠ 직전 제안 반려 — 고쳐서 다시\n{reject_note}\n"
@@ -264,22 +277,31 @@ def build_style_prompt(preset: dict, story_doc: dict, reject_note: str = "") -> 
         reject_block=reject_block)
 
 
-def _call_style_model(gemini, frames: list[dict], prompt: str) -> dict:
-    """Flash vision — 프레임을 inline 바이트로 싣는다(업로드 API 불필요한 크기)."""
+def _call_style_model(gemini, draft_path: Path, prompt: str) -> dict:
+    """Flash vision — draft 영상 전체를 6fps 표본으로 본다(2026-08-31 사용자 설정).
+
+    스틸 16장으로는 컷 리듬(팝인·효과음 큐 근거 — §7)을 볼 수 없었다. draft 는
+    1분 남짓이라 6fps 표본도 수만 토큰 — Pro 청크 분석 대비 미미하다."""
+    from app.v3.seq_analyze import _upload_video
     types = gemini.types
-    parts = []
-    for f in frames:
-        parts.append(types.Part.from_bytes(
-            data=Path(f["path"]).read_bytes(), mime_type="image/jpeg"))
-    parts.append(prompt)
-    response = gemini.client.models.generate_content(
-        model=gemini.config.flash_model_name,
-        contents=parts,
-        config=types.GenerateContentConfig(
-            temperature=0.0,
-            response_mime_type="application/json",
-            max_output_tokens=8192,
-        ))
+    uploaded = _upload_video(gemini, draft_path, log=lambda *a: None)
+    try:
+        part = types.Part(file_data=types.FileData(file_uri=uploaded.uri,
+                                                   mime_type="video/mp4"),
+                          video_metadata=types.VideoMetadata(fps=STYLE_SAMPLE_FPS))
+        response = gemini.client.models.generate_content(
+            model=gemini.config.flash_model_name,
+            contents=[part, prompt],
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                response_mime_type="application/json",
+                max_output_tokens=8192,
+            ))
+    finally:
+        try:
+            gemini.client.files.delete(name=uploaded.name)
+        except Exception:  # noqa: BLE001
+            pass
     text = _extract_json_from_markdown(response.text or "")
     try:
         return json.loads(text)
@@ -293,23 +315,25 @@ def _call_style_model(gemini, frames: list[dict], prompt: str) -> dict:
         raise ValueError(f"응답 JSON 파싱 실패: {e} — 앞 200자: {text[:200]!r}") from e
 
 
-def run_style(gemini, frames: list[dict], story_doc: dict, *,
-              preset: dict | None = None, log=print) -> tuple[dict, dict]:
+def run_style(gemini, draft_path: Path, story_doc: dict, *,
+              preset: dict | None = None, windows: list[dict] | None = None,
+              log=print) -> tuple[dict, dict]:
     """Stage 4 실행 → (style 문서, 감사 기록). 소진 시 프리셋 폴백 — 렌더는 항상 간다."""
     preset = dict(preset if preset is not None else RECAP_PRESET)
     n_beats = len(story_doc.get("beats") or [])
-    audit: dict[str, Any] = {"attempts": [], "frames": len(frames)}
+    audit: dict[str, Any] = {"attempts": [], "input": "draft_video",
+                             "sample_fps": STYLE_SAMPLE_FPS}
     styled: dict | None = None
     reject_note = ""
     for attempt in range(1 + MAX_REASKS):
-        prompt = build_style_prompt(preset, story_doc, reject_note)
+        prompt = build_style_prompt(preset, story_doc, reject_note, windows=windows)
         log(f"  [v3/style] Flash vision 요청 (시도 {attempt + 1}/{1 + MAX_REASKS}, "
-            f"프레임 {len(frames)})")
+            f"draft {STYLE_SAMPLE_FPS:g}fps 표본)")
         t0 = time.time()
         problems: list[str] = []
         notes: list[str] = []
         try:
-            resp = _call_style_model(gemini, frames, prompt)
+            resp = _call_style_model(gemini, draft_path, prompt)
             styled, problems, notes = validate_style_response(resp, n_beats)
         except ValueError as e:
             styled, problems = None, [f"응답 오류: {e}"]
