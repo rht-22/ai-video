@@ -115,6 +115,27 @@ TITLE_CHAR_W = 1.0                # 한글 1자 폭 ÷ 글자크기 (Jalnan 92px
 TITLE_SPACE_W = 0.3               # 공백은 좁다 — 1.0 으로 세면 멀쩡한 제목을 줄인다
 
 
+POP_TO_FX = {"soft": "pop_soft", "strong": "pop_strong"}   # none 은 태그 없음
+
+
+def subtitle_fx_windows(story_doc: dict, style_doc: dict,
+                        timeline: list[dict]) -> list[tuple[float, float, str]]:
+    """비트별 등장 효과 창(편집본 좌표). 순수.
+
+    Stage 4 는 비트마다 `pop`(none/soft/strong)을 **컷 리듬을 보고** 정하는데
+    지금까지 아무도 읽지 않는 죽은 출력이었다(사용자 지적) — 라벨 위치와 같은 부류.
+    여기서 자막 줄 등장 애니메이션으로 잇는다."""
+    pops = {int(b["number"]): str(b.get("pop") or "none")
+            for b in ((style_doc or {}).get("v3_style") or {}).get("beats") or []
+            if b.get("number") is not None}
+    out: list[tuple[float, float, str]] = []
+    for w in stage4.edited_beat_windows(story_doc, timeline):
+        fx = POP_TO_FX.get(pops.get(int(w["beat"]), "none"))
+        if fx:
+            out.append((float(w["start"]), float(w["end"]), fx))
+    return out
+
+
 def resolve_work_logo(work_title: str, app_root: Path | None = None) -> Path | None:
     """작품명 → 정규화된 로고 PNG. 순수(파일 조회만)·결정적.
 
@@ -237,10 +258,22 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     # 화자별 색은 **줄 단위 style** 통로로 간다(v1 이 쓰는 그 통로 — subtitle.py 의
     # _line_style_overrides). SpeechSegment 는 frozen 3필드라 style 을 못 달아
     # SimpleNamespace 로 짓는다. color 가 없으면 종전과 바이트 동일.
+    fx_windows = subtitle_fx_windows(story_doc, style_doc, plan["timeline"])
+
+    def _seg_style(seg: dict) -> dict | None:
+        st: dict[str, Any] = {}
+        if seg.get("color"):
+            st["color"] = str(seg["color"])
+        t0 = float(seg["start_sec"])
+        for w0, w1, fx in fx_windows:
+            if w0 <= t0 < w1:
+                st["fx"] = fx
+                break
+        return st or None
+
     build_ass_from_segments(
         [SimpleNamespace(start_sec=float(s["start_sec"]), end_sec=float(s["end_sec"]),
-                         text=str(s["text"]),
-                         style=({"color": str(s["color"])} if s.get("color") else None))
+                         text=str(s["text"]), style=_seg_style(s))
          for s in segments],
         sub_path, sub_style)
 

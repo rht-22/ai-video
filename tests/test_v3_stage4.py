@@ -380,3 +380,23 @@ def test_resolve_work_logo_prefers_white_and_is_deterministic(tmp_path):
     # png 이 없으면 메타만 보고 고르지 않는다
     (d / "CG0g2.png").unlink()
     assert finalize.resolve_work_logo("가왕쇼", app_root=tmp_path).stem == "CG0g2_color"
+
+
+def test_beat_pop_reaches_subtitle_lines():
+    """Stage 4 의 비트 pop 은 아무도 안 읽는 죽은 출력이었다(사용자 지적)."""
+    story = {"beats": [{"number": 0, "role": "hook", "span_ids": ["s1"],
+                        "time": {"start": format_ts(100.0), "end": format_ts(104.0)}},
+                       {"number": 1, "role": "climax", "span_ids": ["s2"],
+                        "time": {"start": format_ts(104.0), "end": format_ts(108.0)}}]}
+    tl = [{"clip_start_sec": 100.0, "clip_end_sec": 104.0, "role": "hook",
+           "use_original_audio": True, "span_ids": ["s1"], "subtitle": ""},
+          {"clip_start_sec": 104.0, "clip_end_sec": 108.0, "role": "climax",
+           "use_original_audio": True, "span_ids": ["s2"], "subtitle": ""}]
+    style = {"v3_style": {"beats": [{"number": 0, "pop": "none"},
+                                    {"number": 1, "pop": "strong"}]}}
+    win = finalize.subtitle_fx_windows(story, style, tl)
+    assert win == [(4.0, 8.0, "pop_strong")]          # none 은 창을 만들지 않는다
+    # 엔진 쪽 통로도 확인 — fx 가 없으면 태그가 붙지 않아야 한다(v1 회귀 0)
+    from app.modules.subtitle import _line_style_overrides
+    assert "fscx" in _line_style_overrides({"fx": "pop_strong"}, 2)[0]
+    assert _line_style_overrides({"color": "#FFFFFF"}, 2)[0] == "{\\1c&HFFFFFF&}"

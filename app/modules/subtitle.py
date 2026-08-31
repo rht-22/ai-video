@@ -407,6 +407,17 @@ def _hex_to_ass_color(color: str) -> str:
     return f"&H{c[4:6]}{c[2:4]}{c[0:2]}&".upper()
 
 
+# 줄 등장 애니메이션 — 자유 텍스트의 _text_fx_tags 와 같은 수법(\t 스케일 오버슈트)을
+# 대사 자막 줄에 쓴다. \t 시각은 **이벤트 시작 기준**이라 줄마다 자기 등장에 맞는다.
+# style.fx 가 실려 올 때만 태그가 붙는다 — 안 실리면 종전과 바이트 동일(v1 무영향).
+_LINE_FX = {
+    "pop_soft": ("\\fscx90\\fscy90\\t(0,110,\\fscx104\\fscy104)"
+                 "\\t(110,190,\\fscx100\\fscy100)"),
+    "pop_strong": ("\\fscx62\\fscy62\\t(0,130,\\fscx112\\fscy112)"
+                   "\\t(130,220,\\fscx100\\fscy100)"),
+}
+
+
 def _line_style_overrides(style_ov: dict | None,
                           base_alignment: int) -> tuple[str, str, str, str]:
     """줄 단위 스타일(edit_overrides/v3 subtitles[].style)
@@ -436,6 +447,8 @@ def _line_style_overrides(style_ov: dict | None,
         tags.append(f"\\fs{int(round(float(style_ov['size'])))}")
     if style_ov.get("color"):
         tags.append(f"\\1c{_hex_to_ass_color(str(style_ov['color']))}")
+    if style_ov.get("fx") and str(style_ov["fx"]) in _LINE_FX:
+        tags.append(_LINE_FX[str(style_ov["fx"])])
     if style_ov.get("rotate") is not None and float(style_ov["rotate"]) != 0.0:
         tags.append(f"\\frz{-float(style_ov['rotate']):g}")
     if style_ov.get("y") is not None:
