@@ -228,3 +228,31 @@ def test_span_run_ignores_normal_dialogue():
              _span("c", 4, 6, "반갑습니다."), _span("d", 6, 8, "네."),
              _span("e", 8, 10, "그러시군요.")]
     assert ca.degenerate_span_run(spans) == {}
+
+
+def test_span_judgment_requires_repetition_and_duration():
+    """M9 완주 실측 결함: 실제 반복 발화가 비율만으로 뒤집혀 자막이 사람이 하지 않은
+    말로 바뀌었다("이거 이거 티켓 티켓…" → 모델 추정). span 레벨은 반복 ∧ 길이 이상을
+    **동시에** 요구한다 — 실측 구분자는 단어 길이(실제 0.260s vs 환각 0.000~0.130s)."""
+    # ① 실제 반복 발화 — 길이 정상(0.26s) → 전사 유지
+    real = _span("s", 300.1, 304.4, "이거 이거 티켓 티켓 필요 없고 이거 이거")
+    rw = [{"t0": 300.1 + i * 0.33, "t1": 300.1 + i * 0.33 + 0.26,
+           "text": ["이거", "이거", "티켓", "티켓", "필요", "없고", "이거", "이거"][i],
+           "prob": 0.78} for i in range(8)]
+    assert ca.transcript_broken(real, rw) is None
+    # ② 환각 루프 — 같은 반복 비율인데 길이가 무너졌다 → 적발
+    fake = _span("s2", 632.0, 657.0, " ".join(["그녀는"] * 8))
+    fw = [{"t0": 632.0 + i * 0.5, "t1": 632.0 + i * 0.5, "text": "그녀는",
+           "prob": 0.85} for i in range(8)]
+    assert "반복 환각" in (ca.transcript_broken(fake, fw) or "")
+
+
+def test_low_confidence_alone_never_flips():
+    """실측: 1단어 span "안녕하세요."(prob 0.04)의 전사가 정답이었다 — 저확신
+    단독으로 모델 추정을 화면에 올리면 안 된다(계기판의 몫)."""
+    sp = _span("s", 297.6, 298.0, "안녕하세요.")
+    ws = [{"t0": 297.65, "t1": 297.95, "text": "안녕하세요.", "prob": 0.04}]
+    assert ca.transcript_broken(sp, ws) is None
+    norm = _norm("s", [{"speaker": "갑", "line": "완전히 다른 말"}])
+    d = ca.adjudicate_transcript(norm, [sp], ws)
+    assert d[0]["decision"] == "transcript"

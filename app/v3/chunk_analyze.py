@@ -238,6 +238,8 @@ def validate_stage2_response(resp: Any, chunk_spans: list[dict], *,
 TRANSCRIPT_MIN_PROB = 0.35     # span 평균 확신도 — 이 아래는 전사를 못 믿는다
 SPAN_SIGNATURE_MIN_WORDS = 6   # 반복·길이 서명을 볼 최소 단어 수(리뷰 확정: 작은
                                # 표본에서 비율·중앙값이 자명해져 정상 발화를 오판)
+SPAN_MIN_MEDIAN_DUR = 0.18     # span 단어 길이 중앙 하한 — 실측: 실제 반복 발화
+                               # 0.260s vs 환각 루프 0.000~0.130s
 # 반복·길이 퇴화 임계 자체는 transcribe.GAP_REPEAT_* / GAP_MIN_MEDIAN_DUR 하나뿐이다
 # — M8-B 재전사와 **같은 서명을 공유**한다(여기서 따로 상수를 두면 두 출처가 갈린다)
 
@@ -253,20 +255,29 @@ def transcript_broken(gsp: dict, words: list[dict] | None) -> str | None:
     ws = [w for w in (words or [])
           if gsp["t_in"] <= (float(w["t0"]) + float(w["t1"])) / 2 < gsp["t_out"]]
     if ws:
-        # ⚠ 창(≥6s 재전사)용 임계를 span 에 그대로 쓰면 정상 발화를 오판한다
-        # (리뷰 확정: "네 네 네" 3단어 → 반복 환각 · 1단어 span → 길이 퇴화 —
-        # 표본이 작을 때 비율·중앙값이 자명해진다). 표본이 의미를 갖는 크기에서만
-        # 서명을 본다 — 흩어진 환각은 degenerate_span_run(구간 단위)이 맡는다.
+        # span 레벨은 **반복 ∧ 길이 이상**을 동시에 요구한다. 실측(가왕쇼 M9 완주)이
+        # 근거다 — 실제 반복 발화 "이거 이거 티켓 티켓 필요 없고…"는 단어 길이
+        # 중앙 0.260s·최소 0.120s 인데 반복 비율만 보고 뒤집혀 자막이 사람이 하지
+        # 않은 말("그거 말고 제 티켓 받으세요")로 바뀌었다. 환각 루프는 길이가
+        # 무너진다: "육십!"×53 중앙 0.130s·최소 0.000 · "그녀는"×71 중앙 0.000s.
+        # 창(≥6s 재전사) 단계는 둘 중 하나로 충분하다 — 그쪽은 버려도 무성으로
+        # 돌아갈 뿐이지만, 여기서 뒤집으면 **모델 텍스트가 화면에 나간다**.
         if len(ws) >= SPAN_SIGNATURE_MIN_WORDS:
-            from app.v3.transcribe import is_degenerate_loop
-            loop = is_degenerate_loop([{"text": str(w.get("text") or ""),
-                                        "t0": float(w["t0"]), "t1": float(w["t1"])}
-                                       for w in ws])
-            if loop:
-                return loop
-        probs = [float(w["prob"]) for w in ws if w.get("prob") is not None]
-        if probs and sum(probs) / len(probs) < TRANSCRIPT_MIN_PROB:
-            return f"저확신 평균 {sum(probs)/len(probs):.2f}"
+            from collections import Counter
+            texts = [str(w.get("text") or "") for w in ws]
+            top, n = Counter(texts).most_common(1)[0]
+            durs = sorted(float(w["t1"]) - float(w["t0"]) for w in ws)
+            median = durs[len(durs) // 2]
+            repeated = n >= 3 and n / len(texts) >= 0.4
+            degenerate = median < SPAN_MIN_MEDIAN_DUR
+            if repeated and degenerate:
+                return (f"반복 환각: {top!r} ×{n}/{len(texts)} "
+                        f"(길이 중앙 {median:.3f}s)")
+            if degenerate and min(durs) <= 0.0:
+                return f"길이 퇴화: 단어 길이 중앙 {median:.3f}s"
+        # ⚠ 저확신 단독으로는 뒤집지 않는다(리뷰·실측): 1~2단어 span 은 확신도가
+        # 구조적으로 낮고(실측 "안녕하세요." 0.04 인데 전사가 정답이었다), 전사를
+        # 모델 추정으로 바꾸는 대가가 크다. 저확신은 validate 계기판의 몫이다.
     else:
         # 단어가 없는데 텍스트가 있다 = 격자 재료와 전사 텍스트의 불일치
         toks = text.split()
