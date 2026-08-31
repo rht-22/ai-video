@@ -65,6 +65,10 @@ def build_span_index(stage2_doc: dict, grid: dict) -> tuple[dict[str, dict], lis
                         "is_audio": bool(s.get("is_audio")),
                         "importance": int(s.get("importance") or 3),
                         "audio_script": s.get("audio_script") or [],
+                        # M9-C 판정 결과 — 자막 생성이 이걸 봐야 한다(리뷰 확정
+                        # critical: 판정이 화면에 전파되지 않던 결함)
+                        "text_source": s.get("text_source"),
+                        "heard_text": s.get("heard_text") or "",
                         "scene_script": s.get("scene_script") or "",
                         "meaning_content": m.get("content") or "",
                         "mood": m.get("mood") or "",

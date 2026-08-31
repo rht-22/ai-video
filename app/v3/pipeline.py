@@ -648,8 +648,10 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
     else:
         name_fixes = []
     if rep_warns:
+        _dropped = {i for w in rep_warns if w["kind"] == "run"
+                    for i in w.get("indexes") or []}
         log(f"  [v3/자막] ⚠ 반복 환각 {len(rep_warns)}건 — "
-            f"{sum(len(w['indexes']) for w in rep_warns)}줄 제외(사유 run_log)")
+            f"{len(_dropped)}줄 제외 · 창 경고는 유지(사유 run_log)")
     if name_warns:
         log(f"  [v3/자막] ⚠ 인명 오인식 의심 {len(name_warns)}건: "
             + ", ".join(f"{w['token']}→{w['suggest']}" for w in name_warns[:3])

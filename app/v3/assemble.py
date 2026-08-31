@@ -173,6 +173,39 @@ def _lines_for_span(words: list[dict], t_in: float, t_out: float) -> list[dict]:
     return merged
 
 
+def _lines_from_text(text: str, t_in: float, t_out: float) -> list[dict]:
+    """어절 타임코드 없는 텍스트(M9-C heard) → span 구간 균등 배분 라인. 순수.
+
+    같은 표시 규칙(2~4어절·12자)을 쓰되 타이밍은 균등이다 — 팝인의 발화 동기화는
+    포기하지만, 깨진 전사를 그대로 띄우는 것보다 낫다."""
+    toks = str(text or "").split()
+    if not toks or t_out <= t_in:
+        return []
+    groups: list[list[str]] = []
+    cur: list[str] = []
+    for tk in toks:
+        joined = " ".join(cur + [tk])
+        if cur and (len(cur) >= SUB_MAX_WORDS or len(joined) > SUB_MAX_CHARS):
+            groups.append(cur)
+            cur = []
+        cur.append(tk)
+    if cur:
+        groups.append(cur)
+    step = (t_out - t_in) / len(groups)
+    out = []
+    for i, g in enumerate(groups):
+        a = t_in + step * i
+        b = min(t_out, a + step)
+        if b - a >= SUB_MIN_SEC - 1e-9 or len(groups) == 1:
+            out.append({"start": a, "end": b, "text": " ".join(g)})
+        elif out:                       # 너무 짧으면 앞줄에 병합(§6 규칙과 같은 규율)
+            out[-1]["text"] += " " + " ".join(g)
+            out[-1]["end"] = b
+        else:
+            out.append({"start": a, "end": b, "text": " ".join(g)})
+    return out
+
+
 def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                    grid_words: list[dict]) -> list[dict]:
     """채택 유성 span(뮤트 제외) → 어절 자막 세그먼트(**편집본 좌표** — C6).
@@ -190,9 +223,23 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
             sp = span_index[sid]
             if not sp["is_audio"]:
                 continue
-            in_span = [w for w in grid_words
-                       if sp["t_in"] <= (float(w["t0"]) + float(w["t1"])) / 2 < sp["t_out"]]
-            for ln in _lines_for_span(in_span, sp["t_in"], sp["t_out"]):
+            # M9-C 전사 판정을 자막에 반영(리뷰 확정 critical — 판정이 stage2
+            # 기록에만 남고 화면에는 깨진 전사가 그대로 나가던 결함):
+            #   none  → 대사 확보 실패, 자막 없음(로그·docstring 의 약속 이행)
+            #   heard → grid 단어는 깨진 전사다. 모델이 들은 문장을 span 구간에
+            #           균등 배치한다(어절 타임코드가 없으므로 팝인 대신 균등).
+            src = sp.get("text_source")
+            if src == "none":
+                continue
+            if src == "heard":
+                lines = _lines_from_text(str(sp.get("heard_text") or ""),
+                                         sp["t_in"], sp["t_out"])
+            else:
+                in_span = [w for w in grid_words
+                           if sp["t_in"] <= (float(w["t0"]) + float(w["t1"])) / 2
+                           < sp["t_out"]]
+                lines = _lines_for_span(in_span, sp["t_in"], sp["t_out"])
+            for ln in lines:
                 # 소속 클립을 이미 안다 — offset 직접 계산(동률 스캔 매핑 금지)
                 e0 = round(off + (max(ln["start"], c0) - c0), 3)
                 e1 = round(off + (min(ln["end"], c1) - c0), 3)

@@ -16,7 +16,8 @@ from __future__ import annotations
 from collections import Counter
 
 NAME_MAX_LEN_DIFF = 0      # 같은 길이만 비교 — 길이가 다르면 다른 말일 확률이 높다
-NAME_MIN_LEN = 2           # 한 글자 이름은 일반명사와 충돌
+NAME_MIN_LEN = 3           # 2음절 인명은 일반명사·다른 이름과 편집거리 1 이 흔해
+                           # 오탐이 크다(리뷰 확정) — 3음절부터만 본다
 RUN_MIN = 3                # 연속 동일 줄 임계
 WINDOW = 8                 # 창 크기(줄)
 WINDOW_SHARE = 0.4         # 창 내 최빈 텍스트 점유 임계
@@ -42,11 +43,14 @@ def check_names(segments: list[dict], names: list[str]) -> list[dict]:
     같은 길이 + 편집거리 1 만 잡는다: 한국어 인명 오인식은 대개 비슷한 소리의
     한 글자가 바뀐다(박**처**진). 길이까지 다르면 다른 낱말일 확률이 높아 뺀다."""
     pool = [n for n in dict.fromkeys(names or []) if len(n) >= NAME_MIN_LEN]
+    exact = set(dict.fromkeys(names or []))   # 사전에 **정확히** 있는 이름은 정답이다
     out: list[dict] = []
     for seg in segments or []:
         for raw in str(seg.get("text") or "").split():
             tok = raw.strip(_STRIP)
-            if len(tok) < NAME_MIN_LEN:
+            if len(tok) < NAME_MIN_LEN or tok in exact:
+                # 편집거리 1 인 출연자 쌍(박서진/박세진)에서 정확한 이름이 다른
+                # 이름의 오인식으로 판정되던 결함(리뷰 확정 major)
                 continue
             for nm in pool:
                 if tok == nm or len(tok) != len(nm):
@@ -75,11 +79,22 @@ def fix_names(segments: list[dict], names: list[str]) -> tuple[list[dict], list[
         if not hs:
             fixed.append(dict(seg))
             continue
-        text = str(seg["text"])
-        for h in hs:
-            text = text.replace(h["token"], h["suggest"])
+        # 줄 전체 replace 는 다른 어절의 부분 문자열까지 오염시킨다(리뷰 확정) —
+        # 어절 단위로 분해해 **정확히 일치하는 어절만** 바꾸고 구두점은 보존한다
+        table = {h["token"]: h["suggest"] for h in hs}
+        parts, n_sub = [], 0
+        for raw in str(seg["text"]).split():
+            core = raw.strip(_STRIP)
+            if core in table:
+                parts.append(raw.replace(core, table[core], 1))
+                n_sub += 1
+            else:
+                parts.append(raw)
+        text = " ".join(parts)
         fixed.append({**seg, "text": text})
-        log.append({"at": key[0], "before": key[1], "after": text})
+        log.append({"at": key[0], "before": key[1], "after": text,
+                    "subs": [{"token": k, "suggest": v} for k, v in table.items()],
+                    "n": n_sub})
     return fixed, log
 
 
@@ -89,37 +104,49 @@ def check_repetition(segments: list[dict]) -> list[dict]:
     실증: 환각 구간(격자에 "육십!"×53)을 자막 빌더에 태우면 34줄이 나오고 ①이
     13줄 연속을 적발한다. 실제 자막(가왕쇼 22줄·포핸즈 19줄)은 경고 0."""
     segs = list(segments or [])
+
+    def sig(s: dict) -> str:
+        """비교 키 — 구두점·공백 차이는 같은 줄로 본다("네." vs "네")."""
+        return " ".join(str(s.get("text") or "").split()).strip(_STRIP)
+
     out: list[dict] = []
     i = 0
     while i < len(segs):                                   # ① 연속 동일 줄
         j = i
-        while j + 1 < len(segs) and \
-                str(segs[j + 1].get("text")) == str(segs[i].get("text")):
+        while j + 1 < len(segs) and sig(segs[j + 1]) == sig(segs[i]):
             j += 1
         n = j - i + 1
-        if n >= RUN_MIN and str(segs[i].get("text") or "").strip():
+        if n >= RUN_MIN and sig(segs[i]):
             out.append({"kind": "run", "n": n, "text": str(segs[i].get("text")),
                         "at": round(float(segs[i].get("start_sec") or 0), 2),
                         "indexes": list(range(i, j + 1))})
         i = j + 1
-    for k in range(0, max(0, len(segs) - WINDOW + 1)):     # ② 창 내 점유
+    # ② 창 내 점유 — 텍스트별로 **인덱스를 병합**해 경고 1건씩(창마다 중복 발행하거나
+    # 뒤 창에만 나온 줄이 새던 결함: 리뷰 확정)
+    hits: dict[str, set[int]] = {}
+    for k in range(0, max(0, len(segs) - WINDOW + 1)):
         win = segs[k:k + WINDOW]
-        top, n = Counter(str(s.get("text")) for s in win).most_common(1)[0]
-        if n >= RUN_MIN and n / len(win) >= WINDOW_SHARE and top.strip():
-            if not any(o["kind"] == "window" and o["text"] == top for o in out):
-                out.append({"kind": "window", "n": n, "text": top,
-                            "at": round(float(win[0].get("start_sec") or 0), 2),
-                            "indexes": [k + x for x, s in enumerate(win)
-                                        if str(s.get("text")) == top]})
+        top, n = Counter(sig(s) for s in win).most_common(1)[0]
+        if n >= RUN_MIN and n / len(win) >= WINDOW_SHARE and top:
+            hits.setdefault(top, set()).update(
+                k + x for x, s in enumerate(win) if sig(s) == top)
+    for top, idxs in hits.items():
+        order = sorted(idxs)
+        out.append({"kind": "window", "n": len(order),
+                    "text": str(segs[order[0]].get("text")),
+                    "at": round(float(segs[order[0]].get("start_sec") or 0), 2),
+                    "indexes": order})
     return out
 
 
 def drop_repetition(segments: list[dict]) -> tuple[list[dict], list[dict]]:
-    """B 예방판 — 반복 서명에 걸린 줄을 자막에서 제외한 사본 + 제외 기록. 순수.
+    """B 예방판 — **연속 런**에 걸린 줄을 자막에서 제외한 사본 + 경고 전체. 순수.
 
     조용한 뭉갬 금지: 몇 줄을 왜 뺐는지 호출자가 run_log 에 남긴다. 자막 없이
     영상만 나가는 것이 "육십!" 34줄이 화면을 덮는 것보다 낫다."""
     warns = check_repetition(segments)
-    drop = {i for w in warns for i in w.get("indexes") or []}
+    # 제거는 **연속 런만** — 창 규칙은 실제 대사의 짧은 맞장구("네." 4/8줄)에도
+    # 걸릴 수 있어 경고 전용으로 강등한다(리뷰 확정: 정상 자막 제거 위험)
+    drop = {i for w in warns if w["kind"] == "run" for i in w.get("indexes") or []}
     kept = [s for i, s in enumerate(segments or []) if i not in drop]
     return kept, warns

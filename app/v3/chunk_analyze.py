@@ -186,6 +186,13 @@ def validate_stage2_response(resp: Any, chunk_spans: list[dict], *,
                 entry = {}
             audio_in = entry.get("heard") if entry.get("heard") is not None \
                 else entry.get("audio")
+            if isinstance(audio_in, str):        # 관용 파서 — characters 와 같은 규율
+                audio_in = ([{"speaker": "미상", "line": audio_in}]
+                            if audio_in.strip() else [])
+                notes.append(f"{sid} heard 문자열 → 1행으로 해석")
+            elif isinstance(audio_in, dict):
+                audio_in = [audio_in]
+                notes.append(f"{sid} heard 객체 → 1행 배열로 해석")
             audio = []
             if gsp["is_audio"]:
                 if isinstance(audio_in, list) and audio_in:
@@ -229,7 +236,10 @@ def validate_stage2_response(resp: Any, chunk_spans: list[dict], *,
 
 # ── M9-C: 전사 판정 — 모델은 "들은 것"만 내고, 채택은 코드가 한다 ────────────
 TRANSCRIPT_MIN_PROB = 0.35     # span 평균 확신도 — 이 아래는 전사를 못 믿는다
-TRANSCRIPT_MIN_MEDIAN_DUR = 0.06   # 단어 길이 중앙 — 0 수렴은 환각 서명(실측)
+SPAN_SIGNATURE_MIN_WORDS = 6   # 반복·길이 서명을 볼 최소 단어 수(리뷰 확정: 작은
+                               # 표본에서 비율·중앙값이 자명해져 정상 발화를 오판)
+# 반복·길이 퇴화 임계 자체는 transcribe.GAP_REPEAT_* / GAP_MIN_MEDIAN_DUR 하나뿐이다
+# — M8-B 재전사와 **같은 서명을 공유**한다(여기서 따로 상수를 두면 두 출처가 갈린다)
 
 
 def transcript_broken(gsp: dict, words: list[dict] | None) -> str | None:
@@ -243,19 +253,24 @@ def transcript_broken(gsp: dict, words: list[dict] | None) -> str | None:
     ws = [w for w in (words or [])
           if gsp["t_in"] <= (float(w["t0"]) + float(w["t1"])) / 2 < gsp["t_out"]]
     if ws:
-        from app.v3.transcribe import is_degenerate_loop
-        loop = is_degenerate_loop([{"text": str(w.get("text") or ""),
-                                    "t0": float(w["t0"]), "t1": float(w["t1"])}
-                                   for w in ws])
-        if loop:
-            return loop
+        # ⚠ 창(≥6s 재전사)용 임계를 span 에 그대로 쓰면 정상 발화를 오판한다
+        # (리뷰 확정: "네 네 네" 3단어 → 반복 환각 · 1단어 span → 길이 퇴화 —
+        # 표본이 작을 때 비율·중앙값이 자명해진다). 표본이 의미를 갖는 크기에서만
+        # 서명을 본다 — 흩어진 환각은 degenerate_span_run(구간 단위)이 맡는다.
+        if len(ws) >= SPAN_SIGNATURE_MIN_WORDS:
+            from app.v3.transcribe import is_degenerate_loop
+            loop = is_degenerate_loop([{"text": str(w.get("text") or ""),
+                                        "t0": float(w["t0"]), "t1": float(w["t1"])}
+                                       for w in ws])
+            if loop:
+                return loop
         probs = [float(w["prob"]) for w in ws if w.get("prob") is not None]
         if probs and sum(probs) / len(probs) < TRANSCRIPT_MIN_PROB:
             return f"저확신 평균 {sum(probs)/len(probs):.2f}"
     else:
         # 단어가 없는데 텍스트가 있다 = 격자 재료와 전사 텍스트의 불일치
         toks = text.split()
-        if len(toks) >= 3 and len(set(toks)) == 1:
+        if len(toks) >= SPAN_SIGNATURE_MIN_WORDS and len(set(toks)) == 1:
             return f"반복 환각: {toks[0]!r} ×{len(toks)}"
     return None
 

@@ -138,12 +138,70 @@ def test_transcript_broken_signals():
     ok = _span("s", 0.0, 3.0, "정상 문장입니다")
     assert ca.transcript_broken(ok, [{"t0": 0.2, "t1": 1.0, "text": "정상",
                                       "prob": 0.9}]) is None
-    zero = [{"t0": 1.0 + i, "t1": 1.0 + i, "text": f"w{i}", "prob": 0.9}
+    # 길이 0 단어 8개가 span [0,3) **안에** 있어야 서명 표본이 된다(중점 소속 규칙)
+    zero = [{"t0": 0.2 + i * 0.3, "t1": 0.2 + i * 0.3, "text": f"w{i}", "prob": 0.9}
             for i in range(8)]
     assert "길이 퇴화" in (ca.transcript_broken(ok, zero) or "")
-    # 단어 없이 텍스트만 반복 — 격자 재료 불일치 경로
-    rep = _span("s", 0.0, 3.0, "네 네 네 네")
+    # 단어 없이 텍스트만 반복 — 격자 재료 불일치 경로(표본 ≥6 에서만)
+    rep = _span("s", 0.0, 3.0, "네 네 네 네 네 네")
     assert "반복 환각" in (ca.transcript_broken(rep, []) or "")
+
+
+def test_span_scale_guard_protects_short_real_speech():
+    """리뷰 확정: 창(≥6s 재전사)용 임계를 작은 span 에 쓰면 정상 발화를 오판했다.
+    표본이 의미를 갖는 크기(SPAN_SIGNATURE_MIN_WORDS) 아래에서는 서명을 안 본다."""
+    # ① 예능 맞장구 "네 네 네" — 3단어, 확신도 정상
+    sp = _span("s", 0.0, 1.0, "네 네 네")
+    ws = [{"t0": 0.1 + i * 0.3, "t1": 0.1 + i * 0.3 + 0.25, "text": "네", "prob": 0.94}
+          for i in range(3)]
+    assert ca.transcript_broken(sp, ws) is None
+    # ② 한 단어짜리 span — 중앙값이 곧 그 단어 길이라 '길이 퇴화'로 오판되던 경로
+    one = _span("s2", 5.2, 5.3, "네.")
+    assert ca.transcript_broken(one, [{"t0": 5.20, "t1": 5.25, "text": "네.",
+                                       "prob": 0.9}]) is None
+    # ③ 표본이 충분하면 여전히 잡는다
+    big = _span("s3", 0.0, 10.0, " ".join(["육십!"] * 12))
+    bw = [{"t0": i * 0.3, "t1": i * 0.3 + 0.13, "text": "육십!", "prob": 0.97}
+          for i in range(12)]
+    assert "환각" in (ca.transcript_broken(big, bw) or "")
+
+
+def test_name_check_skips_exact_dictionary_members():
+    """리뷰 확정 major: 편집거리 1 인 출연자 쌍(박서진/박세진)에서 정확한 이름이
+    다른 이름의 오인식으로 판정되고, --fix-names 면 엉뚱한 사람으로 바뀌었다."""
+    names = ["박서진", "박세진", "전유진"]
+    segs = [_seg(10.0, "박세진 씨가 노래합니다")]
+    assert tc.check_names(segs, names) == []
+    fixed, log = tc.fix_names(segs, names)
+    assert fixed[0]["text"] == "박세진 씨가 노래합니다" and log == []
+    # 사전에 없는 진짜 오인식은 여전히 잡는다
+    assert len(tc.check_names([_seg(1.0, "박처진 씨")], names)) == 1
+
+
+def test_fix_names_replaces_only_whole_tokens():
+    """리뷰 확정: 줄 전체 replace 가 다른 어절의 부분 문자열을 오염시켰다."""
+    names = ["홍지윤"]
+    segs = [_seg(1.0, "홍지운 씨와 홍지운아빠가")]     # 두 번째는 다른 어절의 접두
+    fixed, log = tc.fix_names(segs, names)
+    assert fixed[0]["text"] == "홍지윤 씨와 홍지운아빠가"
+    assert log[0]["n"] == 1
+
+
+def test_repetition_window_merges_indexes_once():
+    """리뷰 확정: 창마다 경고가 중복 발행되고 뒤 창에만 나온 줄이 새던 결함."""
+    segs = [_seg(i * 2.0, "그녀는" if i % 2 == 0 else f"말{i}") for i in range(12)]
+    warns = [w for w in tc.check_repetition(segs) if w["kind"] == "window"]
+    assert len(warns) == 1                      # 텍스트당 1건
+    assert warns[0]["indexes"] == [0, 2, 4, 6, 8, 10]   # 뒤 창의 등장도 포함
+    assert warns[0]["at"] == 0.0                # 반복 첫 등장 기준
+
+
+def test_drop_repetition_keeps_window_only_warnings():
+    """리뷰 확정: 창 규칙으로 정상 대사를 제거하면 안 된다 — 경고 전용."""
+    segs = [_seg(i * 2.0, "네." if i % 2 == 0 else f"대사{i}") for i in range(8)]
+    kept, warns = tc.drop_repetition(segs)
+    assert len(kept) == len(segs)               # 한 줄도 안 지운다
+    assert any(w["kind"] == "window" for w in warns)   # 경고는 남는다
 
 
 def test_adjudication_catches_cross_span_loop():
