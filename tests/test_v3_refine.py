@@ -205,3 +205,21 @@ def test_shrink_guard_interval_semantics():
     # end edge 를 앞으로: [new, orig] 이 해방분
     orig_e, new_e = 1838.0, 1791.0
     assert (new_e, orig_e) == (1791.0, 1838.0)
+
+
+# ── 공백 재전사 반복 환각 방어(2026-08-31 실측 결함) ────────────────────────
+
+def test_degenerate_loop_detection():
+    from app.v3.transcribe import is_degenerate_loop
+    # 실측 재현 ①: "그녀는"×71 — prob 0.84 로 높아 확신 필터를 통과했다
+    loop = [{"text": "그녀는", "t0": 632 + i * 0.3, "t1": 632 + i * 0.3 + 0.3}
+            for i in range(20)]
+    assert "반복 환각" in (is_degenerate_loop(loop) or "")
+    # 실측 재현 ②: 길이 0 단어(정렬 산출물)
+    zero = [{"text": f"w{i}", "t0": 100.0 + i, "t1": 100.0 + i} for i in range(10)]
+    assert "길이 퇴화" in (is_degenerate_loop(zero) or "")
+    # 정상 창(가왕쇼 1185~1278s 품바 라이브 — 길이 중앙 0.92s)은 통과
+    ok = [{"text": w, "t0": 1185 + i * 1.2, "t1": 1185 + i * 1.2 + 0.92}
+          for i, w in enumerate("설레이다 꺼낸 가슴을 오라버니 어깨에 기대해볼래요 커다란 얼굴을 묻고".split())]
+    assert is_degenerate_loop(ok) is None
+    assert is_degenerate_loop([]) is None

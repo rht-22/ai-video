@@ -112,7 +112,34 @@ def transcribe_words(audio_path: Path, duration_sec: float, *,
 # ── M8-B: 전사 공백 재전사 (발주서 v3-m8 — 트리거 실측 수정판) ────────────────
 GAP_RETRY_SEC = 6.0          # 단어 간 공백 트리거 — 긴 공백은 드물어 상한 불필요
 GAP_SILENCE_SKIP = 0.8       # 창의 이 비율 이상이 silencedetect 무음이면 진짜 무음
-GAP_MIN_PROB = 0.4           # vad off 재전사의 환각 방어 — 저확신 단어 버림
+GAP_MIN_PROB = 0.4           # vad off 재전사의 환각 방어 ① — 저확신 단어 버림
+# ② 반복 환각(퇴화 루프) 방어 — 실측(가왕쇼 2026-08-31): vad off 재전사가 음악·
+# 함성 구간에서 같은 토큰을 수십 번 뱉는다("그녀는"×71·"육십!"×53). prob 은
+# 0.84~0.97 로 높아 ①이 못 잡는다. 서명은 두 가지: 한 토큰의 창 내 점유율이
+# 높거나, 단어 길이가 0 에 수렴(정상 발화는 중앙 0.3~0.9s).
+GAP_REPEAT_RATIO = 0.4       # 최빈 토큰 점유율 — 이 이상이면 루프로 본다
+GAP_REPEAT_MIN_N = 3         # 최소 반복 횟수(짧은 창의 우연 일치 제외)
+GAP_MIN_WORD_DUR = 0.04      # 이보다 짧은 단어는 실물이 아니다(정렬 산출물)
+GAP_MIN_MEDIAN_DUR = 0.06    # 창 단어 길이 중앙값이 이 아래면 창 전체가 퇴화
+
+
+def is_degenerate_loop(found: list[dict]) -> str | None:
+    """복원 단어 목록이 반복 환각인가 → 사유 문자열(정상이면 None). 순수.
+
+    창 **전체를 버린다** — 루프가 낀 창은 나머지 단어도 신뢰할 수 없고, 버려도
+    M8 이전 동작(그 구간 무성)으로 돌아갈 뿐이라 손실이 없다(보수 규율)."""
+    if not found:
+        return None
+    from collections import Counter
+    counts = Counter(w["text"] for w in found)
+    top, n = counts.most_common(1)[0]
+    if n >= GAP_REPEAT_MIN_N and n / len(found) >= GAP_REPEAT_RATIO:
+        return f"반복 환각: {top!r} ×{n}/{len(found)}"
+    durs = sorted(w["t1"] - w["t0"] for w in found)
+    median = durs[len(durs) // 2]
+    if median < GAP_MIN_MEDIAN_DUR:
+        return f"길이 퇴화: 단어 길이 중앙 {median:.3f}s"
+    return None
 
 
 def retranscribe_gaps(audio_path: Path, words: list[dict], duration_sec: float,
@@ -162,6 +189,8 @@ def retranscribe_gaps(audio_path: Path, words: list[dict], duration_sec: float,
                 for w in s.words or []:
                     if w.probability is None or w.probability < GAP_MIN_PROB:
                         continue
+                    if float(w.end) - float(w.start) < GAP_MIN_WORD_DUR:
+                        continue          # 0 길이 단어 = 정렬 산출물(환각 서명)
                     if not (a + 0.1 < float(w.start) and float(w.end) < b - 0.1):
                         continue          # 기존 단어와의 경계 중복 방지 — 공백 안만
                     text = (w.word or "").strip()
@@ -170,6 +199,14 @@ def retranscribe_gaps(audio_path: Path, words: list[dict], duration_sec: float,
                                       "t1": round(float(w.end), 3),
                                       "text": text,
                                       "prob": round(float(w.probability), 3)})
+            loop = is_degenerate_loop(found)
+            if loop:
+                rec["dropped"] = loop      # 조용한 폐기 금지 — 사유를 남긴다
+                audit.setdefault("dropped_windows", 0)
+                audit["dropped_windows"] += 1
+                log(f"  [v3/전사] ⚠ 공백 재전사 {a:.0f}~{b:.0f}s 폐기 — {loop}")
+                audit["windows"].append(rec)
+                continue
             merged.extend(found)
             rec["found"] = len(found)
             audit["recovered_words"] += len(found)
