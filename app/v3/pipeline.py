@@ -44,6 +44,12 @@ from app.v3.scenecut import SCENE_THRESHOLD, detect_scene_cuts
 from app.v3.timegrid import build_grid_doc, carve_spans
 from app.v3.transcribe import WHISPER_MODEL_NAME, transcribe_words
 
+# v3 모델 정책(2026-08-31 사용자 결정): **전 호출 Flash 3.7** — A/B 실측(가왕쇼)
+# 에서 Pro 대비 저하 없음(전사 준수·예고 판정은 오히려 우세). v1 공유 모듈 기본값은
+# 건드리지 않는다(병행 구축) — v3 진입점에서만 오버라이드. env GEMINI_V3_MODEL 로
+# 채널/노드별 재지정 가능(문제 시 Pro 복귀 손잡이).
+V3_MODEL_DEFAULT = "gemini-3.7-flash"
+
 V3_STEPS = ("init", "research", "probe", "proxy", "grid", "seq_analyze",
             "chunk_split", "chunk_analyze", "story", "resources",
             "draft_render", "style", "render", "validate")
@@ -151,9 +157,10 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
             "steps": [],
         }
     # v3 신규 호출의 모델 역할 — provenance 모듈(공유)을 고치지 않고 가산 키로 남긴다
+    import os as _os
+    _v3_model = _os.environ.get("GEMINI_V3_MODEL", V3_MODEL_DEFAULT)
     run_log.setdefault("provenance", {}).setdefault("models", {})["roles_v3"] = {
-        "seq_analyze": "pro", "chunk_analyze": "pro", "story": "flash",
-        "style": "flash", "frame_qc": "flash",
+        "all_llm": _v3_model,        # 2026-08-31: 전 호출 단일 모델(A/B 근거)
         "grid_transcribe": f"local:{WHISPER_MODEL_NAME}"}
 
     def step(name: str, **fields) -> None:
@@ -164,8 +171,14 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
     def get_gemini():
         nonlocal gemini
         if gemini is None:
+            import dataclasses
+            import os
+
             from app.modules.gemini_client import load_gemini_client
             gemini = load_gemini_client()
+            v3_model = os.environ.get("GEMINI_V3_MODEL", V3_MODEL_DEFAULT)
+            gemini.config = dataclasses.replace(
+                gemini.config, model_name=v3_model, flash_model_name=v3_model)
         return gemini
 
     try:
