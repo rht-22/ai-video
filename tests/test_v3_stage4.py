@@ -242,7 +242,7 @@ def test_style_validates_label_positions_and_clamps():
         {"design": {}, "labels": [{"index": 0, "x": 0.72, "y": 0.36},
                                   {"index": 1, "x": 0.99, "y": 0.05}]}, 3, band=band)
     assert problems == []
-    assert styled["labels"][0] == {"index": 0, "x": 0.72, "y": 0.36}
+    assert (styled["labels"][0]["x"], styled["labels"][0]["y"]) == (0.72, 0.36)
     # 밴드·가로 범위 밖은 **보정**한다(라벨을 잃지 않는다) + 노트 기록
     assert styled["labels"][1]["x"] == pytest.approx(0.82)
     assert styled["labels"][1]["y"] == pytest.approx(0.315)
@@ -273,3 +273,28 @@ def test_plan_labels_uses_anchor_and_is_shared():
     assert len(out) == 1 and out[0]["index"] == 0
     assert out[0]["start_sec"] == pytest.approx(5.0)     # 앵커 s2 의 편집본 시각
     assert out[0]["end_sec"] == pytest.approx(9.0)       # +4s 상한
+
+
+def test_style_labels_carry_rotate_color_fx():
+    """M12b: 기울기·색·등장효과도 Stage 4 판단 — 렌더러가 이미 굽는 어휘로만."""
+    styled, problems, notes = stage4.validate_style_response(
+        {"design": {}, "labels": [
+            {"index": 0, "x": 0.72, "y": 0.36, "rotate": -4, "color": "yellow", "fx": "pop"},
+            {"index": 1, "x": 0.25, "y": 0.62, "rotate": 30, "color": "puce", "fx": "wobble"},
+            {"index": 2, "x": 0.5, "y": 0.40}]}, 3, band=(0.275, 0.725))
+    assert problems == []
+    assert styled["labels"][0] == {"index": 0, "x": 0.72, "y": 0.36,
+                                   "rotate": -4.0, "color": "#FFD400", "fx": "pop"}
+    # 범위 밖 기울기·미지원 어휘는 **보정**(라벨을 잃지 않는다)
+    assert styled["labels"][1]["rotate"] == pytest.approx(stage4.LABEL_ROTATE_LIMIT)
+    assert styled["labels"][1]["fx"] == "pop"
+    assert sum("labels[1]" in n for n in notes) == 3        # 기울기·색·fx 세 건
+    # 미지정은 조용히 순환 기본값 — 라벨이 전부 같은 색이 되지 않게
+    assert styled["labels"][2]["color"] == stage4.LABEL_COLOR_CYCLE[2]
+    assert styled["labels"][2]["fx"] == "pop"
+
+
+def test_render_labels_fall_back_when_style_silent():
+    """스타일이 위치를 못 주면 종전 기본값 — 위치 실패가 라벨 소실이 되면 안 된다."""
+    assert finalize._cycle_color(0) == stage4.LABEL_COLOR_CYCLE[0]
+    assert finalize._cycle_color(5) == stage4.LABEL_COLOR_CYCLE[1]

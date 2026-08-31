@@ -38,6 +38,7 @@ PROGRESSION_MAX_GAP_SEC = 3.0     # §9-D 진행감 — 2~3초마다 화면 변�
 LOOP_DIFF_WARN = 60.0             # 첫/끝 프레임 평균 절대 오차(0~255) 경고 임계
 LABEL_Y_RATIO = 0.526             # 괄호 라벨 세로 위치 — 템플릿 1010/1920 실측
 LABEL_MAX_SEC = 4.0               # 라벨 표시 상한 — 레퍼런스 실측 3.54~4.00s
+# 색 순환은 Stage 4 계약(stage4.LABEL_PALETTE)과 한 곳에서 관리한다
 QC_FRAME_COUNT = 4
 
 
@@ -100,6 +101,12 @@ def video_band_ratio(design) -> tuple[float, float]:
     y0 = min(max(0, int(vy)), max(0, H - scaled_h)) if vy is not None \
         else (H - scaled_h) // 2
     return y0 / H, (y0 + scaled_h) / H
+
+
+def _cycle_color(index: int) -> str:
+    """Stage 4 가 색을 안 줬을 때의 결정적 순환 — 라벨이 전부 같은 색이 되지 않게."""
+    from app.v3.stage4 import LABEL_COLOR_CYCLE
+    return LABEL_COLOR_CYCLE[index % len(LABEL_COLOR_CYCLE)]
 
 
 def plan_labels(story_doc: dict, plan: dict) -> list[dict]:
@@ -205,7 +212,10 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                        "end_sec": lb["end_sec"],
                        "x": float(pos.get("x", 0.5)),
                        "y": float(pos.get("y", LABEL_Y_RATIO)),
-                       "size": 58, "color": "#FF4A3B", "stroke": "dark"})
+                       "rotate": float(pos.get("rotate", 0.0)),
+                       "size": 58, "stroke": "dark",
+                       "fx": str(pos.get("fx") or "pop"),
+                       "color": str(pos.get("color") or _cycle_color(lb["index"]))})
     texts_path = None
     if labels:
         texts_path = output_dir / "v3_labels.ass"

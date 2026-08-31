@@ -64,6 +64,14 @@ STYLE_ALLOWED: dict[str, Any] = {
 POP_LEVELS = ("none", "soft", "strong")
 LABEL_X_RANGE = (0.18, 0.82)   # 가로 여백 — 캔버스 끝에 붙으면 글자가 잘린다
 LABEL_BAND_MARGIN = 0.04       # 영상 밴드 안쪽 여백(검정 밴드 침범 방지)
+LABEL_ROTATE_LIMIT = 8.0       # 기울기 상한(°, 시계방향 +) — 넘으면 가독성이 깨진다
+LABEL_PALETTE = {              # 모델은 **이름**으로 고른다(자유 hex 는 안 읽히는 색이 나온다)
+    "red": "#FF4A3B", "yellow": "#FFD400", "cyan": "#37E2F0",
+    "lime": "#B6FF3B", "pink": "#FF6FD8", "white": "#FFFFFF"}
+LABEL_COLOR_CYCLE = ("#FF4A3B", "#FFD400", "#37E2F0", "#B6FF3B")  # 미지정 시 순환
+# 등장 효과 — 렌더러(build_texts_ass/_text_fx_tags)가 이미 굽는 어휘. 기본은 pop
+# ("띠용" 오버슈트 30%→110%→100%, 220ms). 미지정이 none 이면 라벨이 그냥 튀어나온다.
+LABEL_FX = ("pop", "glow", "shake", "none")
 CROP_ANCHORS = ("left", "center", "right")
 
 
@@ -224,7 +232,28 @@ def validate_style_response(resp: Any, n_beats: int,
         cy = min(max(y, band[0] + LABEL_BAND_MARGIN), band[1] - LABEL_BAND_MARGIN)
         if (cx, cy) != (x, y):
             notes.append(f"labels[{idx}] 위치 보정: ({x:.2f},{y:.2f})→({cx:.2f},{cy:.2f})")
-        labels_out.append({"index": idx, "x": round(cx, 3), "y": round(cy, 3)})
+        try:
+            rot = float(item.get("rotate") or 0.0)
+        except (TypeError, ValueError):
+            rot = 0.0
+            notes.append(f"labels[{idx}] rotate 형식 오류 → 0°")
+        cr = min(max(rot, -LABEL_ROTATE_LIMIT), LABEL_ROTATE_LIMIT)
+        if cr != rot:
+            notes.append(f"labels[{idx}] 기울기 보정: {rot:g}°→{cr:g}°")
+        raw_color = item.get("color")
+        color = LABEL_PALETTE.get(str(raw_color or "").strip().lower())
+        if color is None:
+            # 미지정은 조용히 순환 기본값(단조 회귀 방지) · 오타는 노트를 남긴다
+            color = LABEL_COLOR_CYCLE[idx % len(LABEL_COLOR_CYCLE)]
+            if raw_color:
+                notes.append(f"labels[{idx}] 색 이름 미지원({raw_color!r}) → 기본 순환")
+        raw_fx = item.get("fx")
+        fx = str(raw_fx or "pop").strip().lower()
+        if fx not in LABEL_FX:
+            notes.append(f"labels[{idx}] fx 미지원({raw_fx!r}) → pop")
+            fx = "pop"
+        labels_out.append({"index": idx, "x": round(cx, 3), "y": round(cy, 3),
+                           "rotate": round(cr, 1), "color": color, "fx": fx})
 
     beats_out: list[dict] = []
     for b in resp.get("beats") or []:
@@ -268,7 +297,12 @@ STYLE_PROMPT = """당신은 쇼츠 아트디렉터다. 첨부한 영상은 리�
 {labels_block}
 
 ## 판단 기준
-0. **라벨 위치** — 위 각 라벨의 시각으로 가서 그 순간 화면을 보고 x·y(0~1 비율)를 정하라. 인물 얼굴·방송 자체 자막(보통 화면 중앙~하단)·자막 밴드를 **피해서** 빈 곳에 놓는다. 세로는 영상 밴드({band_lo:.2f}~{band_hi:.2f}) 안이어야 하고, 가로는 0.18~0.82. 기본값(중앙 0.5/{band_mid:.2f})이 그 순간 무언가를 덮으면 반드시 옮겨라.
+0. **라벨 배치** — 위 각 라벨의 시각으로 가서 그 순간 화면을 보고 정하라.
+   - `x`·`y`(0~1 비율): 인물 얼굴·방송 자체 자막(보통 화면 중앙~하단)·자막 밴드를 **피해서** 빈 곳에. 세로는 영상 밴드({band_lo:.2f}~{band_hi:.2f}) 안, 가로는 0.18~0.82.
+   - **양옆으로도 움직여라.** 위아래로만 피하면 화면이 단조롭다 — 인물이 왼쪽에 서 있으면 오른쪽 여백, 오른쪽이면 왼쪽 여백으로 보낸다. 라벨마다 x 를 다시 판단하고, 가운데(0.5)는 **양쪽이 다 막혔을 때만** 쓴다.
+   - `rotate`(-8~8°, 시계방향 +): 감정이 튀는 라벨은 살짝 기울인다(3~6°). 차분한 설명 라벨은 0. 전부 기울이면 산만하다.
+   - `color`: {palette_names} 중 하나. 그 순간 화면에서 **가장 눈에 띄는** 색을 고르고, 연달아 나오는 라벨은 서로 다른 색으로.
+   - `fx`(등장 효과): `pop`(기본 — 띠용 튀어나옴) · `glow`(발광, 어두운 화면에서 강조) · `shake`(흔들림, 충격·놀람) · `none`(차분한 설명 라벨).
 1. 자막 가독성: 화면 하단이 밝거나 복잡하면 subtitle_color/외곽선 대비, 필요시 subtitle_y_margin 조정.
 2. 제목 밴드: 기본 유지 — 화면과 무관(검정 밴드 위)이라 특별한 사유 없으면 손대지 않는다.
 3. 비트별: crop(인물이 왼/오른쪽에 쏠린 구간 → left/right, 기본 center) · pop(팝인 강도 none/soft/strong — **실제 컷 리듬을 보고**: 컷이 잦고 호흡 빠른 비트만 soft+) · sfx(리듬 전환점의 효과음 큐 한 줄, 필수 아님).
@@ -277,7 +311,7 @@ STYLE_PROMPT = """당신은 쇼츠 아트디렉터다. 첨부한 영상은 리�
 ## 출력 (JSON 만)
 {{"design": {{"subtitle_color": "#FFFFFF"}},
  "beats": [{{"number": 0, "crop": "center", "pop": "soft", "sfx": null}}],
- "labels": [{{"index": 0, "x": 0.72, "y": 0.36}}],
+ "labels": [{{"index": 0, "x": 0.72, "y": 0.36, "rotate": -4, "color": "yellow", "fx": "pop"}}],
  "notes": "판단 근거 한두 문장"}}"""
 
 
@@ -309,6 +343,7 @@ def build_style_prompt(preset: dict, story_doc: dict, reject_note: str = "",
         beats_block=beats_block, labels_block=labels_block,
         band_lo=band[0] + LABEL_BAND_MARGIN, band_hi=band[1] - LABEL_BAND_MARGIN,
         band_mid=(band[0] + band[1]) / 2,
+        palette_names=" · ".join(LABEL_PALETTE),
         allowed_keys=", ".join(sorted(STYLE_ALLOWED)),
         reject_block=reject_block)
 
