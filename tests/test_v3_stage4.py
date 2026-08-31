@@ -362,3 +362,21 @@ def test_title_sizes_shrink_to_fit_canvas_width():
     assert fit("유람선 승선 포기 속출\n배삯 버리고 따라간 이유", [92, 112]) == [92, 89]
     assert fit("짧은 줄\n짧은 줄", [92, 112]) == [92, 112]      # 들어가면 안 건드린다
     assert fit("", [92, 112]) == [92, 112]                      # 제목 없음 = 무변경
+
+
+def test_resolve_work_logo_prefers_white_and_is_deterministic(tmp_path):
+    """하단 밴드는 검정 — 흰색판이 정답이고 _color 는 차순위. 못 찾으면 텍스트 폴백."""
+    d = tmp_path / "assets" / "logos"
+    d.mkdir(parents=True)
+    for stem, src in (("CG0g2", "가왕쇼_logo_final_white.png"),
+                      ("CG0g2_color", "가왕쇼_logo_final_color.png"),
+                      ("RZsv4", "다른작품_로고.png")):
+        (d / f"{stem}.json").write_text('{"source_file": "%s"}' % src, encoding="utf-8")
+        (d / f"{stem}.png").write_bytes(b"x")
+    got = finalize.resolve_work_logo("가왕쇼", app_root=tmp_path)
+    assert got is not None and got.stem == "CG0g2"
+    assert finalize.resolve_work_logo("없는작품", app_root=tmp_path) is None
+    assert finalize.resolve_work_logo("", app_root=tmp_path) is None
+    # png 이 없으면 메타만 보고 고르지 않는다
+    (d / "CG0g2.png").unlink()
+    assert finalize.resolve_work_logo("가왕쇼", app_root=tmp_path).stem == "CG0g2_color"

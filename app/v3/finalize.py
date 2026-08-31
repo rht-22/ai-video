@@ -66,6 +66,11 @@ def design_from_style(design: dict) -> DesignConfig:
         up["video_y"] = int(design["video_y"])
     if design.get("video_width") is not None:
         up["video_width"] = int(design["video_width"])
+    for k in ("work_image_width", "work_image_height"):
+        if design.get(k) is not None:
+            up[k] = int(design[k])
+    if design.get("work_image_align"):
+        up["work_image_align"] = str(design["work_image_align"])
     up["title_colors"] = [str(design.get("title_color", base.title_colors[0])),
                           str(design.get("title_color2", base.title_colors[1]))]
     up["title_sizes"] = [int(design.get("title_size", base.title_sizes[0])),
@@ -103,9 +108,37 @@ def video_band_ratio(design, *, canvas_height: int = 1920) -> tuple[float, float
     return g.top / canvas_height, g.bottom / canvas_height
 
 
+LOGO_WIDTH = 620                  # 하단 밴드 로고 박스(가로) — 수동 제작본 "가왕쇼" 폭 근사
+LOGO_BOX_HEIGHT = 300             # 세로 상한(contain) — 세로형 로고가 밴드를 넘지 않게
 TITLE_MAX_WIDTH = 980             # 템플릿 max_width_px — 좌우 여백 각 50px
 TITLE_CHAR_W = 1.0                # 한글 1자 폭 ÷ 글자크기 (Jalnan 92px 프레임 실측)
 TITLE_SPACE_W = 0.3               # 공백은 좁다 — 1.0 으로 세면 멀쩡한 제목을 줄인다
+
+
+def resolve_work_logo(work_title: str, app_root: Path | None = None) -> Path | None:
+    """작품명 → 정규화된 로고 PNG. 순수(파일 조회만)·결정적.
+
+    `assets/logos/<코드>.json` 의 `source_file` 이 작품명으로 **시작**하면 그 작품의
+    로고다(scripts/normalize_logo.py 가 남기는 메타). 하단 밴드는 검정이라 흰색판을
+    우선하고(`_color` 는 차순위), 동률은 코드 사전순 — 무작위 요소 없음.
+    못 찾으면 None → 종전처럼 작품명 **텍스트**로 렌더(회귀 0)."""
+    name = str(work_title).strip()
+    if not name:
+        return None
+    root = app_root or Path(__file__).resolve().parent.parent
+    logo_dir = root / "assets" / "logos"
+    hits: list[tuple[int, str, Path]] = []
+    for meta in sorted(logo_dir.glob("*.json")):
+        try:
+            src = str(json.loads(meta.read_text(encoding="utf-8")).get("source_file") or "")
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not src.startswith(name):
+            continue
+        png = meta.with_suffix(".png")
+        if png.exists():
+            hits.append((1 if meta.stem.endswith("_color") else 0, meta.stem, png))
+    return min(hits)[2] if hits else None
 
 
 def fit_title_sizes(title_text: str, sizes: list[int]) -> list[int]:
@@ -261,6 +294,17 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
 
     out_path = output_dir / out_name
     audio_mix = plan.get("audio_mix") or {}
+    # 하단 밴드 — 작품 로고 이미지가 있으면 텍스트 대신 그것을 쓴다(렌더러는 이미
+    # contain 배치를 하고 있었고, v3 만 work_type 을 안 넘겨 매 편 텍스트로 나갔다)
+    _work_title = (plan.get("layout") or {}).get("bottom_label") or ""
+    if design.work_type != "image":
+        _logo = resolve_work_logo(_work_title)
+        if _logo is not None:
+            log(f"  [v3/render] 작품 로고 {_logo.name}")
+            design = _dc.replace(design, work_type="image", work_value=str(_logo),
+                                 work_image_width=LOGO_WIDTH,
+                                 work_image_height=LOGO_BOX_HEIGHT,
+                                 work_image_align="center")
     # 제목 줄별 크기를 이 편의 실제 글자수로 맞춘다(위 docstring 참조)
     _title_text = (plan.get("layout") or {}).get("top_title") or ""
     _fitted = fit_title_sizes(_title_text, list(design.title_sizes))
