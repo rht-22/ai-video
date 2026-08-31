@@ -34,9 +34,9 @@ from app.modules.speech import SpeechSegment
 from app.v3 import schemas
 from app.v3.timegrid import grid_snap_times
 
-SCAN_PROXY_HEIGHT = 360          # 전체 훑기용 — 시각 정밀도는 스냅이 보정(기획서 부록A §4)
-SCAN_PROXY_FILE_FPS = 1.0        # 파일 자체 fps(업로드 크기)
-SCAN_SAMPLE_FPS = 0.5            # Gemini 표본 fps(video_metadata) — 해상 한도 ±2s 와 정합
+SCAN_PROXY_HEIGHT = 480          # 전체 훑기용(2026-08-31 사용자 설정: 360→480)
+SCAN_PROXY_FILE_FPS = 10.0       # 파일 자체 fps(2026-08-31: 1→10 — 표본 프레임의 시각 정밀)
+SCAN_SAMPLE_FPS = 1.0            # Gemini 표본 fps(video_metadata · 2026-08-31: 0.5→1)
 MAX_REASKS = 2                   # 반려·재질의 상한(기획서 §3)
 BOUNDARY_CLUSTER_EPS = 1.0       # 인접 구간이 공유해야 할 경계의 허용 어긋남(스냅 전 정준화)
 PROMPT_SCENE_CUTS_CAP = 1500     # 프롬프트에 실을 장면 전환 어휘 상한(넘으면 결정적 솎음)

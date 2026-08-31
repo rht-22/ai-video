@@ -32,6 +32,7 @@ from app.v3 import schemas
 from app.v3.seq_analyze import MAX_REASKS, _upload_video
 
 TRANSCRIPT_DIFF_MAX = 0.35     # 정규화 편집거리(공백 제거) — 넘으면 각색으로 보고 복원
+CHUNK_SAMPLE_FPS = 3.0         # Gemini 표본 fps(2026-08-31 사용자 설정 — 종전 기본 1fps)
 MOOD_MAX_CHARS = 20
 
 
@@ -434,7 +435,8 @@ def build_stage2_prompt(chunk: dict, stage1_doc: dict, chunk_spans: list[dict],
 def _call_stage2_model(gemini, uploaded, prompt: str) -> dict:
     types = gemini.types
     part = types.Part(file_data=types.FileData(file_uri=uploaded.uri,
-                                               mime_type="video/mp4"))
+                                               mime_type="video/mp4"),
+                      video_metadata=types.VideoMetadata(fps=CHUNK_SAMPLE_FPS))
     response = gemini.client.models.generate_content(
         model=gemini.config.model_name,          # Pro — 영상을 실제로 보는 호출
         contents=[part, prompt],

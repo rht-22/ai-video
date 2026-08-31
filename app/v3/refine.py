@@ -35,6 +35,7 @@ PROBE_WINDOW_CAP_SEC = 180.0
 FLASH_BUDGET = 8           # 편당 총 Flash 호출 예산(재질의 포함 — 강제·감사)
 PROBE_HEIGHT = 480
 PROBE_FPS = 10
+PROBE_SAMPLE_FPS = 6.0     # Gemini 표본 fps(2026-08-31 사용자 설정 — 종전 기본 1fps)
 
 ZONE_DESC = {"intro": "타이틀/인트로", "recap": "지난 화 요약",
              "teaser": "다음 화 예고", "credit": "엔딩 크레딧",
@@ -316,7 +317,8 @@ def _call_probe(gemini, clip: Path, prompt: str) -> dict:
     uploaded = _upload_video(gemini, clip, log=lambda *a: None)
     try:
         part = types.Part(file_data=types.FileData(file_uri=uploaded.uri,
-                                                   mime_type="video/mp4"))
+                                                   mime_type="video/mp4"),
+                          video_metadata=types.VideoMetadata(fps=PROBE_SAMPLE_FPS))
         resp = gemini.client.models.generate_content(
             model=gemini.config.flash_model_name,       # 국소 창 — Flash 로 충분
             contents=[part, prompt],
