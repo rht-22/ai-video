@@ -217,6 +217,50 @@ def plan_labels(story_doc: dict, plan: dict) -> list[dict]:
     return out
 
 
+def detect_burned_subtitles(video_path: Path, clips: list, design, output_dir: Path,
+                            log=print) -> tuple[dict | None, list]:
+    """소스에 박힌 자막 띠와 구간별 표본. 실패는 (None, []) — 본편을 막지 않는다.
+
+    E17-2/E18-2 는 v1 이 쓰던 안전장치인데 v3 는 밴드 기하 계산만 빌려 쓰고 회피는
+    배선하지 않았다(사용자 지적: 원본 '브레이크가 고장' 위에 우리 자막이 깔림).
+    검출은 비싸므로 클립 구성 지문으로 사이드카에 캐시한다."""
+    import hashlib
+
+    from app.modules import subtitle_region as _sr
+    sig = hashlib.sha1((";".join(f"{c.start_sec:.3f}-{c.end_sec:.3f}" for c in clips)
+                        + f"|{design.aspect_ratio}|{design.video_y}").encode()).hexdigest()[:16]
+    cache = output_dir / "checkpoint_burned_subtitle.json"
+    if cache.exists():
+        try:
+            data = json.loads(cache.read_text(encoding="utf-8"))
+            if data.get("signature") == sig:
+                log("  [v3/자막회피] 검출 결과 재사용")
+                return data.get("band"), list(data.get("profiles") or [])
+        except (OSError, ValueError):
+            pass
+    band, profiles = None, []
+    try:
+        band = _sr.detect_burned_band(video_path, clips, design)
+        profiles = _sr.detect_burned_profiles(video_path, clips, design)
+    except Exception as e:                        # 안전장치가 발행을 막으면 안 된다
+        log(f"  [v3/자막회피] 검출 실패({type(e).__name__}) — 자막 위치는 종전 그대로")
+        return None, []
+    try:
+        cache.write_text(json.dumps({"signature": sig, "band": band,
+                                     "profiles": profiles}, ensure_ascii=False),
+                         encoding="utf-8")
+    except OSError:
+        pass
+    if band:
+        log(f"  [v3/자막회피] 원본 자막 띠 y={band['top']}~{band['bottom']} "
+            f"(표본 {band['frames']}프레임/{band['clips']}클립)")
+    else:
+        log("  [v3/자막회피] 상시 자막 띠 없음")
+    if profiles:
+        log(f"  [v3/자막회피] 구간별 표본 {len(profiles)}프레임")
+    return band, profiles
+
+
 # ── 최종 렌더 어댑터 ────────────────────────────────────────────────────────
 
 def render_final(*, video_path: Path, plan: dict, style_doc: dict,
@@ -249,21 +293,81 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                        use_original_audio=bool(c.get("use_original_audio", True)))
              for c in plan["timeline"]]
 
+    # 하단 밴드 — 작품 로고 이미지가 있으면 텍스트 대신 그것을 쓴다(렌더러는 이미
+    # contain 배치를 하고 있었고, v3 만 work_type 을 안 넘겨 매 편 텍스트로 나갔다)
+    _work_title = (plan.get("layout") or {}).get("bottom_label") or ""
+    if design.work_type != "image":
+        _logo = resolve_work_logo(_work_title)
+        if _logo is not None:
+            log(f"  [v3/render] 작품 로고 {_logo.name}")
+            design = _dc.replace(design, work_type="image", work_value=str(_logo),
+                                 work_image_width=LOGO_WIDTH,
+                                 work_image_height=LOGO_BOX_HEIGHT,
+                                 work_image_align="center")
+    # 제목 줄별 크기를 이 편의 실제 글자수로 맞춘다
+    _title_text = (plan.get("layout") or {}).get("top_title") or ""
+    _fitted = fit_title_sizes(_title_text, list(design.title_sizes))
+    if _fitted != list(design.title_sizes):
+        log(f"  [v3/render] 제목 크기 폭 맞춤 {design.title_sizes} → {_fitted}")
+        design = _dc.replace(design, title_sizes=_fitted, title_size=_fitted[0])
+
+    # 원본에 박힌 자막 회피(E17-2/E18-2) — 우리 자막을 **위로만** 민다
+    from app.modules import subtitle_region as _sr
+    _band, _profiles = detect_burned_subtitles(Path(video_path), clips, design,
+                                               output_dir, log=log)
+    _geom = _sr.band_geometry(design, canvas_width=config.canvas_width,
+                              canvas_height=config.canvas_height)
+    _title_bottom = _sr.estimate_title_bottom(
+        design, _geom, line_count=_sr.estimate_title_line_count(_title_text))
+    _sub_margin = int(design.subtitle_y_margin)
+    _tts_margin = int(design.tts_line_y_margin)
+    if _band:
+        for _name, _size, _cur in (("자막", design.subtitle_size, _sub_margin),
+                                   ("내레이션", design.tts_line_font_size, _tts_margin)):
+            _new, _notes = _sr.avoid_margin_v(
+                _cur, canvas_height=config.canvas_height,
+                burned_top=int(_band["top"]), burned_bottom=int(_band["bottom"]),
+                subtitle_height=_sr.estimate_subtitle_height(_size),
+                title_bottom=_title_bottom, band_top=_geom.top)
+            for n in _notes:
+                log(f"  [v3/자막회피] {_name} — {n}")
+            if _name == "자막":
+                _sub_margin = int(_new)
+            else:
+                _tts_margin = int(_new)
+
     # 대사 ASS — C6 세그먼트(편집본 좌표)를 그대로 이벤트로
     sub_path = output_dir / "v3_subtitles.ass"
     sub_style = SubtitleStyle(
         font_name=ass_family, font_size=design.subtitle_size,
         primary_color=_style_color(design.subtitle_color or "#FFFFFF"),
-        outline=3, margin_v=design.subtitle_y_margin)
+        outline=3, margin_v=_sub_margin)
     # 화자별 색은 **줄 단위 style** 통로로 간다(v1 이 쓰는 그 통로 — subtitle.py 의
     # _line_style_overrides). SpeechSegment 는 frozen 3필드라 style 을 못 달아
     # SimpleNamespace 로 짓는다. color 가 없으면 종전과 바이트 동일.
     fx_windows = subtitle_fx_windows(story_doc, style_doc, plan["timeline"])
 
-    def _seg_style(seg: dict) -> dict | None:
+    # 몇 초씩만 뜨는 방송 텔롭은 전역 띠 판정에 안 걸린다 — 줄이 떠 있는 **그 창의**
+    # 표본으로 다시 재서 필요한 줄만 더 올린다(E18-2). 내리지는 않는다.
+    _line_margins: list[int | None] = [None] * len(segments or [])
+    if _profiles and segments:
+        _line_margins, _pn = _sr.per_cue_margins(
+            [SimpleNamespace(start_sec=float(s["start_sec"]),
+                             end_sec=float(s["end_sec"])) for s in segments],
+            _profiles, _geom, base_margin_v=_sub_margin,
+            canvas_height=config.canvas_height,
+            subtitle_height=_sr.estimate_subtitle_height(design.subtitle_size),
+            title_bottom=_title_bottom)
+        for n in _pn:
+            log(f"  [v3/자막회피] {n}")
+
+    def _seg_style(seg: dict, idx: int = 0) -> dict | None:
         st: dict[str, Any] = {}
         if seg.get("color"):
             st["color"] = str(seg["color"])
+        m = _line_margins[idx] if idx < len(_line_margins) else None
+        if m is not None:
+            st["y"] = round((config.canvas_height - int(m)) / float(config.canvas_height), 5)
         t0 = float(seg["start_sec"])
         for w0, w1, fx in fx_windows:
             if w0 <= t0 < w1:
@@ -273,8 +377,8 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
 
     build_ass_from_segments(
         [SimpleNamespace(start_sec=float(s["start_sec"]), end_sec=float(s["end_sec"]),
-                         text=str(s["text"]), style=_seg_style(s))
-         for s in segments],
+                         text=str(s["text"]), style=_seg_style(s, i))
+         for i, s in enumerate(segments)],
         sub_path, sub_style)
 
     # TTS 자막 ASS — cue 텍스트(합성 fit 반영본)
@@ -287,7 +391,7 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
         tts_style = SubtitleStyle(
             font_name=ass_family, font_size=design.tts_line_font_size,
             primary_color=design.tts_line_color, outline=3,
-            margin_v=design.tts_line_y_margin)
+            margin_v=_tts_margin)
         build_tts_ass(
             [SpeechSegment(start_sec=float(f["cue"]["start_sec"]),
                            end_sec=float(f["cue"]["end_sec"]),
@@ -327,23 +431,6 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
 
     out_path = output_dir / out_name
     audio_mix = plan.get("audio_mix") or {}
-    # 하단 밴드 — 작품 로고 이미지가 있으면 텍스트 대신 그것을 쓴다(렌더러는 이미
-    # contain 배치를 하고 있었고, v3 만 work_type 을 안 넘겨 매 편 텍스트로 나갔다)
-    _work_title = (plan.get("layout") or {}).get("bottom_label") or ""
-    if design.work_type != "image":
-        _logo = resolve_work_logo(_work_title)
-        if _logo is not None:
-            log(f"  [v3/render] 작품 로고 {_logo.name}")
-            design = _dc.replace(design, work_type="image", work_value=str(_logo),
-                                 work_image_width=LOGO_WIDTH,
-                                 work_image_height=LOGO_BOX_HEIGHT,
-                                 work_image_align="center")
-    # 제목 줄별 크기를 이 편의 실제 글자수로 맞춘다(위 docstring 참조)
-    _title_text = (plan.get("layout") or {}).get("top_title") or ""
-    _fitted = fit_title_sizes(_title_text, list(design.title_sizes))
-    if _fitted != list(design.title_sizes):
-        log(f"  [v3/render] 제목 크기 폭 맞춤 {design.title_sizes} → {_fitted}")
-        design = _dc.replace(design, title_sizes=_fitted, title_size=_fitted[0])
     inputs = RenderInputs(
         video_path=Path(video_path),
         clips=clips,

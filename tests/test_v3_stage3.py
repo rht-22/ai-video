@@ -633,3 +633,49 @@ def test_word_subtitles_carry_speaker_color():
     by_speaker = {s["speaker"]: s["color"] for s in segs}
     assert by_speaker["박서진"] == assemble.SPEAKER_DEFAULT_COLOR
     assert by_speaker["어머니"] != assemble.SPEAKER_DEFAULT_COLOR
+
+
+# ── 뮤트 창 — 내레이션이 끝나면 원음이 돌아온다 ─────────────────────────────
+
+def test_mute_covers_only_the_narration_window():
+    """실측 사고: 도입부 뮤트창 5.49s 에 내레이션 1.92s → 3.57s 완전 무음."""
+    f = assemble.split_by_windows
+    # 창이 없으면 종전대로 통째 뮤트(회귀 0)
+    assert f(298.9, 304.4, []) == [(298.9, 304.4, False)]
+    # 실측 케이스 — 창 밖 3.62s 는 원음이 돌아온다
+    assert f(298.9, 304.4, [(297.98, 300.78)]) == [(298.9, 300.78, False),
+                                                   (300.78, 304.4, True)]
+    # 창이 가운데면 앞뒤 둘 다 살린다
+    assert f(10.0, 20.0, [(13.0, 15.0)]) == [(10.0, 13.0, True), (13.0, 15.0, False),
+                                             (15.0, 20.0, True)]
+    # 0.2s 자투리는 만들지 않는다 — 살아난 게 아니라 잡음이다
+    assert f(10.0, 15.2, [(10.0, 15.0)]) == [(10.0, 15.2, False)]
+
+
+def test_narration_windows_merge_adjacent_cues():
+    doc = {"narration_cues": [
+        {"beat": 0, "source_time_sec": 297.98, "source_end_sec": 299.447},
+        {"beat": 0, "source_time_sec": 299.447, "source_end_sec": 300.78},
+        {"beat": 2, "source_time_sec": 346.1, "source_end_sec": 347.7},
+        {"beat": 3, "source_time_sec": 1.0, "source_end_sec": None}]}
+    w = assemble.narration_windows(doc)
+    assert w[0] == [(297.98, 300.78)]          # 잇닿은 두 큐는 한 창
+    assert w[2] == [(346.1, 347.7)]
+    assert 3 not in w                          # 끝이 없는 큐는 창이 아니다
+
+
+def test_edit_plan_splits_muted_clip_at_window_end():
+    span = {"s1": {"t_in": 100.0, "t_out": 101.0, "pos": 0, "is_audio": True},
+            "s2": {"t_in": 101.0, "t_out": 107.0, "pos": 1, "is_audio": True}}
+    doc = {"beats": [{"number": 0, "role": "hook", "span_ids": ["s1", "s2"],
+                      "muted_span_ids": ["s2"],
+                      "time": {"start": schemas.format_ts(100.0),
+                               "end": schemas.format_ts(107.0)}}],
+           "narration_cues": [{"beat": 0, "source_time_sec": 100.5,
+                               "source_end_sec": 103.0}],
+           "title": {"line1": "윗줄", "line2": "아랫줄"}}
+    tl = assemble.assemble_edit_plan(doc, span, video_path="v.mp4",
+                                     work_title="w")["timeline"]
+    assert [(c["clip_start_sec"], c["clip_end_sec"], c["use_original_audio"])
+            for c in tl] == [(100.0, 101.0, True), (101.0, 103.0, False),
+                             (103.0, 107.0, True)]
