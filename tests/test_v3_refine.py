@@ -35,18 +35,19 @@ def test_probe_windows_per_edge_and_clamp():
     # intro 시작(0)·teaser 끝(러닝타임 끝)은 검사 대상 아님
     assert kinds == {("intro", "end"), ("teaser", "start")}
     ts = next(p for p in probes if p["zone"] == "teaser")
-    assert ts["t0"] == pytest.approx(1791.0 - 90.0)     # 본편 쪽 여유
-    assert ts["t1"] == pytest.approx(1854.119)          # zone 전체(러닝타임 클램프)
+    assert ts["t0"] == pytest.approx(1791.0 - 90.0)     # 원경계 −90
+    assert ts["t1"] == pytest.approx(1854.119)          # +90 은 러닝타임 클램프
 
 
-def test_probe_window_covers_head_anchored_zone():
-    # 포핸즈2 실측: intro[0,138.5] 과잉 — 진짜 경계 42.5 가 종전 창(48.5~) 밖.
-    # 머리 고정 zone 의 end 프로브 창은 zone 전체를 덮어야 한다.
-    ex = _ex(intro=(0.0, 138.5))
-    p = next(x for x in boundary_probe_windows(ex, 3560.0)
+def test_probe_window_centers_on_original_boundary():
+    # 리뷰 확정 수정: 창은 원경계 중심 ±90 — 큰 zone 에서도 원경계가 항상 창 안.
+    # zone 깊은 내부의 경계(포핸즈2 42.5)는 부분 표본 재프로브 경로가 맡는다.
+    p = next(x for x in boundary_probe_windows(_ex(intro=(0.0, 138.5)), 3560.0)
              if x["zone"] == "intro" and x["edge"] == "end")
-    assert p["t0"] == pytest.approx(0.0)
-    assert p["t1"] == pytest.approx(180.0)              # 창 상한 180s(t0 기준)
+    assert (p["t0"], p["t1"]) == (pytest.approx(48.5), pytest.approx(228.5))
+    big = next(x for x in boundary_probe_windows(_ex(teaser=(3000.0, 3250.0)), 3300.0)
+               if x["edge"] == "start")
+    assert big["t0"] <= 3000.0 <= big["t1"]             # 원경계 창 안(리뷰 케이스)
 
 
 def test_probe_tail_when_no_exception_and_cap():
@@ -55,7 +56,8 @@ def test_probe_tail_when_no_exception_and_cap():
     assert probes[0]["t0"] == pytest.approx(820.0)
     many = _ex(intro=(5, 10), recap=(20, 30), teaser=(900, 950),
                credit=(960, 980), end=(985, 995))
-    assert len(boundary_probe_windows(many, 1000.0)) == MAX_PROBES  # 상한
+    # 상한 적용·탈락 기록은 호출자(refine_exception) 몫 — 순수 함수는 전부 반환
+    assert len(boundary_probe_windows(many, 1000.0)) == 10
 
 
 def test_scene_cut_candidates_ids_and_margin():
@@ -157,3 +159,38 @@ def test_gap_trigger_and_silence_skip(monkeypatch):
     assert len(calls) == 1                                          # 10s 공백만
     assert calls[0] == [max(0.0, 2.0 - 1.0), 12.0 + 1.0]
     assert merged == sorted(words, key=lambda w: (w["t0"], w["t1"]))
+
+
+def test_retile_fills_liberated_gap_on_zone_shrink():
+    # 리뷰 확정 critical: zone 축소로 해방된 구간(42.5~138.5)을 인접 sequence 가
+    # 확장해 덮는다 — 빈틈 0 복원(포핸즈2 헤드라인 시나리오)
+    doc = {"sequences": [
+        {"number": 0, "content": "a",
+         "time": {"start": format_ts(138.5), "end": format_ts(600.0)},
+         "chunks": [{"number": 0, "meanings": [],
+                     "time": {"start": format_ts(138.5), "end": format_ts(600.0)}}]}],
+        "exception_sector": _ex(intro=(0.0, 138.5))}
+    out = retile_sequences(doc, _ex(intro=(0.0, 42.5)), 600.0)
+    sq = out["sequences"][0]
+    assert parse_ts(sq["time"]["start"]) == pytest.approx(42.5)
+    assert parse_ts(sq["chunks"][0]["time"]["start"]) == pytest.approx(42.5)
+
+
+def test_retile_fills_gap_from_zone_drop_with_new_sequence():
+    # zone 폐기(신병4 시나리오) — 말미 해방 구간을 이전 sequence 확장으로 덮는다
+    doc = {"sequences": [
+        {"number": 0, "content": "a",
+         "time": {"start": format_ts(0.0), "end": format_ts(1934.0)},
+         "chunks": [{"number": 0, "meanings": [],
+                     "time": {"start": format_ts(0.0), "end": format_ts(1934.0)}}]}],
+        "exception_sector": _ex(credit=(1934.0, 1993.5))}
+    out = retile_sequences(doc, _ex(), 1993.5)
+    assert parse_ts(out["sequences"][-1]["time"]["end"]) == pytest.approx(1993.5)
+
+
+def test_apply_boundary_rejects_neighbor_overlap():
+    # 리뷰 확정 major: 이동 결과가 이웃 zone 과 겹치면 기각(원판정 유지)
+    ex = _ex(intro=(0.0, 60.0), recap=(60.0, 120.0))
+    out = apply_boundary(ex, {"zone": "intro", "edge": "end", "orig": 60.0},
+                         100.0, 1000.0)
+    assert parse_ts(out["intro"]["end"]) == pytest.approx(60.0)   # 기각

@@ -32,6 +32,7 @@ MAX_PROBES = 5             # 경계 프로브 상한
 MAX_VERIFIES = 3           # zone 실체 검증 상한 — 편당 Flash 총 ≤8(발주 개정)
 VERIFY_SAMPLE_SEC = 60.0   # zone 중앙 표본 — 머리는 본편형 도입이라 애매(가왕쇼 실측)
 PROBE_WINDOW_CAP_SEC = 180.0
+FLASH_BUDGET = 8           # 편당 총 Flash 호출 예산(재질의 포함 — 강제·감사)
 PROBE_HEIGHT = 480
 PROBE_FPS = 10
 
@@ -55,23 +56,23 @@ def boundary_probe_windows(exception_sector: dict, duration: float) -> list[dict
     for key, s, e in zones:
         # 창은 **zone 전체 + 본편 쪽 여유**를 덮는다(포핸즈2 실측: 진짜 경계 42.5 가
         # [e−90, e+30] 창 밖 — 과잉 zone 은 경계가 zone 안쪽 깊숙이 있다). 상한 180s.
+        # 창 = **원경계 중심 ±90s** — 원경계는 항상 창 안(리뷰 확정: zone 기준
+        # 캡은 큰 zone 에서 원경계를 창 밖으로 밀어 축소만 가능하게 했다).
+        # zone 깊은 내부의 진짜 경계는 부분 표본 재프로브가 맡는다(포핸즈2 실증
+        # — 138.5 창 밖의 42.5 를 재프로브가 찾았다). 캡 180 은 자동 충족.
         if s > 0.5:
-            t1 = min(duration, max(e, s + WINDOW_BACK_SEC))
             probes.append({"zone": key, "edge": "start",
-                           "t0": max(0.0, min(s - WINDOW_BACK_SEC, s),
-                                     t1 - PROBE_WINDOW_CAP_SEC),
-                           "t1": t1, "orig": s})
+                           "t0": max(0.0, s - WINDOW_BACK_SEC),
+                           "t1": min(duration, s + WINDOW_BACK_SEC), "orig": s})
         if e < duration - 0.5:
-            t0 = max(0.0, min(s, e - WINDOW_BACK_SEC))
             probes.append({"zone": key, "edge": "end",
-                           "t0": t0,
-                           "t1": min(duration, e + WINDOW_BACK_SEC,
-                                     t0 + PROBE_WINDOW_CAP_SEC), "orig": e})
+                           "t0": max(0.0, e - WINDOW_BACK_SEC),
+                           "t1": min(duration, e + WINDOW_BACK_SEC), "orig": e})
     if not zones and duration > TAIL_WINDOW_SEC / 2:
         probes.append({"zone": "tail", "edge": "start",
                        "t0": max(0.0, duration - TAIL_WINDOW_SEC),
                        "t1": duration, "orig": None})
-    return probes[:MAX_PROBES]
+    return probes                       # 상한 적용·탈락 기록은 호출자(감사 의무)
 
 
 def scene_cut_candidates(grid: dict, t0: float, t1: float) -> list[dict]:
@@ -101,9 +102,18 @@ def apply_boundary(exception_sector: dict, probe: dict, new_t: float,
         return out
     zone["start" if probe["edge"] == "start" else "end"] = ts
     s, e = schemas.parse_ts(zone["start"]), schemas.parse_ts(zone["end"])
-    if e <= s:                       # 역전 방어 — 이동 기각(원판정 유지)
-        return {k: (dict(v) if isinstance(v, dict) else v)
+    original = {k: (dict(v) if isinstance(v, dict) else v)
                 for k, v in (exception_sector or {}).items()}
+    if e <= s:                       # 역전 방어 — 이동 기각(원판정 유지)
+        return original
+    # 인접 zone 침범 방어(리뷰 확정): 프로브 창이 이웃 zone 위로 뻗을 수 있어
+    # 이동 결과가 다른 zone 과 겹치면 기각 — 커버리지 계약(겹침 0)이 우선
+    ivs = sorted((schemas.parse_ts(z["start"]), schemas.parse_ts(z["end"]))
+                 for z in out.values()
+                 if isinstance(z, dict) and z.get("start") is not None)
+    for (a0, a1), (b0, b1) in zip(ivs, ivs[1:]):
+        if b0 < a1 - 1e-9:
+            return original
     return out
 
 
@@ -155,11 +165,79 @@ def retile_sequences(stage1_doc: dict, new_exception: dict,
             # chunk 타일링 강제: 첫 시작=구간 시작 · 끝=구간 끝 · 인접 맞물림
             chunks[0]["time"]["start"] = schemas.format_ts(p0)
             chunks[-1]["time"]["end"] = schemas.format_ts(p1)
+            # 10분 상한 방어 — 클램프·이전 보수로 늘어난 chunk 는 균등 분할
+            split: list[dict] = []
+            for ch in chunks:
+                c0 = schemas.parse_ts(ch["time"]["start"])
+                c1 = schemas.parse_ts(ch["time"]["end"])
+                if c1 - c0 <= schemas.CHUNK_MAX_SEC:
+                    split.append(ch)
+                    continue
+                n = int((c1 - c0) // schemas.CHUNK_MAX_SEC) + 1
+                for j in range(n):
+                    a = c0 + (c1 - c0) * j / n
+                    b = c0 + (c1 - c0) * (j + 1) / n
+                    split.append({**ch, "meanings": [],
+                                  "time": {"start": schemas.format_ts(a),
+                                           "end": schemas.format_ts(b)}})
+            chunks = split
             for i, ch in enumerate(chunks):
                 ch["number"] = i
             new_seqs.append({**sq, "time": {"start": schemas.format_ts(p0),
                                             "end": schemas.format_ts(p1)},
                              "chunks": chunks})
+    # 해방 구간 메움(리뷰 확정 critical): zone 축소·폐기로 비-exception 이 된
+    # 구간은 어떤 sequence 도 안 덮는다(Stage 1 은 여집합만 덮었으므로) — 인접
+    # sequence 를 확장하거나(우선) 새 sequence 로 채워 빈틈 0 을 복원한다.
+    new_seqs.sort(key=lambda q: schemas.parse_ts(q["time"]["start"]))
+    covered = sorted([(schemas.parse_ts(q["time"]["start"]),
+                       schemas.parse_ts(q["time"]["end"])) for q in new_seqs]
+                     + ex_ivs)
+    gaps = []
+    cursor = 0.0
+    for a, b in covered:
+        if a - cursor > schemas.COVERAGE_EPS_SEC:
+            gaps.append((cursor, a))
+        cursor = max(cursor, b)
+    if duration - cursor > schemas.COVERAGE_EPS_SEC:
+        gaps.append((cursor, duration))
+    for g0, g1 in gaps:
+        prev = next((q for q in new_seqs
+                     if abs(schemas.parse_ts(q["time"]["end"]) - g0) < 0.05), None)
+        nxt = next((q for q in new_seqs
+                    if abs(schemas.parse_ts(q["time"]["start"]) - g1) < 0.05), None)
+        def _gap_chunks(a: float, b: float) -> list[dict]:
+            """갭 → ≤10분 chunk 목록 — 기존 chunk 를 늘리면 상한(600s)을 뚫는다
+            (포핸즈2 보수 실측: 648.2s chunk)."""
+            out = []
+            cur = a
+            while b - cur > 1e-9:
+                nxt_t = min(b, cur + schemas.CHUNK_MAX_SEC)
+                out.append({"number": 0, "meanings": [],
+                            "time": {"start": schemas.format_ts(cur),
+                                     "end": schemas.format_ts(nxt_t)}})
+                cur = nxt_t
+            return out
+
+        if prev is not None:
+            prev["time"]["end"] = schemas.format_ts(g1)
+            prev["chunks"].extend(_gap_chunks(g0, g1))
+            for i, ch in enumerate(prev["chunks"]):
+                ch["number"] = i
+        elif nxt is not None:
+            nxt["time"]["start"] = schemas.format_ts(g0)
+            nxt["chunks"][:0] = _gap_chunks(g0, g1)
+            for i, ch in enumerate(nxt["chunks"]):
+                ch["number"] = i
+        else:
+            chunks = _gap_chunks(g0, g1)
+            for i, ch in enumerate(chunks):
+                ch["number"] = i
+            new_seqs.append({"number": 0, "content": "(정밀 재관찰로 회수된 구간)",
+                             "time": {"start": schemas.format_ts(g0),
+                                      "end": schemas.format_ts(g1)},
+                             "chunks": chunks})
+    new_seqs.sort(key=lambda q: schemas.parse_ts(q["time"]["start"]))
     for i, sq in enumerate(new_seqs):
         sq["number"] = i
     return {**stage1_doc, "sequences": new_seqs,
@@ -265,12 +343,24 @@ def refine_exception(gemini, stage1_doc: dict, grid: dict, video_path: Path,
     """경계 정밀 2-pass 실행 → (재타일링된 stage1 문서, 감사). 실패는 원판정 유지."""
     duration = float((grid.get("source") or {}).get("duration_sec") or 0)
     exception = stage1_doc.get("exception_sector") or {}
-    probes = boundary_probe_windows(exception, duration)
-    audit: dict[str, Any] = {"probes": [], "moved": 0}
+    all_probes = boundary_probe_windows(exception, duration)
+    probes = all_probes[:MAX_PROBES]
+    audit: dict[str, Any] = {"probes": [], "moved": 0, "flash_calls": 0}
+    for dropped in all_probes[MAX_PROBES:]:   # 조용한 절단 금지(리뷰 확정)
+        audit["probes"].append({**{k: dropped[k] for k in ("zone", "edge", "orig")},
+                                "result": "상한 초과 — 미검사"})
     if not probes:
         return stage1_doc, audit
     ffmpeg = find_ffmpeg_command("ffmpeg")
     work_dir.mkdir(parents=True, exist_ok=True)
+
+    def call_probe_budgeted(clip, prompt):
+        """편당 Flash 총예산 강제(리뷰 확정: 재질의 합산 최악 21콜) — 소진 시
+        RuntimeError 로 호출자에 '원판정 유지' 경로를 태운다."""
+        if audit["flash_calls"] >= FLASH_BUDGET:
+            raise RuntimeError("Flash 예산 소진 — 원판정 유지")
+        audit["flash_calls"] += 1
+        return _call_probe(gemini, clip, prompt)
 
     new_exception = exception
     for i, probe in enumerate(probes):
@@ -283,7 +373,13 @@ def refine_exception(gemini, stage1_doc: dict, grid: dict, video_path: Path,
             continue
         clip = work_dir / f"probe_{i}_{probe['zone']}_{probe['edge']}.mp4"
         t0 = time.time()
-        _cut_probe_clip(ffmpeg, video_path, probe["t0"], probe["t1"], clip)
+        try:
+            _cut_probe_clip(ffmpeg, video_path, probe["t0"], probe["t1"], clip)
+        except subprocess.CalledProcessError as e:
+            rec["result"] = (f"재단 실패 — 원판정 유지: "
+                             f"{(e.stderr or b'')[-120:]!r}")
+            audit["probes"].append(rec)
+            continue
         desc = ZONE_DESC.get(probe["zone"], "예고/크레딧")
         cand_lines = "\n".join(f"- {c['rel']:.1f}s | {c['id']}" for c in cands)
         chosen: str | None = None
@@ -293,7 +389,7 @@ def refine_exception(gemini, stage1_doc: dict, grid: dict, video_path: Path,
                 t0=schemas.format_ts(probe["t0"]), t1=schemas.format_ts(probe["t1"]),
                 desc=desc, cands=cand_lines) + (f"\n\n⚠ 직전 반려: {reject}" if reject else "")
             try:
-                resp = _call_probe(gemini, clip, prompt)
+                resp = call_probe_budgeted(clip, prompt)
                 chosen, problems = validate_probe_response(resp, cands)
             except (ValueError, Exception) as e:  # noqa: BLE001 — 프로브 실패 = 원판정
                 chosen, problems = None, [f"호출 오류: {e}"]
@@ -356,7 +452,7 @@ def refine_exception(gemini, stage1_doc: dict, grid: dict, video_path: Path,
             verified += 1
             kind = None
             try:
-                resp = _call_probe(gemini, clip, VERIFY_PROMPT.format(
+                resp = call_probe_budgeted(clip, VERIFY_PROMPT.format(
                     t0=schemas.format_ts(v0), t1=schemas.format_ts(v1),
                     desc=ZONE_DESC.get(key, "예고/크레딧")))
                 kind, _pr = validate_verify_response(resp)
@@ -367,18 +463,21 @@ def refine_exception(gemini, stage1_doc: dict, grid: dict, video_path: Path,
                 continue
             # 표본이 본편 — 좁힌 창에서 경계 1회 재프로브(main 표본 구간 제외)
             if head_anchored:
-                w0, w1, edge = zs, v0 + 5.0, "end"
+                w1 = v0 + 5.0
+                w0, edge = max(zs, w1 - PROBE_WINDOW_CAP_SEC), "end"
             else:
-                w0, w1, edge = v1 - 5.0, ze, "start"
+                w0 = v1 - 5.0
+                w1, edge = min(ze, w0 + PROBE_WINDOW_CAP_SEC), "start"
             cands2 = scene_cut_candidates(grid, w0, w1)
-            rec["result"] = "표본 본편 — 재프로브"
+            rec["result"] = ("표본 본편 — 재프로브" if cands2
+                             else "표본 본편 — 경계 후보 없음, 유지")
             audit["probes"].append(rec)
             if not cands2:
                 continue
             clip2 = work_dir / f"reprobe_{key}.mp4"
             try:
                 _cut_probe_clip(ffmpeg, video_path, w0, w1, clip2)
-                resp2 = _call_probe(gemini, clip2, PROBE_PROMPT.format(
+                resp2 = call_probe_budgeted(clip2, PROBE_PROMPT.format(
                     t0=schemas.format_ts(w0), t1=schemas.format_ts(w1),
                     desc=ZONE_DESC.get(key, "예고/크레딧"),
                     cands="\n".join(f"- {c['rel']:.1f}s | {c['id']}" for c in cands2)))
@@ -422,7 +521,7 @@ def refine_exception(gemini, stage1_doc: dict, grid: dict, video_path: Path,
                 desc=ZONE_DESC.get(key, "예고/크레딧")) \
                 + (f"\n\n⚠ 직전 반려: {reject}" if reject else "")
             try:
-                resp = _call_probe(gemini, clip, prompt)
+                resp = call_probe_budgeted(clip, prompt)
                 kind, problems = validate_verify_response(resp)
             except Exception as e:  # noqa: BLE001 — 검증 실패 = 유지(보수)
                 kind, problems = None, [f"호출 오류: {e}"]
@@ -444,4 +543,23 @@ def refine_exception(gemini, stage1_doc: dict, grid: dict, video_path: Path,
     if audit["moved"] == 0:
         return stage1_doc, audit
     doc = retile_sequences(stage1_doc, new_exception, duration)
+    # validate_coverage 는 정규화 표현(초 float)을 받는다 — 문서 표기에서 변환
+    norm = {"sequences": [{"start": schemas.parse_ts(q["time"]["start"]),
+                           "end": schemas.parse_ts(q["time"]["end"]),
+                           "chunks": [{"start": schemas.parse_ts(c["time"]["start"]),
+                                       "end": schemas.parse_ts(c["time"]["end"])}
+                                      for c in q.get("chunks") or []]}
+                          for q in doc["sequences"]],
+            "exception_sector": {k: (None if not isinstance(z, dict)
+                                     or z.get("start") is None else
+                                     {"start": schemas.parse_ts(z["start"]),
+                                      "end": schemas.parse_ts(z["end"])})
+                                 for k, z in doc["exception_sector"].items()}}
+    problems = schemas.validate_coverage(norm, duration)
+    if problems:
+        # 재타일링이 계약(빈틈·겹침 0)을 못 지키면 정밀 결과를 통째로 버린다 —
+        # 원판정 유지가 깨진 문서보다 낫다(오염 방지 비대칭·리뷰 확정)
+        audit["retile_failed"] = problems[:5]
+        log(f"  [v3/refine] ⚠ 재타일링 커버리지 위반 {len(problems)}건 — 원판정 유지")
+        return stage1_doc, audit
     return doc, audit

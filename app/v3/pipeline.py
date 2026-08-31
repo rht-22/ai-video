@@ -267,9 +267,18 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
                 # M8-B: 단어 간 긴 공백(≥6s)만 완화 재전사 — VAD 가 현장음 속
                 # 발화를 삼킨 구간 복원(가왕쇼 자막 공백 실사고). carve 전 병합이라
                 # span id 안정성 유지. 캐시에도 병합본이 실린다.
-                from app.v3.transcribe import retranscribe_gaps
+                from app.v3.transcribe import (
+                    _build_whisper_prompt,
+                    retranscribe_gaps,
+                )
+                # 재전사에도 본전사와 같은 프롬프트(인명 사전·맥락) — 빼먹으면 복원
+                # 단어만 인명 표기가 갈린다(리뷰 확정)
                 words, gap_audit = retranscribe_gaps(
-                    audio_path, words, duration, silence, log=log)
+                    audio_path, words, duration, silence,
+                    prompt=_build_whisper_prompt(
+                        work_title=work_title, character_names=names or None,
+                        work_context=(research or {}).get("work_context") or None),
+                    log=log)
                 step("grid_gap_retry", **gap_audit)
                 _write_json(words_ckpt, {"model": WHISPER_MODEL_NAME, "words": words,
                                          "failed_windows": [list(f) for f in failed],
