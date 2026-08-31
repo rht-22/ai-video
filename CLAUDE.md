@@ -6,11 +6,11 @@
 
 | 슬롯 | 모델명 | 쓰는 곳 |
 |------|--------|---------|
-| Pro (`GEMINI_MODEL_NAME`) | `gemini-3.1-pro-preview` | **영상 분석 하나뿐** — `analyze_chunk()` |
-| Flash (`GEMINI_FLASH_MODEL_NAME`) | `gemini-3.6-flash` | **그 외 전부** |
+| Pro 슬롯 (`GEMINI_MODEL_NAME`) | `gemini-3.7-flash` | **영상 분석** — `analyze_chunk()`·v3 Stage 1/2 (2026-08-31: 전 호출 Flash 3.7 — A/B 실측 근거, env 로 Pro 복귀 가능) |
+| Flash 슬롯 (`GEMINI_FLASH_MODEL_NAME`) | `gemini-3.7-flash` | **그 외 전부** |
 
 `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-3.1-flash-preview` 등 다른 모델은 사용 금지.  
-환경변수와 코드 기본값 모두 위 두 모델로 고정.
+코드 기본값은 위 모델로 고정 — 배포 노드 env 가 있으면 그쪽이 이긴다. 슬롯(역할) 구분은 유지한다(Pro 복귀 시 GEMINI_MODEL_NAME 만 바꾸면 된다).
 
 ### 모델 사용 정책 (2026-08-23, 사용자 결정)
 

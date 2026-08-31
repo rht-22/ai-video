@@ -462,11 +462,12 @@ def test_relationships_and_research_moved_to_flash():
 
 
 def test_gemini_config_default_is_not_a_banned_model():
-    """CLAUDE.md 모델 규칙: 두 모델 외 금지. 종전 기본값은 'gemini-3.5-flash' 였다."""
+    """CLAUDE.md 모델 규칙: 허용 모델 외 금지 — 2026-08-31 전 호출 Flash 3.7
+    (v3 A/B 실측 근거 · 종전엔 pro-preview/3.6-flash 이원). 슬롯 구분은 유지."""
     from app.modules.gemini_client import GeminiConfig
     cfg = GeminiConfig(api_key="x")
-    assert cfg.model_name == "gemini-3.1-pro-preview"
-    assert cfg.flash_model_name == "gemini-3.6-flash"
+    assert cfg.model_name == "gemini-3.7-flash"
+    assert cfg.flash_model_name == "gemini-3.7-flash"
 
 
 def test_provenance_records_role_to_slot_map():
