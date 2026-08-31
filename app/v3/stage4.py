@@ -392,7 +392,7 @@ STYLE_PROMPT = """당신은 쇼츠 아트디렉터다. 첨부한 영상은 리�
 def build_style_prompt(preset: dict, story_doc: dict, reject_note: str = "",
                        windows: list[dict] | None = None,
                        labels: list[dict] | None = None,
-                       band: tuple[float, float] = (0.28, 0.72)) -> str:
+                       band: tuple[float, float] = (0.231, 0.769)) -> str:
     if windows:
         # draft 는 편집본 좌표 — 원본 절대초(b.time)를 보여주면 영상 속 시각과 어긋난다
         by_beat = {w["beat"]: w for w in windows}
@@ -465,10 +465,15 @@ def _call_style_model(gemini, draft_path: Path, prompt: str) -> dict:
 def run_style(gemini, draft_path: Path, story_doc: dict, *,
               preset: dict | None = None, windows: list[dict] | None = None,
               labels: list[dict] | None = None,
-              band: tuple[float, float] = (0.28, 0.72),
+              band: tuple[float, float] | None = None,
               log=print) -> tuple[dict, dict]:
     """Stage 4 실행 → (style 문서, 감사 기록). 소진 시 프리셋 폴백 — 렌더는 항상 간다."""
     preset = dict(preset if preset is not None else RECAP_PRESET)
+    if band is None:
+        # 유도 없는 매직 넘버를 두면 밴드를 안 넘기는 호출부가 조용히 검정 밴드를
+        # 뚫는다(적대 리뷰 M2) — 프리셋 기하에서 잰다
+        from app.v3.finalize import design_from_style, video_band_ratio
+        band = video_band_ratio(design_from_style(preset))
     n_beats = len(story_doc.get("beats") or [])
     audit: dict[str, Any] = {"attempts": [], "input": "draft_video",
                              "sample_fps": STYLE_SAMPLE_FPS}

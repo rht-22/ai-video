@@ -352,3 +352,13 @@ def test_title_bold_is_closed_to_ai():
     # 옛 체크포인트가 되살리지 못한다
     assert finalize.design_from_style({"title_bold": True, "title_bold2": True}) \
         .title_bolds == finalize.DesignConfig().title_bolds
+
+
+def test_title_sizes_shrink_to_fit_canvas_width():
+    """렌더러 줄바꿈은 1줄 크기로만 폭을 재서 큰 2줄이 잘린다 — 프레임 QC 실적발."""
+    fit = finalize.fit_title_sizes
+    # 가왕쇼 실측: 2줄 '배삯 버리고 따라간 이유'(11자)를 112px 로 그리면 1232px
+    # 가왕쇼 실측: 2줄(글자10+공백3 = 10.9단위)을 112px 로 그리면 1221px — 양쪽이 잘렸다
+    assert fit("유람선 승선 포기 속출\n배삯 버리고 따라간 이유", [92, 112]) == [92, 89]
+    assert fit("짧은 줄\n짧은 줄", [92, 112]) == [92, 112]      # 들어가면 안 건드린다
+    assert fit("", [92, 112]) == [92, 112]                      # 제목 없음 = 무변경

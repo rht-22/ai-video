@@ -103,6 +103,30 @@ def video_band_ratio(design, *, canvas_height: int = 1920) -> tuple[float, float
     return g.top / canvas_height, g.bottom / canvas_height
 
 
+TITLE_MAX_WIDTH = 980             # 템플릿 max_width_px — 좌우 여백 각 50px
+TITLE_CHAR_W = 1.0                # 한글 1자 폭 ÷ 글자크기 (Jalnan 92px 프레임 실측)
+TITLE_SPACE_W = 0.3               # 공백은 좁다 — 1.0 으로 세면 멀쩡한 제목을 줄인다
+
+
+def fit_title_sizes(title_text: str, sizes: list[int]) -> list[int]:
+    """제목 줄별 크기를 폭 980px 안으로 줄인다. 순수.
+
+    렌더러의 자동 줄바꿈은 **1줄 크기**로만 폭을 재서(renderer `_max_chars_for(
+    base_size)`) 2줄이 더 크면 그 줄이 화면 밖으로 잘린다 — 템플릿 크기(92/112)를
+    그대로 넣자 프레임 QC 가 4프레임 전부에서 잡았다. 템플릿 자신의 계약이
+    max_width_px 980 이므로 여기서 줄마다 맞춘다(렌더러는 무변경 — 공용이다)."""
+    lines = [ln for ln in str(title_text).split("\n") if ln.strip()]
+    out = list(sizes)
+    for i, size in enumerate(sizes):
+        if i >= len(lines):
+            continue
+        ln = lines[i].strip()
+        units = sum(TITLE_SPACE_W if ch.isspace() else TITLE_CHAR_W for ch in ln)
+        if units > 0:
+            out[i] = max(40, min(int(size), int(TITLE_MAX_WIDTH / units)))
+    return out
+
+
 def _cycle_color(index: int) -> str:
     """Stage 4 가 색을 안 줬을 때의 결정적 순환 — 라벨이 전부 같은 색이 되지 않게."""
     return stage4.LABEL_COLOR_CYCLE[index % len(stage4.LABEL_COLOR_CYCLE)]
@@ -237,6 +261,12 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
 
     out_path = output_dir / out_name
     audio_mix = plan.get("audio_mix") or {}
+    # 제목 줄별 크기를 이 편의 실제 글자수로 맞춘다(위 docstring 참조)
+    _title_text = (plan.get("layout") or {}).get("top_title") or ""
+    _fitted = fit_title_sizes(_title_text, list(design.title_sizes))
+    if _fitted != list(design.title_sizes):
+        log(f"  [v3/render] 제목 크기 폭 맞춤 {design.title_sizes} → {_fitted}")
+        design = _dc.replace(design, title_sizes=_fitted, title_size=_fitted[0])
     inputs = RenderInputs(
         video_path=Path(video_path),
         clips=clips,
