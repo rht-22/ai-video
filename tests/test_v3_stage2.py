@@ -203,8 +203,10 @@ def test_validate_missing_span_details():
     assert any("상세 누락" in x for x in p)                  # 반려
     norm, p2, notes = ca.validate_stage2_response(r, spans, final_attempt=True)
     assert p2 == [] and any("전사 기본값" in n for n in notes)  # 소진 시 채움+표기
+    # M9-C: 누락 span 은 heard 없음(빈 audio)으로 둔다 — 여기서 전사를 채워 넣으면
+    # 판정(adjudicate_transcript)이 무의미해진다. 전사 채택은 판정이 한다.
     filled = norm[1]["spans"][1]
-    assert filled["audio"] == [{"speaker": "미상", "line": "저는 강비오입니다."}]
+    assert filled["audio"] == []
 
 
 def test_validate_importance_clamp_and_unvoiced_audio_drop():
@@ -218,21 +220,22 @@ def test_validate_importance_clamp_and_unvoiced_audio_drop():
     assert norm[0]["spans"][1]["audio"] == [] and any("무성" in n for n in notes)
 
 
-def test_transcript_guard_restores_rewrite():
-    """합격 기준 — 전사 diff 복원 작동 케이스(각색 복원 · 소정정 통과)를 고정."""
+def test_adjudication_keeps_transcript_when_sound(monkeypatch):
+    """M9-C 각색 방어 유지 — 전사가 정상이면 heard 가 뭐라 하든 전사가 이긴다."""
     spans = _spans4()
     r = _resp_ok()
-    r["meanings"][0]["spans"][0]["audio"] = [
+    r["meanings"][0]["spans"][0]["heard"] = [
         {"speaker": "강비오", "line": "여러분 모두 만나서 정말 기쁘고 반갑습니다"}]  # 각색
-    r["meanings"][1]["spans"][1]["audio"] = [
+    r["meanings"][1]["spans"][1]["heard"] = [
         {"speaker": "강비오", "line": "저는 강비호입니다."}]                        # 소정정
     norm, p, _ = ca.validate_stage2_response(r, spans, final_attempt=False)
     assert p == []
-    restored = ca.apply_transcript_guard(norm, spans)
-    assert len(restored) == 1 and restored[0]["span_id"] == "sp0000"
+    decisions = ca.adjudicate_transcript(norm, spans, words=None)
+    assert all(d["decision"] == "transcript" for d in decisions)   # 전부 전사 채택
     assert norm[0]["spans"][0]["audio"] == [
-        {"speaker": "강비오", "line": "안녕하세요."}]        # 전사로 복원
-    assert norm[1]["spans"][1]["audio"][0]["line"] == "저는 강비호입니다."  # 정정 유지
+        {"speaker": "강비오", "line": "안녕하세요."}]              # 각색 복원
+    assert next(d for d in decisions if d["span_id"] == "sp0000")["restored"] is True
+    assert norm[1]["spans"][1]["audio"][0]["line"] == "저는 강비오입니다."  # 전사 채택
 
 
 def test_character_cross_check_consistency():

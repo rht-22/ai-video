@@ -45,6 +45,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="M3(story + edit_plan·자막·TTS cue) 없이 Stage 2 까지만")
     p.add_argument("--skip-stage4", action="store_true",
                    help="M4(draft·style·최종 렌더·validate) 없이 M3 까지만")
+    p.add_argument("--fix-names", action="store_true",
+                   help="자막의 인명 오인식을 리서치 사전으로 자동 교정(기본 경고만)")
     p.add_argument("--hook-variants", type=int, default=None,
                    help="§9-C 훅 변형 N버전(2~3) — 본편 불변·훅 비트/제목/첫 TTS 만 교체")
     p.add_argument("--story-target-sec", type=float, default=None,
@@ -88,6 +90,7 @@ def main(argv: list[str] | None = None) -> int:
                  edit_overrides_path=(Path(args.edit_overrides)
                                       if args.edit_overrides else None),
                  hook_variants=args.hook_variants,
+                 fix_names=args.fix_names,
                  story_target_sec=args.story_target_sec,
                  story_max_sec=args.story_max_sec, max_chunks=args.max_chunks,
                  scene_threshold=args.scene_threshold)

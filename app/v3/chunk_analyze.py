@@ -184,7 +184,8 @@ def validate_stage2_response(resp: Any, chunk_spans: list[dict], *,
             if entry is None:
                 missing.append(sid)
                 entry = {}
-            audio_in = entry.get("audio")
+            audio_in = entry.get("heard") if entry.get("heard") is not None \
+                else entry.get("audio")
             audio = []
             if gsp["is_audio"]:
                 if isinstance(audio_in, list) and audio_in:
@@ -194,7 +195,9 @@ def validate_stage2_response(resp: Any, chunk_spans: list[dict], *,
                                 "speaker": str(line.get("speaker") or "").strip() or "미상",
                                 "line": str(line["line"]).strip()})
                 if not audio:
-                    audio = [{"speaker": "미상", "line": gsp.get("text", "")}]
+                    # heard 누락 = 모델이 못 들었다 — 전사 채택 경로로 보낸다
+                    # (예전처럼 전사를 여기서 채워 넣으면 판정이 무의미해진다)
+                    audio = []
             elif audio_in:
                 notes.append(f"{sid} 무성 span 의 audio 제안 폐기(전사에 발화 없음)")
             sp_imp = entry.get("importance")
@@ -207,6 +210,7 @@ def validate_stage2_response(resp: Any, chunk_spans: list[dict], *,
                 "characters": _name_list(entry.get("characters"), notes, sid),
                 "importance": sp_imp,
                 "audio": audio,
+                "heard": list(audio) if gsp["is_audio"] else [],
             })
         if missing:
             if final_attempt:
@@ -223,24 +227,105 @@ def validate_stage2_response(resp: Any, chunk_spans: list[dict], *,
     return norm, [], notes
 
 
-def apply_transcript_guard(norm: list[dict], chunk_spans: list[dict]) -> list[dict]:
-    """검증 ② — audio_script 를 전사 정본과 대조, 각색이면 복원. 복원 내역 반환."""
+# ── M9-C: 전사 판정 — 모델은 "들은 것"만 내고, 채택은 코드가 한다 ────────────
+TRANSCRIPT_MIN_PROB = 0.35     # span 평균 확신도 — 이 아래는 전사를 못 믿는다
+TRANSCRIPT_MIN_MEDIAN_DUR = 0.06   # 단어 길이 중앙 — 0 수렴은 환각 서명(실측)
+
+
+def transcript_broken(gsp: dict, words: list[dict] | None) -> str | None:
+    """이 span 의 전사가 **기계적으로** 깨졌는가 → 사유(정상이면 None). 순수.
+
+    판정은 전부 물리량이다(반복 서명·단어 길이·확신도) — 의미 판단은 하지 않는다.
+    모델이 자기 텍스트를 스스로 승격시키지 못하게 하는 장치다."""
+    text = str(gsp.get("text") or "").strip()
+    if not text:
+        return "전사 없음"
+    ws = [w for w in (words or [])
+          if gsp["t_in"] <= (float(w["t0"]) + float(w["t1"])) / 2 < gsp["t_out"]]
+    if ws:
+        from app.v3.transcribe import is_degenerate_loop
+        loop = is_degenerate_loop([{"text": str(w.get("text") or ""),
+                                    "t0": float(w["t0"]), "t1": float(w["t1"])}
+                                   for w in ws])
+        if loop:
+            return loop
+        probs = [float(w["prob"]) for w in ws if w.get("prob") is not None]
+        if probs and sum(probs) / len(probs) < TRANSCRIPT_MIN_PROB:
+            return f"저확신 평균 {sum(probs)/len(probs):.2f}"
+    else:
+        # 단어가 없는데 텍스트가 있다 = 격자 재료와 전사 텍스트의 불일치
+        toks = text.split()
+        if len(toks) >= 3 and len(set(toks)) == 1:
+            return f"반복 환각: {toks[0]!r} ×{len(toks)}"
+    return None
+
+
+def degenerate_span_run(chunk_spans: list[dict]) -> dict[str, str]:
+    """**구간 단위** 반복 환각 — span id → 사유. 순수.
+
+    실측 재현(가왕쇼 991~1014s): 환각이 span 하나 안에 뭉쳐 있지 않고 "육십!" 한
+    단어짜리 span 29개로 흩어져 있었다. 단일 span 검사(transcript_broken)는 각각을
+    정상으로 보므로, 이웃한 유성 span 들의 텍스트 반복을 따로 본다 —
+    자막 그물(textcheck.check_repetition)과 같은 서명·같은 임계를 재사용한다."""
+    from app.v3 import textcheck
+    voiced = [s for s in sorted(chunk_spans, key=lambda x: float(x["t_in"]))
+              if s["is_audio"] and str(s.get("text") or "").strip()]
+    segs = [{"start_sec": float(s["t_in"]), "end_sec": float(s["t_out"]),
+             "text": str(s["text"]).strip()} for s in voiced]
+    out: dict[str, str] = {}
+    for w in textcheck.check_repetition(segs):
+        for i in w.get("indexes") or []:
+            out[voiced[i]["id"]] = f"구간 반복 환각: {w['text'][:16]!r} ×{w['n']}span"
+    return out
+
+
+def adjudicate_transcript(norm: list[dict], chunk_spans: list[dict],
+                          words: list[dict] | None = None) -> list[dict]:
+    """검증 ② (M9-C) — span 마다 전사 vs 모델 청취(heard) 중 채택본을 확정. 판정 기록.
+
+    규칙(보수·결정적):
+      전사 정상 → **전사 채택**(현행 유지). heard 가 크게 다르면 각색으로 보고
+                  전사로 복원한다 — M2 부터의 각색 방어(실측 3.5%)를 유지.
+      전사 깨짐 → **heard 채택**(있을 때만). 모델은 소리를 실제로 듣는다 —
+                  환각 전사를 그대로 옮겨 적던 경로(실측 77/78)의 해소.
+      둘 다 불가 → 자막 제외(text_source=none) — 조용한 공백 금지, 사유를 남긴다."""
     by_id = {sp["id"]: sp for sp in chunk_spans}
-    restored: list[dict] = []
+    run_broken = degenerate_span_run(chunk_spans)   # 구간 단위 서명(단일 span 밖)
+    records: list[dict] = []
     for m in norm:
         for s in m["spans"]:
             gsp = by_id[s["span_id"]]
             if not gsp["is_audio"]:
                 continue
-            transcript = gsp.get("text", "")
-            joined = " ".join(line["line"] for line in s["audio"])
-            ratio = edit_ratio(joined, transcript)
-            if ratio > TRANSCRIPT_DIFF_MAX:
-                speaker = s["audio"][0]["speaker"] if s["audio"] else "미상"
+            transcript = str(gsp.get("text") or "").strip()
+            raw = s.get("heard")
+            if isinstance(raw, str):          # 문서 표기(heard_text)가 되돌아온 경우
+                heard_lines = [{"speaker": "미상", "line": raw}] if raw.strip() else []
+            else:
+                heard_lines = raw or s.get("audio") or []
+            heard_lines = [x for x in heard_lines if isinstance(x, dict)]
+            heard = " ".join(str(x.get("line") or "") for x in heard_lines).strip()
+            speaker = (heard_lines[0].get("speaker") if heard_lines else None) or "미상"
+            broken = run_broken.get(s["span_id"]) or transcript_broken(gsp, words)
+            rec = {"span_id": s["span_id"], "broken": broken}
+            if broken and heard:
+                s["audio"] = [dict(x) for x in heard_lines]
+                s["text_source"] = "heard"
+                rec.update({"decision": "heard", "text": heard[:80],
+                            "dropped_transcript": transcript[:80]})
+            elif broken:
+                s["audio"] = []
+                s["text_source"] = "none"
+                rec.update({"decision": "none", "text": ""})
+            else:
+                ratio = edit_ratio(heard, transcript) if heard else 1.0
                 s["audio"] = [{"speaker": speaker, "line": transcript}]
-                restored.append({"span_id": s["span_id"], "ratio": round(ratio, 3),
-                                 "model_text": joined[:80], "restored": transcript[:80]})
-    return restored
+                s["text_source"] = "transcript"
+                rec.update({"decision": "transcript", "diff": round(ratio, 3),
+                            "restored": bool(heard) and ratio > TRANSCRIPT_DIFF_MAX})
+            s["heard_text"] = heard
+            records.append(rec)
+    return records
 
 
 def character_cross_check(appearances: list[dict] | None,
@@ -306,6 +391,8 @@ def assemble_chunk_meanings(norm: list[dict], chunk_spans: list[dict]) -> list[d
                          "end": schemas.format_ts(float(gsp["t_out"]))},
                 "is_audio": bool(gsp["is_audio"]),
                 "audio_script": s["audio"] if gsp["is_audio"] else [],
+                "heard_text": s.get("heard_text", "") if gsp["is_audio"] else "",
+                "text_source": s.get("text_source") if gsp["is_audio"] else None,
                 "scene_script": s["scene_script"],
                 "characters": s["characters"],
                 "importance": s["importance"],
@@ -359,13 +446,14 @@ PROMPT_TEMPLATE = """당신은 방송 영상의 장면 기록가다. 첨부한 �
 {stage1_block}
 
 ## 이 청크의 span 목록 (id | 시각 | 유성/무성 | 전사)
-전사는 정본이다 — 대사를 다시 쓰지 마라. 명백한 오인식(고유명사·한두 글자)만 정정을 제안할 수 있다.
+전사는 시각(span 경계)의 근거다. 대사 텍스트는 아래 heard 로 당신이 들은 것을 적고, 확정은 코드에 맡긴다.
 {span_table}
 {faces_block}
 ## 과제
 1. 연속한 span 들을 하나의 meaning 으로 묶어라 — "누가 무엇을 하고 있다"가 바뀌는 지점이 경계다. 이 청크의 **모든 span 이 정확히 하나의 meaning** 에 속해야 한다(빈틈·겹침 금지).
 2. meaning 마다: content(한 문장) · characters(등장인물명) · importance(1~5, 이야기 기여도) · mood(한 단어).
-3. span 마다: scene_script(화면 묘사 한 문장) · characters · importance(1~5) · audio(유성 span 만 — 전사 각 문장에 화자를 배정. line 은 전사 그대로, 명백한 오인식만 고쳐라. 무성 span 은 audio 생략).
+3. span 마다: scene_script(화면 묘사 한 문장) · characters · importance(1~5) · heard(유성 span 만 — **당신이 실제로 들은 대사**를 화자와 함께 적어라. 무성 span 은 생략).
+   ⚠ heard 는 전사를 베끼는 칸이 아니다. 위 전사표는 참고일 뿐이고, **들리는 대로** 적어라 — 전사가 잡음·음악에 망가져 있을 수 있다(같은 말이 수십 번 반복되는 등). 최종 대사는 코드가 전사와 당신의 heard 를 대조해 확정하니, 당신은 각색하지 말고 들은 것만 정확히 옮기면 된다.
 {reject_block}
 ## 출력 (JSON 만)
 {{"meanings": [
@@ -373,7 +461,7 @@ PROMPT_TEMPLATE = """당신은 방송 영상의 장면 기록가다. 첨부한 �
     "content": "…", "characters": ["이름"], "importance": 4, "mood": "긴장",
     "spans": [
       {{"id": "sp0000", "scene_script": "…", "characters": ["이름"], "importance": 3,
-        "audio": [{{"speaker": "이름", "line": "전사 그대로"}}]}}
+        "heard": [{{"speaker": "이름", "line": "들은 대사 그대로"}}]}}
     ]}}
 ]}}"""
 
@@ -506,17 +594,28 @@ def run_chunk_analyze(gemini, chunk_file: Path, chunk: dict, stage1_doc: dict,
                 reject_note = "\n".join(f"- {p}" for p in problems[:20])
                 continue
 
-            restored = apply_transcript_guard(norm, chunk_spans)
+            decisions = adjudicate_transcript(norm, chunk_spans, grid.get("words"))
             meanings = assemble_chunk_meanings(norm, chunk_spans)
+            picked = {k: sum(1 for d in decisions if d["decision"] == k)
+                      for k in ("transcript", "heard", "none")}
+            restored = [d for d in decisions if d.get("restored")]
             audit["transcript_guard"] = {
                 "voiced_spans": sum(1 for sp in chunk_spans if sp["is_audio"]),
-                "restored": len(restored), "details": restored[:20]}
+                "restored": len(restored), "details": restored[:10],
+                "picked": picked,
+                "broken": [d for d in decisions if d["broken"]][:10]}
             audit["character_check"] = character_cross_check(
                 appearances, norm, chunk_spans, chunk["start_sec"], chunk["end_sec"])
             audit["time_alignment"] = verify_time_alignment(meanings, grid)
             for r in restored:
-                log(f"  [v3/stage2] {audit['chunk']} 전사 복원 {r['span_id']} "
-                    f"(diff {r['ratio']}): {r['model_text'][:40]!r} → 전사")
+                log(f"  [v3/stage2] {audit['chunk']} 각색 복원 {r['span_id']} "
+                    f"(diff {r.get('diff')}) → 전사 채택")
+            for b in [d for d in decisions if d["decision"] == "heard"][:10]:
+                log(f"  [v3/stage2] {audit['chunk']} 전사 깨짐 {b['span_id']} "
+                    f"({b['broken']}) → 청취 채택: {b.get('text','')[:34]!r}")
+            for b in [d for d in decisions if d["decision"] == "none"][:5]:
+                log(f"  [v3/stage2] ⚠ {audit['chunk']} {b['span_id']} 대사 확보 실패 "
+                    f"({b['broken']}) — 자막 제외")
             return meanings, audit
         audit["failed"] = ("반려 소진 — 마지막 사유: "
                            + "; ".join(audit["attempts"][-1]["problems"][:3]))

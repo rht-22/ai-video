@@ -1,0 +1,172 @@
+"""V3-M9 — 자막 텍스트 신뢰 3종 회귀 가드(LLM 없이 · 실측 픽스처).
+
+발주서 orders/v3-m9-transcript-adjudication.md. 세 사례를 박제한다:
+  A "박처진"←박서진 (가왕쇼 자막 43.0s 실물) · 오탐 0 대조군
+  B "육십!" 34줄 시뮬레이션(환각 구간을 자막 빌더에 태운 실물) · 실제 자막 무경고
+  C 전사 깨짐 판정 4분기 — 각색 방어(전사 정상)는 종전 그대로 유지
+"""
+from __future__ import annotations
+
+import pytest
+
+from app.v3 import chunk_analyze as ca
+from app.v3 import textcheck as tc
+
+
+def _seg(t, text): return {"start_sec": t, "end_sec": t + 1.0, "text": text}
+
+
+# ── A 인명 대조 ─────────────────────────────────────────────────────────────
+
+NAMES = ["박서진", "전유진", "홍지윤", "빈예서", "윤수현", "최수호"]
+
+
+def test_name_check_hits_real_case():
+    # 가왕쇼 43.0s 실물 자막 — 한 글자 오인식
+    hits = tc.check_names([_seg(43.0, "박처진 씨 등장하자마자")], NAMES)
+    assert len(hits) == 1
+    assert (hits[0]["token"], hits[0]["suggest"]) == ("박처진", "박서진")
+
+
+def test_name_check_no_false_positive_on_real_subtitles():
+    # 이번 편 실제 자막에서 인명이 정확히 나온 줄 + 무관한 줄
+    segs = [_seg(31.7, "이거 전유진 티켓은"), _seg(12.5, "이거 이거 티켓 티켓"),
+            _seg(35.3, "이건 하나만 가질 수 있어요."), _seg(45.3, "이렇게 힘들게 뿌릴")]
+    assert tc.check_names(segs, NAMES) == []
+
+
+def test_name_check_ignores_length_mismatch():
+    # 길이가 다르면 다른 낱말 — "박서진들"·"서진" 은 잡지 않는다(오탐 억제)
+    assert tc.check_names([_seg(1, "박서진들 모여")], NAMES) == []
+    assert tc.check_names([_seg(1, "서진 씨")], NAMES) == []
+
+
+def test_name_fix_is_opt_in_and_logged():
+    segs = [_seg(43.0, "박처진 씨 등장하자마자")]
+    fixed, log = tc.fix_names(segs, NAMES)
+    assert fixed[0]["text"] == "박서진 씨 등장하자마자"
+    assert log[0]["before"] != log[0]["after"]
+    assert segs[0]["text"] == "박처진 씨 등장하자마자"      # 원본 불변(순수)
+
+
+# ── B 반복 그물 ─────────────────────────────────────────────────────────────
+
+def test_repetition_catches_hallucination_run():
+    # 환각 구간 시뮬레이션 실물: "육십!" 이 34줄 연속
+    segs = [_seg(i * 0.5, "육십!") for i in range(34)]
+    warns = tc.check_repetition(segs)
+    assert any(w["kind"] == "run" and w["n"] >= 3 for w in warns)
+    kept, w2 = tc.drop_repetition(segs)
+    assert kept == [] and w2                                # 전량 제외 + 사유
+
+
+def test_repetition_window_rule():
+    # 사이사이 다른 줄이 껴도 창 점유가 높으면 잡는다
+    segs = []
+    for i in range(8):
+        segs.append(_seg(i * 2.0, "그녀는" if i % 2 == 0 else f"말{i}"))
+    assert any(w["kind"] == "window" for w in tc.check_repetition(segs))
+
+
+def test_repetition_no_false_positive_on_real_dialogue():
+    # 이번 편 실제 자막 일부 — 구어 반복("이거 가지세요 이거")은 잡으면 안 된다
+    segs = [_seg(12.5, "이거 이거 티켓 티켓"), _seg(14.5, "필요 없고 이거 이거"),
+            _seg(15.4, "이거 가지세요 이거"), _seg(16.1, "가지실래요?"),
+            _seg(16.7, "아 이거 왜 받으세요?"), _seg(19.4, "왜 받으세요?"),
+            _seg(25.1, "가세요 가세요."), _seg(26.5, "어머니 들어가세요.")]
+    assert tc.check_repetition(segs) == []
+
+
+# ── C 전사 판정 ─────────────────────────────────────────────────────────────
+
+def _span(sid, t0, t1, text): return {"id": sid, "t_in": t0, "t_out": t1,
+                                      "is_audio": True, "time_authority": "stt",
+                                      "text": text}
+
+
+def _norm(sid, heard):
+    return [{"first_idx": 0, "last_idx": 0, "content": "c", "characters": [],
+             "importance": 3, "mood": "",
+             "spans": [{"span_id": sid, "scene_script": "", "characters": [],
+                        "importance": 3, "audio": heard, "heard": heard}]}]
+
+
+def test_adjudication_picks_heard_when_transcript_is_loop():
+    # 실사고 재현: 격자에 "육십!" ×29 · 모델은 실제 대사를 들었다
+    sp = [_span("sp0", 991.0, 1014.0, " ".join(["육십!"] * 29))]
+    words = [{"t0": 991 + i * 0.3, "t1": 991 + i * 0.3 + 0.13, "text": "육십!",
+              "prob": 0.97} for i in range(29)]
+    norm = _norm("sp0", [{"speaker": "박서진", "line": "산악회 60명 온대요"}])
+    d = ca.adjudicate_transcript(norm, sp, words)
+    assert d[0]["decision"] == "heard" and "반복 환각" in d[0]["broken"]
+    assert norm[0]["spans"][0]["audio"][0]["line"] == "산악회 60명 온대요"
+    assert norm[0]["spans"][0]["text_source"] == "heard"
+
+
+def test_adjudication_low_confidence_and_empty_transcript():
+    sp = [_span("sp1", 10.0, 12.0, "웅얼웅얼")]
+    words = [{"t0": 10.2, "t1": 10.9, "text": "웅얼웅얼", "prob": 0.11}]
+    d = ca.adjudicate_transcript(_norm("sp1", [{"speaker": "갑", "line": "실제 대사"}]),
+                                 sp, words)
+    assert d[0]["decision"] == "heard" and "저확신" in d[0]["broken"]
+    d2 = ca.adjudicate_transcript(_norm("sp2", [{"speaker": "갑", "line": "실제 대사"}]),
+                                  [_span("sp2", 10.0, 12.0, "  ")], [])
+    assert d2[0]["decision"] == "heard" and d2[0]["broken"] == "전사 없음"
+
+
+def test_adjudication_drops_span_when_both_unusable():
+    # 전사도 깨졌고 모델도 못 들었다 → 자막 제외(조용한 공백 금지 — 사유 기록)
+    sp = [_span("sp3", 0.0, 3.0, "")]
+    norm = _norm("sp3", [])
+    d = ca.adjudicate_transcript(norm, sp, [])
+    assert d[0]["decision"] == "none"
+    assert norm[0]["spans"][0]["audio"] == []
+    assert norm[0]["spans"][0]["text_source"] == "none"
+
+
+def test_adjudication_keeps_sound_transcript_against_paraphrase():
+    # 각색 방어 유지 — 전사가 정상이면 heard 가 달라도 전사가 이긴다
+    sp = [_span("sp4", 0.0, 3.0, "안녕하세요.")]
+    words = [{"t0": 0.3, "t1": 1.1, "text": "안녕하세요.", "prob": 0.93}]
+    norm = _norm("sp4", [{"speaker": "갑", "line": "여러분 만나서 정말 반갑습니다"}])
+    d = ca.adjudicate_transcript(norm, sp, words)
+    assert d[0]["decision"] == "transcript" and d[0]["restored"] is True
+    assert norm[0]["spans"][0]["audio"][0]["line"] == "안녕하세요."
+
+
+def test_transcript_broken_signals():
+    ok = _span("s", 0.0, 3.0, "정상 문장입니다")
+    assert ca.transcript_broken(ok, [{"t0": 0.2, "t1": 1.0, "text": "정상",
+                                      "prob": 0.9}]) is None
+    zero = [{"t0": 1.0 + i, "t1": 1.0 + i, "text": f"w{i}", "prob": 0.9}
+            for i in range(8)]
+    assert "길이 퇴화" in (ca.transcript_broken(ok, zero) or "")
+    # 단어 없이 텍스트만 반복 — 격자 재료 불일치 경로
+    rep = _span("s", 0.0, 3.0, "네 네 네 네")
+    assert "반복 환각" in (ca.transcript_broken(rep, []) or "")
+
+
+def test_adjudication_catches_cross_span_loop():
+    # 실측 재현(가왕쇼 991~1014s): 환각이 한 단어짜리 span 29개로 흩어져 있어
+    # 단일 span 검사로는 안 걸렸다 — 구간 단위 서명이 잡아야 한다
+    spans = [_span(f"sp{i}", 991.0 + i * 0.8, 991.0 + i * 0.8 + 0.4, "육십!")
+             for i in range(29)]
+    assert len(ca.degenerate_span_run(spans)) == 29
+    norm = [{"first_idx": 0, "last_idx": 28, "content": "c", "characters": [],
+             "importance": 3, "mood": "",
+             "spans": [{"span_id": s["id"], "scene_script": "", "characters": [],
+                        "importance": 3,
+                        "audio": [{"speaker": "박서진", "line": "산악회 60명이요"}],
+                        "heard": [{"speaker": "박서진", "line": "산악회 60명이요"}]}
+                       for s in spans]}]
+    d = ca.adjudicate_transcript(norm, spans, None)
+    assert all(x["decision"] == "heard" for x in d)
+    assert norm[0]["spans"][0]["audio"][0]["line"] == "산악회 60명이요"
+
+
+def test_span_run_ignores_normal_dialogue():
+    # 실제 대사에서 짧은 맞장구가 몇 번 나오는 정도는 잡으면 안 된다
+    spans = [_span("a", 0, 2, "안녕하세요."), _span("b", 2, 4, "네."),
+             _span("c", 4, 6, "반갑습니다."), _span("d", 6, 8, "네."),
+             _span("e", 8, 10, "그러시군요.")]
+    assert ca.degenerate_span_run(spans) == {}

@@ -107,7 +107,7 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
            skip_stage4: bool = False, edit_overrides_path: Path | None = None,
            hook_variants: int | None = None,
            story_target_sec: float | None = None,
-           story_max_sec: float | None = None,
+           story_max_sec: float | None = None, fix_names: bool = False,
            max_chunks: int | None = None,
            scene_threshold: float = SCENE_THRESHOLD, log=print) -> Path:
     """v3 실행(M1 grid·Stage1 + M2 chunk_split·Stage2) → output_dir 반환.
@@ -393,7 +393,7 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
                     work_title=work_title, grid=grid, research=research,
                     from_step=from_step,
                     story_target_sec=story_target_sec,
-                    story_max_sec=story_max_sec,
+                    story_max_sec=story_max_sec, fix_names=fix_names,
                     get_gemini=get_gemini, step=step, log=log)
 
         # ── M6-A: 훅 변형 — M3 산출 위에(본편 불변 · 렌더는 변형 발주 시) ──
@@ -569,7 +569,7 @@ def _run_m2(*, output_dir: Path, video_path: Path, stage1_path: Path, grid: dict
 def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
             research: dict | None, from_step: str | None,
             story_target_sec: float | None, story_max_sec: float | None,
-            get_gemini, step, log) -> None:
+            get_gemini, step, log, fix_names: bool = False) -> None:
     """Stage 3(story) + 경계면 조립 + resources(TTS 합성) — 발주서 v3-m3.
 
     story 캐시는 M2 와 같은 규율로 **상류 지문**에 묶는다 — stage2 의 meaning/span
@@ -637,6 +637,23 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
 
     segments = assemble.word_subtitles(plan["timeline"], span_index,
                                        grid.get("words") or [])
+    # ── M9-A/B: 자막 텍스트 신뢰 검사(순수 코드 · LLM 0콜) ────────────────
+    from app.v3 import textcheck
+    segments, rep_warns = textcheck.drop_repetition(segments)   # B 예방
+    names = [c["character_name"] for c in (research or {}).get("cast_images") or []
+             if c.get("character_name")]
+    name_warns = textcheck.check_names(segments, names)          # A 경고
+    if fix_names and name_warns:
+        segments, name_fixes = textcheck.fix_names(segments, names)
+    else:
+        name_fixes = []
+    if rep_warns:
+        log(f"  [v3/자막] ⚠ 반복 환각 {len(rep_warns)}건 — "
+            f"{sum(len(w['indexes']) for w in rep_warns)}줄 제외(사유 run_log)")
+    if name_warns:
+        log(f"  [v3/자막] ⚠ 인명 오인식 의심 {len(name_warns)}건: "
+            + ", ".join(f"{w['token']}→{w['suggest']}" for w in name_warns[:3])
+            + (" (교정 적용)" if name_fixes else " (경고만 — --fix-names 로 교정)"))
     _write_json(output_dir / "subtitle_segments.json", segments)
 
     cues = assemble.finalize_cues(story_doc.get("narration_cues") or [],
@@ -696,6 +713,8 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
     stats = assemble.clip_stats(plan)
     entry = {"step": "resources", "elapsed": round(time.time() - t0, 1),
              "tts_backend": backend, "tts_cues": len(tts_cue_files),
+             "subtitle_repetition_warns": rep_warns,
+             "subtitle_name_warns": name_warns, "subtitle_name_fixes": name_fixes,
              "cues_lost_to_trim": [c["text"][:40] for c in lost],
              "time_alignment": belt, "clip_stats": stats,
              "subtitle_segments": len(segments)}
@@ -809,10 +828,16 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
     stage2_doc = _read_json(output_dir / "stage2.json")
     tmp_dir = output_dir / "validate_tmp"
     tmp_dir.mkdir(exist_ok=True)
+    _res_names = []
+    _rp = output_dir / "checkpoint_research.json"
+    if _rp.exists():
+        _res_names = [c["character_name"] for c in
+                      (_read_json(_rp) or {}).get("cast_images") or []
+                      if c.get("character_name")]
     vdoc = finalize.run_validate(
         plan=plan, grid=grid, stage1_doc=stage1_doc, stage2_doc=stage2_doc,
         segments=segments, resources=resources, final_path=final_path,
-        tmp_dir=tmp_dir, gemini=get_gemini(), log=log)
+        tmp_dir=tmp_dir, cast_names=_res_names, gemini=get_gemini(), log=log)
     _write_json(output_dir / "validation.json", vdoc)
     step("validate", elapsed=round(time.time() - t0, 1),
          hard_fail=vdoc["hard_fail"], warnings=vdoc["warnings_total"],

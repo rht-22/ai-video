@@ -358,6 +358,7 @@ def frame_vision_qc(gemini, video_path: Path, tmp_dir: Path, *,
 def run_validate(*, plan: dict, grid: dict, stage1_doc: dict, stage2_doc: dict,
                  segments: list[dict], resources: dict,
                  final_path: Path | None, tmp_dir: Path,
+                 cast_names: list[str] | None = None,
                  gemini=None, log=print) -> dict:
     """validate 확장 — 수치 4종 + §9-D. 경고는 차단하지 않는다(기획: 경고 모드)."""
     doc: dict[str, Any] = {"schema": "v3_validate/v1"}
@@ -367,6 +368,11 @@ def run_validate(*, plan: dict, grid: dict, stage1_doc: dict, stage2_doc: dict,
                                                        stage1_doc)             # ③
     doc["progression"] = check_progression(plan.get("timeline") or [],
                                            segments, resources)                # §9-D ①
+    # M9-A/B 계기판 — 조립 시점의 예방을 통과한 뒤에도 남은 게 있는지(이중 방어)
+    from app.v3 import textcheck
+    doc["subtitle_text"] = {
+        "repetition": textcheck.check_repetition(segments),
+        "name_suspects": textcheck.check_names(segments, cast_names or [])}
     if final_path is not None and final_path.exists():
         doc["loop_continuity"] = check_loop_continuity(final_path, tmp_dir)    # §9-D ②
         if gemini is not None:
@@ -379,7 +385,9 @@ def run_validate(*, plan: dict, grid: dict, stage1_doc: dict, stage2_doc: dict,
         or doc["exception_ingress"]["violations"])
     doc["hard_fail"] = bool(hard_fail)
     doc["warnings_total"] = (
-        len(doc["progression"]["warnings"])
+        len(doc["subtitle_text"]["repetition"])
+        + len(doc["subtitle_text"]["name_suspects"])
+        + len(doc["progression"]["warnings"])
         + (1 if doc.get("loop_continuity", {}).get("warning") else 0)
         + len(doc.get("frame_qc", {}).get("issues") or []))
     return doc
