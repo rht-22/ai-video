@@ -307,6 +307,42 @@ def band_in_window(profiles: list, t0: float, t1: float, geom: BandGeometry, *,
     return (int(geom.top + rows[0] * px_per_row), int(geom.top + rows[1] * px_per_row))
 
 
+def runs_in_window(profiles: list, t0: float, t1: float, geom: BandGeometry, *,
+                   probe_h: int = PROBE_H,
+                   min_frames: int = WINDOW_MIN_FRAMES,
+                   threshold: float = MIN_FRAME_HIT_RATIO,
+                   gap_merge: int = ROW_GAP_MERGE) -> list[tuple[int, int]]:
+    """그 창에서 글자가 있는 **모든** 띠(캔버스 y). 순수.
+
+    `band_in_window` 는 설계상 **가장 아래 한 줄만** 돌려준다(편 내내 같은 자리에 있는
+    번인 대사 자막을 겨냥한 것). 예능 텔롭은 여러 줄로 쌓이므로 그 위로 올리면 다른
+    줄에 얹힌다 — 2026-08-31 가왕쇼 실측: 창 19.86~20.29 에 run 이 3개
+    (181-187 · 204-208 · 223-233 행)인데 아래 것만 피해서 나머지 둘과 겹쳤다.
+    여기서는 전부 돌려주고, 어디에 놓을지는 호출부가 정한다."""
+    ratios = ratios_in_window(profiles, t0, t1, probe_h=probe_h, min_frames=min_frames)
+    if not ratios:
+        return []
+    h = len(ratios)
+    min_rows = max(1, int(h * MIN_BAND_RATIO))
+    out: list[tuple[int, int]] = []
+    start, end, gap = None, 0, 0
+    for y in range(int(h * SEARCH_FROM_RATIO), h):
+        if ratios[y] >= threshold:
+            if start is None:
+                start = y
+            gap, end = 0, y + 1
+        elif start is not None:
+            gap += 1
+            if gap > gap_merge:
+                out.append((start, end))
+                start, gap = None, 0
+    if start is not None:
+        out.append((start, end))
+    px = geom.scaled_h / float(probe_h)
+    return [(int(geom.top + a * px), int(geom.top + b * px))
+            for a, b in out if (b - a) >= min_rows]
+
+
 def avoid_margin_v(margin_v: int, *,
                    canvas_height: int,
                    burned_top: int,

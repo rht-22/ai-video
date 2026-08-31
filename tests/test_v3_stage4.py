@@ -400,3 +400,20 @@ def test_beat_pop_reaches_subtitle_lines():
     from app.modules.subtitle import _line_style_overrides
     assert "fscx" in _line_style_overrides({"fx": "pop_strong"}, 2)[0]
     assert _line_style_overrides({"color": "#FFFFFF"}, 2)[0] == "{\\1c&HFFFFFF&}"
+
+
+def test_place_above_burned_clears_every_band_not_just_the_lowest():
+    """예능 텔롭은 여러 줄로 쌓인다 — 아래 띠만 피하면 그 위 띠에 얹힌다(가왕쇼 실측)."""
+    p = finalize.place_above_burned
+    burned = [(1136, 1159), (1224, 1239), (1297, 1335)]     # 창 19.86~20.29 실측
+    m, note = p(518, burned, canvas_height=1920, subtitle_height=150, floor_top=460)
+    top, bottom = 1920 - m - 150, 1920 - m
+    assert all(bottom + finalize.SUB_GAP_PX <= a or top >= z + finalize.SUB_GAP_PX
+               for a, z in burned)                           # 어느 띠와도 안 겹친다
+    assert m > 518 and note and "3띠" in note
+    # 겹치지 않으면 그대로 둔다(내리지 않는다)
+    assert p(518, [(1500, 1540)], canvas_height=1920,
+             subtitle_height=150, floor_top=460) == (518, None)
+    # 제목에 막히면 갈 수 있는 데까지만 가고 모자란 양을 남긴다(조용한 포기 금지)
+    m2, note2 = p(518, burned, canvas_height=1920, subtitle_height=150, floor_top=1100)
+    assert "제목에 막혀" in note2 and 1920 - m2 - 150 >= 1100

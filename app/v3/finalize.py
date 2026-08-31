@@ -217,6 +217,47 @@ def plan_labels(story_doc: dict, plan: dict) -> list[dict]:
     return out
 
 
+SUB_GAP_PX = 12                   # 원본 자막과 우리 자막 사이 최소 여백
+
+
+def place_above_burned(margin_v: int, burned: list[tuple[int, int]], *,
+                       canvas_height: int, subtitle_height: int,
+                       floor_top: int, gap: int = SUB_GAP_PX) -> tuple[int, str | None]:
+    """원본 자막 띠들을 피한 margin_v 와 메모. 순수·결정적.
+
+    규율은 E17-2 를 따른다 — **올리기만** 하고(내리면 로고와 부딪힌다), 제목 아래
+    (floor_top)를 넘지 않는다. 다만 띠를 **하나가 아니라 전부** 본다: 기본 자리에서
+    위로 올라가며 우리 자막 상자가 어떤 띠와도 겹치지 않는 첫 자리를 고른다.
+    끝까지 자리가 없으면 갈 수 있는 데까지만 가고 **모자란 것을 메모로 남긴다**."""
+    H = int(canvas_height)
+    box_bottom = H - int(margin_v)
+
+    def hits(bottom: int) -> tuple[int, int] | None:
+        top = bottom - int(subtitle_height)
+        for a, z in burned:
+            if a - gap < bottom and top < z + gap:
+                return (a, z)
+        return None
+
+    hit = hits(box_bottom)
+    if hit is None:
+        return int(margin_v), None
+    # 겹치는 띠 **위**로 올린다. 위쪽에 또 띠가 있으면 다시 올린다(여러 줄 텔롭).
+    bottom = box_bottom
+    for _ in range(len(burned) + 1):
+        hit = hits(bottom)
+        if hit is None:
+            break
+        bottom = hit[0] - gap
+    top = bottom - int(subtitle_height)
+    if top < floor_top:                       # 제목을 침범해야만 피할 수 있는 경우
+        short = floor_top - top
+        bottom = floor_top + int(subtitle_height)
+        return (H - bottom,
+                f"띠를 다 피하려면 {short}px 더 올려야 하는데 제목에 막혀 여기까지만")
+    return H - int(bottom), f"원본 자막 {len(burned)}띠 회피 (margin_v {margin_v} → {H - int(bottom)})"
+
+
 def detect_burned_subtitles(video_path: Path, clips: list, design, output_dir: Path,
                             log=print) -> tuple[dict | None, list]:
     """소스에 박힌 자막 띠와 구간별 표본. 실패는 (None, []) — 본편을 막지 않는다.
@@ -321,7 +362,13 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
         design, _geom, line_count=_sr.estimate_title_line_count(_title_text))
     _sub_margin = int(design.subtitle_y_margin)
     _tts_margin = int(design.tts_line_y_margin)
-    if _band:
+    _sub_h = _sr.estimate_subtitle_height(design.subtitle_size)
+    _floor_top = _title_bottom + SUB_GAP_PX
+
+    def _runs(t0: float, t1: float) -> list[tuple[int, int]]:
+        return _sr.runs_in_window(_profiles, t0, t1, _geom) if _profiles else []
+
+    if _band:   # 편 내내 같은 자리에 있는 번인 자막 — 전역으로 한 번 올린다
         for _name, _size, _cur in (("자막", design.subtitle_size, _sub_margin),
                                    ("내레이션", design.tts_line_font_size, _tts_margin)):
             _new, _notes = _sr.avoid_margin_v(
@@ -336,6 +383,20 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
             else:
                 _tts_margin = int(_new)
 
+    # 내레이션 줄은 스타일이 하나뿐이라 큐 창들의 **합집합**으로 한 번만 정한다
+    _cue_wins = [(float(f["cue"]["start_sec"]), float(f["cue"]["end_sec"]))
+                 for f in (resources.get("tts_cue_files") or [])
+                 if f.get("cue", {}).get("start_sec") is not None
+                 and f.get("cue", {}).get("end_sec") is not None]
+    _tts_runs = sorted({r for w in _cue_wins for r in _runs(*w)})
+    if _tts_runs:
+        _tts_margin, _note = place_above_burned(
+            _tts_margin, _tts_runs, canvas_height=config.canvas_height,
+            subtitle_height=_sr.estimate_subtitle_height(design.tts_line_font_size),
+            floor_top=_floor_top)
+        if _note:
+            log(f"  [v3/자막회피] 내레이션 — {_note}")
+
     # 대사 ASS — C6 세그먼트(편집본 좌표)를 그대로 이벤트로
     sub_path = output_dir / "v3_subtitles.ass"
     sub_style = SubtitleStyle(
@@ -348,18 +409,22 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     fx_windows = subtitle_fx_windows(story_doc, style_doc, plan["timeline"])
 
     # 몇 초씩만 뜨는 방송 텔롭은 전역 띠 판정에 안 걸린다 — 줄이 떠 있는 **그 창의**
-    # 표본으로 다시 재서 필요한 줄만 더 올린다(E18-2). 내리지는 않는다.
+    # 표본으로 다시 재서 필요한 줄만 더 올린다(E18-2). 예능은 텔롭이 여러 줄로 쌓이므로
+    # 가장 아래 띠만 피하면 그 위 띠에 얹힌다(실측) → 띠를 전부 보고 빈 자리를 고른다.
     _line_margins: list[int | None] = [None] * len(segments or [])
-    if _profiles and segments:
-        _line_margins, _pn = _sr.per_cue_margins(
-            [SimpleNamespace(start_sec=float(s["start_sec"]),
-                             end_sec=float(s["end_sec"])) for s in segments],
-            _profiles, _geom, base_margin_v=_sub_margin,
-            canvas_height=config.canvas_height,
-            subtitle_height=_sr.estimate_subtitle_height(design.subtitle_size),
-            title_bottom=_title_bottom)
-        for n in _pn:
-            log(f"  [v3/자막회피] {n}")
+    _moved = 0
+    for _i, _s in enumerate(segments or []):
+        _rs = _runs(float(_s["start_sec"]), float(_s["end_sec"]))
+        if not _rs:
+            continue
+        _m, _note = place_above_burned(_sub_margin, _rs,
+                                       canvas_height=config.canvas_height,
+                                       subtitle_height=_sub_h, floor_top=_floor_top)
+        if _m > _sub_margin:            # 단조 개선 — 내리지 않는다
+            _line_margins[_i] = _m
+            _moved += 1
+    if _moved:
+        log(f"  [v3/자막회피] 자막 {_moved}/{len(segments)}줄을 구간별로 더 올렸습니다")
 
     def _seg_style(seg: dict, idx: int = 0) -> dict | None:
         st: dict[str, Any] = {}
@@ -437,6 +502,8 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                                           round(_off + (z - float(c["clip_start_sec"])), 3)))
         _off += _dur
 
+    out_path = output_dir / out_name
+    audio_mix = plan.get("audio_mix") or {}
     inputs = RenderInputs(
         video_path=Path(video_path),
         clips=clips,
