@@ -103,15 +103,13 @@ def test_adjudication_picks_heard_when_transcript_is_loop():
     assert norm[0]["spans"][0]["text_source"] == "heard"
 
 
-def test_adjudication_low_confidence_and_empty_transcript():
-    sp = [_span("sp1", 10.0, 12.0, "웅얼웅얼")]
-    words = [{"t0": 10.2, "t1": 10.9, "text": "웅얼웅얼", "prob": 0.11}]
-    d = ca.adjudicate_transcript(_norm("sp1", [{"speaker": "갑", "line": "실제 대사"}]),
-                                 sp, words)
-    assert d[0]["decision"] == "heard" and "저확신" in d[0]["broken"]
-    d2 = ca.adjudicate_transcript(_norm("sp2", [{"speaker": "갑", "line": "실제 대사"}]),
-                                  [_span("sp2", 10.0, 12.0, "  ")], [])
-    assert d2[0]["decision"] == "heard" and d2[0]["broken"] == "전사 없음"
+def test_adjudication_empty_transcript_takes_heard():
+    """전사가 아예 없으면 잃을 게 없다 — heard 채택. (저확신 단독 뒤집기는
+    실측 오탐으로 제거됐다: test_low_confidence_alone_never_flips 참조)"""
+    d = ca.adjudicate_transcript(_norm("sp2", [{"speaker": "갑", "line": "실제 대사"}]),
+                                 [_span("sp2", 10.0, 12.0, "  ")], [])
+    assert d[0]["decision"] == "heard" and d[0]["broken"] == "전사 없음"
+    assert d[0]["text"] == "실제 대사"
 
 
 def test_adjudication_drops_span_when_both_unusable():
