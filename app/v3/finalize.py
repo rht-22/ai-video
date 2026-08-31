@@ -83,6 +83,56 @@ def design_from_style(design: dict) -> DesignConfig:
     return dataclasses.replace(base, **up)
 
 
+def video_band_ratio(design) -> tuple[float, float]:
+    """영상 밴드의 세로 범위(캔버스 대비 0~1) — 라벨은 이 **안**에 있어야 한다.
+
+    renderer 의 기하와 같은 식(밴드 폭 기준 scaled_h · video_y 미지정이면 중앙).
+    검정 밴드 위에 라벨을 놓으면 제목·로고와 충돌하므로 클램프 근거가 된다."""
+    H, W = 1920, 1080
+    try:
+        r_w, r_h = (int(x) for x in str(getattr(design, "aspect_ratio", "1:1")).split(":"))
+    except (ValueError, AttributeError):
+        r_w = r_h = 1
+    width = getattr(design, "video_width", None) or W
+    scaled_h = int(width * r_h / r_w) if r_w else width
+    scaled_h = min(scaled_h, H)
+    vy = getattr(design, "video_y", None)
+    y0 = min(max(0, int(vy)), max(0, H - scaled_h)) if vy is not None \
+        else (H - scaled_h) // 2
+    return y0 / H, (y0 + scaled_h) / H
+
+
+def plan_labels(story_doc: dict, plan: dict) -> list[dict]:
+    """비트 라벨 → 편집본 시각이 붙은 목록(순수). style·render 공용.
+
+    M11: 앵커 span 시각에 뜬다(비트 시작 고정 아님). 위치(x·y)는 여기서 정하지
+    않는다 — Stage 4 가 화면을 보고 채우고, 없으면 렌더가 기본값을 쓴다."""
+    offsets = assemble.edited_offsets(plan["timeline"])
+    span_t = {}
+    for c in plan["timeline"]:
+        for sid in c.get("span_ids") or []:
+            span_t.setdefault(sid, float(c["clip_start_sec"]))
+    out: list[dict] = []
+    for b in story_doc.get("beats") or []:
+        items = b.get("labels") or ([{"text": b["label"],
+                                      "span_id": (b.get("span_ids") or [None])[0]}]
+                                    if b.get("label") else [])
+        for lb in items:
+            src = span_t.get(lb.get("span_id"))
+            if src is None:
+                src = schemas.parse_ts(b["time"]["start"])
+            s0 = assemble.to_edited_sec(src, offsets, kind="start")
+            s1 = assemble.to_edited_sec(schemas.parse_ts(b["time"]["end"]), offsets,
+                                        kind="end")
+            if s0 is None or s1 is None or s1 <= s0:   # 역전 = 음수 길이 ASS
+                continue
+            out.append({"index": len(out), "text": lb["text"],
+                        "start_sec": round(s0, 3),
+                        "end_sec": round(min(s1, s0 + LABEL_MAX_SEC), 3),
+                        "beat": b.get("number"), "span_id": lb.get("span_id")})
+    return out
+
+
 # ── 최종 렌더 어댑터 ────────────────────────────────────────────────────────
 
 def render_final(*, video_path: Path, plan: dict, style_doc: dict,
@@ -144,32 +194,18 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
             tts_path, tts_style)
 
     # 괄호 라벨 — 편집실 자유 텍스트 레이어 재사용(비트 창 전체에 표시)
+    # 라벨 — 계획은 공용(plan_labels), 위치는 Stage 4 가 화면을 보고 정한 값을 쓴다
+    # (M12: 가운데 고정이면 인물 얼굴·방송 자막을 덮는다는 사용자 지적).
+    placed = {int(x["index"]): x for x in (style_doc.get("v3_style") or {}).get("labels")
+              or [] if isinstance(x, dict) and x.get("index") is not None}
     labels = []
-    offsets = assemble.edited_offsets(plan["timeline"])
-    # M11-B: 라벨은 **앵커 span 시각**에 뜬다(레퍼런스는 대사 순간에 붙는다 —
-    # 비트 시작 고정이면 긴 비트에서 앞부분에만 잠깐 떴다). 앵커 span 의 소스
-    # 시각을 편집본으로 옮겨 배치한다.
-    span_t = {}
-    for c in plan["timeline"]:
-        for sid in c.get("span_ids") or []:
-            span_t.setdefault(sid, float(c["clip_start_sec"]))
-    for b in story_doc.get("beats") or []:
-        items = b.get("labels") or ([{"text": b["label"],
-                                      "span_id": (b.get("span_ids") or [None])[0]}]
-                                    if b.get("label") else [])
-        for lb in items:
-            src = span_t.get(lb.get("span_id"))
-            if src is None:
-                src = schemas.parse_ts(b["time"]["start"])
-            s0 = assemble.to_edited_sec(src, offsets, kind="start")
-            s1 = assemble.to_edited_sec(schemas.parse_ts(b["time"]["end"]), offsets,
-                                        kind="end")
-            if s0 is None or s1 is None or s1 <= s0:  # 역전 = 음수 길이 ASS(리뷰 확정)
-                continue
-            labels.append({"text": lb["text"], "start_sec": s0,
-                           "end_sec": min(s1, s0 + LABEL_MAX_SEC),
-                           "x": 0.5, "y": LABEL_Y_RATIO, "size": 58,
-                           "color": "#FF4A3B", "stroke": "dark"})
+    for lb in plan_labels(story_doc, plan):
+        pos = placed.get(lb["index"]) or {}
+        labels.append({"text": lb["text"], "start_sec": lb["start_sec"],
+                       "end_sec": lb["end_sec"],
+                       "x": float(pos.get("x", 0.5)),
+                       "y": float(pos.get("y", LABEL_Y_RATIO)),
+                       "size": 58, "color": "#FF4A3B", "stroke": "dark"})
     texts_path = None
     if labels:
         texts_path = output_dir / "v3_labels.ass"

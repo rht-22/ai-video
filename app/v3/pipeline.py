@@ -800,8 +800,16 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
         # 편집본 좌표 비트 창 — draft 영상 속 시각과 정합(원본 절대초 금지)
         win = [{"beat": w["beat"], "start": w["start"], "end": w["end"]}
                for w in windows]
+        # M12: 라벨을 화면 보고 배치하려면 Stage 4 가 **무엇이 언제 뜨는지** 알아야
+        # 한다 — 렌더와 같은 계획(plan_labels)·같은 밴드 기하를 넘긴다.
+        label_plan = finalize.plan_labels(story_doc, plan)
+        # 밴드는 **채널 프리셋** 기준(이 시점 style_doc 은 아직 None) — 렌더가 쓸
+        # 기하와 같아야 라벨이 검정 밴드를 침범하지 않는다
+        band = finalize.video_band_ratio(
+            finalize.design_from_style(stage4.RECAP_PRESET))
         style_doc, audit = stage4.run_style(get_gemini(), draft_path, story_doc,
-                                            windows=win, log=log)
+                                            windows=win, labels=label_plan,
+                                            band=band, log=log)
         _write_json(style_ckpt, {"fingerprint": fingerprint, "style": style_doc})
         step("style", elapsed=round(time.time() - t0, 1),
              attempts=len(audit["attempts"]), fallback=audit.get("fallback", False),

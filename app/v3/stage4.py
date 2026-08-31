@@ -62,6 +62,8 @@ STYLE_ALLOWED: dict[str, Any] = {
     "aspect_ratio": re.compile(r"^\d{1,2}:\d{1,2}$"),
 }
 POP_LEVELS = ("none", "soft", "strong")
+LABEL_X_RANGE = (0.18, 0.82)   # 가로 여백 — 캔버스 끝에 붙으면 글자가 잘린다
+LABEL_BAND_MARGIN = 0.04       # 영상 밴드 안쪽 여백(검정 밴드 침범 방지)
 CROP_ANCHORS = ("left", "center", "right")
 
 
@@ -160,7 +162,8 @@ def sample_beat_frames(draft_path: Path, windows: list[dict], out_dir: Path,
 
 # ── Stage 4 — style (12) ────────────────────────────────────────────────────
 
-def validate_style_response(resp: Any, n_beats: int) \
+def validate_style_response(resp: Any, n_beats: int,
+                            band: tuple[float, float] = (0.28, 0.72)) \
         -> tuple[dict | None, list[str], list[str]]:
     """모델 응답 → (정규화 스타일 | None, 반려 사유, 노트). 순수.
 
@@ -202,6 +205,27 @@ def validate_style_response(resp: Any, n_beats: int) \
                     continue
             design[k] = v
 
+    # M12: 라벨 위치 — 모델이 화면을 보고 정한 x·y(0~1). 밴드 밖·형식 오류는
+    # 기본값으로 보정(라벨을 잃지 않는다 — 위치 실패가 라벨 소실이 되면 안 된다).
+    labels_out: list[dict] = []
+    for item in resp.get("labels") or []:
+        if not isinstance(item, dict):
+            continue
+        idx = item.get("index")
+        if not isinstance(idx, int) or isinstance(idx, bool) or idx < 0:
+            problems.append(f"labels index 가 정수가 아님: {idx!r}")
+            continue
+        try:
+            x, y = float(item["x"]), float(item["y"])
+        except (KeyError, TypeError, ValueError):
+            problems.append(f"labels[{idx}] x·y 가 필요하다(0~1 비율)")
+            continue
+        cx = min(max(x, LABEL_X_RANGE[0]), LABEL_X_RANGE[1])
+        cy = min(max(y, band[0] + LABEL_BAND_MARGIN), band[1] - LABEL_BAND_MARGIN)
+        if (cx, cy) != (x, y):
+            notes.append(f"labels[{idx}] 위치 보정: ({x:.2f},{y:.2f})→({cx:.2f},{cy:.2f})")
+        labels_out.append({"index": idx, "x": round(cx, 3), "y": round(cy, 3)})
+
     beats_out: list[dict] = []
     for b in resp.get("beats") or []:
         if not isinstance(b, dict):
@@ -222,7 +246,7 @@ def validate_style_response(resp: Any, n_beats: int) \
         beats_out.append({"number": num, "crop": crop, "pop": pop, "sfx_cue": sfx})
     if problems:
         return None, problems, notes
-    return {"design": design, "beats": beats_out,
+    return {"design": design, "beats": beats_out, "labels": labels_out,
             "notes": str(resp.get("notes") or "").strip()[:400]}, [], notes
 
 
@@ -240,7 +264,11 @@ STYLE_PROMPT = """당신은 쇼츠 아트디렉터다. 첨부한 영상은 리�
 ## 비트 구성 (영상 내 시각 — 편집본 좌표)
 {beats_block}
 
+## 화면에 얹을 괄호 라벨 (시각은 이 영상 기준)
+{labels_block}
+
 ## 판단 기준
+0. **라벨 위치** — 위 각 라벨의 시각으로 가서 그 순간 화면을 보고 x·y(0~1 비율)를 정하라. 인물 얼굴·방송 자체 자막(보통 화면 중앙~하단)·자막 밴드를 **피해서** 빈 곳에 놓는다. 세로는 영상 밴드({band_lo:.2f}~{band_hi:.2f}) 안이어야 하고, 가로는 0.18~0.82. 기본값(중앙 0.5/{band_mid:.2f})이 그 순간 무언가를 덮으면 반드시 옮겨라.
 1. 자막 가독성: 화면 하단이 밝거나 복잡하면 subtitle_color/외곽선 대비, 필요시 subtitle_y_margin 조정.
 2. 제목 밴드: 기본 유지 — 화면과 무관(검정 밴드 위)이라 특별한 사유 없으면 손대지 않는다.
 3. 비트별: crop(인물이 왼/오른쪽에 쏠린 구간 → left/right, 기본 center) · pop(팝인 강도 none/soft/strong — **실제 컷 리듬을 보고**: 컷이 잦고 호흡 빠른 비트만 soft+) · sfx(리듬 전환점의 효과음 큐 한 줄, 필수 아님).
@@ -249,11 +277,14 @@ STYLE_PROMPT = """당신은 쇼츠 아트디렉터다. 첨부한 영상은 리�
 ## 출력 (JSON 만)
 {{"design": {{"subtitle_color": "#FFFFFF"}},
  "beats": [{{"number": 0, "crop": "center", "pop": "soft", "sfx": null}}],
+ "labels": [{{"index": 0, "x": 0.72, "y": 0.36}}],
  "notes": "판단 근거 한두 문장"}}"""
 
 
 def build_style_prompt(preset: dict, story_doc: dict, reject_note: str = "",
-                       windows: list[dict] | None = None) -> str:
+                       windows: list[dict] | None = None,
+                       labels: list[dict] | None = None,
+                       band: tuple[float, float] = (0.28, 0.72)) -> str:
     if windows:
         # draft 는 편집본 좌표 — 원본 절대초(b.time)를 보여주면 영상 속 시각과 어긋난다
         by_beat = {w["beat"]: w for w in windows}
@@ -270,9 +301,14 @@ def build_style_prompt(preset: dict, story_doc: dict, reject_note: str = "",
     reject_block = ""
     if reject_note:
         reject_block = f"\n## ⚠ 직전 제안 반려 — 고쳐서 다시\n{reject_note}\n"
+    labels_block = "\n".join(
+        f"- index {lb['index']} · {lb['start_sec']:.1f}~{lb['end_sec']:.1f}s · "
+        f"{lb['text']}" for lb in labels or []) or "- (라벨 없음)"
     return STYLE_PROMPT.format(
         preset_block=json.dumps(preset, ensure_ascii=False, indent=1),
-        beats_block=beats_block,
+        beats_block=beats_block, labels_block=labels_block,
+        band_lo=band[0] + LABEL_BAND_MARGIN, band_hi=band[1] - LABEL_BAND_MARGIN,
+        band_mid=(band[0] + band[1]) / 2,
         allowed_keys=", ".join(sorted(STYLE_ALLOWED)),
         reject_block=reject_block)
 
@@ -317,6 +353,8 @@ def _call_style_model(gemini, draft_path: Path, prompt: str) -> dict:
 
 def run_style(gemini, draft_path: Path, story_doc: dict, *,
               preset: dict | None = None, windows: list[dict] | None = None,
+              labels: list[dict] | None = None,
+              band: tuple[float, float] = (0.28, 0.72),
               log=print) -> tuple[dict, dict]:
     """Stage 4 실행 → (style 문서, 감사 기록). 소진 시 프리셋 폴백 — 렌더는 항상 간다."""
     preset = dict(preset if preset is not None else RECAP_PRESET)
@@ -326,7 +364,8 @@ def run_style(gemini, draft_path: Path, story_doc: dict, *,
     styled: dict | None = None
     reject_note = ""
     for attempt in range(1 + MAX_REASKS):
-        prompt = build_style_prompt(preset, story_doc, reject_note, windows=windows)
+        prompt = build_style_prompt(preset, story_doc, reject_note, windows=windows,
+                                    labels=labels, band=band)
         log(f"  [v3/style] Flash vision 요청 (시도 {attempt + 1}/{1 + MAX_REASKS}, "
             f"draft {STYLE_SAMPLE_FPS:g}fps 표본)")
         t0 = time.time()
@@ -334,7 +373,7 @@ def run_style(gemini, draft_path: Path, story_doc: dict, *,
         notes: list[str] = []
         try:
             resp = _call_style_model(gemini, draft_path, prompt)
-            styled, problems, notes = validate_style_response(resp, n_beats)
+            styled, problems, notes = validate_style_response(resp, n_beats, band=band)
         except ValueError as e:
             styled, problems = None, [f"응답 오류: {e}"]
         audit["attempts"].append({"attempt": attempt + 1,
@@ -346,7 +385,8 @@ def run_style(gemini, draft_path: Path, story_doc: dict, *,
         reject_note = "\n".join(f"- {p}" for p in problems[:15])
     if styled is None:
         log("  [v3/style] ⚠ 재질의 소진 — 프리셋 그대로(스타일 무변경 폴백)")
-        styled = {"design": {}, "beats": [], "notes": "재질의 소진 — 프리셋 폴백"}
+        styled = {"design": {}, "beats": [], "labels": [],
+                  "notes": "재질의 소진 — 프리셋 폴백"}
         audit["fallback"] = True
 
     design = {**preset, **styled["design"]}
@@ -354,7 +394,9 @@ def run_style(gemini, draft_path: Path, story_doc: dict, *,
         "schema": "v3_style/v1",
         "design": design,
         "diff": style_diff(preset, styled["design"]),
-        "v3_style": {"beats": styled["beats"], "notes": styled["notes"]},
+        "v3_style": {"beats": styled["beats"],
+                     "labels": styled.get("labels") or [],
+                     "notes": styled["notes"]},
     }
     audit["diff_keys"] = sorted(doc["diff"])
     return doc, audit

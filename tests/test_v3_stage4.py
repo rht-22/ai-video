@@ -220,3 +220,56 @@ def test_renderer_muted_windows_additive():
     muted = _build_audio_filter(
         RenderInputs(**base, muted_windows=[(5.0, 10.0)]), 1, 0)
     assert "volume=enable='between(t,5.000,10.000)':volume=0," in muted
+
+
+# ── M12: 라벨 위치를 Stage 4 가 화면 보고 정한다 ──────────────────────────
+
+def test_video_band_ratio_matches_renderer_geometry():
+    """라벨은 영상 밴드 **안**에 있어야 한다 — 검정 밴드는 제목·로고 자리."""
+    import dataclasses
+    from app.config import DesignConfig
+    lo, hi = finalize.video_band_ratio(
+        dataclasses.replace(DesignConfig(), aspect_ratio="5:4"))
+    assert (round(lo * 1920), round(hi * 1920)) == (528, 1392)   # renderer 와 동일
+    lo2, hi2 = finalize.video_band_ratio(
+        dataclasses.replace(DesignConfig(), aspect_ratio="16:9"))
+    assert hi2 - lo2 < hi - lo                                   # 납작할수록 좁다
+
+
+def test_style_validates_label_positions_and_clamps():
+    band = (0.275, 0.725)
+    styled, problems, notes = stage4.validate_style_response(
+        {"design": {}, "labels": [{"index": 0, "x": 0.72, "y": 0.36},
+                                  {"index": 1, "x": 0.99, "y": 0.05}]}, 3, band=band)
+    assert problems == []
+    assert styled["labels"][0] == {"index": 0, "x": 0.72, "y": 0.36}
+    # 밴드·가로 범위 밖은 **보정**한다(라벨을 잃지 않는다) + 노트 기록
+    assert styled["labels"][1]["x"] == pytest.approx(0.82)
+    assert styled["labels"][1]["y"] == pytest.approx(0.315)
+    assert any("위치 보정" in n for n in notes)
+
+
+def test_style_rejects_malformed_label_entries():
+    _, problems, _ = stage4.validate_style_response(
+        {"design": {}, "labels": [{"index": "0", "x": 0.5, "y": 0.5}]}, 3)
+    assert any("index" in p for p in problems)
+    _, p2, _ = stage4.validate_style_response(
+        {"design": {}, "labels": [{"index": 0}]}, 3)
+    assert any("x·y" in p for p in p2)
+
+
+def test_plan_labels_uses_anchor_and_is_shared():
+    """style 과 render 가 **같은 목록**을 봐야 index 가 맞는다(M12 계약)."""
+    story = {"beats": [{"number": 0, "role": "climax",
+                        "span_ids": ["s1", "s2"],
+                        "labels": [{"text": "(놀람)", "span_id": "s2"}],
+                        "time": {"start": format_ts(100.0), "end": format_ts(110.0)}}]}
+    plan = {"timeline": [
+        {"clip_start_sec": 100.0, "clip_end_sec": 105.0, "role": "climax",
+         "use_original_audio": True, "subtitle": "", "span_ids": ["s1"]},
+        {"clip_start_sec": 105.0, "clip_end_sec": 110.0, "role": "climax",
+         "use_original_audio": True, "subtitle": "", "span_ids": ["s2"]}]}
+    out = finalize.plan_labels(story, plan)
+    assert len(out) == 1 and out[0]["index"] == 0
+    assert out[0]["start_sec"] == pytest.approx(5.0)     # 앵커 s2 의 편집본 시각
+    assert out[0]["end_sec"] == pytest.approx(9.0)       # +4s 상한
