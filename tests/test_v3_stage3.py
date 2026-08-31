@@ -93,15 +93,37 @@ def _resp(beats):
 
 
 def test_validate_ok_and_label_paren_note():
+    """M11: narration 은 배열, labels 는 span 앵커 배열. 구 형식(문자열)도 받는다."""
     story, problems, notes = st.validate_story_response(_resp([
-        {"role": "hook", "span_ids": ["sp0000", "sp0001"], "narration": "내레이션",
-         "label": None},
-        {"role": "climax", "span_ids": ["sp0005"], "narration": None,
-         "label": "팩폭"},
+        {"role": "hook", "span_ids": ["sp0000", "sp0001"],
+         "narration": ["첫 문장이었죠", "둘째 문장입니다"], "labels": []},
+        {"role": "climax", "span_ids": ["sp0005"], "narration": [],
+         "labels": [{"text": "팩폭", "span_id": "sp0005"}]},
     ]), IDX, ORDER)
     assert problems == []
-    assert story["beats"][1]["label"] == "(팩폭)"
+    assert story["beats"][0]["narration"] == ["첫 문장이었죠", "둘째 문장입니다"]
+    assert story["beats"][1]["labels"] == [{"text": "(팩폭)", "span_id": "sp0005"}]
     assert any("괄호 보정" in n for n in notes)
+
+
+def test_validate_accepts_legacy_string_forms():
+    story, problems, _ = st.validate_story_response(_resp([
+        {"role": "hook", "span_ids": ["sp0000"], "narration": "한 문장",
+         "label": "(구형식)"},
+        {"role": "climax", "span_ids": ["sp0005"], "narration": None, "label": None},
+    ]), IDX, ORDER)
+    assert problems == []
+    assert story["beats"][0]["narration"] == ["한 문장"]
+    assert story["beats"][0]["labels"] == [{"text": "(구형식)", "span_id": "sp0000"}]
+
+
+def test_validate_rejects_label_anchor_outside_beat():
+    _, problems, _ = st.validate_story_response(_resp([
+        {"role": "hook", "span_ids": ["sp0000"], "narration": [],
+         "labels": [{"text": "(밖)", "span_id": "sp0005"}]},
+        {"role": "climax", "span_ids": ["sp0005"], "narration": [], "labels": []},
+    ]), IDX, ORDER)
+    assert any("앵커" in p for p in problems)
 
 
 def test_validate_rejects_unknown_and_noncontiguous_and_reuse():
@@ -486,3 +508,79 @@ def test_rubric_tie_break_is_deterministic():
     one = _cand([{"role": "hook", "span_ids": ["a"], "narration": None, "label": None}])
     best, table = pick_best([one, dict(one)], idx, target_sec=5.0)
     assert best == 0 and table[0]["score"] == table[1]["score"]
+
+
+# ── M11: 비트당 복수 내레이션·라벨(레퍼런스 리듬) ──────────────────────────
+
+def test_multi_narration_places_sequentially():
+    """레퍼런스 실측: 훅에 짧은 문장 둘이 이어 붙는다(0.20~2.20 + 2.20~4.35).
+    한 런 안에서 커서가 전진하며 두 문장이 겹치지 않게 놓여야 한다."""
+    grid2 = _mk_grid([(0.0, 8.0, False, "")])          # 무성 8초 런 하나
+    s2 = _mk_stage2(grid2, [(0, 0, 3, "m")])
+    idx, _ = st.build_span_index(s2, grid2)
+    beats = [{"role": "hook", "span_ids": ["sp0000"],
+              "narration": ["열다섯자짜리첫문장이죠", "열다섯자짜리둘째문장"],
+              "labels": []}]
+    cues, dropped = st.plan_narration_slots(beats, idx)
+    assert len(cues) == 2 and not dropped
+    assert cues[0]["line"] == 0 and cues[1]["line"] == 1
+    assert cues[1]["source_time_sec"] >= cues[0]["source_end_sec"] - 1e-6  # 겹침 없음
+    assert all(c["mode"] == "silent" for c in cues)
+
+
+def test_multi_narration_drops_tail_when_window_runs_out():
+    """창이 모자라면 **뒤 문장부터** 버린다 — 앞 문장이 서사에 더 중요하다."""
+    # 창 1.5s — 첫 문장(견적 1.07s) 뒤 남는 0.43s 는 최소 노출(1.0s)에 못 미친다
+    grid2 = _mk_grid([(0.0, 1.5, False, "")])
+    s2 = _mk_stage2(grid2, [(0, 0, 3, "m")])
+    idx, _ = st.build_span_index(s2, grid2)
+    beats = [{"role": "hook", "span_ids": ["sp0000"],
+              "narration": ["첫문장은들어간다", "둘째문장은자리가없다", "셋째도없다"],
+              "labels": []}]
+    cues, dropped = st.plan_narration_slots(beats, idx)
+    assert len(cues) == 1 and cues[0]["text"] == "첫문장은들어간다"
+    assert [d["text"] for d in dropped] == ["둘째문장은자리가없다", "셋째도없다"]
+    assert beats[0]["narration"] == ["첫문장은들어간다"]    # 산출에 반영
+
+
+def test_multi_narration_uses_leftover_window_as_fit():
+    """남은 창이 최소 노출 이상이면 뒤 문장도 fit 으로 넣는다(버리기 전에 살린다)."""
+    grid2 = _mk_grid([(0.0, 2.2, False, "")])
+    s2 = _mk_stage2(grid2, [(0, 0, 3, "m")])
+    idx, _ = st.build_span_index(s2, grid2)
+    beats = [{"role": "hook", "span_ids": ["sp0000"],
+              "narration": ["첫문장은들어간다", "둘째문장은자리가없다"], "labels": []}]
+    cues, dropped = st.plan_narration_slots(beats, idx)
+    assert len(cues) == 2 and not dropped
+    assert cues[1]["mode"] == "fit"
+    assert cues[1]["source_end_sec"] <= 2.2 + 1e-6
+
+
+def test_multi_narration_mute_scope_stays_window_local():
+    """복수 문장에서도 뮤트는 창과 겹친 유성 span 만(M3 리뷰 확정 규율 유지)."""
+    grid2 = _mk_grid([(0.0, 3.0, True, "잡담"), (3.0, 9.0, False, ""),
+                      (9.0, 12.0, True, "중요")])
+    s2 = _mk_stage2(grid2, [(0, 2, 2, "m")])
+    idx, _ = st.build_span_index(s2, grid2)
+    idx["sp0002"]["importance"] = 5                    # 뮤트 금지 대상
+    beats = [{"role": "context", "span_ids": ["sp0000", "sp0001", "sp0002"],
+              "narration": ["첫문장", "둘째문장"], "labels": []}]
+    cues, _ = st.plan_narration_slots(beats, idx)
+    assert cues and st.verify_tts_conflicts(cues, beats, idx) == []
+    assert "sp0002" not in beats[0]["muted_span_ids"]
+
+
+def test_labels_anchor_to_span_not_beat_start():
+    """레퍼런스: 라벨이 대사 순간에 붙는다. 앵커 span 을 담은 클립에 실려야 한다."""
+    beats = [{"number": 0, "role": "climax",
+              "span_ids": ["sp0005", "sp0006"], "narration": [],
+              "labels": [{"text": "(갑자기 청혼)", "span_id": "sp0006"}],
+              "muted_span_ids": [],
+              "time": {"start": schemas.format_ts(14.0),
+                       "end": schemas.format_ts(23.0)}}]
+    doc = {"title": {"line1": "a", "line2": "b"}, "beats": beats}
+    plan = assemble.assemble_edit_plan(doc, IDX, video_path="/v", work_title="w")
+    # sp0005·sp0006 은 소스 연속이라 한 클립 — 그 클립에 라벨이 실린다
+    labeled = [c for c in plan["timeline"] if c["subtitle"]]
+    assert labeled and labeled[0]["subtitle"] == "(갑자기 청혼)"
+    assert "sp0006" in labeled[0]["span_ids"]

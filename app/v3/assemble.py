@@ -62,11 +62,14 @@ def assemble_edit_plan(story_doc: dict, span_index: dict[str, dict], *,
                     group = []
             group.append(sid)
         flush(group)
-        # 라벨은 비트의 첫 클립에 싣는다(C1 subtitle 필드 — 편집실 오버레이 재료)
-        if b.get("label"):
-            first = len(timeline) - sum(
-                1 for c in timeline if c["span_ids"][0] in set(b["span_ids"]))
-            timeline[first]["subtitle"] = b["label"]
+        # 라벨은 **앵커 span 을 담은 클립**의 subtitle 필드에 싣는다(C1 — 편집실
+        # 오버레이 재료). M11: 비트 시작 고정이 아니라 대사 순간 앵커.
+        for lb in b.get("labels") or ([{"text": b["label"], "span_id": b["span_ids"][0]}]
+                                      if b.get("label") else []):
+            for c in timeline:
+                if lb.get("span_id") in (c.get("span_ids") or []):
+                    c["subtitle"] = lb["text"]
+                    break
 
     grid_marks = sorted({round(span_index[s][k], 3)
                          for c in timeline for s in c["span_ids"]

@@ -155,16 +155,42 @@ def validate_story_response(resp: Any, span_index: dict[str, dict],
             problems.append(f"beats[{k}] span 재사용: {reused[:5]} — 한 span 은 한 비트에만")
             continue
         used.update(ids)
-        narration = b.get("narration")
-        narration = str(narration).strip() if isinstance(narration, str) and \
-            str(narration).strip() else None
-        label = b.get("label")
-        label = str(label).strip() if isinstance(label, str) and str(label).strip() else None
-        if label and not (label.startswith("(") and label.endswith(")")):
-            notes.append(f"beats[{k}] 라벨 괄호 보정: {label!r}")
-            label = f"({label.strip('()')})"
+        # M11-A: 내레이션은 **짧은 문장 배열** — 레퍼런스 실측(1.4~2.2s ×2)의 리듬.
+        # 단일 문자열도 계속 받는다(하위호환).
+        raw_nar = b.get("narration")
+        if isinstance(raw_nar, str):
+            narration = [raw_nar.strip()] if raw_nar.strip() else []
+        elif isinstance(raw_nar, list):
+            narration = [str(x).strip() for x in raw_nar if str(x).strip()]
+        else:
+            narration = []
+
+        # M11-B: 라벨은 **복수 + span 앵커** — 레퍼런스는 대사 순간에 붙는다.
+        raw_labels = b.get("labels")
+        if raw_labels is None and b.get("label") is not None:
+            raw_labels = [b["label"]]            # 하위호환: 단일 라벨 → 첫 span 앵커
+        labels: list[dict] = []
+        for li, item in enumerate(raw_labels or []):
+            if isinstance(item, str):
+                text, anchor = item.strip(), ids[0]
+            elif isinstance(item, dict):
+                text = str(item.get("text") or "").strip()
+                anchor = item.get("span_id") or ids[0]
+            else:
+                problems.append(f"beats[{k}] labels[{li}] 형식 오류")
+                continue
+            if not text:
+                continue
+            if anchor not in ids:
+                problems.append(f"beats[{k}] labels[{li}] 앵커 {anchor!r} 가 이 비트의 "
+                                f"span 이 아니다 — 비트 안 span 을 골라라")
+                continue
+            if not (text.startswith("(") and text.endswith(")")):
+                notes.append(f"beats[{k}] 라벨 괄호 보정: {text!r}")
+                text = f"({text.strip('()')})"
+            labels.append({"text": text, "span_id": anchor})
         beats.append({"role": role, "span_ids": list(ids),
-                      "narration": narration, "label": label})
+                      "narration": narration, "labels": labels})
 
     if template == "recap_dialogue" and beats \
             and not any(b["role"] == "climax" for b in beats):
@@ -229,68 +255,83 @@ def plan_narration_slots(beats: list[dict], span_index: dict[str, dict]) \
     cues: list[dict] = []
     dropped: list[dict] = []
     for bi, b in enumerate(beats):
-        text = b.get("narration")
-        if not text:
+        raw = b.get("narration")
+        texts = ([raw] if isinstance(raw, str) and raw.strip()
+                 else [str(x) for x in (raw or []) if str(x).strip()])
+        if not texts:
             b["muted_span_ids"] = []
             continue
-        est = max(NARRATION_MIN_SEC, len("".join(text.split())) / NARRATION_CPS)
+        # M11-A: 문장들을 비트 안 창에 **순서대로** 배치한다(레퍼런스는 짧은 문장
+        # 둘이 이어 붙는다). 커서(cursor)가 이미 쓴 시각을 기억해 겹치지 않는다.
+        placed_muted: list[str] = []
+        cursor = 0.0
+        for ti, text in enumerate(texts):
+            est = max(NARRATION_MIN_SEC, len("".join(text.split())) / NARRATION_CPS)
 
-        def runs(allow_mute: bool) -> list[list[str]]:
-            """덮을 수 있는 span 의 **소스 연속** 런 — grid 인덱스 인접이어도 0.5s
-            미만 전사 구멍으로 소스가 끊길 수 있다(적대 리뷰 확정: 창 끝이 구멍에
-            떨어져 cue 소실+뮤트만 남는 재현). 구멍에서도 런을 끊는다."""
-            out: list[list[str]] = []
-            cur: list[str] = []
-            for sid in b["span_ids"]:
-                sp = span_index[sid]
-                ok = (not sp["is_audio"]) or \
-                    (allow_mute and sp["importance"] <= MUTE_MAX_IMPORTANCE)
-                broken = bool(cur) and \
-                    abs(sp["t_in"] - span_index[cur[-1]]["t_out"]) > 0.005
-                if ok and not broken:
-                    cur.append(sid)
-                else:
-                    if cur:
-                        out.append(cur)
-                    cur = [sid] if ok else []
-            if cur:
-                out.append(cur)
-            return out
+            def runs(allow_mute: bool) -> list[list[str]]:
+                """덮을 수 있는 span 의 **소스 연속** 런 — grid 인덱스 인접이어도 0.5s
+                미만 전사 구멍으로 소스가 끊길 수 있다(적대 리뷰 확정: 창 끝이 구멍에
+                떨어져 cue 소실+뮤트만 남는 재현). 구멍에서도 런을 끊는다."""
+                out: list[list[str]] = []
+                cur: list[str] = []
+                for sid in b["span_ids"]:
+                    sp = span_index[sid]
+                    ok = (not sp["is_audio"]) or \
+                        (allow_mute and sp["importance"] <= MUTE_MAX_IMPORTANCE)
+                    broken = bool(cur) and \
+                        abs(sp["t_in"] - span_index[cur[-1]]["t_out"]) > 0.005
+                    if ok and not broken:
+                        cur.append(sid)
+                    else:
+                        if cur:
+                            out.append(cur)
+                        cur = [sid] if ok else []
+                if cur:
+                    out.append(cur)
+                return out
 
-        def run_dur(run: list[str]) -> float:
-            return sum(span_index[s]["t_out"] - span_index[s]["t_in"] for s in run)
+            def free(run: list[str]) -> tuple[float, float]:
+                """이 런에서 **아직 안 쓴** 구간(커서 이후) → (시작, 남은 길이)."""
+                a = max(span_index[run[0]]["t_in"], cursor)
+                b_end = span_index[run[-1]]["t_out"]
+                return a, max(0.0, b_end - a)
 
-        chosen: list[str] | None = None
-        mode = None
-        for allow_mute in (False, True):                      # ⓐ 먼저, 그다음 ⓑ
-            fits = [r for r in runs(allow_mute) if run_dur(r) >= est]
-            if fits:
-                chosen, mode = fits[0], ("silent" if not allow_mute else "muted")
+            chosen: list[str] | None = None
+            mode = None
+            for allow_mute in (False, True):                  # ⓐ 먼저, 그다음 ⓑ
+                fits = [r for r in runs(allow_mute) if free(r)[1] >= est]
+                if fits:
+                    chosen, mode = fits[0], ("silent" if not allow_mute else "muted")
+                    break
+            if chosen is None:                                # 견적 미달 — 최장 런에 fit
+                all_runs = [r for r in runs(True) if free(r)[1] >= NARRATION_MIN_SEC]
+                if all_runs:
+                    chosen = max(all_runs, key=lambda r: (free(r)[1],
+                                                          -span_index[r[0]]["pos"]))
+                    mode = "fit"
+            if chosen is None:                                # ⓒ — 드랍 + 기록
+                # 뒤 문장부터 버린다(앞 문장이 살아남는 쪽이 서사에 낫다)
+                for rest in texts[ti:]:
+                    dropped.append({"beat": bi, "text": rest,
+                                    "reason": "남은 창 없음(importance≥4 유성뿐)"})
                 break
-        if chosen is None:                                    # 견적 미달 — 최장 런으로 fit
-            all_runs = runs(True)
-            if all_runs:
-                longest = max(all_runs, key=lambda r: (run_dur(r), -span_index[r[0]]["pos"]))
-                if run_dur(longest) >= NARRATION_MIN_SEC:
-                    chosen, mode = longest, "fit"
-        if chosen is None:                                    # ⓒ — 드랍 + 기록
-            dropped.append({"beat": bi, "text": text,
-                            "reason": "무성/뮤트 가능 창 없음(importance≥4 유성뿐)"})
-            b["narration"] = None
-            b["muted_span_ids"] = []
-            continue
-        w0 = span_index[chosen[0]]["t_in"]
-        w1 = min(span_index[chosen[-1]]["t_out"], w0 + max(est, NARRATION_MIN_SEC))
-        # 뮤트는 **창과 겹치는** 유성 span 만 — 런 전체 뮤트는 창 밖 대사까지
-        # 무음으로 만들었다(적대 리뷰 확정: 내레이션도 대사도 없는 구간 재현)
-        muted = [s for s in chosen if span_index[s]["is_audio"]
-                 and span_index[s]["t_in"] < w1 - 0.01
-                 and span_index[s]["t_out"] > w0 + 0.01]
-        b["muted_span_ids"] = muted
-        cues.append({"beat": bi, "text": text, "mode": mode,
-                     "source_time_sec": round(w0, 3),
-                     "source_end_sec": round(w1, 3),
-                     "muted_span_ids": muted})
+            w0, avail = free(chosen)
+            w1 = min(span_index[chosen[-1]]["t_out"],
+                     w0 + max(min(est, avail), NARRATION_MIN_SEC))
+            # 뮤트는 **창과 겹치는** 유성 span 만 — 런 전체 뮤트는 창 밖 대사까지
+            # 무음으로 만들었다(적대 리뷰 확정: 내레이션도 대사도 없는 구간 재현)
+            muted = [s for s in chosen if span_index[s]["is_audio"]
+                     and span_index[s]["t_in"] < w1 - 0.01
+                     and span_index[s]["t_out"] > w0 + 0.01]
+            placed_muted.extend(m for m in muted if m not in placed_muted)
+            cursor = w1
+            cues.append({"beat": bi, "line": ti, "text": text, "mode": mode,
+                         "source_time_sec": round(w0, 3),
+                         "source_end_sec": round(w1, 3),
+                         "muted_span_ids": muted})
+        b["muted_span_ids"] = placed_muted
+        placed = [c["text"] for c in cues if c["beat"] == bi]
+        b["narration"] = placed or None
     return cues, dropped
 
 
@@ -374,7 +415,7 @@ def fallback_highlight(span_index: dict[str, dict], span_order: list[str],
         if len(beats) >= PIECES_MAX or (total >= target_sec and len(beats) >= PIECES_MIN):
             break
         beats.append({"role": "build", "span_ids": list(ids),
-                      "narration": None, "label": None})
+                      "narration": None, "labels": []})
         total += sum(span_index[s]["t_out"] - span_index[s]["t_in"] for s in ids)
     beats.sort(key=lambda b: span_index[b["span_ids"][0]]["t_in"])   # 시각순 편성
     return {"template": "highlight", "reason": "재질의 소진 — 코드 폴백(최소 1개 보장)",
@@ -499,8 +540,8 @@ PROMPT_TEMPLATE = """당신은 리캡 쇼츠 구성작가다. 아래 기록(전�
 1. 목표 {target_sec:.0f}초(상한 {max_sec:.0f}초) · 조각 {pieces_min}~{pieces_max}개.
 2. 비트 하나 = **소스에서 이어지는 span 연속 범위 하나**. 떨어진 구간을 묶으려면 비트를 나눠라. 편성 순서는 자유(원거리 결합 가능)지만 이야기가 통해야 한다.
 3. 한 span 은 한 비트에만. importance 높은 span 을 우선하되, 대사의 호흡(문장 시작~끝)을 자르지 마라.
-4. 내레이션(narration)은 hook/context/bridge 비트에만 — 서술체(~했어요/~했죠), 문장당 2~4초, 그 비트의 무성 구간 위에 얹힌다(대사 위에 얹지 마라).
-5. 라벨(label)은 "(팩폭 시전)" 식 괄호 심리 강조 — 꼭 필요한 비트에만 0~3개.
+4. 내레이션(narration)은 hook/context/bridge 비트에만, **짧은 문장 2~3개의 배열**로 써라 — 문장당 1.5~2.5초(레퍼런스 실측: "천재에게 반주를 부탁한 여학생" 2.0s + "돌아온 답은 최악이었죠" 2.15s). 한 문장이 길면 팝인 리듬이 죽고 얹을 창을 못 찾아 잘린다. 서술체(~했어요/~했죠), 대사 위에 얹지 마라.
+5. 라벨(labels)은 "(팩폭 시전)" 식 괄호 심리 강조 — **편 전체에서 2~4개**, 심리·상황이 꺾이는 **그 대사 순간의 span** 에 앵커한다(`{{"text": "(팩폭 시전)", "span_id": "sp0123"}}`). 앵커는 반드시 그 비트의 span 중 하나.
 6. 제목 2줄: line1=상황(관계+사건), line2=펀치. 각 {title_max}자 이내.
 7. 서론 금지 — 인사말·자기소개·상황 설명성 대사 span 은 hook 에 채택하지 않는다(후킹은 내레이션과 사건 한복판 대사의 몫이다).
 8. 대사 신뢰 — `[대사없음]` span 은 **대사 인용 비트로 쓰지 마라**(무성 재료·장면으로는 가능). `[저확신 …]` 은 받아쓰기가 흔들린 구간이라 화면 자막이 깨질 수 있으니 가급적 피하고, 꼭 필요하면 그 비트의 다른 span 으로 대체하라. `[청취]` 는 확정된 대사다(그대로 써도 된다).
@@ -516,8 +557,8 @@ PROMPT_TEMPLATE = """당신은 리캡 쇼츠 구성작가다. 아래 기록(전�
  {{"template": "recap_dialogue", "reason": "선택 사유 한 문장",
    "title": {{"line1": "…", "line2": "…"}},
    "beats": [
-    {{"role": "hook", "span_ids": ["sp0000", "sp0001"], "narration": "…" , "label": null}},
-    {{"role": "climax", "span_ids": ["sp0102"], "narration": null, "label": "(…)"}}
+    {{"role": "hook", "span_ids": ["sp0000", "sp0001"], "narration": ["짧은 문장1", "짧은 문장2"], "labels": []}},
+    {{"role": "climax", "span_ids": ["sp0102", "sp0103"], "narration": [], "labels": [{{"text": "(…)", "span_id": "sp0103"}}]}}
    ]}}
 ]}}"""
 
@@ -612,7 +653,7 @@ def _beat_doc(beats: list[dict], span_index: dict[str, dict]) -> list[dict]:
             "time": {"start": schemas.format_ts(span_index[first]["t_in"]),
                      "end": schemas.format_ts(span_index[last]["t_out"])},
             "narration": b.get("narration"),
-            "label": b.get("label"),
+            "labels": b.get("labels") or [],
             "muted_span_ids": list(b.get("muted_span_ids") or []),
         })
     return out

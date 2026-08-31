@@ -37,6 +37,7 @@ from app.v3 import assemble, schemas
 PROGRESSION_MAX_GAP_SEC = 3.0     # §9-D 진행감 — 2~3초마다 화면 변화
 LOOP_DIFF_WARN = 60.0             # 첫/끝 프레임 평균 절대 오차(0~255) 경고 임계
 LABEL_Y_RATIO = 0.526             # 괄호 라벨 세로 위치 — 템플릿 1010/1920 실측
+LABEL_MAX_SEC = 4.0               # 라벨 표시 상한 — 레퍼런스 실측 3.54~4.00s
 QC_FRAME_COUNT = 4
 
 
@@ -145,19 +146,30 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     # 괄호 라벨 — 편집실 자유 텍스트 레이어 재사용(비트 창 전체에 표시)
     labels = []
     offsets = assemble.edited_offsets(plan["timeline"])
+    # M11-B: 라벨은 **앵커 span 시각**에 뜬다(레퍼런스는 대사 순간에 붙는다 —
+    # 비트 시작 고정이면 긴 비트에서 앞부분에만 잠깐 떴다). 앵커 span 의 소스
+    # 시각을 편집본으로 옮겨 배치한다.
+    span_t = {}
+    for c in plan["timeline"]:
+        for sid in c.get("span_ids") or []:
+            span_t.setdefault(sid, float(c["clip_start_sec"]))
     for b in story_doc.get("beats") or []:
-        if not b.get("label"):
-            continue
-        s0 = assemble.to_edited_sec(schemas.parse_ts(b["time"]["start"]), offsets,
-                                    kind="start")
-        s1 = assemble.to_edited_sec(schemas.parse_ts(b["time"]["end"]), offsets,
-                                    kind="end")
-        if s0 is None or s1 is None or s1 <= s0:   # 역전 = 음수 길이 ASS(리뷰 확정)
-            continue
-        labels.append({"text": b["label"], "start_sec": s0,
-                       "end_sec": min(s1, s0 + 4.0),      # 라벨은 최대 4s(템플릿 관행)
-                       "x": 0.5, "y": LABEL_Y_RATIO, "size": 58,
-                       "color": "#FF4A3B", "stroke": "dark"})
+        items = b.get("labels") or ([{"text": b["label"],
+                                      "span_id": (b.get("span_ids") or [None])[0]}]
+                                    if b.get("label") else [])
+        for lb in items:
+            src = span_t.get(lb.get("span_id"))
+            if src is None:
+                src = schemas.parse_ts(b["time"]["start"])
+            s0 = assemble.to_edited_sec(src, offsets, kind="start")
+            s1 = assemble.to_edited_sec(schemas.parse_ts(b["time"]["end"]), offsets,
+                                        kind="end")
+            if s0 is None or s1 is None or s1 <= s0:  # 역전 = 음수 길이 ASS(리뷰 확정)
+                continue
+            labels.append({"text": lb["text"], "start_sec": s0,
+                           "end_sec": min(s1, s0 + LABEL_MAX_SEC),
+                           "x": 0.5, "y": LABEL_Y_RATIO, "size": 58,
+                           "color": "#FF4A3B", "stroke": "dark"})
     texts_path = None
     if labels:
         texts_path = output_dir / "v3_labels.ass"
