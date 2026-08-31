@@ -405,6 +405,33 @@ def refine_exception(gemini, stage1_doc: dict, grid: dict, video_path: Path,
             continue
         new_t = next(c["t"] for c in cands if c["id"] == chosen)
         moved = round(new_t - probe["orig"], 3) if probe["orig"] is not None else None
+        # 오염 방지 비대칭(리뷰·실사고 2호): zone 을 **줄이는** 이동은 해방 구간의
+        # 실체 검증(main 판정) 없이는 기각한다 — 가왕쇼 재실행 실측: teaser.end
+        # 프로브가 예고 속 텍스트 카드를 경계로 오인해 예고 후반 45.5s 를 본편으로
+        # 해방(채점 FAIL 재현). 확대 방향은 손실 위험뿐이라 그대로 간다.
+        shrink_iv = None
+        if probe["orig"] is not None:
+            if probe["edge"] == "start" and new_t > probe["orig"] + 0.01:
+                shrink_iv = (probe["orig"], new_t)
+            elif probe["edge"] == "end" and new_t < probe["orig"] - 0.01:
+                shrink_iv = (new_t, probe["orig"])
+        if shrink_iv and shrink_iv[1] - shrink_iv[0] >= 8.0:
+            vclip = work_dir / f"shrinkcheck_{probe['zone']}_{probe['edge']}.mp4"
+            kind = None
+            try:
+                _cut_probe_clip(ffmpeg, video_path, shrink_iv[0], shrink_iv[1], vclip)
+                vresp = call_probe_budgeted(vclip, VERIFY_PROMPT.format(
+                    t0=schemas.format_ts(shrink_iv[0]),
+                    t1=schemas.format_ts(shrink_iv[1]),
+                    desc=ZONE_DESC.get(probe["zone"], "예고/크레딧")))
+                kind, _vp = validate_verify_response(vresp)
+            except Exception:  # noqa: BLE001 — 판정 불가 = 기각(보수)
+                kind = None
+            if kind != "main":
+                rec["result"] = (f"축소 기각(해방 구간 실체={kind or '판정 불가'}): "
+                                 f"{chosen}={new_t}")
+                audit["probes"].append(rec)
+                continue
         applied = apply_boundary(new_exception, probe, new_t, duration)
         if probe["orig"] is not None and abs(new_t - probe["orig"]) < 0.01:
             rec["result"] = f"원판정 확인(동일 컷 {chosen}={new_t})"

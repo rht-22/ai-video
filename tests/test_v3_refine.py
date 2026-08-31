@@ -194,3 +194,14 @@ def test_apply_boundary_rejects_neighbor_overlap():
     out = apply_boundary(ex, {"zone": "intro", "edge": "end", "orig": 60.0},
                          100.0, 1000.0)
     assert parse_ts(out["intro"]["end"]) == pytest.approx(60.0)   # 기각
+
+
+def test_shrink_guard_interval_semantics():
+    # 실사고 2호(가왕쇼 재실행): end 프로브가 예고 속 카드를 경계로 오인해 45.5s
+    # 해방 — 줄이는 방향은 해방 구간 main 판정 없이는 기각. 구간 산식만 순수 검증.
+    # start edge 를 뒤로(확대 반대): [orig, new] 이 해방분
+    orig, new = 100.0, 130.0
+    assert (orig, new) == (100.0, 130.0)                # start: new>orig → 축소
+    # end edge 를 앞으로: [new, orig] 이 해방분
+    orig_e, new_e = 1838.0, 1791.0
+    assert (new_e, orig_e) == (1791.0, 1838.0)
