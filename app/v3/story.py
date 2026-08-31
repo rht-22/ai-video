@@ -448,11 +448,19 @@ def score_story(story: dict, span_index: dict[str, dict], *,
               if s in span_index and span_index[s]["is_audio"]]
 
     # ① 내레이션 실현율 — 계획한 내레이션 중 실제 슬롯을 얻는 비율
-    planned = sum(1 for b in beats if b.get("narration"))
+    # M11: 분모는 **문장 수**다 — 비트 수로 세면 복수 문장에서 비율이 1 을 넘어
+    # (실측 1.667) 가중치 3.0 이 다른 항목을 압도한다(응집도 0.43 인 안이 이겼다).
+    def _lines(b: dict) -> int:
+        n = b.get("narration")
+        if isinstance(n, str):
+            return 1 if n.strip() else 0
+        return len([x for x in (n or []) if str(x).strip()])
+
+    planned = sum(_lines(b) for b in beats)
     probe = [dict(b, span_ids=list(b["span_ids"])) for b in beats]
     cues, dropped = plan_narration_slots(probe, span_index)
     if planned:
-        narration = len(cues) / planned
+        narration = min(1.0, len(cues) / planned)   # 상한 1.0(항목 정규화)
     elif story.get("template") == "recap_dialogue":
         narration = 0.0        # 3:7 규약이 있는 템플릿에서 내레이션 0 = 규약 위반
     else:
@@ -540,7 +548,7 @@ PROMPT_TEMPLATE = """당신은 리캡 쇼츠 구성작가다. 아래 기록(전�
 1. 목표 {target_sec:.0f}초(상한 {max_sec:.0f}초) · 조각 {pieces_min}~{pieces_max}개.
 2. 비트 하나 = **소스에서 이어지는 span 연속 범위 하나**. 떨어진 구간을 묶으려면 비트를 나눠라. 편성 순서는 자유(원거리 결합 가능)지만 이야기가 통해야 한다.
 3. 한 span 은 한 비트에만. importance 높은 span 을 우선하되, 대사의 호흡(문장 시작~끝)을 자르지 마라.
-4. 내레이션(narration)은 hook/context/bridge 비트에만, **짧은 문장 2~3개의 배열**로 써라 — 문장당 1.5~2.5초(레퍼런스 실측: "천재에게 반주를 부탁한 여학생" 2.0s + "돌아온 답은 최악이었죠" 2.15s). 한 문장이 길면 팝인 리듬이 죽고 얹을 창을 못 찾아 잘린다. 서술체(~했어요/~했죠), 대사 위에 얹지 마라.
+4. 내레이션(narration)은 hook/context/bridge 비트에만, **짧은 문장 2~3개의 배열**로 써라. **문장당 공백 포함 12~16자**를 지켜라 — 레퍼런스 실측이 그 길이다("천재에게 반주를 부탁한 여학생" 15자·2.0s / "돌아온 답은 최악이었죠" 12자·2.15s). 17자를 넘으면 얹을 창을 못 찾아 코드가 잘라내고, 그러면 문장이 아니라 조각이 화면에 나간다(실측: "놀랍게도 승객들은 유람선 관광까지 포기하고…" → "관광 접고 전유진"). 서술체(~했어요/~했죠), 대사 위에 얹지 마라.
 5. 라벨(labels)은 "(팩폭 시전)" 식 괄호 심리 강조 — **편 전체에서 2~4개**, 심리·상황이 꺾이는 **그 대사 순간의 span** 에 앵커한다(`{{"text": "(팩폭 시전)", "span_id": "sp0123"}}`). 앵커는 반드시 그 비트의 span 중 하나.
 6. 제목 2줄: line1=상황(관계+사건), line2=펀치. 각 {title_max}자 이내.
 7. 서론 금지 — 인사말·자기소개·상황 설명성 대사 span 은 hook 에 채택하지 않는다(후킹은 내레이션과 사건 한복판 대사의 몫이다).

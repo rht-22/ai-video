@@ -584,3 +584,15 @@ def test_labels_anchor_to_span_not_beat_start():
     labeled = [c for c in plan["timeline"] if c["subtitle"]]
     assert labeled and labeled[0]["subtitle"] == "(갑자기 청혼)"
     assert "sp0006" in labeled[0]["span_ids"]
+
+
+def test_rubric_narration_ratio_is_bounded_by_lines():
+    """M11 실측 버그: 복수 문장이면 cue 수 > 비트 수라 비율이 1.667 까지 튀어
+    가중치 3.0 이 응집도(0.43)를 압도했다 — 분모는 **문장 수**여야 한다."""
+    idx = _idx([("s", 0, 20, False, None, None, "")])
+    cand = _cand([{"role": "hook", "span_ids": ["s"],
+                   "narration": ["첫문장이었죠", "둘째문장이죠", "셋째문장까지"],
+                   "labels": []}])
+    sc = score_story(cand, idx, target_sec=20.0)
+    assert 0.0 <= sc["parts"]["narration"] <= 1.0
+    assert sc["parts"]["narration"] == 1.0        # 셋 다 배치되면 만점
