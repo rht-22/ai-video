@@ -35,17 +35,24 @@ STYLE_SAMPLE_FPS = 6.0    # Stage 4 가 draft 를 영상으로 볼 때의 Gemini
 
 # 채널 프리셋 초기값 — templates/recap_shorts/template.json 실측(프리미어 수동 제작).
 # 키는 어댑터 design-* 어휘와 1:1(ves CHANNEL_DESIGN_FLAGS) — C5 동결의 이행.
+# 정본: ai-premiere-pro/templates/shinbyeong_shorts/template.json + gw_captions.example
+# (가왕쇼 6화를 사람이 프리미어로 수동 제작한 실측 스펙). 숫자는 그 파일이 근거다.
 RECAP_PRESET: dict[str, Any] = {
-    "title_color": "#FFE94A",       # 1줄 = 상황(노랑)
-    "title_color2": "#FF3B2D",      # 2줄 = 펀치(빨강)
-    "title_size": 88,
-    "title_size2": 92,
-    "subtitle_color": "#FFFFFF",    # 대사 = 흰색
-    "subtitle_size": 62,
+    "title_color": "#FFF04A",       # 1줄 = 셋업(노랑) — 템플릿 그라데이션 시작색
+    "title_color2": "#FF6A2D",      # 2줄 = 펀치(주황~빨강) — 그라데이션 시작색
+    "title_size": 92,               # 템플릿 line1 92px
+    "title_size2": 112,             # 템플릿 line2 112px
+    "subtitle_color": "#FFFFFF",    # 대사 기본 = 흰색(화자별 색은 별도 축)
+    "subtitle_size": 60,            # 템플릿 60px
+    "subtitle_y_margin": 518,       # 템플릿 center_y 1372 → 하단 마진 518
     "tts_color": "#FFE94A",         # 내레이션 = 노랑
     "tts_size": 62,
     "work_color": "#FFFFFF",
-    "aspect_ratio": "5:4",          # 영상 밴드 1080×864 ≈ 템플릿 855px
+    # 영상 밴드 443~1477(높이 1034) — 템플릿 실측. 24:23 → int(1080×23/24)=1035,
+    # 렌더러 짝수 보정으로 1034. video_y 를 명시해 정확히 443 에 앉힌다.
+    # (종전 "5:4" 는 864px — 배율 0.80 이라 템플릿(0.956) 대비 화면을 16% 손해봤다)
+    "aspect_ratio": "24:23",
+    "video_y": 443,
 }
 
 # 화이트리스트 + 범위 — 어휘 밖은 반려 재료(C5: 임의 신설 금지)
@@ -67,7 +74,7 @@ STYLE_DESIGN_IGNORED = {
     "title_bold2": "제목 굵게는 폰트가 이미 굵어 글자가 뭉갭니다 — 채널·편집실이 정합니다",
 }
 POP_LEVELS = ("none", "soft", "strong")
-LABEL_SIZE = 58                # 라벨 글자 크기(px) — 렌더(finalize)와 한 곳에서 관리
+LABEL_SIZE = 56                # 라벨 글자 크기(px) — 템플릿 실측(렌더와 한 곳에서 관리)
 LABEL_X_RANGE = (0.18, 0.82)   # 가로 여백 상한 — 폭 계산 결과와 **교집합**으로 쓴다
 LABEL_CHAR_W = 0.80            # 한글 1자 폭 ÷ 글자크기 (Jalnan 58px 실측 40.8~46.3px)
 LABEL_FX_OVERSHOOT = 1.10      # pop 등장 순간 110% 로 커진다 — 그 폭까지 화면 안이어야
@@ -75,10 +82,10 @@ LABEL_EDGE_PAD = 24            # 캔버스 가장자리 여백(px)
 LABEL_Y_FALLBACK = 0.526       # 스타일이 위치를 안 줬을 때 렌더가 쓰는 세로(= finalize)
 LABEL_BAND_MARGIN = 0.04       # 영상 밴드 안쪽 여백(검정 밴드 침범 방지)
 LABEL_ROTATE_LIMIT = 8.0       # 기울기 상한(°, 시계방향 +) — 넘으면 가독성이 깨진다
-LABEL_PALETTE = {              # 모델은 **이름**으로 고른다(자유 hex 는 안 읽히는 색이 나온다)
-    "red": "#FF4A3B", "yellow": "#FFD400", "cyan": "#37E2F0",
-    "lime": "#B6FF3B", "pink": "#FF6FD8", "white": "#FFFFFF"}
-LABEL_COLOR_CYCLE = ("#FF4A3B", "#FFD400", "#37E2F0", "#B6FF3B")  # 미지정 시 순환
+# 모델은 **이름**으로 고른다(자유 hex 는 안 읽히는 색이 나온다). 값은 템플릿 사전.
+LABEL_PALETTE = {"white": "#FFFFFF", "red": "#FF5540", "yellow": "#FFE94A",
+                 "blue": "#7ED0FF", "orange": "#FFB637"}
+LABEL_COLOR_CYCLE = ("#FF5540", "#FFE94A", "#7ED0FF", "#FFB637")  # 미지정 시 순환
 # 등장 효과 — 렌더러(build_texts_ass/_text_fx_tags)가 이미 굽는 어휘. 기본은 pop
 # ("띠용" 오버슈트 30%→110%→100%, 220ms). 미지정이 none 이면 라벨이 그냥 튀어나온다.
 LABEL_FX = ("pop", "glow", "shake", "none")

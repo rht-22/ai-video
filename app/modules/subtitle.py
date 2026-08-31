@@ -1014,6 +1014,8 @@ def merge_subtitle_segments(
 # 대사 자막과 별개의 ASS 한 장. 이벤트마다 \an5\pos(중심) 으로 화면 아무 데나 놓고,
 # 크기·색·테두리·회전·등장효과를 인라인 태그로 박는다. Style 은 자리표시자(폰트는 \fn).
 _TEXT_STROKE_BORDER = {"dark": ("&H00000000", 0.07), "white": ("&H00FFFFFF", 0.06),
+                       # 가왕쇼 템플릿 실측 7px/56px — dark(4px)로는 밝은 화면에서 뜬다
+                       "dark_thick": ("&H00000000", 0.125),
                        "none": ("&H00000000", 0.0)}
 
 

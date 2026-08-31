@@ -209,6 +209,47 @@ def _lines_from_text(text: str, t_in: float, t_out: float) -> list[dict]:
     return out
 
 
+# 화자별 자막색 — 정본은 가왕쇼 템플릿(template.json dialogue_captions.colors):
+# w 주연/기본 · o 상대역 · y 질문·리액션 · b 썰전달자 · r 강조.
+SPEAKER_DEFAULT_COLOR = "#FFFFFF"
+SPEAKER_PALETTE = ("#FFB637", "#FFE94A", "#7ED0FF", "#FF5540")
+UNKNOWN_SPEAKERS = frozenset({"미상", "?", "unknown", "unknown speaker"})
+
+
+def speaker_colors(span_index: dict[str, dict]) -> dict[str, str]:
+    """화자 → 자막색. 순수·결정적.
+
+    최다 발화자(= 주연)와 미상은 흰색, 나머지는 **첫 등장 순서**로 팔레트를 돈다.
+    사람이 만든 템플릿도 주연만 흰색이고 상대역·리액션에 색을 줬다(gw 실측 w12/y4/o4).
+    동률은 먼저 나온 화자가 주연 — 무작위 요소 없음."""
+    counts: dict[str, int] = {}
+    order: list[str] = []
+    for sp in sorted(span_index.values(), key=lambda s: (s["t_in"], s["t_out"])):
+        for line in sp.get("audio_script") or []:
+            name = str(line.get("speaker") or "").strip()
+            if not name or name.lower() in UNKNOWN_SPEAKERS:
+                continue
+            if name not in counts:
+                order.append(name)
+            counts[name] = counts.get(name, 0) + 1
+    if not order:
+        return {}
+    lead = min(order, key=lambda n: (-counts[n], order.index(n)))
+    out = {lead: SPEAKER_DEFAULT_COLOR}
+    for i, name in enumerate(n for n in order if n != lead):
+        out[name] = SPEAKER_PALETTE[i % len(SPEAKER_PALETTE)]
+    return out
+
+
+def span_speaker(sp: dict) -> str:
+    """그 span 의 대표 화자(첫 발화자). 없으면 빈 문자열."""
+    for line in sp.get("audio_script") or []:
+        name = str(line.get("speaker") or "").strip()
+        if name:
+            return name
+    return ""
+
+
 def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                    grid_words: list[dict]) -> list[dict]:
     """채택 유성 span(뮤트 제외) → 어절 자막 세그먼트(**편집본 좌표** — C6).
@@ -216,6 +257,7 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
     단어 소속은 중점 기준(span 재단과 같은 규율). 자막은 원본 오디오 인용에만 —
     내레이션 텍스트는 cue 가 나른다(편집실이 cue.text 로 오버레이)."""
     segments: list[dict] = []
+    colors = speaker_colors(span_index)
     off = 0.0
     for c in timeline:
         c0, c1 = float(c["clip_start_sec"]), float(c["clip_end_sec"])
@@ -242,13 +284,17 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                            if sp["t_in"] <= (float(w["t0"]) + float(w["t1"])) / 2
                            < sp["t_out"]]
                 lines = _lines_for_span(in_span, sp["t_in"], sp["t_out"])
+            speaker = span_speaker(sp)
+            color = colors.get(speaker, SPEAKER_DEFAULT_COLOR)
             for ln in lines:
                 # 소속 클립을 이미 안다 — offset 직접 계산(동률 스캔 매핑 금지)
                 e0 = round(off + (max(ln["start"], c0) - c0), 3)
                 e1 = round(off + (min(ln["end"], c1) - c0), 3)
                 if e1 <= e0:
                     continue
-                segments.append({"start_sec": e0, "end_sec": e1, "text": ln["text"]})
+                # speaker·color 는 additive — 옛 소비자는 세 키만 읽는다(C6)
+                segments.append({"start_sec": e0, "end_sec": e1, "text": ln["text"],
+                                 "speaker": speaker, "color": color})
         off += c1 - c0
     segments.sort(key=lambda s: (s["start_sec"], s["end_sec"]))
     return segments

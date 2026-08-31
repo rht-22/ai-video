@@ -596,3 +596,40 @@ def test_rubric_narration_ratio_is_bounded_by_lines():
     sc = score_story(cand, idx, target_sec=20.0)
     assert 0.0 <= sc["parts"]["narration"] <= 1.0
     assert sc["parts"]["narration"] == 1.0        # 셋 다 배치되면 만점
+
+# ── 가왕쇼 템플릿: 화자별 자막색 ────────────────────────────────────────────
+
+def test_speaker_colors_lead_is_white_others_cycle():
+    """사람이 만든 템플릿도 주연만 흰색이고 상대역·리액션에 색을 줬다(gw 실측)."""
+    idx = {
+        "s1": {"t_in": 0.0, "t_out": 2.0, "audio_script": [{"speaker": "박서진"}]},
+        "s2": {"t_in": 2.0, "t_out": 4.0, "audio_script": [{"speaker": "어머니"}]},
+        "s3": {"t_in": 4.0, "t_out": 6.0, "audio_script": [{"speaker": "박서진"}]},
+        "s4": {"t_in": 6.0, "t_out": 8.0, "audio_script": [{"speaker": "미상"}]},
+        "s5": {"t_in": 8.0, "t_out": 9.0, "audio_script": [{"speaker": "PD"}]},
+    }
+    c = assemble.speaker_colors(idx)
+    assert c["박서진"] == assemble.SPEAKER_DEFAULT_COLOR          # 최다 = 주연
+    assert c["어머니"] == assemble.SPEAKER_PALETTE[0]             # 첫 등장 순
+    assert c["PD"] == assemble.SPEAKER_PALETTE[1]
+    assert "미상" not in c                                        # 미상은 기본색
+    # 동률이면 먼저 나온 화자가 주연 — 무작위 요소 없이 결정적
+    tie = {"a": {"t_in": 1.0, "t_out": 2.0, "audio_script": [{"speaker": "을"}]},
+           "b": {"t_in": 0.0, "t_out": 1.0, "audio_script": [{"speaker": "갑"}]}}
+    assert assemble.speaker_colors(tie)["갑"] == assemble.SPEAKER_DEFAULT_COLOR
+
+
+def test_word_subtitles_carry_speaker_color():
+    span = {"sp1": {"t_in": 0.0, "t_out": 2.0, "is_audio": True, "text_source": "heard",
+                    "heard_text": "여보세요", "audio_script": [{"speaker": "어머니"}]},
+            "sp2": {"t_in": 2.0, "t_out": 4.0, "is_audio": True, "text_source": "heard",
+                    "heard_text": "안녕하세요 저 박서진입니다",
+                    "audio_script": [{"speaker": "박서진"}]},
+            "sp3": {"t_in": 4.0, "t_out": 6.0, "is_audio": True, "text_source": "heard",
+                    "heard_text": "네 네", "audio_script": [{"speaker": "박서진"}]}}
+    tl = [{"clip_start_sec": 0.0, "clip_end_sec": 6.0, "use_original_audio": True,
+           "span_ids": ["sp1", "sp2", "sp3"]}]
+    segs = assemble.word_subtitles(tl, span, [])
+    by_speaker = {s["speaker"]: s["color"] for s in segs}
+    assert by_speaker["박서진"] == assemble.SPEAKER_DEFAULT_COLOR
+    assert by_speaker["어머니"] != assemble.SPEAKER_DEFAULT_COLOR

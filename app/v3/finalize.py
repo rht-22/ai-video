@@ -18,6 +18,7 @@ import json
 import subprocess
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from app.config import AppConfig, DesignConfig
@@ -59,6 +60,12 @@ def design_from_style(design: dict) -> DesignConfig:
     up: dict[str, Any] = {}
     if "aspect_ratio" in design:
         up["aspect_ratio"] = str(design["aspect_ratio"])
+    # 밴드 위치·크기는 **채널 프리셋 전용**(STYLE_ALLOWED 에 없어 AI 가 못 준다).
+    # 매핑이 없으면 프리셋에 적어도 조용히 무시된다 — 가왕쇼 템플릿 443px 이 그랬다.
+    if design.get("video_y") is not None:
+        up["video_y"] = int(design["video_y"])
+    if design.get("video_width") is not None:
+        up["video_width"] = int(design["video_width"])
     up["title_colors"] = [str(design.get("title_color", base.title_colors[0])),
                           str(design.get("title_color2", base.title_colors[1]))]
     up["title_sizes"] = [int(design.get("title_size", base.title_sizes[0])),
@@ -170,9 +177,14 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
         font_name=ass_family, font_size=design.subtitle_size,
         primary_color=_style_color(design.subtitle_color or "#FFFFFF"),
         outline=3, margin_v=design.subtitle_y_margin)
+    # 화자별 색은 **줄 단위 style** 통로로 간다(v1 이 쓰는 그 통로 — subtitle.py 의
+    # _line_style_overrides). SpeechSegment 는 frozen 3필드라 style 을 못 달아
+    # SimpleNamespace 로 짓는다. color 가 없으면 종전과 바이트 동일.
     build_ass_from_segments(
-        [SpeechSegment(start_sec=float(s["start_sec"]), end_sec=float(s["end_sec"]),
-                       text=str(s["text"])) for s in segments],
+        [SimpleNamespace(start_sec=float(s["start_sec"]), end_sec=float(s["end_sec"]),
+                         text=str(s["text"]),
+                         style=({"color": str(s["color"])} if s.get("color") else None))
+         for s in segments],
         sub_path, sub_style)
 
     # TTS 자막 ASS — cue 텍스트(합성 fit 반영본)
@@ -205,7 +217,7 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                        "x": float(pos.get("x", 0.5)),
                        "y": float(pos.get("y", LABEL_Y_RATIO)),
                        "rotate": float(pos.get("rotate", 0.0)),
-                       "size": stage4.LABEL_SIZE, "stroke": "dark",
+                       "size": stage4.LABEL_SIZE, "stroke": "dark_thick",
                        "fx": str(pos.get("fx") or "pop"),
                        "color": str(pos.get("color") or _cycle_color(lb["index"]))})
     texts_path = None

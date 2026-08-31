@@ -316,11 +316,12 @@ def test_style_labels_carry_rotate_color_fx():
     styled, problems, notes = stage4.validate_style_response(
         {"design": {}, "labels": [
             {"index": 0, "x": 0.72, "y": 0.36, "rotate": -4, "color": "yellow", "fx": "pop"},
-            {"index": 1, "x": 0.25, "y": 0.62, "rotate": 30, "color": "puce", "fx": "wobble"},
+            {"index": 1, "x": 0.25, "y": 0.62, "rotate": 30, "color": "puce",
+             "fx": "wobble"},
             {"index": 2, "x": 0.5, "y": 0.40}]}, 3, band=(0.275, 0.725))
     assert problems == []
-    assert styled["labels"][0] == {"index": 0, "x": 0.72, "y": 0.36,
-                                   "rotate": -4.0, "color": "#FFD400", "fx": "pop"}
+    assert styled["labels"][0] == {"index": 0, "x": 0.72, "y": 0.36, "rotate": -4.0,
+                                   "color": stage4.LABEL_PALETTE["yellow"], "fx": "pop"}
     # 범위 밖 기울기·미지원 어휘는 **보정**(라벨을 잃지 않는다)
     assert styled["labels"][1]["rotate"] == pytest.approx(stage4.LABEL_ROTATE_LIMIT)
     assert styled["labels"][1]["fx"] == "pop"
