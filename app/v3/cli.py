@@ -57,6 +57,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="계획 앞에서부터 N개 청크만 재단·분석(스모크용 — Pro 요금 상한)")
     p.add_argument("--scene-threshold", type=float, default=SCENE_THRESHOLD,
                    help=f"ffmpeg scene score 임계(기본 {SCENE_THRESHOLD})")
+    # 템플릿 확장(2026-08-31, laeebly 벤치마크) — 미지정 = 종전 그대로(회귀 0)
+    p.add_argument("--story-templates", default=None,
+                   help="추가로 여는 스토리 템플릿(쉼표 구분 — conflict_payoff,"
+                        "chemi_observe). 미지정 = 기본 2종(recap_dialogue·highlight)만")
+    p.add_argument("--style-preset", default=None,
+                   help="채널 스타일 프리셋(recap|drama_clip). 미지정 = recap")
     return p
 
 
@@ -93,6 +99,10 @@ def main(argv: list[str] | None = None) -> int:
                  fix_names=args.fix_names,
                  story_target_sec=args.story_target_sec,
                  story_max_sec=args.story_max_sec, max_chunks=args.max_chunks,
+                 story_templates=(tuple(
+                     s.strip() for s in args.story_templates.split(",") if s.strip())
+                     if args.story_templates else None),
+                 style_preset=args.style_preset,
                  scene_threshold=args.scene_threshold)
     print(f"[v3] 완료 → {out}")
     return 0

@@ -55,6 +55,45 @@ RECAP_PRESET: dict[str, Any] = {
     "video_y": 443,
 }
 
+# 드라마 갈등형 채널 프리셋 (2026-08-31, laeebly 벤치마크 후속) — 값 근거는 둘:
+# ① 김부장(이거보고자) v1~v6 실전 렌더 실측 채널값(1:1 밴드 · video_y 450 ·
+#    제목 66/84 흰/빨 · 자막 58 흰 · 내레이션 민트 #7DE8D8)
+# ② laeebly 상위작 해부 — 제목 '전제 흰/결론 액센트' 2줄(쇼츠몽·빡빡이횽),
+#    내레이션 민트는 신병4 벤치마크 공통색. 자막 하단 마진 400 은 E18-6 실측
+#    base_margin_v(1:1 밴드 하단 앵커)와 같은 값이다.
+DRAMA_CLIP_PRESET: dict[str, Any] = {
+    "title_color": "#FFFFFF",       # 1줄 = 전제(흰)
+    "title_color2": "#FF4632",      # 2줄 = 결론·사건(빨강) — 색 대비가 곧 약속
+    "title_size": 66,
+    "title_size2": 84,
+    "subtitle_color": "#FFFFFF",
+    "subtitle_size": 58,
+    "subtitle_y_margin": 400,
+    "tts_color": "#7DE8D8",         # 내레이션 = 민트(벤치마크 공통)
+    "tts_size": 58,
+    "work_color": "#FFFFFF",
+    "aspect_ratio": "1:1",
+    "video_y": 450,
+}
+
+# 프리셋 레지스트리 — 미지정(None)은 recap 그대로(회귀 0). 모르는 이름은 즉시 실패
+# (조용히 recap 으로 떨어지면 채널은 새 프리셋을 켰다고 믿은 채 종전 화면을 받는다).
+STYLE_PRESETS: dict[str, dict[str, Any]] = {
+    "recap": RECAP_PRESET,
+    "drama_clip": DRAMA_CLIP_PRESET,
+}
+
+
+def get_style_preset(name: str | None) -> dict[str, Any]:
+    if name is None or not str(name).strip():
+        return RECAP_PRESET
+    preset = STYLE_PRESETS.get(str(name).strip())
+    if preset is None:
+        raise ValueError(f"모르는 스타일 프리셋 {name!r} — 사용 가능: "
+                         f"{sorted(STYLE_PRESETS)}")
+    return preset
+
+
 # 화이트리스트 + 범위 — 어휘 밖은 반려 재료(C5: 임의 신설 금지)
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 STYLE_ALLOWED: dict[str, Any] = {

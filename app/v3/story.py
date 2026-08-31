@@ -29,7 +29,47 @@ from app.v3 import schemas
 from app.v3.seq_analyze import MAX_REASKS
 
 SCHEMA_STORY = "v3_story/v1"
-TEMPLATES = ("recap_dialogue", "highlight")
+TEMPLATES = ("recap_dialogue", "highlight")   # 기본 제공(종전 그대로 — 회귀 0)
+
+# ── 스토리 템플릿 레지스트리 (2026-08-31, laeebly 벤치마크 6편 실측 후속) ──────
+# 기본 2종의 프롬프트 문구는 PROMPT_TEMPLATE 본문에 그대로 박혀 있다(바이트 불변) —
+# 레지스트리의 desc 는 **추가(extra) 템플릿의 것만** 프롬프트에 덧붙는다. 채널이
+# --story-templates 로 열지 않으면 검증기도 프롬프트도 종전과 완전히 같다.
+# required_roles 는 검증기가 강제한다(recap 의 climax 필수를 일반화한 것 — 반려
+# 문구는 종전과 같은 형식).
+#
+# 신규 2종의 근거(2026-08-31 laeebly 상위작 프레임 해부 — 뜨비·빡빡이횽·누나스픽 포함):
+# · conflict_payoff — 쇼츠몽 40.8만(에스컬레이션→반격→충격 프리즈)·옥상평상 36.9만
+#   (펀치라인 4.9s 감속)·뜨비 리텐션 105.6%(끝=시작 같은 상태 행동 루프)의 공통 문법.
+# · chemi_observe — 누나스픽 도깨비 10주년 여행 22.9만·자매 채널 리텐션 110~120%:
+#   갈등 없이 '관전 과제 + 인물 역할 별명 + 전원 피크 + 리캡 루프'가 반복 시청을 만든다.
+STORY_TEMPLATE_SPECS: dict[str, dict] = {
+    "recap_dialogue": {"required_roles": ("climax",), "extra": False, "desc": ""},
+    "highlight": {"required_roles": (), "extra": False, "desc": ""},
+    "conflict_payoff": {
+        "required_roles": ("turn", "payoff"), "extra": True,
+        "desc": (
+            "- conflict_payoff(갈등형 — 드라마·콩트): 비트 역할 = hook(갈등 정점의 "
+            "대사 한복판에서 시작 — 상황 설명 span 금지) → escalate(같은 갈등이 한 "
+            "단계씩 세지는 대사 인용 2~3비트) → turn(반격·재맥락화 선언 — **핵심 대사 "
+            "span 은 자르지 말고 통째로**, 여기서만 호흡을 늦춘다) → payoff(최대 "
+            "펀치라인 한 방) → loop_ending(당한 쪽 리액션 직후 **즉시 컷** — 해소·"
+            "정리·화해 대사 금지. 마지막 상태가 hook 의 갈등과 같은 상태면 루프 재생이 "
+            "이어진다). 내레이션은 전환부에만 최소로."),
+    },
+    "chemi_observe": {
+        "required_roles": ("ensemble",), "extra": True,
+        "desc": (
+            "- chemi_observe(케미 관찰형 — 출연진 조합 예능): 비트 역할 = "
+            "observe_hook(내레이션이 관전 과제를 선언 — 예: \"짧은 순간에 성격 다 "
+            "나옴\") → member_moment(인물 한 명의 순간, 인물 수만큼 반복 — 라벨은 "
+            "그 인물의 역할 **별명**(예: \"(츤데레 작은오빠)\")으로 붙이고 같은 인물이 "
+            "다시 나오면 같은 별명을 재사용한다) → ensemble(전원이 한 화면에서 웃음이 "
+            "동시에 터지는 피크) → recap_loop(제목을 되받는 내레이션 한 줄을 얹고 최대 "
+            "웃음 직후 **즉시 컷**). 갈등이 없어도 된다 — 관계·성격 대비가 긴장을 "
+            "대신한다."),
+    },
+}
 STORY_TARGET_SEC = 53.0      # recap 템플릿 기준(레퍼런스 53s) — 채널 노브
 STORY_MAX_SEC = 60.0         # 쇼츠 상한 아래 여유 — 초과분은 예산 다듬기가 던다
 PIECES_MIN, PIECES_MAX = 6, 8   # 편성 조각 수 지향(합격 기준 분포 — soft)
@@ -96,7 +136,9 @@ def arousal_adjust(arousal: list[dict], t0: float, t1: float) -> float:
 # ── 모델 응답 검증(순수) ────────────────────────────────────────────────────
 
 def validate_story_response(resp: Any, span_index: dict[str, dict],
-                            span_order: list[str]) -> tuple[dict | None, list[str], list[str]]:
+                            span_order: list[str],
+                            allowed_templates: tuple[str, ...] = TEMPLATES,
+                            ) -> tuple[dict | None, list[str], list[str]]:
     """모델 응답 → (정규화 스토리 | None, 반려 사유, 보정 노트).
 
     비트의 span_ids 는 **분석된 span 의 grid 연속 범위**여야 한다(부분 발췌·원거리
@@ -108,8 +150,8 @@ def validate_story_response(resp: Any, span_index: dict[str, dict],
         return None, ["응답이 객체가 아니다"], []
 
     template = resp.get("template")
-    if template not in TEMPLATES:
-        problems.append(f"template 은 {TEMPLATES} 중 하나: {template!r}")
+    if template not in allowed_templates:
+        problems.append(f"template 은 {allowed_templates} 중 하나: {template!r}")
 
     title = resp.get("title")
     if not isinstance(title, dict) or not str(title.get("line1") or "").strip() \
@@ -192,9 +234,12 @@ def validate_story_response(resp: Any, span_index: dict[str, dict],
         beats.append({"role": role, "span_ids": list(ids),
                       "narration": narration, "labels": labels})
 
-    if template == "recap_dialogue" and beats \
-            and not any(b["role"] == "climax" for b in beats):
-        problems.append("recap_dialogue 는 climax 비트가 하나 필요하다")
+    # 템플릿별 필수 역할 — recap 의 climax 필수를 레지스트리로 일반화(반려 문구 동일)
+    _spec = STORY_TEMPLATE_SPECS.get(template) or {}
+    if beats:
+        for _need in _spec.get("required_roles") or ():
+            if not any(b["role"] == _need for b in beats):
+                problems.append(f"{template} 는 {_need} 비트가 하나 필요하다")
     if problems:
         return None, problems, notes
     return {"template": template, "reason": str(resp.get("reason") or "").strip(),
@@ -542,7 +587,7 @@ PROMPT_TEMPLATE = """당신은 리캡 쇼츠 구성작가다. 아래 기록(전�
 
 ## 템플릿 (하나 선택)
 - recap_dialogue(1호 — 기본): 8비트 구조. 내레이션:원본대사 ≈ 3:7. 비트 역할 = hook(내레이션 1문장, 제목과 호응) → conflict(대사 인용) → context(내레이션 배경 서술) → silent_break(자막·내레이션 없는 장면 1회 — 호흡) → climax(핵심 대사를 편집 없이 길게) → bridge(내레이션 1문장 전환) → reaction(상대 인물 대사) → ending(도전/떡밥 대사 직후 컷 — 아웃트로 없음).
-- highlight(폴백): 역할 build 로 강한 순간만 시각순.
+- highlight(폴백): 역할 build 로 강한 순간만 시각순.{extra_templates}
 
 ## 편성 규칙
 1. 목표 {target_sec:.0f}초(상한 {max_sec:.0f}초) · 조각 {pieces_min}~{pieces_max}개.
@@ -607,23 +652,50 @@ def build_material_block(stage2_doc: dict, span_index: dict[str, dict]) -> str:
     return "\n".join(lines)
 
 
+def resolve_story_templates(story_templates: tuple[str, ...] | list[str] | None,
+                            ) -> tuple[str, ...]:
+    """채널이 추가로 연 템플릿 → 허용 목록(기본 2종 + extras). 모르는 이름은 즉시
+    실패 — 조용히 무시하면 채널은 새 문법을 켰다고 믿은 채 종전 산출을 받는다."""
+    extras: list[str] = []
+    for name in story_templates or ():
+        name = str(name).strip()
+        if not name:
+            continue
+        spec = STORY_TEMPLATE_SPECS.get(name)
+        if spec is None:
+            raise ValueError(
+                f"모르는 스토리 템플릿 {name!r} — 사용 가능: "
+                f"{sorted(STORY_TEMPLATE_SPECS)}")
+        if spec.get("extra") and name not in extras:
+            extras.append(name)
+    return TEMPLATES + tuple(extras)
+
+
 def build_story_prompt(stage2_doc: dict, span_index: dict[str, dict], *,
                        work_title: str, research_context: str = "",
                        target_sec: float = STORY_TARGET_SEC,
                        max_sec: float = STORY_MAX_SEC,
-                       reject_note: str = "") -> str:
+                       reject_note: str = "",
+                       story_templates: tuple[str, ...] | list[str] | None = None,
+                       ) -> str:
     research_block = ""
     if research_context:
         research_block = "\n" + research_context.strip()[:800]
     reject_block = ""
     if reject_note:
         reject_block = f"\n## ⚠ 직전 제안 반려 사유 — 전부 고쳐서 다시 내라\n{reject_note}\n"
+    # 추가 템플릿 절 — 안 열면 빈 문자열이라 프롬프트가 종전과 바이트 동일(회귀 0)
+    allowed = resolve_story_templates(story_templates)
+    extra_templates = "".join(
+        "\n" + STORY_TEMPLATE_SPECS[name]["desc"]
+        for name in allowed if STORY_TEMPLATE_SPECS[name].get("extra"))
     return PROMPT_TEMPLATE.format(
         work_title=work_title, research_block=research_block,
         n_cands=STORY_CANDIDATES,
         target_sec=target_sec, max_sec=max_sec,
         pieces_min=PIECES_MIN, pieces_max=PIECES_MAX,
         title_max=TITLE_MAX_CHARS, reject_block=reject_block,
+        extra_templates=extra_templates,
         material_block=build_material_block(stage2_doc, span_index))
 
 
@@ -671,13 +743,16 @@ def run_story(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
               research_context: str = "",
               target_sec: float = STORY_TARGET_SEC,
               max_sec: float = STORY_MAX_SEC,
+              story_templates: tuple[str, ...] | list[str] | None = None,
               log=print) -> tuple[dict, dict]:
     """Stage 3 실행 → (story 문서, 감사 기록). 실패해도 폴백으로 반드시 1개."""
     span_index, span_order = build_span_index(stage2_doc, grid)
     if not span_index:
         raise ValueError("분석된 span 이 없다 — Stage 2 가 선행돼야 한다")
+    allowed_templates = resolve_story_templates(story_templates)
     arousal = grid.get("arousal") or []
-    audit: dict[str, Any] = {"attempts": [], "spans_available": len(span_index)}
+    audit: dict[str, Any] = {"attempts": [], "spans_available": len(span_index),
+                             "allowed_templates": list(allowed_templates)}
 
     story: dict | None = None
     reject_note = ""
@@ -685,7 +760,8 @@ def run_story(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
         prompt = build_story_prompt(
             stage2_doc, span_index, work_title=work_title,
             research_context=research_context, target_sec=target_sec,
-            max_sec=max_sec, reject_note=reject_note)
+            max_sec=max_sec, reject_note=reject_note,
+            story_templates=story_templates)
         log(f"  [v3/story] Flash 편성 요청 (시도 {attempt + 1}/{1 + MAX_REASKS}, "
             f"{STORY_CANDIDATES}안)")
         t0 = time.time()
@@ -699,7 +775,9 @@ def run_story(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
             raw = resp.get("candidates") if isinstance(resp, dict) else None
             raw = raw if isinstance(raw, list) and raw else [resp]
             for k, one in enumerate(raw[:STORY_CANDIDATES]):
-                st, pr, nt = validate_story_response(one, span_index, span_order)
+                st, pr, nt = validate_story_response(
+                    one, span_index, span_order,
+                    allowed_templates=allowed_templates)
                 notes.extend(nt)
                 if st is not None:
                     cands.append(st)

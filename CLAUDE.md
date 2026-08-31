@@ -1895,3 +1895,29 @@ miss(오염)>overreach(손실) · 관용 tol+2.0s · aux 중립(명시 zone 우�
   +10분 상한 분할+자가 validate_coverage — 위반 시 원판정 폴백), 인접 zone 침범
   기각, 프로브 창 원경계 중심 ±90(큰 zone 축소-only 강제 해소 — 깊은 내부는
   재프로브 몫), 재단 보호, 상한 탈락·재프로브 생략 기록. 기각 3건 무변경.
+
+## V3 템플릿 확장 — 스토리 2종·스타일 프리셋 1종 (2026-08-31, laeebly 벤치마크 후속)
+
+`app/v3/story.py` `STORY_TEMPLATE_SPECS`·`resolve_story_templates` ·
+`app/v3/stage4.py` `STYLE_PRESETS`·`get_style_preset` · CLI `--story-templates`·
+`--style-preset`. 근거: laeebly 상위작 6편 프레임 해부(뜨비·빡빡이횽·누나스픽 포함,
+아티팩트 「laeebly 상위작 해부」).
+
+- **덧붙임만** — v3 는 다른 세션이 활발히 작업 중인 표면이라 기존 동작 무변경이
+  합류 조건이다. 미지정이면: 제공 템플릿 = 종전 2종(recap_dialogue·highlight),
+  프롬프트 바이트 동일(`{extra_templates}` 빈 문자열), 프리셋 = RECAP_PRESET,
+  story 캐시 지문도 그대로(템플릿 키는 지정 시에만 지문에 들어간다).
+- **스토리 템플릿**(추가로 열어야 제공된다 — `--story-templates a,b`):
+  · `conflict_payoff`(갈등형) — hook=갈등 정점(설명 금지) → escalate → turn(핵심
+    대사 통째 보존 = 펀치라인 감속) → payoff → loop_ending(리액션 직후 즉시 컷·
+    해소 금지). 쇼츠몽 40.8만·옥상평상 94% 시청·뜨비 리텐션 105.6% 공통 문법.
+  · `chemi_observe`(케미 관찰형) — observe_hook(관전 과제) → member_moment(인물
+    역할 **별명** 라벨 재사용) → ensemble(전원 피크) → recap_loop(제목 회수 + 즉시
+    컷). 누나스픽 도깨비 여행 22.9만·자매 채널 리텐션 110~120% 문법.
+  필수 역할은 레지스트리 `required_roles` 가 강제(recap 의 climax 필수를 일반화 —
+  반려 문구 형식 동일). 모르는 이름은 즉시 실패.
+- **스타일 프리셋** `drama_clip` — 김부장 v1~v6 실측 채널값(1:1 밴드·video_y 450·
+  제목 66/84 흰/#FF4632·자막 58·내레이션 #7DE8D8) + 벤치마크 '전제 흰/결론 액센트'
+  2줄 문법. 값은 전부 `STYLE_ALLOWED` 범위 안(테스트가 대조). 밴드 기하와
+  run_style 이 **같은 프리셋**을 본다(RECAP 하드코딩 잔재 금지 — 테스트 고정).
+- 회귀 가드: `tests/test_v3_templates.py`(17건). 전체 1688 통과.

@@ -109,6 +109,8 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
            story_target_sec: float | None = None,
            story_max_sec: float | None = None, fix_names: bool = False,
            max_chunks: int | None = None,
+           story_templates: tuple[str, ...] | None = None,
+           style_preset: str | None = None,
            scene_threshold: float = SCENE_THRESHOLD, log=print) -> Path:
     """v3 실행(M1 grid·Stage1 + M2 chunk_split·Stage2) → output_dir 반환.
     실패해도 run_log 는 남긴다(finally). max_chunks 는 스모크용 — 계획 앞에서부터
@@ -394,6 +396,7 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
                     from_step=from_step,
                     story_target_sec=story_target_sec,
                     story_max_sec=story_max_sec, fix_names=fix_names,
+                    story_templates=story_templates,
                     get_gemini=get_gemini, step=step, log=log)
 
         # ── M6-A: 훅 변형 — M3 산출 위에(본편 불변 · 렌더는 변형 발주 시) ──
@@ -419,7 +422,7 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
             step("draft_render", skipped="edit_plan.json 없음")
         else:
             _run_m4(output_dir=output_dir, video_path=Path(video_path),
-                    grid=grid, from_step=from_step,
+                    grid=grid, from_step=from_step, style_preset=style_preset,
                     get_gemini=get_gemini, step=step, log=log)
         return output_dir
     finally:
@@ -569,7 +572,8 @@ def _run_m2(*, output_dir: Path, video_path: Path, stage1_path: Path, grid: dict
 def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
             research: dict | None, from_step: str | None,
             story_target_sec: float | None, story_max_sec: float | None,
-            get_gemini, step, log, fix_names: bool = False) -> None:
+            get_gemini, step, log, fix_names: bool = False,
+            story_templates: tuple[str, ...] | None = None) -> None:
     """Stage 3(story) + 경계면 조립 + resources(TTS 합성) — 발주서 v3-m3.
 
     story 캐시는 M2 와 같은 규율로 **상류 지문**에 묶는다 — stage2 의 meaning/span
@@ -588,11 +592,16 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
     max_sec = story_max_sec if story_max_sec is not None else st.STORY_MAX_SEC
     # 길이 노브도 지문 재료다 — 빠지면 --story-max-sec 재실행이 캐시에 먹혀 조용히
     # 무시된다(적대 리뷰 확정 · --job-id 재개 재현)
+    _fp_payload: dict = {
+        "spans": [[sid, span_index[sid]["t_in"], span_index[sid]["t_out"],
+                   span_index[sid]["importance"]] for sid in span_order],
+        "target": target, "max": max_sec}
+    # 템플릿 목록도 지문 재료다(길이 노브와 같은 규율) — 단, 미지정이면 키를 아예
+    # 안 넣어 기존 잡의 지문이 그대로 유지된다(캐시 회귀 0).
+    if story_templates:
+        _fp_payload["templates"] = sorted(st.resolve_story_templates(story_templates))
     fingerprint = hashlib.sha1(json.dumps(
-        {"spans": [[sid, span_index[sid]["t_in"], span_index[sid]["t_out"],
-                    span_index[sid]["importance"]] for sid in span_order],
-         "target": target, "max": max_sec},
-        sort_keys=True).encode("utf-8")).hexdigest()[:16]
+        _fp_payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
     story_ckpt = output_dir / "checkpoint_story.json"
     story_doc = None
@@ -609,7 +618,7 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
         story_doc, audit = st.run_story(
             get_gemini(), stage2_doc, grid, work_title=work_title,
             research_context=research_ctx, target_sec=target, max_sec=max_sec,
-            log=log)
+            story_templates=story_templates, log=log)
         _write_json(story_ckpt, {"fingerprint": fingerprint, "story": story_doc})
         step("story", elapsed=round(time.time() - t0, 1),
              attempts=len(audit["attempts"]), fallback=audit.get("fallback", False),
@@ -731,7 +740,8 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
 
 
 def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
-            from_step: str | None, get_gemini, step, log) -> None:
+            from_step: str | None, get_gemini, step, log,
+            style_preset: str | None = None) -> None:
     """M4 — 2-pass 렌더 + validate 확장 (발주서 v3-m4).
 
     draft/최종 렌더는 산출 파일 존재로 캐시(--from-step 으로 재구성). style 은
@@ -809,9 +819,12 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
         # 한다 — 렌더와 같은 계획(plan_labels)·같은 밴드 기하를 넘긴다.
         # 밴드는 **채널 프리셋** 기준으로 프롬프트에 싣고, 모델이 aspect_ratio 를
         # 바꾸면 validate 가 확정 design 으로 다시 재서 클램프한다(리뷰 C1).
-        band = finalize.video_band_ratio(
-            finalize.design_from_style(stage4.RECAP_PRESET))
+        # 프리셋은 채널 선택(--style-preset · 미지정 = recap 그대로) — 밴드 기하와
+        # run_style 이 **같은 프리셋**을 봐야 한다(어긋나면 라벨이 검정 밴드를 뚫는다).
+        _preset = stage4.get_style_preset(style_preset)
+        band = finalize.video_band_ratio(finalize.design_from_style(_preset))
         style_doc, audit = stage4.run_style(get_gemini(), draft_path, story_doc,
+                                            preset=_preset,
                                             windows=win, labels=label_plan,
                                             band=band, log=log)
         _write_json(style_ckpt, {"fingerprint": fingerprint, "style": style_doc})
