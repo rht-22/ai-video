@@ -15,6 +15,7 @@ import pytest
 from app.replay.golden import load_golden, score_cuts
 from app.v3 import assemble, schemas
 from app.v3 import story as st
+from app.v3.story import pick_best, score_story
 
 
 # ── 픽스처(순수 dict — 실측 grid 축소판) ────────────────────────────────────
@@ -409,3 +410,79 @@ def test_golden_file_loads_and_scores_timeline_shape():
     # 우리 timeline 모양(clip_start_sec/clip_end_sec)이 채점기에 그대로 물린다
     score = score_cuts([{"clip_start_sec": 570.0, "clip_end_sec": 574.65}], golden)
     assert score["matched_n"] == 1 and score["matches"][0]["iou"] == 1.0
+
+
+# ── M10-C 다안 심사 루브릭(순수·결정적) ────────────────────────────────────
+
+def _cand(beats, title=("a", "b")):
+    return {"template": "recap_dialogue", "reason": "",
+            "title": {"line1": title[0], "line2": title[1]}, "beats": beats}
+
+
+def _idx(specs):
+    """specs: [(sid, t_in, t_out, is_audio, conf, text_source, line)]"""
+    return {s[0]: {"t_in": s[1], "t_out": s[2], "is_audio": s[3], "importance": 3,
+                   "pos": i, "conf": s[4], "text_source": s[5],
+                   "audio_script": [{"speaker": "갑", "line": s[6]}] if s[3] else [],
+                   "heard_text": "", "scene_script": "", "meaning_content": "m",
+                   "mood": ""} for i, s in enumerate(specs)}
+
+
+def test_rubric_prefers_trustworthy_material():
+    """M9 실측 사고: 저확신 구간을 골라 자막이 깨진 채 나갔다 — 재료 신뢰도 반영."""
+    idx = _idx([("hi", 0, 5, True, 0.9, "transcript", "믿을 만한 대사"),
+                ("lo", 10, 15, True, 0.15, "transcript", "저거에 샜는데")])
+    good = _cand([{"role": "hook", "span_ids": ["hi"], "narration": None, "label": None}])
+    bad = _cand([{"role": "hook", "span_ids": ["lo"], "narration": None, "label": None}])
+    best, table = pick_best([bad, good], idx, target_sec=5.0)
+    assert best == 1
+    assert table[1]["parts"]["material"] > table[0]["parts"]["material"]
+
+
+def test_rubric_prefers_realizable_narration():
+    """M9 실측 사고: cue 3개 전량 드랍(내레이션 0) — 슬롯을 실제로 얻는 안이 이긴다."""
+    # importance 4 = 뮤트 불가(ⓒ) 이므로 무성 span 이 없으면 슬롯이 안 나온다
+    idx = _idx([("v1", 0, 6, True, 0.9, "transcript", "대사"),
+                ("sil", 6, 12, False, None, None, ""),
+                ("v2", 12, 18, True, 0.9, "transcript", "대사2")])
+    for sid in ("v1", "v2"):
+        idx[sid]["importance"] = 4
+    with_slot = _cand([{"role": "hook", "span_ids": ["v1", "sil"],
+                        "narration": "내레이션 문장", "label": None}])
+    no_slot = _cand([{"role": "hook", "span_ids": ["v1", "v2"],
+                      "narration": "내레이션 문장", "label": None}])
+    best, table = pick_best([no_slot, with_slot], idx, target_sec=12.0)
+    assert best == 1 and table[1]["parts"]["narration"] == 1.0
+    assert table[0]["parts"]["narration"] == 0.0
+    # recap_dialogue 인데 내레이션을 아예 안 쓴 안도 규약 위반으로 0점
+    none_planned = _cand([{"role": "hook", "span_ids": ["v1"],
+                           "narration": None, "label": None}])
+    assert score_story(none_planned, idx, target_sec=6.0)["parts"]["narration"] == 0.0
+
+
+def test_rubric_penalizes_scattered_arcs():
+    idx = _idx([("a", 0, 5, True, 0.9, "transcript", "사건 시작"),
+                ("b", 5, 10, True, 0.9, "transcript", "사건 한복판"),
+                ("z", 900, 905, True, 0.9, "transcript", "멀리 떨어진 컷")])
+    near = _cand([{"role": "hook", "span_ids": ["a"], "narration": None, "label": None},
+                  {"role": "climax", "span_ids": ["b"], "narration": None, "label": None}])
+    far = _cand([{"role": "hook", "span_ids": ["a"], "narration": None, "label": None},
+                 {"role": "climax", "span_ids": ["z"], "narration": None, "label": None}])
+    assert score_story(near, idx, target_sec=10.0)["parts"]["cohesion"] == 1.0
+    assert score_story(far, idx, target_sec=10.0)["parts"]["cohesion"] == 0.0
+
+
+def test_rubric_intro_ban():
+    idx = _idx([("g", 0, 5, True, 0.9, "transcript", "안녕하세요 반갑습니다"),
+                ("m", 5, 10, True, 0.9, "transcript", "사건 한복판")])
+    greet = _cand([{"role": "hook", "span_ids": ["g"], "narration": None, "label": None}])
+    mid = _cand([{"role": "hook", "span_ids": ["m"], "narration": None, "label": None}])
+    assert score_story(greet, idx, target_sec=5.0)["parts"]["intro"] == 0.0
+    assert score_story(mid, idx, target_sec=5.0)["parts"]["intro"] == 1.0
+
+
+def test_rubric_tie_break_is_deterministic():
+    idx = _idx([("a", 0, 5, True, 0.9, "transcript", "대사")])
+    one = _cand([{"role": "hook", "span_ids": ["a"], "narration": None, "label": None}])
+    best, table = pick_best([one, dict(one)], idx, target_sec=5.0)
+    assert best == 0 and table[0]["score"] == table[1]["score"]

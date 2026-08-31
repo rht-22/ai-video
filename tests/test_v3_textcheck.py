@@ -254,3 +254,33 @@ def test_low_confidence_alone_never_flips():
     norm = _norm("s", [{"speaker": "갑", "line": "완전히 다른 말"}])
     d = ca.adjudicate_transcript(norm, [sp], ws)
     assert d[0]["decision"] == "transcript"
+
+
+def test_name_check_initials_rule_catches_two_edits():
+    """M9 완주 실측 미탐: '정유지!'(←전유진)가 화면에 나갔다 — 3음절 이름은 거리 2
+    오인식이 흔한데(자음 유지·모음/받침 흔들림) 거리 1 규칙이 통째로 놓쳤다."""
+    names = ["전유진", "박서진", "빈예서"]
+    hits = tc.check_names([_seg(28.1, "정유지!")], names)
+    assert len(hits) == 1 and hits[0]["suggest"] == "전유진"
+    # 초성이 다르면 거리 2 는 안 잡는다(오탐 억제) — '박처진'은 거리 1 규칙으로 잡힘
+    assert tc.check_names([_seg(1.0, "박처진 씨")], names)[0]["suggest"] == "박서진"
+    assert tc.check_names([_seg(1.0, "가나다 라마바")], names) == []
+
+
+def test_name_check_no_false_positive_on_measured_corpora():
+    """실측 회귀 — 가왕쇼·포핸즈 자막 어휘에서 오탐 0(임계 확장의 조건)."""
+    gw = ["전유진", "박서진", "홍지윤", "김수찬", "별사랑", "김태연", "구수경",
+          "윤수현", "최수호", "빈예서"]
+    fh = ["강비오", "최정요", "홍재인", "강승운", "강지혜", "윤선주", "도현수", "최기택"]
+    real = ["어머니 나가시는 거예요?", "홍보 종료하겠습니다.", "이거 전유진 티켓은",
+            "반주는 됐고,", "그냥 너랑 나랑 결혼하자!", "저리 가, 제발",
+            "이건 하나만 가질 수 있어요.", "연예인 된 기분입니다, 지금."]
+    segs = [_seg(i, s) for i, s in enumerate(real)]
+    assert tc.check_names(segs, gw) == []
+    assert tc.check_names(segs, fh) == []
+
+
+def test_initials_helper():
+    assert tc.initials("전유진") == tc.initials("정유지") == "ㅈㅇㅈ"
+    assert tc.initials("박서진") != tc.initials("박처진")
+    assert tc.initials("abc") == "abc"

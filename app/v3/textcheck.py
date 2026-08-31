@@ -37,11 +37,31 @@ def edit_distance(a: str, b: str) -> int:
     return prev[-1]
 
 
+_CHO = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"
+
+
+def initials(s: str) -> str:
+    """한글 문자열 → 초성열(한글 아닌 글자는 그대로). 순수.
+
+    한국어 인명 오인식은 **자음이 유지되고 모음·받침이 흔들리는** 성질이 있다
+    (실측: 정유지↔전유진 ㅈㅇㅈ · 분이서↔빈예서 ㅂㅇㅅ) — 거리 2 를 무턱대고
+    허용하면 오탐이 늘지만, 초성이 같으면 그 위험이 크게 준다."""
+    out = []
+    for c in str(s):
+        o = ord(c)
+        out.append(_CHO[(o - 0xAC00) // 588] if 0xAC00 <= o <= 0xD7A3 else c)
+    return "".join(out)
+
+
 def check_names(segments: list[dict], names: list[str]) -> list[dict]:
     """A — 자막 어절 × 인명 사전. 오인식 의심 목록(경고용). 순수.
 
-    같은 길이 + 편집거리 1 만 잡는다: 한국어 인명 오인식은 대개 비슷한 소리의
-    한 글자가 바뀐다(박**처**진). 길이까지 다르면 다른 낱말일 확률이 높아 뺀다."""
+    같은 길이에서 두 규칙의 합집합(실측 튜닝):
+      ① 편집거리 1 — 한 글자만 흔들린 오인식(박**처**진 ← 박서진)
+      ② 초성 일치 ∧ 거리 ≤2 — 자음이 유지된 오인식(**정유지** ← 전유진).
+         한국 이름은 대부분 3음절이라 ①만으로는 이 유형을 통째로 놓쳤다(M9 실측:
+         "정유지!"가 화면에 나감). 길이가 다르면 다른 낱말일 확률이 높아 뺀다.
+    실측 오탐: 가왕쇼·포핸즈 자막 전량에서 0(전사 전체 표본에서도 전부 실오인식)."""
     pool = [n for n in dict.fromkeys(names or []) if len(n) >= NAME_MIN_LEN]
     exact = set(dict.fromkeys(names or []))   # 사전에 **정확히** 있는 이름은 정답이다
     out: list[dict] = []
@@ -55,7 +75,8 @@ def check_names(segments: list[dict], names: list[str]) -> list[dict]:
             for nm in pool:
                 if tok == nm or len(tok) != len(nm):
                     continue
-                if edit_distance(tok, nm) == 1:
+                d = edit_distance(tok, nm)
+                if d == 1 or (d == 2 and initials(tok) == initials(nm)):
                     out.append({"at": round(float(seg.get("start_sec") or 0), 2),
                                 "token": tok, "suggest": nm,
                                 "line": str(seg.get("text") or "")})

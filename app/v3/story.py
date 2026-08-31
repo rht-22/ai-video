@@ -38,6 +38,7 @@ NARRATION_MIN_SEC = 1.0      # 이보다 작은 슬롯은 슬롯이 아니다
 AROUSAL_TIEBREAK_MAX = 0.5   # §9-B: arousal 은 보조지표 — importance 동점 근처에서만
 MUTE_MAX_IMPORTANCE = 3      # ⓑ: 이 이하 유성 span 만 뮤트 후보(ⓒ: ≥4 는 절대 불가)
 TITLE_MAX_CHARS = 16         # 상단 밴드 2줄 각각의 실측 상한(템플릿 폭 990px)
+LOW_CONF = 0.5               # 이 아래 확신도는 재료 목록에 [저확신] 표기(M10-B)
 
 
 # ── 재료 색인(순수) ─────────────────────────────────────────────────────────
@@ -69,6 +70,7 @@ def build_span_index(stage2_doc: dict, grid: dict) -> tuple[dict[str, dict], lis
                         # critical: 판정이 화면에 전파되지 않던 결함)
                         "text_source": s.get("text_source"),
                         "heard_text": s.get("heard_text") or "",
+                        "conf": s.get("conf"),
                         "scene_script": s.get("scene_script") or "",
                         "meaning_content": m.get("content") or "",
                         "mood": m.get("mood") or "",
@@ -379,6 +381,109 @@ def fallback_highlight(span_index: dict[str, dict], span_order: list[str],
             "title": {"line1": work_title, "line2": "하이라이트"}, "beats": beats}
 
 
+# ── M10-C: 다안 심사 — 판단은 모델, 승자 선택은 코드(결정적) ────────────────
+
+STORY_CANDIDATES = 3         # 한 호출에서 받는 안 개수(추가 LLM 호출 0)
+RUBRIC_WEIGHTS = {           # 품질 사고 > 취향 — 실측이 만든 가중치
+    "narration": 3.0,        # 내레이션 실현율(실측 0/3 드랍 사고)
+    "material": 3.0,         # 재료 신뢰도(저확신 자막이 화면에 나간 사고)
+    "cohesion": 1.5,         # 아크 응집도(원거리 짜집기 억제 — 사용자 지적)
+    "progression": 1.0,      # 진행감(§9-D)
+    "budget": 1.0,           # 예산 적합
+    "intro": 1.0,            # 서론 금지(§9-D)
+}
+_GREETING = ("안녕", "반갑", "처음 뵙", "소개할게", "인사드리")
+
+
+def score_story(story: dict, span_index: dict[str, dict], *,
+                target_sec: float) -> dict:
+    """안 하나 → 항목별 0~1 점수 + 총점. 순수·결정적.
+
+    LLM 심사를 쓰지 않는다 — 검증자와 피검증자가 편향을 공유하면 안 된다(M9 원칙).
+    항목은 전부 실측 사고에서 유래했다(주석의 사고 이름 참조)."""
+    beats = story.get("beats") or []
+    ids = [s for b in beats for s in b.get("span_ids") or []]
+    voiced = [span_index[s] for s in ids
+              if s in span_index and span_index[s]["is_audio"]]
+
+    # ① 내레이션 실현율 — 계획한 내레이션 중 실제 슬롯을 얻는 비율
+    planned = sum(1 for b in beats if b.get("narration"))
+    probe = [dict(b, span_ids=list(b["span_ids"])) for b in beats]
+    cues, dropped = plan_narration_slots(probe, span_index)
+    if planned:
+        narration = len(cues) / planned
+    elif story.get("template") == "recap_dialogue":
+        narration = 0.0        # 3:7 규약이 있는 템플릿에서 내레이션 0 = 규약 위반
+    else:
+        narration = 0.5        # highlight 등 — 실현율을 논할 대상이 아니다(중립)
+
+    # ② 재료 신뢰도 — 채택 유성 span 의 확신도·판정 상태
+    if voiced:
+        ok = 0.0
+        for sp in voiced:
+            src, conf = sp.get("text_source"), sp.get("conf")
+            if src == "none":
+                continue                       # 대사 없음 = 0점
+            if src == "heard":
+                ok += 0.9                      # 확정 대사(청취) — 거의 만점
+            elif conf is None:
+                ok += 0.7                      # 미측정(구 문서) — 중립
+            else:
+                ok += min(1.0, max(0.0, (conf - 0.3) / 0.5))
+        material = ok / len(voiced)
+    else:
+        material = 0.5                         # 대사 없는 편성 — 중립
+
+    # ③ 아크 응집도 — 소스 시간 점프 횟수(비트 사이 불연속)
+    starts = [span_index[b["span_ids"][0]]["t_in"] for b in beats
+              if b.get("span_ids") and b["span_ids"][0] in span_index]
+    ends = [span_index[b["span_ids"][-1]]["t_out"] for b in beats
+            if b.get("span_ids") and b["span_ids"][-1] in span_index]
+    jumps = sum(1 for a, b in zip(ends, starts[1:]) if abs(b - a) > 5.0)
+    cohesion = max(0.0, 1.0 - jumps / max(1, len(beats) - 1))
+
+    # ④ 진행감 — 비트 길이가 3초를 크게 넘는 구간 비율(자막·컷 이벤트 근사)
+    long_beats = sum(1 for b in beats
+                     if b.get("span_ids") and b["span_ids"][0] in span_index
+                     and (span_index[b["span_ids"][-1]]["t_out"]
+                          - span_index[b["span_ids"][0]]["t_in"]) > 12.0)
+    progression = max(0.0, 1.0 - long_beats / max(1, len(beats)))
+
+    # ⑤ 예산 적합
+    total = story_duration(beats, span_index)
+    budget = max(0.0, 1.0 - abs(total - target_sec) / max(1.0, target_sec))
+
+    # ⑥ 서론 금지 — hook 첫 대사가 인사말인가
+    intro = 1.0
+    hook = next((b for b in beats if b.get("role") == "hook"), None)
+    if hook:
+        for sid in hook.get("span_ids") or []:
+            sp = span_index.get(sid)
+            if not sp or not sp["is_audio"]:
+                continue
+            line = " ".join(str(a.get("line") or "")
+                            for a in sp.get("audio_script") or [])
+            if any(g in line for g in _GREETING):
+                intro = 0.0
+            break
+
+    parts = {"narration": narration, "material": material, "cohesion": cohesion,
+             "progression": progression, "budget": budget, "intro": intro}
+    total_score = sum(parts[k] * w for k, w in RUBRIC_WEIGHTS.items())
+    return {"parts": {k: round(v, 3) for k, v in parts.items()},
+            "score": round(total_score, 3),
+            "total_sec": round(total, 2), "narration_dropped": len(dropped)}
+
+
+def pick_best(cands: list[dict], span_index: dict[str, dict], *,
+              target_sec: float) -> tuple[int, list[dict]]:
+    """안 목록 → (승자 인덱스, 점수표). 동점은 낮은 인덱스(결정성)."""
+    table = [{"index": i, **score_story(c, span_index, target_sec=target_sec)}
+             for i, c in enumerate(cands)]
+    best = max(range(len(table)), key=lambda i: (table[i]["score"], -i))
+    return best, table
+
+
 # ── 프롬프트·호출 ───────────────────────────────────────────────────────────
 
 PROMPT_TEMPLATE = """당신은 리캡 쇼츠 구성작가다. 아래 기록(전체 구조·의미 단위·span 목록)만으로 쇼츠 1편을 편성하라. 영상은 볼 수 없고, 볼 필요도 없다 — 기록이 정본이다. 시각은 절대 쓰지 않는다: **span id 로만** 말한다.
@@ -398,17 +503,23 @@ PROMPT_TEMPLATE = """당신은 리캡 쇼츠 구성작가다. 아래 기록(전�
 5. 라벨(label)은 "(팩폭 시전)" 식 괄호 심리 강조 — 꼭 필요한 비트에만 0~3개.
 6. 제목 2줄: line1=상황(관계+사건), line2=펀치. 각 {title_max}자 이내.
 7. 서론 금지 — 인사말·자기소개·상황 설명성 대사 span 은 hook 에 채택하지 않는다(후킹은 내레이션과 사건 한복판 대사의 몫이다).
+8. 대사 신뢰 — `[대사없음]` span 은 **대사 인용 비트로 쓰지 마라**(무성 재료·장면으로는 가능). `[저확신 …]` 은 받아쓰기가 흔들린 구간이라 화면 자막이 깨질 수 있으니 가급적 피하고, 꼭 필요하면 그 비트의 다른 span 으로 대체하라. `[청취]` 는 확정된 대사다(그대로 써도 된다).
 {reject_block}
 ## 재료 — 의미 단위와 span (id | 유성/무성 | importance | 내용)
 {material_block}
 
+## 후보 {n_cands}안을 내라 (중요)
+서로 **다른 아크·다른 소재**로 {n_cands}개를 제안하라 — 같은 구간의 어절만 바꾼 안은 안 된다. 각 안은 위 규칙을 모두 지켜야 하고, 코드가 내레이션 실현 가능성·대사 신뢰도·응집도로 채점해 하나를 고른다. 그러니 "안전한 안"과 "과감한 안"을 섞어도 좋다.
+
 ## 출력 (JSON 만)
-{{"template": "recap_dialogue", "reason": "선택 사유 한 문장",
- "title": {{"line1": "…", "line2": "…"}},
- "beats": [
-  {{"role": "hook", "span_ids": ["sp0000", "sp0001"], "narration": "…" , "label": null}},
-  {{"role": "climax", "span_ids": ["sp0102"], "narration": null, "label": "(…)"}}
- ]}}"""
+{{"candidates": [
+ {{"template": "recap_dialogue", "reason": "선택 사유 한 문장",
+   "title": {{"line1": "…", "line2": "…"}},
+   "beats": [
+    {{"role": "hook", "span_ids": ["sp0000", "sp0001"], "narration": "…" , "label": null}},
+    {{"role": "climax", "span_ids": ["sp0102"], "narration": null, "label": "(…)"}}
+   ]}}
+]}}"""
 
 
 def build_material_block(stage2_doc: dict, span_index: dict[str, dict]) -> str:
@@ -429,7 +540,18 @@ def build_material_block(stage2_doc: dict, span_index: dict[str, dict]) -> str:
                         speech = " / ".join(
                             f"{a.get('speaker')}: {a.get('line')}"
                             for a in s.get("audio_script") or [])
-                        lines.append(f"{sid} | 유성 | imp {s.get('importance')} | {speech}")
+                        # M10-B: 신뢰 표기 — 모델이 못 미더운 대사를 피해 고르게
+                        src = s.get("text_source")
+                        conf = s.get("conf")
+                        tag = ""
+                        if src == "none" or not speech.strip():
+                            tag = " [대사없음]"
+                        elif src == "heard":
+                            tag = " [청취]"
+                        elif conf is not None and conf < LOW_CONF:
+                            tag = f" [저확신 {conf:.2f}]"
+                        lines.append(f"{sid} | 유성 | imp {s.get('importance')}"
+                                     f"{tag} | {speech}")
                     else:
                         lines.append(f"{sid} | 무성 | imp {s.get('importance')} | "
                                      f"{s.get('scene_script', '')}")
@@ -449,6 +571,7 @@ def build_story_prompt(stage2_doc: dict, span_index: dict[str, dict], *,
         reject_block = f"\n## ⚠ 직전 제안 반려 사유 — 전부 고쳐서 다시 내라\n{reject_note}\n"
     return PROMPT_TEMPLATE.format(
         work_title=work_title, research_block=research_block,
+        n_cands=STORY_CANDIDATES,
         target_sec=target_sec, max_sec=max_sec,
         pieces_min=PIECES_MIN, pieces_max=PIECES_MAX,
         title_max=TITLE_MAX_CHARS, reject_block=reject_block,
@@ -514,21 +637,42 @@ def run_story(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
             stage2_doc, span_index, work_title=work_title,
             research_context=research_context, target_sec=target_sec,
             max_sec=max_sec, reject_note=reject_note)
-        log(f"  [v3/story] Flash 편성 요청 (시도 {attempt + 1}/{1 + MAX_REASKS})")
+        log(f"  [v3/story] Flash 편성 요청 (시도 {attempt + 1}/{1 + MAX_REASKS}, "
+            f"{STORY_CANDIDATES}안)")
         t0 = time.time()
         problems: list[str] = []
         notes: list[str] = []
+        cands: list[dict] = []
         try:
             resp = _call_story_model(gemini, prompt)
-            story, problems, notes = validate_story_response(
-                resp, span_index, span_order)
+            # M10-C: N안 수집 — 하나라도 통과하면 진행(전량 반려 시에만 재질의).
+            # 구 응답(단일 안)도 그대로 받는다(하위호환).
+            raw = resp.get("candidates") if isinstance(resp, dict) else None
+            raw = raw if isinstance(raw, list) and raw else [resp]
+            for k, one in enumerate(raw[:STORY_CANDIDATES]):
+                st, pr, nt = validate_story_response(one, span_index, span_order)
+                notes.extend(nt)
+                if st is not None:
+                    cands.append(st)
+                else:
+                    problems.extend(f"안{k}: {x}" for x in pr[:4])
         except ValueError as e:
-            story, problems = None, [f"응답 오류: {e}"]
-        audit["attempts"].append({"attempt": attempt + 1,
-                                  "elapsed": round(time.time() - t0, 1),
-                                  "problems": problems, "notes": notes})
-        if story is not None:
+            problems = [f"응답 오류: {e}"]
+        rec = {"attempt": attempt + 1, "elapsed": round(time.time() - t0, 1),
+               "candidates": len(cands), "problems": problems, "notes": notes}
+        if cands:
+            best, table = pick_best(cands, span_index, target_sec=target_sec)
+            story = cands[best]
+            rec["scores"] = table
+            rec["winner"] = best
+            audit["attempts"].append(rec)
+            audit["scores"] = table
+            audit["winner"] = best
+            log(f"  [v3/story] {len(cands)}안 심사 → 안{best} 채택 "
+                f"(점수 {table[best]['score']} · "
+                + " · ".join(f"{k} {v}" for k, v in table[best]["parts"].items()) + ")")
             break
+        audit["attempts"].append(rec)
         log(f"  [v3/story] 반려 — 사유 {len(problems)}건")
         reject_note = "\n".join(f"- {p}" for p in problems[:20])
 

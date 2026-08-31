@@ -333,7 +333,13 @@ def adjudicate_transcript(norm: list[dict], chunk_spans: list[dict],
             heard = " ".join(str(x.get("line") or "") for x in heard_lines).strip()
             speaker = (heard_lines[0].get("speaker") if heard_lines else None) or "미상"
             broken = run_broken.get(s["span_id"]) or transcript_broken(gsp, words)
-            rec = {"span_id": s["span_id"], "broken": broken}
+            # M10-B: 재료 신뢰 신호 — 스토리가 "이 대사를 얼마나 믿을 수 있나"를
+            # 보고 고르게 한다(실측: 저확신 구간을 골라 자막이 깨진 채 나갔다)
+            _ws = [w for w in (words or [])
+                   if gsp["t_in"] <= (float(w["t0"]) + float(w["t1"])) / 2 < gsp["t_out"]]
+            _pr = [float(w["prob"]) for w in _ws if w.get("prob") is not None]
+            s["conf"] = round(sum(_pr) / len(_pr), 2) if _pr else None
+            rec = {"span_id": s["span_id"], "broken": broken, "conf": s["conf"]}
             if broken and heard:
                 s["audio"] = [dict(x) for x in heard_lines]
                 s["text_source"] = "heard"
@@ -418,6 +424,7 @@ def assemble_chunk_meanings(norm: list[dict], chunk_spans: list[dict]) -> list[d
                 "is_audio": bool(gsp["is_audio"]),
                 "audio_script": s["audio"] if gsp["is_audio"] else [],
                 "heard_text": s.get("heard_text", "") if gsp["is_audio"] else "",
+                "conf": s.get("conf") if gsp["is_audio"] else None,
                 "text_source": s.get("text_source") if gsp["is_audio"] else None,
                 "scene_script": s["scene_script"],
                 "characters": s["characters"],
