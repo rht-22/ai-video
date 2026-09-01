@@ -2672,6 +2672,13 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 편집실 오버라이드는 여기서 한 번만 읽고 검증한다 — 계약 위반이면 무거운 단계를
     # 돌기 전에 즉시 실패시킨다(사람이 고친 값이 조용히 무시된 채 영상이 나가는 것이 최악).
     _edit_overrides = load_edit_overrides(payload.edit_overrides_path)
+    # 두부 방지(2026-09-01) — 폰트에 글리프가 없는 글자는 **거절**한다. AI 산출은
+    # style_compose 가 조용히 빼지만 사람이 고친 문구를 말없이 지우면 안 된다
+    # (EditOverrideError 머리말: 반영 안 된 채 나가는 것이 최악). 계약 검증과 같은
+    # 자리 = 무거운 단계 앞이라 사람은 검수함에서 사유를 즉시 본다.
+    from app.modules.glyphs import check_overrides as _check_glyphs
+    _check_glyphs(_edit_overrides, paths.app_root,
+                  title_font=payload.design.title_font)
     # v3 images(F-408) 파일 검증 — file 은 run_dir(=output_dir) 상대 경로 계약이다.
     # 없는 파일·계약 밖 파일은 무거운 단계를 돌기 전에 여기서 fail-loud (스토리지
     # 다운로드는 오케스트레이터 어댑터 몫 — 여기 도달했으면 파일이 있어야 정상).
@@ -4319,6 +4326,7 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
     # 연출은 그 위에 얹는 것이라 경계를 건드리지 않는다 — 그래서 이 블록은 좌표를 만들
     # 뿐 clips 를 바꾸지 않는다(바꾸면 자막·cue 좌표가 전부 어긋난다).
     _style_design_kwargs: dict[str, Any] = {}
+    _style_titles_dropped = 0                      # 편집실 제목이 폐기시킨 AI 창 수
     _style_plan_applied: dict[str, Any] | None = None
     _text_clamp: dict[str, Any] | None = None      # 효과 텍스트 밴드 클램프 기록(E18-2)
     _texts_from_style = False                      # E19-4: AI 라벨만 얼굴 회피를 탄다
@@ -4406,7 +4414,9 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                         # E19-5 — 프롬프트가 말한 캡·gain 과 같은 숫자(E19-1 규율).
                         sfx_manifest=_sfx_manifest if _sfx_open else None,
                         max_sfx=(int(_sfx_cfg["max_per_episode"]) if _sfx_open else None),
-                        sfx_gain_db=(float(_sfx_cfg["mix_gain_db"]) if _sfx_open else -6.0))
+                        sfx_gain_db=(float(_sfx_cfg["mix_gain_db"]) if _sfx_open else -6.0),
+                        # 두부 방지 — 제목 창은 이 폰트로 그려진다(cmap 조회, 2026-09-01)
+                        title_font=payload.design.title_font)
                     checkpoint_style.write_text(
                         json.dumps(_style_plan, ensure_ascii=False, indent=2), encoding="utf-8")
                 except _stylemod.StylePlanError as _e:
@@ -4549,7 +4559,26 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             # fixed_line: 창의 text 는 **아랫줄**이고 윗줄은 편 전체 고정이다(E21 지시).
             #   AI 가 낸 title_fixed, 없으면 스토리 title_line1.
             # ⚠ 편집실 title.segments 는 종전 계약 그대로다(사람이 보낸 text 가 곧 화면).
-            if _style_plan.get("title_segments") and not _title_segments:
+            #
+            # 🛑 **편집실이 제목을 고쳤으면 AI 창을 폐기한다**(2026-09-01 사용자 지시).
+            #   E18-1 의 빈틈 메우기가 창을 편 전체로 늘리면서 top_title 이 화면에서
+            #   영구히 사라졌다 — 사람이 제목을 세 번 고쳐 재렌더해도 한 글자도 안 바뀌고
+            #   plan 의 top_title 만 조용히 갱신됐다(가왕쇼_9bca673b 실사고: 창 하나가
+            #   0~67.365s = 완성본 전체를 덮어 기본 제목의 상영 시간이 0초).
+            #   창을 지우는 것으로는 못 막는다 — 키가 없으면 여기서 AI 창이 다시 얹힌다.
+            #   그래서 **엔진이** 사람의 제목 의도를 우선한다: top_title 이 오면 그 문구가
+            #   편 전체에 나가고 AI 창은 통째로 버린다. 사람이 창까지 보냈으면 그 창이
+            #   이긴다(맨 아래 분기) — 구간별 제목을 원하는 의도까지 뭉개면 안 된다.
+            #   ⚠ 8/24 이전엔 AI 창 자체가 없어(실측 108편 0건) 이 경로가 없었다.
+            _owner = _stylemod.title_windows_owner(
+                _style_plan.get("title_segments"), _title_segments,
+                ((_edit_overrides or {}).get("title") or {}).get("top_title"))
+            if _owner == _stylemod.TITLE_OWNER_EDITOR_TITLE:
+                print(f"  [style] 편집실이 제목을 고쳤습니다 — AI 제목 창 "
+                      f"{len(_style_plan['title_segments'])}개 폐기, 고친 제목이 "
+                      f"편 전체에 나갑니다: {title_text[:24]!r}")
+                _style_titles_dropped = len(_style_plan["title_segments"])
+            elif _owner == _stylemod.TITLE_OWNER_AI:
                 _base_line1, _ = _stylemod.split_title_lines(title_text)
                 _fixed_line = str(_style_plan.get("title_fixed") or _base_line1).strip()
                 try:
@@ -4568,7 +4597,8 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                               f"{_fixed_line[:20]!r} · 아랫줄만 교체(빈 시간 없음)")
                 except EditOverrideError as _e:
                     print(f"  [style] 제목 창이 계약 위반 → 제목은 종전대로: {_e}")
-            elif _style_plan.get("title_segments"):
+            elif _owner == _stylemod.TITLE_OWNER_EDITOR_SEGMENTS and _style_plan.get(
+                    "title_segments"):
                 print("  [style] 제목은 편집실이 보낸 것이 이깁니다 — AI 제목 창 무시")
 
             # ── 5) 디자인 (채널이 명시한 키는 AI 가 못 덮는다) ──────────────
@@ -4586,6 +4616,10 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             "images": len((_style_plan or {}).get("images") or []),
             "subtitle_styles": len((_style_plan or {}).get("subtitle_styles") or []),
             "title_segments": len((_style_plan or {}).get("title_segments") or []),
+            # 편집실이 제목을 고쳐 폐기된 AI 창 수(2026-09-01) — 0 이면 키가 없다.
+            # 화면에 안 나간 연출을 run_log 가 '냈다'고만 말하면 검수가 어긋난다.
+            **({"title_segments_dropped_by_editor": _style_titles_dropped}
+               if _style_titles_dropped else {}),
             "title_fixed": (_style_plan or {}).get("title_fixed"),
             "tts_tone": len((_style_plan or {}).get("tts") or []),
             "design": sorted((_style_plan or {}).get("design") or {}),

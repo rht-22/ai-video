@@ -117,7 +117,10 @@ def test_pipeline_block_guards_every_category_with_editor_override():
     assert 'get("subtitle_styles") and _sub_override is None' in block
     assert 'get("texts") and not _text_overlays' in block
     assert 'get("images") and not _image_overlays' in block
-    assert 'get("title_segments") and not _title_segments' in block
+    # 제목 창만 판정이 세 갈래라(사람 창 > 사람 제목 > AI) 조건을 블록 안에 다시 적지
+    # 않고 순수 함수 하나에 모았다 — 같은 가드다(2026-09-01).
+    assert "_stylemod.title_windows_owner(" in block
+    assert "_stylemod.TITLE_OWNER_AI" in block
     # 채널 명시 키 방어는 design_overrides 가 payload.design_explicit_fields 로 한다
     assert "payload.design_explicit_fields" in block
 
@@ -658,3 +661,49 @@ def test_prompt_states_the_two_line_title_contract():
     assert "제목을 굵게 하지 않는다" in rendered
     assert "직전 문구" in rendered                  # 빈틈 규칙을 모델도 알아야 한다
     assert str(sc.MAX_TITLE_LINE_CHARS) in rendered
+
+
+# ── 제목 창의 주인 (2026-09-01 사용자 지시) ──────────────────────────────
+# 사고: E18-1 의 빈틈 메우기가 AI 창을 편 전체로 늘리면서 top_title 의 상영 시간이
+# 0초가 됐다. 사람이 편집실에서 제목을 세 번 고쳐 재렌더해도 화면이 한 글자도 안
+# 바뀌고 plan 의 top_title 만 조용히 갱신됐다(가왕쇼_9bca673b, 창 0~67.365s).
+def test_editor_title_discards_ai_windows():
+    """제목만 고쳐 보내면 AI 창을 버린다 — 고친 제목이 편 전체에 나가야 한다."""
+    from app.modules import style_compose as sc
+    assert sc.title_windows_owner(
+        ai_segments=[{"text": "AI 창"}], editor_segments=None,
+        editor_top_title="사람이 고친 제목") == sc.TITLE_OWNER_EDITOR_TITLE
+
+
+def test_editor_segments_still_win_over_everything():
+    """사람이 창을 직접 보냈으면 그 창이다 — 구간별 제목 의도를 뭉개면 안 된다."""
+    from app.modules import style_compose as sc
+    assert sc.title_windows_owner(
+        ai_segments=[{"text": "AI 창"}], editor_segments=[{"text": "사람 창"}],
+        editor_top_title="사람이 고친 제목") == sc.TITLE_OWNER_EDITOR_SEGMENTS
+
+
+def test_ai_windows_apply_when_editor_did_not_touch_title():
+    """제목을 안 고친 라운드는 종전 그대로 — 회귀 0."""
+    from app.modules import style_compose as sc
+    for empty in (None, "", "   "):
+        assert sc.title_windows_owner(
+            ai_segments=[{"text": "AI 창"}], editor_segments=None,
+            editor_top_title=empty) == sc.TITLE_OWNER_AI
+
+
+def test_no_ai_windows_is_not_owned_by_anyone():
+    """AI 창이 없으면(8/23 이전 전 편) 판정할 것도 없다 — 기본 제목이 편 전체."""
+    from app.modules import style_compose as sc
+    assert sc.title_windows_owner(None, None, "사람 제목") == sc.TITLE_OWNER_NONE
+    assert sc.title_windows_owner([], None, None) == sc.TITLE_OWNER_NONE
+
+
+def test_pipeline_routes_title_windows_through_the_decision():
+    """배선 고정 — 파이프라인이 자기만의 조건을 다시 적으면 안 된다(그래서 새어 나갔다)."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "app" / "pipeline.py").read_text(
+        encoding="utf-8")
+    assert "_stylemod.title_windows_owner(" in src
+    assert "_stylemod.TITLE_OWNER_EDITOR_TITLE" in src
+    assert "title_segments_dropped_by_editor" in src

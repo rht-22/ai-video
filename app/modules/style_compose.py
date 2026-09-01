@@ -277,6 +277,92 @@ def _num(value: Any, where: str) -> float:
         raise StylePlanError(f"{where}: 숫자가 아닙니다({value!r})") from None
 
 
+# ── 두부 방지 (2026-09-01) — 폰트에 글리프가 없는 글자를 AI 산출에서 뺀다 ───────
+# 제목에는 이중 차단이 있었는데(스토리 프롬프트 + _strip_emoji) **연출에는 한 겹도**
+# 없었다: AI 가 "즉석 라이브 폭발 💥" 를 냈고 화면에 ⊠ 로 나갔다(가왕쇼_9bca673b).
+# 정규식이 아니라 cmap 을 보는 이유는 glyphs.py 머리말 — 폰트마다 되는 기호가 다르다
+# (Jalnan 은 ★♪‼ 를 그리고 Griun 은 못 그린다).
+# AI 산출은 **제거 + note**, 사람이 보낸 값은 **거절**이다(edit_overrides 쪽). 사람 문구를
+# 조용히 지우면 '고친 값이 반영 안 된 채 나간다'는 최악을 우리 손으로 만드는 셈이다.
+def _tofu_strip(text: Any, font: Any, app_root: Path) -> tuple[str, list[str]]:
+    """(문구, 뺀 글자들). 폰트를 못 읽으면 원문 그대로(fail-open)."""
+    from app.modules.glyphs import font_charset, strip_missing
+    if not font:
+        return str(text or ""), []
+    return strip_missing(text, font_charset(str(font), app_root))
+
+
+def _strip_tofu_texts(texts: list[dict[str, Any]], app_root: Path,
+                      notes: list[str]) -> None:
+    """효과 텍스트에서 그 항목의 **자기 폰트**에 없는 글자를 뺀다. 항목마다 폰트가 다르다.
+
+    빈 문구만 남으면 그 항목을 지우는 대신 **남긴다** — 여기서 지우면 뒤따르는 배치·
+    클램프 기록과 개수가 어긋나고, 빈 텍스트는 어차피 화면에 아무것도 안 그린다."""
+    for t in texts:
+        if not isinstance(t, dict):
+            continue
+        kept, tofu = _tofu_strip(t.get("text"), t.get("font"), app_root)
+        if tofu:
+            t["text"] = kept
+            notes.append(f"효과 텍스트 {str(t.get('text'))[:12]!r}: 폰트"
+                         f"({t.get('font')})에 없는 글자 {''.join(tofu)} 제거 — "
+                         f"그대로 두면 화면에 두부(□)로 나간다")
+
+
+def _strip_tofu_titles(segs: list[dict[str, Any]], title_font: Any, app_root: Path,
+                       notes: list[str]) -> None:
+    """시간대별 제목 창의 문구에서 제목 폰트에 없는 글자를 뺀다.
+
+    창 문구가 통째로 사라지면 그 창을 버린다 — 빈 창을 남기면 그 시간에 제목이 없는
+    화면이 되고, 그건 '제목은 편 내내 떠 있어야 한다'(2026-08-24 지시)를 어긴다.
+    창이 빠진 시간은 배치 단계의 빈틈 잇기(fill_title_gaps)가 직전 문구로 메운다."""
+    if not title_font:
+        return
+    keep = []
+    for sg in segs:
+        kept, tofu = _tofu_strip(sg.get("text"), title_font, app_root)
+        if not tofu:
+            keep.append(sg)
+            continue
+        if kept.strip():
+            sg["text"] = kept.strip()
+            keep.append(sg)
+            notes.append(f"제목 창에서 제목 폰트에 없는 글자 {''.join(tofu)} 제거")
+        else:
+            notes.append(f"제목 창 {str(sg.get('text'))[:12]!r} 이 통째로 폰트에 없는 "
+                         f"글자뿐이라 창을 버린다 — 그 시간은 직전 문구가 잇는다")
+    segs[:] = keep
+
+
+# ── 제목 창의 주인은 누구인가 (2026-09-01) ──────────────────────────────────
+# 우선순위를 **한 곳에서** 정한다. 파이프라인 if/elif 안에만 있으면 조건 하나가 바뀔 때
+# 아무도 못 알아채고, 실제로 그렇게 새어 나간 것이 아래 'editor_title' 경우다.
+TITLE_OWNER_EDITOR_SEGMENTS = "editor_segments"   # 사람이 창을 직접 보냈다
+TITLE_OWNER_EDITOR_TITLE = "editor_title"         # 사람이 제목만 고쳤다 → AI 창 폐기
+TITLE_OWNER_AI = "ai"                             # AI 창을 얹는다(종전)
+TITLE_OWNER_NONE = "none"                         # 창 없음 — 기본 제목이 편 전체
+
+
+def title_windows_owner(ai_segments: Any, editor_segments: Any,
+                        editor_top_title: Any) -> str:
+    """시간대별 제목을 누가 정하는가. 순수 — 테스트 대상.
+
+    ① 사람이 창을 보냈으면 그 창(종전 계약 — 구간별 제목을 원한 의도).
+    ② 사람이 **제목만** 고쳤으면 AI 창을 버린다(2026-09-01 사용자 지시).
+       E18-1 의 빈틈 메우기가 창을 편 전체로 늘려 top_title 의 상영 시간이 0초가 됐고,
+       사람이 제목을 몇 번을 고쳐도 화면이 안 바뀌었다(가왕쇼_9bca673b 실사고).
+       창을 **지우는** 것으로는 못 막는다 — 키가 없으면 엔진이 AI 창을 다시 얹는다.
+    ③ 그 외에는 종전대로 AI 창.
+    """
+    if editor_segments:
+        return TITLE_OWNER_EDITOR_SEGMENTS
+    if not ai_segments:
+        return TITLE_OWNER_NONE
+    if str(editor_top_title or "").strip():
+        return TITLE_OWNER_EDITOR_TITLE
+    return TITLE_OWNER_AI
+
+
 def validate_plan(
     plan: Any,
     *,
@@ -287,6 +373,7 @@ def validate_plan(
     sfx_manifest: dict[str, dict[str, Any]] | None = None,
     max_sfx: int | None = None,
     sfx_gain_db: float = -6.0,
+    title_font: str | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """style_plan/v1 → (정규화된 플랜, 기록할 메모들). 계약 위반이면 StylePlanError.
 
@@ -357,6 +444,7 @@ def validate_plan(
             raise StylePlanError(str(e)) from None
     if texts:
         out["texts"] = overrides_texts({"texts": texts}) or []
+        _strip_tofu_texts(out["texts"], app_root, notes)
     if images:
         out["images"] = images
 
@@ -460,11 +548,16 @@ def validate_plan(
                 f"title_segments[{i}]: 앵커 구간이 잘못됐습니다 (from {a:g} → to {b:g})")
         segs.append({"text": text, "from_anchor": a, "to_anchor": b})
     if segs:
+        _strip_tofu_titles(segs, title_font, app_root, notes)
         out["title_segments"] = segs
 
     # ── 고정 윗줄 (제목 창과 한 벌) ───────────────────────────────────────
     if plan.get("title_fixed") is not None:
-        fixed = str(plan["title_fixed"]).strip()
+        fixed, _tofu = _tofu_strip(plan["title_fixed"], title_font, app_root)
+        fixed = fixed.strip()
+        if _tofu:
+            notes.append(f"title_fixed 에서 제목 폰트에 없는 글자 {''.join(_tofu)} 제거 "
+                         f"— 그대로 두면 화면에 두부(□)로 나간다")
         if not fixed:
             raise StylePlanError("title_fixed 가 비었습니다 (안 쓸 거면 키를 빼세요)")
         if "\n" in fixed:
