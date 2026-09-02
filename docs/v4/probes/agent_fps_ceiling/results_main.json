@@ -1,0 +1,384 @@
+{
+ "truth_count": 200,
+ "duration_sec": 20.0,
+ "results": [
+  {
+   "fps": 1.0,
+   "mode": "list",
+   "elapsed_sec": 2.891,
+   "finishReason": "STOP",
+   "truncated": false,
+   "promptTokenCount": 1453,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 133
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 1320
+    }
+   ],
+   "candidatesTokenCount": 100,
+   "thoughtsTokenCount": 530,
+   "totalTokenCount": 2083,
+   "theoretical_ceiling": 20,
+   "expected_video_tokens_F66": 1820,
+   "emitted": 20,
+   "hits": 20,
+   "hallucinations": 0,
+   "duplicates": 0,
+   "monotonicity": 1.0,
+   "matched_indices_first10": [
+    4,
+    14,
+    24,
+    34,
+    44,
+    54,
+    64,
+    74,
+    84,
+    94
+   ],
+   "matched_indices_last10": [
+    104,
+    114,
+    124,
+    134,
+    144,
+    154,
+    164,
+    174,
+    184,
+    194
+   ],
+   "recall_vs_ceiling": 1.0,
+   "recall_vs_200": 0.1
+  },
+  {
+   "fps": 2.0,
+   "mode": "list",
+   "elapsed_sec": 18.072,
+   "finishReason": "STOP",
+   "truncated": false,
+   "promptTokenCount": 2773,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 133
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 2640
+    }
+   ],
+   "candidatesTokenCount": 200,
+   "thoughtsTokenCount": 976,
+   "totalTokenCount": 3949,
+   "theoretical_ceiling": 40,
+   "expected_video_tokens_F66": 3140,
+   "emitted": 40,
+   "hits": 40,
+   "hallucinations": 0,
+   "duplicates": 0,
+   "monotonicity": 1.0,
+   "matched_indices_first10": [
+    2,
+    7,
+    12,
+    17,
+    22,
+    27,
+    32,
+    37,
+    42,
+    47
+   ],
+   "matched_indices_last10": [
+    152,
+    157,
+    162,
+    167,
+    172,
+    177,
+    182,
+    187,
+    192,
+    197
+   ],
+   "recall_vs_ceiling": 1.0,
+   "recall_vs_200": 0.2
+  },
+  {
+   "fps": 5.0,
+   "mode": "list",
+   "elapsed_sec": 8.033,
+   "finishReason": "STOP",
+   "truncated": false,
+   "promptTokenCount": 6733,
+   "promptTokensDetails": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 6600
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 133
+    }
+   ],
+   "candidatesTokenCount": 500,
+   "thoughtsTokenCount": 1686,
+   "totalTokenCount": 8919,
+   "theoretical_ceiling": 100,
+   "expected_video_tokens_F66": 7100,
+   "emitted": 100,
+   "hits": 100,
+   "hallucinations": 0,
+   "duplicates": 0,
+   "monotonicity": 1.0,
+   "matched_indices_first10": [
+    0,
+    2,
+    4,
+    6,
+    8,
+    10,
+    12,
+    14,
+    16,
+    18
+   ],
+   "matched_indices_last10": [
+    180,
+    182,
+    184,
+    186,
+    188,
+    190,
+    192,
+    194,
+    196,
+    198
+   ],
+   "recall_vs_ceiling": 1.0,
+   "recall_vs_200": 0.5
+  },
+  {
+   "fps": 8.0,
+   "mode": "list",
+   "elapsed_sec": 10.234,
+   "finishReason": "STOP",
+   "truncated": false,
+   "promptTokenCount": 10693,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 133
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 10560
+    }
+   ],
+   "candidatesTokenCount": 800,
+   "thoughtsTokenCount": 2487,
+   "totalTokenCount": 13980,
+   "theoretical_ceiling": 160,
+   "expected_video_tokens_F66": 11060,
+   "emitted": 160,
+   "hits": 160,
+   "hallucinations": 0,
+   "duplicates": 0,
+   "monotonicity": 1.0,
+   "matched_indices_first10": [
+    0,
+    1,
+    3,
+    4,
+    5,
+    6,
+    8,
+    9,
+    10,
+    11
+   ],
+   "matched_indices_last10": [
+    188,
+    189,
+    190,
+    191,
+    193,
+    194,
+    195,
+    196,
+    198,
+    199
+   ],
+   "recall_vs_ceiling": 1.0,
+   "recall_vs_200": 0.8
+  },
+  {
+   "fps": 10.0,
+   "mode": "list",
+   "elapsed_sec": 11.224,
+   "finishReason": "STOP",
+   "truncated": false,
+   "promptTokenCount": 13333,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 133
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 13200
+    }
+   ],
+   "candidatesTokenCount": 1000,
+   "thoughtsTokenCount": 3088,
+   "totalTokenCount": 17421,
+   "theoretical_ceiling": 200,
+   "expected_video_tokens_F66": 13700,
+   "emitted": 200,
+   "hits": 200,
+   "hallucinations": 0,
+   "duplicates": 0,
+   "monotonicity": 1.0,
+   "matched_indices_first10": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+   ],
+   "matched_indices_last10": [
+    190,
+    191,
+    192,
+    193,
+    194,
+    195,
+    196,
+    197,
+    198,
+    199
+   ],
+   "recall_vs_ceiling": 1.0,
+   "recall_vs_200": 1.0
+  },
+  {
+   "fps": 15.0,
+   "mode": "list",
+   "elapsed_sec": 31.895,
+   "finishReason": "STOP",
+   "truncated": false,
+   "promptTokenCount": 19933,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 133
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 19800
+    }
+   ],
+   "candidatesTokenCount": 1000,
+   "thoughtsTokenCount": 4172,
+   "totalTokenCount": 25105,
+   "theoretical_ceiling": 200,
+   "expected_video_tokens_F66": 20300,
+   "emitted": 200,
+   "hits": 200,
+   "hallucinations": 0,
+   "duplicates": 0,
+   "monotonicity": 1.0,
+   "matched_indices_first10": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+   ],
+   "matched_indices_last10": [
+    190,
+    191,
+    192,
+    193,
+    194,
+    195,
+    196,
+    197,
+    198,
+    199
+   ],
+   "recall_vs_ceiling": 1.0,
+   "recall_vs_200": 1.0
+  },
+  {
+   "fps": 20.0,
+   "mode": "list",
+   "elapsed_sec": 12.701,
+   "finishReason": "STOP",
+   "truncated": false,
+   "promptTokenCount": 26533,
+   "promptTokensDetails": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 26400
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 133
+    }
+   ],
+   "candidatesTokenCount": 1000,
+   "thoughtsTokenCount": 2215,
+   "totalTokenCount": 29748,
+   "theoretical_ceiling": 200,
+   "expected_video_tokens_F66": 26900,
+   "emitted": 200,
+   "hits": 200,
+   "hallucinations": 0,
+   "duplicates": 0,
+   "monotonicity": 1.0,
+   "matched_indices_first10": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+   ],
+   "matched_indices_last10": [
+    190,
+    191,
+    192,
+    193,
+    194,
+    195,
+    196,
+    197,
+    198,
+    199
+   ],
+   "recall_vs_ceiling": 1.0,
+   "recall_vs_200": 1.0
+  }
+ ]
+}

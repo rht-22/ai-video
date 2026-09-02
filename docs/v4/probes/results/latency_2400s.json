@@ -1,0 +1,373 @@
+{
+ "upload": {
+  "name": "files/b227kge0j18s",
+  "uri": "https://generativelanguage.googleapis.com/v1beta/files/b227kge0j18s",
+  "size_bytes": 85224275,
+  "init_sec": 0.8594710826873779,
+  "bytes_sec": 13.523845911026001,
+  "process_wait_sec": 24.29078197479248,
+  "total_sec": 38.67409896850586
+ },
+ "runs": [
+  {
+   "fps": 1,
+   "ok": true,
+   "http": 200,
+   "elapsed_sec": 46.869964838027954,
+   "prompt_tokens": 218454,
+   "output_tokens": 295,
+   "thoughts_tokens": 249,
+   "total_tokens": 218998,
+   "details": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 218400
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 54
+    }
+   ],
+   "finish": "STOP",
+   "out_chars": 500,
+   "out_head": "[\n {\n  \"start\": 0,\n  \"end\": 45,\n  \"summary\": \"친구가 연애를 권유하지만 유미는 연애가 귀찮고 시시하다며 거절한다.\"\n },\n {\n  \"start\": 45,\n  \"end\": 276,\n  \"summary\": \"세포 마을에서 세포들이 사라진 사랑세포를 찾아 나서다 냉동기지에 얼어붙은 모습을 발견한다.\"\n },\n {\n  \"sta",
+   "rep": 1
+  },
+  {
+   "fps": 3,
+   "ok": true,
+   "http": 200,
+   "elapsed_sec": 59.670478105545044,
+   "prompt_tokens": 535254,
+   "output_tokens": 338,
+   "thoughts_tokens": 670,
+   "total_tokens": 536262,
+   "details": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 535200
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 54
+    }
+   ],
+   "finish": "STOP",
+   "out_chars": 624,
+   "out_head": "[\n  {\"start\": 0, \"end\": 46, \"summary\": \"유미가 친구와 대화하며 연애를 오랫동안 쉬어 글이 잘 써지지 않는다고 이야기합니다.\"},\n  {\"start\": 46, \"end\": 275, \"summary\": \"세포 마을에서 사라진 사랑 세포를 찾으러 간 세포들이 냉동 기지를 발견합니다.\"},\n  {\"start\": 275, \"end\":",
+   "rep": 1
+  },
+  {
+   "fps": 5,
+   "ok": true,
+   "http": 200,
+   "elapsed_sec": 146.70369291305542,
+   "prompt_tokens": 852054,
+   "output_tokens": 386,
+   "thoughts_tokens": 605,
+   "total_tokens": 853045,
+   "details": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 54
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 852000
+    }
+   ],
+   "finish": "STOP",
+   "out_chars": 665,
+   "out_head": "[\n  {\n    \"start\": 0.0,\n    \"end\": 46.0,\n    \"summary\": \"연애를 하지 않아 로맨스 글이 써지지 않는 유미에게 친구가 연애를 적극 권유한다.\"\n  },\n  {\n    \"start\": 46.0,\n    \"end\": 125.0,\n    \"summary\": \"유미가 오랫동안 연애를 하지 않자 세포 마을의 세포들이 점차 ",
+   "rep": 1
+  },
+  {
+   "fps": 1,
+   "ok": true,
+   "http": 200,
+   "elapsed_sec": 20.35471200942993,
+   "prompt_tokens": 218454,
+   "output_tokens": 308,
+   "thoughts_tokens": 215,
+   "total_tokens": 218977,
+   "details": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 218400
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 54
+    }
+   ],
+   "finish": "STOP",
+   "out_chars": 523,
+   "out_head": "[\n {\n  \"start\": 0,\n  \"end\": 46,\n  \"summary\": \"연애를 오랫동안 하지 않아 글이 써지지 않는 유미에게 친구가 연애를 권유하지만 유미는 귀찮아한다.\"\n },\n {\n  \"start\": 46,\n  \"end\": 276,\n  \"summary\": \"유미의 머릿속 세포 마을에서 사라진 사랑세포를 찾아 나선 세포들이 미지의 냉동 기지를 ",
+   "rep": 2
+  },
+  {
+   "fps": 3,
+   "ok": true,
+   "http": 200,
+   "elapsed_sec": 52.94042658805847,
+   "prompt_tokens": 535254,
+   "output_tokens": 303,
+   "thoughts_tokens": 1322,
+   "total_tokens": 536879,
+   "details": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 535200
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 54
+    }
+   ],
+   "finish": "STOP",
+   "out_chars": 541,
+   "out_head": "[\n  {\"start\": 0, \"end\": 276, \"summary\": \"연애를 쉬고 있는 유미와 세포 마을에서 사라진 사랑세포를 찾아 나서는 세포들의 모습\"},\n  {\"start\": 276, \"end\": 482, \"summary\": \"새로운 담당 PD 신순록이 작업실을 방문하여 유미와 첫인사를 나누고 과거 인연을 확인하는 장면\"},\n  {\"start\": ",
+   "rep": 2
+  },
+  {
+   "fps": 5,
+   "ok": true,
+   "http": 200,
+   "elapsed_sec": 68.93153405189514,
+   "prompt_tokens": 852054,
+   "output_tokens": 424,
+   "thoughts_tokens": 1701,
+   "total_tokens": 854179,
+   "details": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 852000
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 54
+    }
+   ],
+   "finish": "STOP",
+   "out_chars": 745,
+   "out_head": "[\n  {\n    \"start\": 0,\n    \"end\": 275,\n    \"summary\": \"유미가 연애를 쉬며 글을 쓰지 못하는 사이, 세포들이 세포 마을 냉동 기지에 잠들어 있는 사랑세포를 발견한다.\"\n  },\n  {\n    \"start\": 275,\n    \"end\": 600,\n    \"summary\": \"유미가 새로운 담당자인 신순록 PD와 첫 미",
+   "rep": 2
+  },
+  {
+   "fps": 1,
+   "ok": true,
+   "http": 200,
+   "elapsed_sec": 23.837512969970703,
+   "prompt_tokens": 218454,
+   "output_tokens": 299,
+   "thoughts_tokens": 1333,
+   "total_tokens": 220086,
+   "details": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 54
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 218400
+    }
+   ],
+   "finish": "STOP",
+   "out_chars": 537,
+   "out_head": "[\n  {\"start\": 0, \"end\": 276, \"summary\": \"오랜 연애 공백으로 무뎌진 유미와 세포 마을에서 냉동된 사랑세포를 발견하는 세포들\"},\n  {\"start\": 276, \"end\": 600, \"summary\": \"새로운 담당자인 신순록 PD와 유미의 첫 만남 및 퇴근길 버스 정류장에서의 어색한 동행\"},\n  {\"start\": 600, ",
+   "rep": 3
+  },
+  {
+   "fps": 3,
+   "ok": true,
+   "http": 200,
+   "elapsed_sec": 49.52651810646057,
+   "prompt_tokens": 535254,
+   "output_tokens": 412,
+   "thoughts_tokens": 1482,
+   "total_tokens": 537148,
+   "details": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 54
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 535200
+    }
+   ],
+   "finish": "STOP",
+   "out_chars": 736,
+   "out_head": "[\n  {\n    \"start\": 0,\n    \"end\": 275,\n    \"summary\": \"연애를 오래 쉰 유미의 고민과 세포 마을에서 냉동된 사랑 세포를 발견하는 세포들의 모습\"\n  },\n  {\n    \"start\": 275,\n    \"end\": 600,\n    \"summary\": \"새 담당 피디 신순록과의 첫 만남과 어색함 속에 함께 버스를 타고 ",
+   "rep": 3
+  },
+  {
+   "fps": 5,
+   "ok": true,
+   "http": 200,
+   "elapsed_sec": 70.5488932132721,
+   "prompt_tokens": 852054,
+   "output_tokens": 327,
+   "thoughts_tokens": 1700,
+   "total_tokens": 854081,
+   "details": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 852000
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 54
+    }
+   ],
+   "finish": "STOP",
+   "out_chars": 597,
+   "out_head": "[\n  {\"start\": 0, \"end\": 46, \"summary\": \"연애를 하지 않아 글이 잘 써지지 않는다고 털어놓는 유미의 대화\"},\n  {\"start\": 46, \"end\": 276, \"summary\": \"세포 마을에서 사라진 사랑세포를 찾으러 간 세포들이 냉동기지를 발견하는 장면\"},\n  {\"start\": 276, \"end\": 483, \"summa",
+   "rep": 3
+  },
+  {
+   "fps": 1,
+   "ok": true,
+   "http": 200,
+   "elapsed_sec": 18.530667066574097,
+   "prompt_tokens": 218454,
+   "output_tokens": 285,
+   "thoughts_tokens": 578,
+   "total_tokens": 219317,
+   "details": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 218400
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 54
+    }
+   ],
+   "finish": "STOP",
+   "out_chars": 517,
+   "out_head": "[\n  {\"start\": 0, \"end\": 45, \"summary\": \"친구가 유미에게 글을 쓰기 위해 연애를 권유하지만 유미는 시큰둥해한다.\"},\n  {\"start\": 45, \"end\": 158, \"summary\": \"세포 마을에서 작가 세포가 강해진 사이 사라진 사랑 세포를 찾아 나선다.\"},\n  {\"start\": 158, \"end\": 276, \"sum",
+   "rep": 4
+  },
+  {
+   "fps": 3,
+   "ok": true,
+   "http": 200,
+   "elapsed_sec": 55.154585123062134,
+   "prompt_tokens": 535254,
+   "output_tokens": 322,
+   "thoughts_tokens": 839,
+   "total_tokens": 536415,
+   "details": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 535200
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 54
+    }
+   ],
+   "finish": "STOP",
+   "out_chars": 546,
+   "out_head": "[\n {\n  \"start\": 0,\n  \"end\": 46,\n  \"summary\": \"연애를 하지 않아 글이 잘 써지지 않는다고 털어놓는 유미\"\n },\n {\n  \"start\": 46,\n  \"end\": 276,\n  \"summary\": \"세포 마을에서 사라진 세포들과 냉동 기지에 갇힌 사랑 세포를 발견하는 세포들\"\n },\n {\n  \"start\": 276,\n  \"e",
+   "rep": 4
+  },
+  {
+   "fps": 5,
+   "ok": true,
+   "http": 200,
+   "elapsed_sec": 77.83887195587158,
+   "prompt_tokens": 852054,
+   "output_tokens": 325,
+   "thoughts_tokens": 262,
+   "total_tokens": 852641,
+   "details": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 54
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 852000
+    }
+   ],
+   "finish": "STOP",
+   "out_chars": 566,
+   "out_head": "[\n {\n  \"start\": 0,\n  \"end\": 46,\n  \"summary\": \"유미가 연애를 오랫동안 하지 않아 글이 잘 써지지 않는다고 털어놓는다.\"\n },\n {\n  \"start\": 46,\n  \"end\": 97,\n  \"summary\": \"세포 마을에서 사라진 사랑세포를 찾기 위해 세포들이 나선다.\"\n },\n {\n  \"start\": 97,\n  \"end\"",
+   "rep": 4
+  },
+  {
+   "fps": 1,
+   "ok": true,
+   "http": 200,
+   "elapsed_sec": 16.774203062057495,
+   "prompt_tokens": 218454,
+   "output_tokens": 256,
+   "thoughts_tokens": 227,
+   "total_tokens": 218937,
+   "details": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 54
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 218400
+    }
+   ],
+   "finish": "STOP",
+   "out_chars": 465,
+   "out_head": "[\n  {\"start\": 0, \"end\": 45, \"summary\": \"연애를 오랫동안 쉬어 글이 잘 써지지 않는 유미에게 친구가 연애를 권유합니다.\"},\n  {\"start\": 45, \"end\": 276, \"summary\": \"세포 마을에서 사라진 사랑 세포를 찾아 나선 세포들이 냉동기지에서 냉동된 사랑 세포를 발견합니다.\"},\n  {\"start\": 276",
+   "rep": 5
+  },
+  {
+   "fps": 3,
+   "ok": true,
+   "http": 200,
+   "elapsed_sec": 47.54817724227905,
+   "prompt_tokens": 535254,
+   "output_tokens": 381,
+   "thoughts_tokens": 1040,
+   "total_tokens": 536675,
+   "details": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 54
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 535200
+    }
+   ],
+   "finish": "STOP",
+   "out_chars": 708,
+   "out_head": "[\n  {\"start\": 0, \"end\": 276, \"summary\": \"연애를 하지 않아 글이 막힌 유미와 세포 마을에서 사랑 세포를 찾아 나서는 세포들의 모습\"},\n  {\"start\": 276, \"end\": 600, \"summary\": \"새 담당 PD 신순록과의 첫 만남 미팅 후 함께 퇴근 버스를 타고 이동하는 유미\"},\n  {\"start\": 600, ",
+   "rep": 5
+  },
+  {
+   "fps": 5,
+   "ok": true,
+   "http": 200,
+   "elapsed_sec": 65.45787310600281,
+   "prompt_tokens": 852054,
+   "output_tokens": 437,
+   "thoughts_tokens": 1476,
+   "total_tokens": 853967,
+   "details": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 852000
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 54
+    }
+   ],
+   "finish": "STOP",
+   "out_chars": 772,
+   "out_head": "[\n  {\n    \"start\": 0,\n    \"end\": 276,\n    \"summary\": \"연애에 무뎌진 유미와 세포 마을 냉동실에 잠들어 있는 사랑 세포\"\n  },\n  {\n    \"start\": 276,\n    \"end\": 600,\n    \"summary\": \"새 담당 PD 신순록의 방문과 유미와의 첫 미팅 및 퇴근길 버스 동행\"\n  },\n  {\n ",
+   "rep": 5
+  }
+ ]
+}

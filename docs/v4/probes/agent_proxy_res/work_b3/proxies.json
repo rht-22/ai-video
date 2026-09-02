@@ -1,0 +1,32 @@
+[
+ {
+  "name": "480p",
+  "path": "/private/tmp/claude-501/-Users-gimsewon-rhoonart-ai-video--claude-worktrees-new-video-pipeline-954722/fb818a74-441c-4dce-a784-151845325b20/scratchpad/resprobe/work_b3/proxy_480p.mp4",
+  "bytes": 944255,
+  "mb": 0.944,
+  "encode_sec": 7.62,
+  "width": 480,
+  "height": 854,
+  "linear": 0.444
+ },
+ {
+  "name": "720p",
+  "path": "/private/tmp/claude-501/-Users-gimsewon-rhoonart-ai-video--claude-worktrees-new-video-pipeline-954722/fb818a74-441c-4dce-a784-151845325b20/scratchpad/resprobe/work_b3/proxy_720p.mp4",
+  "bytes": 1583524,
+  "mb": 1.584,
+  "encode_sec": 1.74,
+  "width": 720,
+  "height": 1280,
+  "linear": 0.667
+ },
+ {
+  "name": "1080p",
+  "path": "/private/tmp/claude-501/-Users-gimsewon-rhoonart-ai-video--claude-worktrees-new-video-pipeline-954722/fb818a74-441c-4dce-a784-151845325b20/scratchpad/resprobe/work_b3/proxy_1080p.mp4",
+  "bytes": 2850614,
+  "mb": 2.851,
+  "encode_sec": 1.84,
+  "width": 1080,
+  "height": 1920,
+  "linear": 1.0
+ }
+]

@@ -1,0 +1,351 @@
+{
+ "seed": 20260901,
+ "heights": [
+  20,
+  28,
+  38,
+  52,
+  72,
+  100
+ ],
+ "n_scenes": 8,
+ "scene_sec": 2,
+ "truth": [
+  {
+   "scene": 0,
+   "height": 72,
+   "code": "QA-8289",
+   "band": 0,
+   "y_center": 90
+  },
+  {
+   "scene": 0,
+   "height": 28,
+   "code": "ZX-8790",
+   "band": 1,
+   "y_center": 270
+  },
+  {
+   "scene": 0,
+   "height": 38,
+   "code": "KK-9751",
+   "band": 2,
+   "y_center": 450
+  },
+  {
+   "scene": 0,
+   "height": 20,
+   "code": "LF-6521",
+   "band": 3,
+   "y_center": 630
+  },
+  {
+   "scene": 0,
+   "height": 100,
+   "code": "LJ-1586",
+   "band": 4,
+   "y_center": 810
+  },
+  {
+   "scene": 0,
+   "height": 52,
+   "code": "ML-4127",
+   "band": 5,
+   "y_center": 990
+  },
+  {
+   "scene": 1,
+   "height": 52,
+   "code": "UP-5959",
+   "band": 0,
+   "y_center": 90
+  },
+  {
+   "scene": 1,
+   "height": 100,
+   "code": "NV-3210",
+   "band": 1,
+   "y_center": 270
+  },
+  {
+   "scene": 1,
+   "height": 38,
+   "code": "DV-7760",
+   "band": 2,
+   "y_center": 450
+  },
+  {
+   "scene": 1,
+   "height": 20,
+   "code": "AY-1203",
+   "band": 3,
+   "y_center": 630
+  },
+  {
+   "scene": 1,
+   "height": 72,
+   "code": "TP-6267",
+   "band": 4,
+   "y_center": 810
+  },
+  {
+   "scene": 1,
+   "height": 28,
+   "code": "VA-1238",
+   "band": 5,
+   "y_center": 990
+  },
+  {
+   "scene": 2,
+   "height": 38,
+   "code": "QY-0055",
+   "band": 0,
+   "y_center": 90
+  },
+  {
+   "scene": 2,
+   "height": 72,
+   "code": "VT-8992",
+   "band": 1,
+   "y_center": 270
+  },
+  {
+   "scene": 2,
+   "height": 52,
+   "code": "CS-6332",
+   "band": 2,
+   "y_center": 450
+  },
+  {
+   "scene": 2,
+   "height": 100,
+   "code": "QM-4384",
+   "band": 3,
+   "y_center": 630
+  },
+  {
+   "scene": 2,
+   "height": 28,
+   "code": "JX-6786",
+   "band": 4,
+   "y_center": 810
+  },
+  {
+   "scene": 2,
+   "height": 20,
+   "code": "GK-1792",
+   "band": 5,
+   "y_center": 990
+  },
+  {
+   "scene": 3,
+   "height": 72,
+   "code": "KE-1738",
+   "band": 0,
+   "y_center": 90
+  },
+  {
+   "scene": 3,
+   "height": 20,
+   "code": "NQ-1389",
+   "band": 1,
+   "y_center": 270
+  },
+  {
+   "scene": 3,
+   "height": 28,
+   "code": "AP-2515",
+   "band": 2,
+   "y_center": 450
+  },
+  {
+   "scene": 3,
+   "height": 38,
+   "code": "JZ-7060",
+   "band": 3,
+   "y_center": 630
+  },
+  {
+   "scene": 3,
+   "height": 100,
+   "code": "NJ-4279",
+   "band": 4,
+   "y_center": 810
+  },
+  {
+   "scene": 3,
+   "height": 52,
+   "code": "ZV-2252",
+   "band": 5,
+   "y_center": 990
+  },
+  {
+   "scene": 4,
+   "height": 20,
+   "code": "NH-9079",
+   "band": 0,
+   "y_center": 90
+  },
+  {
+   "scene": 4,
+   "height": 100,
+   "code": "WG-4724",
+   "band": 1,
+   "y_center": 270
+  },
+  {
+   "scene": 4,
+   "height": 72,
+   "code": "SW-7469",
+   "band": 2,
+   "y_center": 450
+  },
+  {
+   "scene": 4,
+   "height": 28,
+   "code": "KK-5611",
+   "band": 3,
+   "y_center": 630
+  },
+  {
+   "scene": 4,
+   "height": 52,
+   "code": "QJ-1336",
+   "band": 4,
+   "y_center": 810
+  },
+  {
+   "scene": 4,
+   "height": 38,
+   "code": "GK-4672",
+   "band": 5,
+   "y_center": 990
+  },
+  {
+   "scene": 5,
+   "height": 52,
+   "code": "WY-7959",
+   "band": 0,
+   "y_center": 90
+  },
+  {
+   "scene": 5,
+   "height": 100,
+   "code": "ZX-0933",
+   "band": 1,
+   "y_center": 270
+  },
+  {
+   "scene": 5,
+   "height": 38,
+   "code": "SL-6307",
+   "band": 2,
+   "y_center": 450
+  },
+  {
+   "scene": 5,
+   "height": 72,
+   "code": "WW-4733",
+   "band": 3,
+   "y_center": 630
+  },
+  {
+   "scene": 5,
+   "height": 28,
+   "code": "VH-9609",
+   "band": 4,
+   "y_center": 810
+  },
+  {
+   "scene": 5,
+   "height": 20,
+   "code": "VF-5050",
+   "band": 5,
+   "y_center": 990
+  },
+  {
+   "scene": 6,
+   "height": 38,
+   "code": "NJ-3062",
+   "band": 0,
+   "y_center": 90
+  },
+  {
+   "scene": 6,
+   "height": 100,
+   "code": "WR-6576",
+   "band": 1,
+   "y_center": 270
+  },
+  {
+   "scene": 6,
+   "height": 20,
+   "code": "TX-4938",
+   "band": 2,
+   "y_center": 450
+  },
+  {
+   "scene": 6,
+   "height": 52,
+   "code": "SN-9204",
+   "band": 3,
+   "y_center": 630
+  },
+  {
+   "scene": 6,
+   "height": 72,
+   "code": "HB-3822",
+   "band": 4,
+   "y_center": 810
+  },
+  {
+   "scene": 6,
+   "height": 28,
+   "code": "UC-5527",
+   "band": 5,
+   "y_center": 990
+  },
+  {
+   "scene": 7,
+   "height": 20,
+   "code": "RD-7762",
+   "band": 0,
+   "y_center": 90
+  },
+  {
+   "scene": 7,
+   "height": 28,
+   "code": "KD-8540",
+   "band": 1,
+   "y_center": 270
+  },
+  {
+   "scene": 7,
+   "height": 72,
+   "code": "DR-9587",
+   "band": 2,
+   "y_center": 450
+  },
+  {
+   "scene": 7,
+   "height": 38,
+   "code": "QN-4400",
+   "band": 3,
+   "y_center": 630
+  },
+  {
+   "scene": 7,
+   "height": 52,
+   "code": "NH-2798",
+   "band": 4,
+   "y_center": 810
+  },
+  {
+   "scene": 7,
+   "height": 100,
+   "code": "QQ-8901",
+   "band": 5,
+   "y_center": 990
+  }
+ ]
+}

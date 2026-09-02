@@ -1,0 +1,378 @@
+[
+ {
+  "frame": 0,
+  "lines": [
+   {
+    "height_px": 10,
+    "actual_ink_px": 10,
+    "font_size": 13,
+    "code": "XM-9206",
+    "row": 0
+   },
+   {
+    "height_px": 14,
+    "actual_ink_px": 14,
+    "font_size": 19,
+    "code": "SJ-4159",
+    "row": 1
+   },
+   {
+    "height_px": 18,
+    "actual_ink_px": 18,
+    "font_size": 25,
+    "code": "WN-2939",
+    "row": 2
+   },
+   {
+    "height_px": 24,
+    "actual_ink_px": 24,
+    "font_size": 33,
+    "code": "JA-8971",
+    "row": 3
+   },
+   {
+    "height_px": 32,
+    "actual_ink_px": 32,
+    "font_size": 44,
+    "code": "KG-0425",
+    "row": 4
+   },
+   {
+    "height_px": 44,
+    "actual_ink_px": 44,
+    "font_size": 60,
+    "code": "ND-9910",
+    "row": 5
+   }
+  ]
+ },
+ {
+  "frame": 1,
+  "lines": [
+   {
+    "height_px": 10,
+    "actual_ink_px": 10,
+    "font_size": 13,
+    "code": "TZ-5816",
+    "row": 0
+   },
+   {
+    "height_px": 14,
+    "actual_ink_px": 14,
+    "font_size": 19,
+    "code": "SH-2130",
+    "row": 1
+   },
+   {
+    "height_px": 18,
+    "actual_ink_px": 18,
+    "font_size": 25,
+    "code": "UC-1673",
+    "row": 2
+   },
+   {
+    "height_px": 24,
+    "actual_ink_px": 24,
+    "font_size": 33,
+    "code": "UU-7570",
+    "row": 3
+   },
+   {
+    "height_px": 32,
+    "actual_ink_px": 32,
+    "font_size": 44,
+    "code": "YK-2232",
+    "row": 4
+   },
+   {
+    "height_px": 44,
+    "actual_ink_px": 44,
+    "font_size": 60,
+    "code": "SW-7806",
+    "row": 5
+   }
+  ]
+ },
+ {
+  "frame": 2,
+  "lines": [
+   {
+    "height_px": 10,
+    "actual_ink_px": 10,
+    "font_size": 13,
+    "code": "TT-2814",
+    "row": 0
+   },
+   {
+    "height_px": 14,
+    "actual_ink_px": 14,
+    "font_size": 19,
+    "code": "XK-9731",
+    "row": 1
+   },
+   {
+    "height_px": 18,
+    "actual_ink_px": 18,
+    "font_size": 25,
+    "code": "RG-8401",
+    "row": 2
+   },
+   {
+    "height_px": 24,
+    "actual_ink_px": 24,
+    "font_size": 33,
+    "code": "BH-0767",
+    "row": 3
+   },
+   {
+    "height_px": 32,
+    "actual_ink_px": 32,
+    "font_size": 44,
+    "code": "HE-6374",
+    "row": 4
+   },
+   {
+    "height_px": 44,
+    "actual_ink_px": 44,
+    "font_size": 60,
+    "code": "SH-4491",
+    "row": 5
+   }
+  ]
+ },
+ {
+  "frame": 3,
+  "lines": [
+   {
+    "height_px": 10,
+    "actual_ink_px": 10,
+    "font_size": 13,
+    "code": "JF-3078",
+    "row": 0
+   },
+   {
+    "height_px": 14,
+    "actual_ink_px": 14,
+    "font_size": 19,
+    "code": "VP-4360",
+    "row": 1
+   },
+   {
+    "height_px": 18,
+    "actual_ink_px": 18,
+    "font_size": 25,
+    "code": "GF-8769",
+    "row": 2
+   },
+   {
+    "height_px": 24,
+    "actual_ink_px": 24,
+    "font_size": 33,
+    "code": "RM-3286",
+    "row": 3
+   },
+   {
+    "height_px": 32,
+    "actual_ink_px": 32,
+    "font_size": 44,
+    "code": "KC-3516",
+    "row": 4
+   },
+   {
+    "height_px": 44,
+    "actual_ink_px": 44,
+    "font_size": 60,
+    "code": "KR-2084",
+    "row": 5
+   }
+  ]
+ },
+ {
+  "frame": 4,
+  "lines": [
+   {
+    "height_px": 10,
+    "actual_ink_px": 10,
+    "font_size": 13,
+    "code": "UX-4448",
+    "row": 0
+   },
+   {
+    "height_px": 14,
+    "actual_ink_px": 14,
+    "font_size": 19,
+    "code": "DP-0888",
+    "row": 1
+   },
+   {
+    "height_px": 18,
+    "actual_ink_px": 18,
+    "font_size": 25,
+    "code": "CB-9355",
+    "row": 2
+   },
+   {
+    "height_px": 24,
+    "actual_ink_px": 24,
+    "font_size": 33,
+    "code": "JD-5987",
+    "row": 3
+   },
+   {
+    "height_px": 32,
+    "actual_ink_px": 32,
+    "font_size": 44,
+    "code": "LK-3528",
+    "row": 4
+   },
+   {
+    "height_px": 44,
+    "actual_ink_px": 44,
+    "font_size": 60,
+    "code": "BC-2114",
+    "row": 5
+   }
+  ]
+ },
+ {
+  "frame": 5,
+  "lines": [
+   {
+    "height_px": 10,
+    "actual_ink_px": 10,
+    "font_size": 13,
+    "code": "EJ-6447",
+    "row": 0
+   },
+   {
+    "height_px": 14,
+    "actual_ink_px": 14,
+    "font_size": 19,
+    "code": "VP-9652",
+    "row": 1
+   },
+   {
+    "height_px": 18,
+    "actual_ink_px": 18,
+    "font_size": 25,
+    "code": "ZL-3473",
+    "row": 2
+   },
+   {
+    "height_px": 24,
+    "actual_ink_px": 24,
+    "font_size": 33,
+    "code": "DC-4618",
+    "row": 3
+   },
+   {
+    "height_px": 32,
+    "actual_ink_px": 32,
+    "font_size": 44,
+    "code": "MM-6435",
+    "row": 4
+   },
+   {
+    "height_px": 44,
+    "actual_ink_px": 44,
+    "font_size": 60,
+    "code": "PX-7795",
+    "row": 5
+   }
+  ]
+ },
+ {
+  "frame": 6,
+  "lines": [
+   {
+    "height_px": 10,
+    "actual_ink_px": 10,
+    "font_size": 13,
+    "code": "CU-3346",
+    "row": 0
+   },
+   {
+    "height_px": 14,
+    "actual_ink_px": 14,
+    "font_size": 19,
+    "code": "MP-4485",
+    "row": 1
+   },
+   {
+    "height_px": 18,
+    "actual_ink_px": 18,
+    "font_size": 25,
+    "code": "PA-3857",
+    "row": 2
+   },
+   {
+    "height_px": 24,
+    "actual_ink_px": 24,
+    "font_size": 33,
+    "code": "WB-6960",
+    "row": 3
+   },
+   {
+    "height_px": 32,
+    "actual_ink_px": 32,
+    "font_size": 44,
+    "code": "RM-4286",
+    "row": 4
+   },
+   {
+    "height_px": 44,
+    "actual_ink_px": 44,
+    "font_size": 60,
+    "code": "KJ-9380",
+    "row": 5
+   }
+  ]
+ },
+ {
+  "frame": 7,
+  "lines": [
+   {
+    "height_px": 10,
+    "actual_ink_px": 10,
+    "font_size": 13,
+    "code": "YZ-2733",
+    "row": 0
+   },
+   {
+    "height_px": 14,
+    "actual_ink_px": 14,
+    "font_size": 19,
+    "code": "KV-4069",
+    "row": 1
+   },
+   {
+    "height_px": 18,
+    "actual_ink_px": 18,
+    "font_size": 25,
+    "code": "EE-9278",
+    "row": 2
+   },
+   {
+    "height_px": 24,
+    "actual_ink_px": 24,
+    "font_size": 33,
+    "code": "FH-0650",
+    "row": 3
+   },
+   {
+    "height_px": 32,
+    "actual_ink_px": 32,
+    "font_size": 44,
+    "code": "TK-2888",
+    "row": 4
+   },
+   {
+    "height_px": 44,
+    "actual_ink_px": 44,
+    "font_size": 60,
+    "code": "DU-1954",
+    "row": 5
+   }
+  ]
+ }
+]

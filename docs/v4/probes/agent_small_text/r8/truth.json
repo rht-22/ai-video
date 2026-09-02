@@ -1,0 +1,138 @@
+[
+ {
+  "frame": 0,
+  "lines": [
+   {
+    "height_px": 12,
+    "eff480": 5.3,
+    "code": "붉은 물결 스물",
+    "row": 0
+   },
+   {
+    "height_px": 16,
+    "eff480": 7.1,
+    "code": "느린 새벽 쉰넷",
+    "row": 1
+   }
+  ]
+ },
+ {
+  "frame": 1,
+  "lines": [
+   {
+    "height_px": 12,
+    "eff480": 5.3,
+    "code": "무거운 구름 여덟",
+    "row": 0
+   },
+   {
+    "height_px": 16,
+    "eff480": 7.1,
+    "code": "둥근 모래 열둘",
+    "row": 1
+   }
+  ]
+ },
+ {
+  "frame": 2,
+  "lines": [
+   {
+    "height_px": 12,
+    "eff480": 5.3,
+    "code": "높은 빗줄기 백삼",
+    "row": 0
+   },
+   {
+    "height_px": 16,
+    "eff480": 7.1,
+    "code": "젖은 그림자 마흔",
+    "row": 1
+   }
+  ]
+ },
+ {
+  "frame": 3,
+  "lines": [
+   {
+    "height_px": 12,
+    "eff480": 5.3,
+    "code": "높은 그림자 쉰넷",
+    "row": 0
+   },
+   {
+    "height_px": 16,
+    "eff480": 7.1,
+    "code": "붉은 종소리 여덟",
+    "row": 1
+   }
+  ]
+ },
+ {
+  "frame": 4,
+  "lines": [
+   {
+    "height_px": 12,
+    "eff480": 5.3,
+    "code": "젖은 골목 쉰넷",
+    "row": 0
+   },
+   {
+    "height_px": 16,
+    "eff480": 7.1,
+    "code": "깊은 새벽 마흔",
+    "row": 1
+   }
+  ]
+ },
+ {
+  "frame": 5,
+  "lines": [
+   {
+    "height_px": 12,
+    "eff480": 5.3,
+    "code": "깊은 새벽 일곱",
+    "row": 0
+   },
+   {
+    "height_px": 16,
+    "eff480": 7.1,
+    "code": "거친 바람 일곱",
+    "row": 1
+   }
+  ]
+ },
+ {
+  "frame": 6,
+  "lines": [
+   {
+    "height_px": 12,
+    "eff480": 5.3,
+    "code": "젖은 바람 쉰넷",
+    "row": 0
+   },
+   {
+    "height_px": 16,
+    "eff480": 7.1,
+    "code": "무거운 손끝 백삼",
+    "row": 1
+   }
+  ]
+ },
+ {
+  "frame": 7,
+  "lines": [
+   {
+    "height_px": 12,
+    "eff480": 5.3,
+    "code": "따뜻한 물결 예순",
+    "row": 0
+   },
+   {
+    "height_px": 16,
+    "eff480": 7.1,
+    "code": "조용한 천장 백삼",
+    "row": 1
+   }
+  ]
+ }
+]

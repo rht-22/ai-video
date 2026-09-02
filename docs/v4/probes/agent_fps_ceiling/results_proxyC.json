@@ -1,0 +1,279 @@
+{
+ "src": "srcC",
+ "truth_count": 200,
+ "duration_sec": 20.0,
+ "file_fps": 10,
+ "slot_ms": 100,
+ "results": [
+  {
+   "src": "srcC",
+   "fps": 10.0,
+   "mode": "list",
+   "elapsed_sec": 14.005,
+   "finishReason": "STOP",
+   "truncated": false,
+   "promptTokenCount": 13333,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 133
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 13200
+    }
+   ],
+   "candidatesTokenCount": 1000,
+   "thoughtsTokenCount": 3083,
+   "sampled_frames_expected": 200,
+   "theoretical_ceiling": 200,
+   "emitted": 200,
+   "hits": 200,
+   "hallucinations": 0,
+   "duplicates": 0,
+   "monotonicity": 1.0,
+   "matched_indices_first10": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+   ],
+   "matched_indices_last10": [
+    190,
+    191,
+    192,
+    193,
+    194,
+    195,
+    196,
+    197,
+    198,
+    199
+   ],
+   "recall_vs_ceiling": 1.0,
+   "recall_vs_all": 1.0
+  },
+  {
+   "src": "srcC",
+   "fps": 12.0,
+   "mode": "list",
+   "elapsed_sec": 10.72,
+   "finishReason": "STOP",
+   "truncated": false,
+   "promptTokenCount": 15973,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 133
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 15840
+    }
+   ],
+   "candidatesTokenCount": 1000,
+   "thoughtsTokenCount": 3496,
+   "sampled_frames_expected": 240,
+   "theoretical_ceiling": 200,
+   "emitted": 200,
+   "hits": 200,
+   "hallucinations": 0,
+   "duplicates": 0,
+   "monotonicity": 1.0,
+   "matched_indices_first10": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+   ],
+   "matched_indices_last10": [
+    190,
+    191,
+    192,
+    193,
+    194,
+    195,
+    196,
+    197,
+    198,
+    199
+   ],
+   "recall_vs_ceiling": 1.0,
+   "recall_vs_all": 1.0
+  },
+  {
+   "src": "srcC",
+   "fps": 15.0,
+   "mode": "list",
+   "elapsed_sec": 16.625,
+   "finishReason": "STOP",
+   "truncated": false,
+   "promptTokenCount": 19933,
+   "promptTokensDetails": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 19800
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 133
+    }
+   ],
+   "candidatesTokenCount": 1000,
+   "thoughtsTokenCount": 4136,
+   "sampled_frames_expected": 300,
+   "theoretical_ceiling": 200,
+   "emitted": 200,
+   "hits": 200,
+   "hallucinations": 0,
+   "duplicates": 0,
+   "monotonicity": 1.0,
+   "matched_indices_first10": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+   ],
+   "matched_indices_last10": [
+    190,
+    191,
+    192,
+    193,
+    194,
+    195,
+    196,
+    197,
+    198,
+    199
+   ],
+   "recall_vs_ceiling": 1.0,
+   "recall_vs_all": 1.0
+  },
+  {
+   "src": "srcC",
+   "fps": 20.0,
+   "mode": "list",
+   "elapsed_sec": 14.411,
+   "finishReason": "STOP",
+   "truncated": false,
+   "promptTokenCount": 26533,
+   "promptTokensDetails": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 26400
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 133
+    }
+   ],
+   "candidatesTokenCount": 1403,
+   "thoughtsTokenCount": 5250,
+   "sampled_frames_expected": 400,
+   "theoretical_ceiling": 200,
+   "emitted": 200,
+   "hits": 200,
+   "hallucinations": 0,
+   "duplicates": 0,
+   "monotonicity": 1.0,
+   "matched_indices_first10": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+   ],
+   "matched_indices_last10": [
+    190,
+    191,
+    192,
+    193,
+    194,
+    195,
+    196,
+    197,
+    198,
+    199
+   ],
+   "recall_vs_ceiling": 1.0,
+   "recall_vs_all": 1.0
+  },
+  {
+   "src": "srcC",
+   "fps": 24.0,
+   "mode": "list",
+   "elapsed_sec": 16.199,
+   "finishReason": "STOP",
+   "truncated": false,
+   "promptTokenCount": 31813,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 133
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 31680
+    }
+   ],
+   "candidatesTokenCount": 1403,
+   "thoughtsTokenCount": 5230,
+   "sampled_frames_expected": 480,
+   "theoretical_ceiling": 200,
+   "emitted": 200,
+   "hits": 200,
+   "hallucinations": 0,
+   "duplicates": 0,
+   "monotonicity": 1.0,
+   "matched_indices_first10": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+   ],
+   "matched_indices_last10": [
+    190,
+    191,
+    192,
+    193,
+    194,
+    195,
+    196,
+    197,
+    198,
+    199
+   ],
+   "recall_vs_ceiling": 1.0,
+   "recall_vs_all": 1.0
+  }
+ ]
+}

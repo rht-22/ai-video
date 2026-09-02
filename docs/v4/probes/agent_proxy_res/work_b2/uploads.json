@@ -1,0 +1,23 @@
+{
+ "480p": {
+  "name": "files/m2c5vl7f11ei",
+  "uri": "https://generativelanguage.googleapis.com/v1beta/files/m2c5vl7f11ei",
+  "bytes": 23787,
+  "upload_sec": 3.5,
+  "active_wait_sec": 2.9
+ },
+ "720p": {
+  "name": "files/9ybckhxo0byh",
+  "uri": "https://generativelanguage.googleapis.com/v1beta/files/9ybckhxo0byh",
+  "bytes": 43270,
+  "upload_sec": 3.89,
+  "active_wait_sec": 1.42
+ },
+ "1080p": {
+  "name": "files/51zlkf9flwtk",
+  "uri": "https://generativelanguage.googleapis.com/v1beta/files/51zlkf9flwtk",
+  "bytes": 72940,
+  "upload_sec": 3.44,
+  "active_wait_sec": 1.45
+ }
+}

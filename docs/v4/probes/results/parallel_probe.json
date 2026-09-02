@@ -1,0 +1,617 @@
+{
+ "file": "files/cz3qf5m3u0ki",
+ "modes": [
+  {
+   "workers": 1,
+   "wall": 78.48,
+   "calls": [
+    {
+     "cand": 0,
+     "t_start": 1788358901.246778,
+     "ok": true,
+     "http": 200,
+     "elapsed": 9.76911187171936,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 27,
+     "think": 817,
+     "finish": "STOP"
+    },
+    {
+     "cand": 1,
+     "t_start": 1788358911.015903,
+     "ok": true,
+     "http": 200,
+     "elapsed": 12.484016180038452,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 91,
+     "think": 1121,
+     "finish": "STOP"
+    },
+    {
+     "cand": 2,
+     "t_start": 1788358923.4999301,
+     "ok": true,
+     "http": 200,
+     "elapsed": 9.174763679504395,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 30,
+     "think": 870,
+     "finish": "STOP"
+    },
+    {
+     "cand": 3,
+     "t_start": 1788358932.6747038,
+     "ok": true,
+     "http": 200,
+     "elapsed": 7.8913891315460205,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 131,
+     "think": 547,
+     "finish": "STOP"
+    },
+    {
+     "cand": 4,
+     "t_start": 1788358940.566128,
+     "ok": true,
+     "http": 200,
+     "elapsed": 6.9257330894470215,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 133,
+     "think": 485,
+     "finish": "STOP"
+    },
+    {
+     "cand": 5,
+     "t_start": 1788358947.4918752,
+     "ok": true,
+     "http": 200,
+     "elapsed": 13.405444860458374,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 126,
+     "think": 464,
+     "finish": "STOP"
+    },
+    {
+     "cand": 6,
+     "t_start": 1788358960.897332,
+     "ok": true,
+     "http": 200,
+     "elapsed": 7.301491022109985,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 30,
+     "think": 419,
+     "finish": "STOP"
+    },
+    {
+     "cand": 7,
+     "t_start": 1788358968.198835,
+     "ok": true,
+     "http": 200,
+     "elapsed": 11.5281662940979,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 111,
+     "think": 515,
+     "finish": "STOP"
+    }
+   ]
+  },
+  {
+   "workers": 4,
+   "wall": 24.57,
+   "calls": [
+    {
+     "cand": 0,
+     "t_start": 1788358984.734119,
+     "ok": true,
+     "http": 200,
+     "elapsed": 6.730619192123413,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 90,
+     "think": 539,
+     "finish": "STOP"
+    },
+    {
+     "cand": 1,
+     "t_start": 1788358984.734415,
+     "ok": true,
+     "http": 200,
+     "elapsed": 14.270768880844116,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 30,
+     "think": 1245,
+     "finish": "STOP"
+    },
+    {
+     "cand": 2,
+     "t_start": 1788358984.734874,
+     "ok": true,
+     "http": 200,
+     "elapsed": 5.604471921920776,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 85,
+     "think": 387,
+     "finish": "STOP"
+    },
+    {
+     "cand": 3,
+     "t_start": 1788358984.735275,
+     "ok": true,
+     "http": 200,
+     "elapsed": 15.554000854492188,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 121,
+     "think": 889,
+     "finish": "STOP"
+    },
+    {
+     "cand": 4,
+     "t_start": 1788358990.3393679,
+     "ok": true,
+     "http": 200,
+     "elapsed": 5.5388641357421875,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 128,
+     "think": 450,
+     "finish": "STOP"
+    },
+    {
+     "cand": 5,
+     "t_start": 1788358991.464774,
+     "ok": true,
+     "http": 200,
+     "elapsed": 12.820162057876587,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 135,
+     "think": 527,
+     "finish": "STOP"
+    },
+    {
+     "cand": 6,
+     "t_start": 1788358995.878253,
+     "ok": true,
+     "http": 200,
+     "elapsed": 6.171560049057007,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 30,
+     "think": 451,
+     "finish": "STOP"
+    },
+    {
+     "cand": 7,
+     "t_start": 1788358999.005213,
+     "ok": true,
+     "http": 200,
+     "elapsed": 10.299263954162598,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 136,
+     "think": 475,
+     "finish": "STOP"
+    }
+   ]
+  },
+  {
+   "workers": 8,
+   "wall": 12.22,
+   "calls": [
+    {
+     "cand": 0,
+     "t_start": 1788359014.310206,
+     "ok": true,
+     "http": 200,
+     "elapsed": 5.846770286560059,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 82,
+     "think": 377,
+     "finish": "STOP"
+    },
+    {
+     "cand": 1,
+     "t_start": 1788359014.310436,
+     "ok": true,
+     "http": 200,
+     "elapsed": 12.223560094833374,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 134,
+     "think": 820,
+     "finish": "STOP"
+    },
+    {
+     "cand": 2,
+     "t_start": 1788359014.310805,
+     "ok": true,
+     "http": 200,
+     "elapsed": 7.5529210567474365,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 89,
+     "think": 361,
+     "finish": "STOP"
+    },
+    {
+     "cand": 3,
+     "t_start": 1788359014.311119,
+     "ok": true,
+     "http": 200,
+     "elapsed": 7.292785882949829,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 139,
+     "think": 718,
+     "finish": "STOP"
+    },
+    {
+     "cand": 4,
+     "t_start": 1788359014.311421,
+     "ok": true,
+     "http": 200,
+     "elapsed": 6.781576871871948,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 30,
+     "think": 375,
+     "finish": "STOP"
+    },
+    {
+     "cand": 5,
+     "t_start": 1788359014.3115299,
+     "ok": true,
+     "http": 200,
+     "elapsed": 6.340965270996094,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 142,
+     "think": 392,
+     "finish": "STOP"
+    },
+    {
+     "cand": 6,
+     "t_start": 1788359014.3118331,
+     "ok": true,
+     "http": 200,
+     "elapsed": 10.489988803863525,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 30,
+     "think": 838,
+     "finish": "STOP"
+    },
+    {
+     "cand": 7,
+     "t_start": 1788359014.312295,
+     "ok": true,
+     "http": 200,
+     "elapsed": 8.676562070846558,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 129,
+     "think": 670,
+     "finish": "STOP"
+    }
+   ]
+  },
+  {
+   "workers": 8,
+   "wall": 12.07,
+   "calls": [
+    {
+     "cand": 0,
+     "t_start": 1788359031.536941,
+     "ok": true,
+     "http": 200,
+     "elapsed": 7.03604793548584,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 87,
+     "think": 640,
+     "finish": "STOP"
+    },
+    {
+     "cand": 1,
+     "t_start": 1788359031.5372539,
+     "ok": true,
+     "http": 200,
+     "elapsed": 10.671220302581787,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 677,
+     "think": 1364,
+     "finish": "STOP"
+    },
+    {
+     "cand": 2,
+     "t_start": 1788359031.5375302,
+     "ok": true,
+     "http": 200,
+     "elapsed": 12.066358804702759,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 100,
+     "think": 586,
+     "finish": "STOP"
+    },
+    {
+     "cand": 3,
+     "t_start": 1788359031.5386372,
+     "ok": true,
+     "http": 200,
+     "elapsed": 7.89769983291626,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 138,
+     "think": 1026,
+     "finish": "STOP"
+    },
+    {
+     "cand": 4,
+     "t_start": 1788359031.539107,
+     "ok": true,
+     "http": 200,
+     "elapsed": 9.276275873184204,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 137,
+     "think": 442,
+     "finish": "STOP"
+    },
+    {
+     "cand": 5,
+     "t_start": 1788359031.5397608,
+     "ok": true,
+     "http": 200,
+     "elapsed": 7.640671014785767,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 137,
+     "think": 310,
+     "finish": "STOP"
+    },
+    {
+     "cand": 6,
+     "t_start": 1788359031.540622,
+     "ok": true,
+     "http": 200,
+     "elapsed": 11.003740072250366,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 147,
+     "think": 510,
+     "finish": "STOP"
+    },
+    {
+     "cand": 7,
+     "t_start": 1788359031.541286,
+     "ok": true,
+     "http": 200,
+     "elapsed": 7.9111340045928955,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 30,
+     "think": 739,
+     "finish": "STOP"
+    }
+   ]
+  },
+  {
+   "workers": 4,
+   "wall": 22.22,
+   "calls": [
+    {
+     "cand": 0,
+     "t_start": 1788359048.615526,
+     "ok": true,
+     "http": 200,
+     "elapsed": 11.527040958404541,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 130,
+     "think": 982,
+     "finish": "STOP"
+    },
+    {
+     "cand": 1,
+     "t_start": 1788359048.6157818,
+     "ok": true,
+     "http": 200,
+     "elapsed": 7.953320264816284,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 30,
+     "think": 1094,
+     "finish": "STOP"
+    },
+    {
+     "cand": 2,
+     "t_start": 1788359048.6158988,
+     "ok": true,
+     "http": 200,
+     "elapsed": 13.482465982437134,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 28,
+     "think": 696,
+     "finish": "STOP"
+    },
+    {
+     "cand": 3,
+     "t_start": 1788359048.6165361,
+     "ok": true,
+     "http": 200,
+     "elapsed": 7.952345848083496,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 152,
+     "think": 830,
+     "finish": "STOP"
+    },
+    {
+     "cand": 4,
+     "t_start": 1788359056.568904,
+     "ok": true,
+     "http": 200,
+     "elapsed": 6.58975887298584,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 180,
+     "think": 615,
+     "finish": "STOP"
+    },
+    {
+     "cand": 5,
+     "t_start": 1788359056.5691159,
+     "ok": true,
+     "http": 200,
+     "elapsed": 6.57592511177063,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 131,
+     "think": 499,
+     "finish": "STOP"
+    },
+    {
+     "cand": 6,
+     "t_start": 1788359060.142647,
+     "ok": true,
+     "http": 200,
+     "elapsed": 10.696885108947754,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 28,
+     "think": 884,
+     "finish": "STOP"
+    },
+    {
+     "cand": 7,
+     "t_start": 1788359062.0984051,
+     "ok": true,
+     "http": 200,
+     "elapsed": 7.701344728469849,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 123,
+     "think": 577,
+     "finish": "STOP"
+    }
+   ]
+  },
+  {
+   "workers": 1,
+   "wall": 80.07,
+   "calls": [
+    {
+     "cand": 0,
+     "t_start": 1788359075.8441641,
+     "ok": true,
+     "http": 200,
+     "elapsed": 6.42283296585083,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 79,
+     "think": 513,
+     "finish": "STOP"
+    },
+    {
+     "cand": 1,
+     "t_start": 1788359082.26702,
+     "ok": true,
+     "http": 200,
+     "elapsed": 15.034965991973877,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 93,
+     "think": 881,
+     "finish": "STOP"
+    },
+    {
+     "cand": 2,
+     "t_start": 1788359097.3019981,
+     "ok": true,
+     "http": 200,
+     "elapsed": 5.882977724075317,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 113,
+     "think": null,
+     "finish": "STOP"
+    },
+    {
+     "cand": 3,
+     "t_start": 1788359103.184991,
+     "ok": true,
+     "http": 200,
+     "elapsed": 7.144625902175903,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 129,
+     "think": 593,
+     "finish": "STOP"
+    },
+    {
+     "cand": 4,
+     "t_start": 1788359110.32963,
+     "ok": true,
+     "http": 200,
+     "elapsed": 7.037097930908203,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 134,
+     "think": 501,
+     "finish": "STOP"
+    },
+    {
+     "cand": 5,
+     "t_start": 1788359117.366814,
+     "ok": true,
+     "http": 200,
+     "elapsed": 8.824612140655518,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 133,
+     "think": 369,
+     "finish": "STOP"
+    },
+    {
+     "cand": 6,
+     "t_start": 1788359126.1914408,
+     "ok": true,
+     "http": 200,
+     "elapsed": 18.75592803955078,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 30,
+     "think": 933,
+     "finish": "STOP"
+    },
+    {
+     "cand": 7,
+     "t_start": 1788359144.94738,
+     "ok": true,
+     "http": 200,
+     "elapsed": 10.961866855621338,
+     "attempts": 1,
+     "prompt_tokens": 21376,
+     "out": 137,
+     "think": 409,
+     "finish": "STOP"
+    }
+   ]
+  }
+ ]
+}
