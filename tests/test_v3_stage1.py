@@ -191,7 +191,7 @@ def test_parse_failure_is_reasked_not_crash(monkeypatch):
     grid = _fake_grid()
     calls = []
     good = _resp([(0, 550, [(0, 550)]), (550, 1000, [(550, 1000)])])
-    def fake_call(gemini, uploaded, prompt):
+    def fake_call(gemini, uploaded, prompt, *, sample_fps=None):
         calls.append(prompt)
         if len(calls) == 1:
             raise ValueError("응답 JSON 파싱 실패: Expecting value")
@@ -278,7 +278,7 @@ def test_reask_loop_then_success(monkeypatch):
     ]
     monkeypatch.setattr(s1, "_upload_video",
                         lambda g, p, log=print: type("U", (), {"name": "f", "uri": "u"})())
-    def fake_call(gemini, uploaded, prompt):
+    def fake_call(gemini, uploaded, prompt, *, sample_fps=None):
         prompts.append(prompt)
         return responses[len(prompts) - 1]
     monkeypatch.setattr(s1, "_call_model", fake_call)
@@ -300,7 +300,7 @@ def test_reask_exhaustion_raises(monkeypatch):
     bad = _resp([(0, 400, [(0, 400)]), (500, 1000, [(500, 1000)])])
     monkeypatch.setattr(s1, "_upload_video",
                         lambda g, p, log=print: type("U", (), {"name": "f", "uri": "u"})())
-    monkeypatch.setattr(s1, "_call_model", lambda g, u, p: json.loads(json.dumps(bad)))
+    monkeypatch.setattr(s1, "_call_model", lambda g, u, p, **kw: json.loads(json.dumps(bad)))
 
     class _Files:
         def delete(self, name):

@@ -17,6 +17,7 @@ temperature=0.0 명시 — 합격 기준의 결정성 조항("temperature 0 기�
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import time
 from pathlib import Path
@@ -36,7 +37,83 @@ from app.v3.timegrid import grid_snap_times
 
 SCAN_PROXY_HEIGHT = 480          # 전체 훑기용(2026-08-31 사용자 설정: 360→480)
 SCAN_PROXY_FILE_FPS = 10.0       # 파일 자체 fps(2026-08-31: 1→10 — 표본 프레임의 시각 정밀)
-SCAN_SAMPLE_FPS = 1.0            # Gemini 표본 fps(video_metadata · 2026-08-31: 0.5→1)
+SCAN_SAMPLE_FPS = 1.0            # Gemini 표본 fps 기본값 — 짧은 소재는 이 값 그대로
+
+# ── 소재 길이에 따른 표본 fps 자동 결정 (2026-09-01) ─────────────────────────
+# 산식은 API 실측이다(count_tokens, 합성 영상 60초 · fps 6점에서 오차 0의 선형식):
+#     토큰 = 재생초 × (표본fps × 71 + 32)
+# 3시간 실물로도 확인했다 — fps 0.85 는 실호출 성공(prompt 875,890), fps 1.0 은
+# 400 "input token count exceeds the maximum 1048576". 길이 자체의 하드 상한은 없고
+# 토큰만이 벽이다(문서의 '45분 제한'은 그 실측으로 반증됐다).
+SCAN_TOKENS_PER_FRAME = 71       # 실측 — media_resolution LOW·미지정 동일(HIGH 만 ≈280)
+SCAN_TOKENS_PER_SEC_AUDIO = 32   # 실측 — fps 와 무관한 고정 몫(3시간이면 34.5만 = 상한 33%)
+SCAN_INPUT_LIMIT = 1_048_576     # gemini-3.7-flash 입력 상한
+SCAN_PROMPT_RESERVE = 50_000     # 프롬프트 유보 — 장면 전환 어휘가 상한 1500 으로 솎여
+                                 # 소재 길이에 비례하지 않는다(실측 추정 2~3만, 여유 포함)
+SCAN_FPS_QUANTUM = 0.05          # 결정성 — 내림 계단(같은 소재는 늘 같은 fps)
+# 하한은 임의값이 아니라 **스냅 관용에서 파생**된다: 표본 간격(1/fps)이 스냅 관용
+# (±2.0s)을 넘으면 모델이 관용 안으로 경계를 제안할 근거를 화면에서 못 본다 —
+# 그 아래로 내리면 Stage 1 은 어차피 스냅 반려로 재질의를 소진하고 죽는다.
+SCAN_SAMPLE_FPS_MIN = 1.0 / schemas.SNAP_TOLERANCE_SEC   # = 0.5 → 최대 4시간 06분
+
+
+def scan_tokens(duration_sec: float, fps: float) -> int:
+    """실측 산식 — 스캔 프록시 1회 업로드의 입력 토큰(순수)."""
+    return round(duration_sec * (fps * SCAN_TOKENS_PER_FRAME + SCAN_TOKENS_PER_SEC_AUDIO))
+
+
+def scan_max_duration_sec(fps: float) -> float:
+    """그 fps 로 한 번에 넣을 수 있는 최대 재생초(프롬프트 유보 반영·순수)."""
+    return (SCAN_INPUT_LIMIT - SCAN_PROMPT_RESERVE) / (
+        fps * SCAN_TOKENS_PER_FRAME + SCAN_TOKENS_PER_SEC_AUDIO)
+
+
+def resolve_scan_fps(duration_sec: float, *,
+                     base_fps: float = SCAN_SAMPLE_FPS) -> tuple[float, dict]:
+    """소재 길이로 Stage 1 표본 fps 를 정한다 — 순수·결정적.
+
+    **기본값으로 들어가는 소재는 한 프레임도 안 바뀐다**: base_fps 로 예산 안에 들면
+    그대로 돌려준다(회귀 0). 넘칠 때만 예산에 맞춰 내리고, `SCAN_FPS_QUANTUM` 계단으로
+    **내림**해 같은 소재가 늘 같은 fps 를 받게 한다(결정성 합격 조항).
+
+    하한(`SCAN_SAMPLE_FPS_MIN`) 아래로 내려가야 들어가는 소재는 **크게 실패한다** —
+    조용히 더 내리면 스냅 관용 밖 제안만 나와 재질의를 소진하고 어차피 죽는데,
+    그때는 Pro 호출 3회를 이미 태운 뒤다.
+
+    길이를 모르면(≤0) 판정하지 않고 base 를 쓴다(오판 금지 — 이 레포의 안전장치 규율).
+    """
+    base = float(base_fps)
+    if base > SCAN_PROXY_FILE_FPS:      # 표본은 파일 fps 를 넘을 수 없다(없는 프레임)
+        raise ValueError(
+            f"표본 fps {base:g} 가 프록시 파일 fps {SCAN_PROXY_FILE_FPS:g} 를 넘는다")
+    dur = float(duration_sec or 0.0)
+    budget = SCAN_INPUT_LIMIT - SCAN_PROMPT_RESERVE
+    note: dict[str, Any] = {"base_fps": base, "duration_sec": round(dur, 3),
+                            "budget_tokens": budget,
+                            "tokens_per_frame": SCAN_TOKENS_PER_FRAME,
+                            "tokens_per_sec_audio": SCAN_TOKENS_PER_SEC_AUDIO}
+    if dur <= 0:
+        return base, {**note, "fps": base, "reason": "duration_unknown"}
+
+    if scan_tokens(dur, base) <= budget:
+        return base, {**note, "fps": base, "reason": "base",
+                      "est_tokens": scan_tokens(dur, base)}
+
+    raw = (budget / dur - SCAN_TOKENS_PER_SEC_AUDIO) / SCAN_TOKENS_PER_FRAME
+    fps = math.floor(max(raw, 0.0) / SCAN_FPS_QUANTUM + 1e-9) * SCAN_FPS_QUANTUM
+    fps = round(fps, 4)
+    if fps < SCAN_SAMPLE_FPS_MIN:
+        raise ValueError(
+            f"소재가 너무 길어 Stage 1 을 한 번에 넣을 수 없다 — {dur / 60:.0f}분"
+            f"(필요 표본 fps {raw:.3f} < 하한 {SCAN_SAMPLE_FPS_MIN:g}). "
+            f"하한에서의 최대 길이는 {scan_max_duration_sec(SCAN_SAMPLE_FPS_MIN) / 60:.0f}분"
+            f"({scan_max_duration_sec(SCAN_SAMPLE_FPS_MIN) / 3600:.2f}시간)이다. "
+            "소재를 나누거나 하한을 낮출지 사람이 결정해야 한다"
+            f"(하한은 스냅 관용 ±{schemas.SNAP_TOLERANCE_SEC:g}s 에서 파생된 값이다).")
+    return fps, {**note, "fps": fps, "reason": "reduced_for_duration",
+                 "est_tokens": scan_tokens(dur, fps),
+                 "max_fps_exact": round(raw, 4)}
+
 MAX_REASKS = 2                   # 반려·재질의 상한(기획서 §3)
 BOUNDARY_CLUSTER_EPS = 1.0       # 인접 구간이 공유해야 할 경계의 허용 어긋남(스냅 전 정준화)
 PROMPT_SCENE_CUTS_CAP = 1500     # 프롬프트에 실을 장면 전환 어휘 상한(넘으면 결정적 솎음)
@@ -359,11 +436,12 @@ def _upload_video(gemini, video_path: Path, *, log=print):
             safe_path.unlink(missing_ok=True)
 
 
-def _call_model(gemini, uploaded, prompt: str) -> dict:
+def _call_model(gemini, uploaded, prompt: str, *,
+                sample_fps: float = SCAN_SAMPLE_FPS) -> dict:
     types = gemini.types
     part = types.Part(
         file_data=types.FileData(file_uri=uploaded.uri, mime_type="video/mp4"),
-        video_metadata=types.VideoMetadata(fps=SCAN_SAMPLE_FPS))
+        video_metadata=types.VideoMetadata(fps=sample_fps))
     response = gemini.client.models.generate_content(
         model=gemini.config.model_name,          # Pro — 영상을 실제로 보는 호출
         contents=[part, prompt],
@@ -401,7 +479,18 @@ def run_seq_analyze(gemini, scan_proxy: Path, grid: dict, *,
     duration = float(grid["source"]["duration_sec"])
     grid_times = grid_snap_times(grid)
     hints = heuristic_hints(grid)
-    audit: dict[str, Any] = {"attempts": [], "heuristic_hints": hints}
+    # 표본 fps 는 소재 길이가 정한다 — **업로드 전**에 판정한다(3시간 프록시 업로드가
+    # 실측 364초였다. 비싼 단계 뒤에 검사를 두지 않는 것이 이 레포의 교훈이다).
+    sample_fps, fps_note = resolve_scan_fps(duration)
+    audit: dict[str, Any] = {"attempts": [], "heuristic_hints": hints,
+                             "sample_fps": sample_fps, "sample_fps_note": fps_note}
+    if fps_note.get("reason") == "reduced_for_duration":
+        log(f"  [v3/stage1] 소재 {duration / 60:.0f}분 — 표본 fps "
+            f"{fps_note['base_fps']:g} → {sample_fps:g} 로 낮춤"
+            f"(예상 {fps_note['est_tokens']:,} tok / 예산 {fps_note['budget_tokens']:,})")
+    else:
+        log(f"  [v3/stage1] 표본 fps {sample_fps:g}"
+            + (f" · 예상 {fps_note['est_tokens']:,} tok" if "est_tokens" in fps_note else ""))
 
     uploaded = _upload_video(gemini, scan_proxy, log=log)
     try:
@@ -412,7 +501,7 @@ def run_seq_analyze(gemini, scan_proxy: Path, grid: dict, *,
             log(f"  [v3/stage1] Pro 제안 요청 (시도 {attempt + 1}/{1 + MAX_REASKS})")
             problems: list[str] = []
             try:
-                raw = _call_model(gemini, uploaded, prompt)
+                raw = _call_model(gemini, uploaded, prompt, sample_fps=sample_fps)
                 norm = schemas.normalize_stage1_response(raw)
             except ValueError as e:
                 # 파싱 실패·구조 오류 둘 다 반려 재료다 — 루프 밖으로 새면 Pro 비용을

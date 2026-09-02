@@ -240,10 +240,19 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
             step("proxy", elapsed=round(time.time() - t0, 1), kind="480p")
         scan_proxy = output_dir / f"{safe_title}_scan.mp4"
         if not skip_seq_analyze:
+            # 표본 fps 사전검사 — 프록시 인코딩(3시간이면 수 분)·업로드(실측 364초)
+            # 앞에서 판정한다. 길이가 하한으로도 안 들어가면 여기서 크게 실패한다.
+            # ⚠ **Stage 1 이 실제로 돌 때만** 건다 — 캐시를 재사용하는 재개(render 등)를
+            # 이 가드가 새로 죽이면 안 된다(재개 계약). 조건은 아래 Stage 1 분기와 같다.
+            scan_fps = scan_fps_note = None
+            if (not (output_dir / "stage1.json").exists()
+                    or from_step in ("grid", "seq_analyze")):
+                scan_fps, scan_fps_note = s1.resolve_scan_fps(duration)
             t0 = time.time()
             s1.build_scan_proxy(Path(video_path), scan_proxy, log=log)
             step("proxy", elapsed=round(time.time() - t0, 1), kind="scan",
-                 height=s1.SCAN_PROXY_HEIGHT, file_fps=s1.SCAN_PROXY_FILE_FPS)
+                 height=s1.SCAN_PROXY_HEIGHT, file_fps=s1.SCAN_PROXY_FILE_FPS,
+                 sample_fps=scan_fps, sample_fps_note=scan_fps_note)
 
         # ── grid ∥ character_index ────────────────────────────────────────
         grid_path = output_dir / "grid.json"
@@ -364,6 +373,8 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
                             for k, v in doc["exception_sector"].items()},
                  heuristic_hints=audit.get("heuristic_hints"),
                  heuristic_mismatch=audit.get("heuristic_mismatch"),
+                 sample_fps=audit.get("sample_fps"),
+                 sample_fps_note=audit.get("sample_fps_note"),
                  audit_attempts=audit["attempts"])
             mism = audit.get("heuristic_mismatch") or []
             if mism:
