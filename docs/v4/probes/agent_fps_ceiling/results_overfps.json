@@ -1,0 +1,26 @@
+{
+ "truth_count": 200,
+ "duration_sec": 20.0,
+ "results": [
+  {
+   "fps": 25.0,
+   "http": 400,
+   "error": "{\"error\": {\"code\": 400, \"message\": \"* GenerateContentRequest.contents[0].parts[0].video_metadata.fps: [FIELD_INVALID] threshold must be less than or equal to 24\\n\", \"status\": \"INVALID_ARGUMENT\"}}"
+  },
+  {
+   "fps": 30.0,
+   "http": 400,
+   "error": "{\"error\": {\"code\": 400, \"message\": \"* GenerateContentRequest.contents[0].parts[0].video_metadata.fps: [FIELD_INVALID] threshold must be less than or equal to 24\\n\", \"status\": \"INVALID_ARGUMENT\"}}"
+  },
+  {
+   "fps": 40.0,
+   "http": 400,
+   "error": "{\"error\": {\"code\": 400, \"message\": \"* GenerateContentRequest.contents[0].parts[0].video_metadata.fps: [FIELD_INVALID] threshold must be less than or equal to 24\\n\", \"status\": \"INVALID_ARGUMENT\"}}"
+  },
+  {
+   "fps": 60.0,
+   "http": 400,
+   "error": "{\"error\": {\"code\": 400, \"message\": \"* GenerateContentRequest.contents[0].parts[0].video_metadata.fps: [FIELD_INVALID] threshold must be less than or equal to 24\\n\", \"status\": \"INVALID_ARGUMENT\"}}"
+  }
+ ]
+}

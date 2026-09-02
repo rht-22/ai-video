@@ -1,0 +1,169 @@
+{
+ "480p|default": {
+  "8": {
+   "missed": 24,
+   "exact": 0,
+   "partial": 0
+  },
+  "10": {
+   "missed": 21,
+   "partial": 3,
+   "exact": 0
+  },
+  "12": {
+   "exact": 7,
+   "partial": 16,
+   "missed": 1
+  },
+  "14": {
+   "exact": 20,
+   "partial": 4
+  },
+  "16": {
+   "exact": 24,
+   "partial": 0
+  },
+  "20": {
+   "exact": 24,
+   "partial": 0
+  }
+ },
+ "720p|default": {
+  "8": {
+   "missed": 24,
+   "exact": 0,
+   "partial": 0
+  },
+  "10": {
+   "missed": 22,
+   "partial": 2,
+   "exact": 0
+  },
+  "12": {
+   "exact": 8,
+   "partial": 16
+  },
+  "14": {
+   "exact": 15,
+   "partial": 9
+  },
+  "16": {
+   "exact": 24,
+   "partial": 0
+  },
+  "20": {
+   "exact": 24,
+   "partial": 0
+  }
+ },
+ "1080p|default": {
+  "8": {
+   "missed": 24,
+   "exact": 0,
+   "partial": 0
+  },
+  "10": {
+   "missed": 21,
+   "partial": 2,
+   "exact": 1
+  },
+  "12": {
+   "exact": 8,
+   "partial": 15,
+   "missed": 1
+  },
+  "14": {
+   "partial": 4,
+   "exact": 20
+  },
+  "16": {
+   "exact": 23,
+   "partial": 1
+  },
+  "20": {
+   "exact": 24,
+   "partial": 0
+  }
+ },
+ "480p|HIGH": {
+  "8": {
+   "missed": 24,
+   "exact": 0,
+   "partial": 0
+  },
+  "10": {
+   "missed": 24,
+   "exact": 0,
+   "partial": 0
+  },
+  "12": {
+   "exact": 24,
+   "partial": 0
+  },
+  "14": {
+   "exact": 24,
+   "partial": 0
+  },
+  "16": {
+   "exact": 24,
+   "partial": 0
+  },
+  "20": {
+   "exact": 24,
+   "partial": 0
+  }
+ },
+ "720p|HIGH": {
+  "8": {
+   "partial": 4,
+   "exact": 16,
+   "missed": 4
+  },
+  "10": {
+   "exact": 20,
+   "partial": 4
+  },
+  "12": {
+   "exact": 24,
+   "partial": 0
+  },
+  "14": {
+   "exact": 24,
+   "partial": 0
+  },
+  "16": {
+   "exact": 24,
+   "partial": 0
+  },
+  "20": {
+   "exact": 24,
+   "partial": 0
+  }
+ },
+ "1080p|HIGH": {
+  "8": {
+   "exact": 19,
+   "partial": 5
+  },
+  "10": {
+   "exact": 21,
+   "partial": 3
+  },
+  "12": {
+   "exact": 24,
+   "partial": 0
+  },
+  "14": {
+   "exact": 24,
+   "partial": 0
+  },
+  "16": {
+   "exact": 24,
+   "partial": 0
+  },
+  "20": {
+   "exact": 24,
+   "partial": 0
+  }
+ }
+}

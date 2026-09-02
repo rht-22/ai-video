@@ -1,0 +1,60 @@
+{
+ "truth_count": 200,
+ "duration_sec": 20.0,
+ "results": [
+  {
+   "fps": 1.0,
+   "mode": "list",
+   "elapsed_sec": 14.529,
+   "finishReason": "STOP",
+   "truncated": false,
+   "promptTokenCount": 1453,
+   "promptTokensDetails": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 1320
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 133
+    }
+   ],
+   "candidatesTokenCount": 100,
+   "thoughtsTokenCount": 603,
+   "totalTokenCount": 2156,
+   "theoretical_ceiling": 20,
+   "expected_video_tokens_F66": 1820,
+   "emitted": 20,
+   "hits": 20,
+   "hallucinations": 0,
+   "duplicates": 0,
+   "monotonicity": 1.0,
+   "matched_indices_first10": [
+    4,
+    14,
+    24,
+    34,
+    44,
+    54,
+    64,
+    74,
+    84,
+    94
+   ],
+   "matched_indices_last10": [
+    104,
+    114,
+    124,
+    134,
+    144,
+    154,
+    164,
+    174,
+    184,
+    194
+   ],
+   "recall_vs_ceiling": 1.0,
+   "recall_vs_200": 0.1
+  }
+ ]
+}

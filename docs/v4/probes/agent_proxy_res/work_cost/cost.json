@@ -1,0 +1,40 @@
+{
+ "src": "/Users/gimsewon/Downloads/\uc2e0\ubcd14_EP1_EPK.mp4",
+ "start": 300,
+ "dur": 600,
+ "fps": 10,
+ "crf": 30,
+ "preset": "ultrafast",
+ "rows": [
+  {
+   "name": "480p",
+   "path": "/private/tmp/claude-501/-Users-gimsewon-rhoonart-ai-video--claude-worktrees-new-video-pipeline-954722/fb818a74-441c-4dce-a784-151845325b20/scratchpad/resprobe/work_cost/lf_480p.mp4",
+   "bytes": 45456798,
+   "mb": 45.46,
+   "encode_sec": 96.5,
+   "upload_sec": 8.83,
+   "active_wait_sec": 14.47,
+   "file_name": "files/iy40z1yl3xmu"
+  },
+  {
+   "name": "720p",
+   "path": "/private/tmp/claude-501/-Users-gimsewon-rhoonart-ai-video--claude-worktrees-new-video-pipeline-954722/fb818a74-441c-4dce-a784-151845325b20/scratchpad/resprobe/work_cost/lf_720p.mp4",
+   "bytes": 74322605,
+   "mb": 74.32,
+   "encode_sec": 101.9,
+   "upload_sec": 12.04,
+   "active_wait_sec": 21.14,
+   "file_name": "files/q7u14nhd9dfx"
+  },
+  {
+   "name": "1080p",
+   "path": "/private/tmp/claude-501/-Users-gimsewon-rhoonart-ai-video--claude-worktrees-new-video-pipeline-954722/fb818a74-441c-4dce-a784-151845325b20/scratchpad/resprobe/work_cost/lf_1080p.mp4",
+   "bytes": 197250853,
+   "mb": 197.25,
+   "encode_sec": 99.9,
+   "upload_sec": 25.02,
+   "active_wait_sec": 25.77,
+   "file_name": "files/us9ifyztuwvu"
+  }
+ ]
+}

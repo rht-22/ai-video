@@ -1,0 +1,290 @@
+[
+ {
+  "tag": "480p|default|r0",
+  "ok": true,
+  "latency_sec": 14.23,
+  "text": "가왕들의 센터 전쟁\n표심 스틸 대작전\n낮 게릴라 홍보전\n시선집중!\n가왕쇼\n게릴라 콘서트에서\n기획\n황인영\n센터 전쟁은\n계속된다\n여러분께 가장 많은\n크리에이터\n노윤\n표를 받으신 분이\n센터가 됩니다.\n오늘 1등은 나야\n총괄 프로듀서\n전수경\n여기서 센터 줘요.\n센터는 저예요\n제가 지금도 센터에\n2등\n숨 쉴 틈도 없이\n경쟁 하는 센터 후보들\n앉아 있지 않습니까 여러분.\n촬영\n[콘티디이틱] 이기주 이정웅 송형석 한재호 김세권 김수연 박민수 전재웅\n한석하 문봉기 전미주 유대한 추 건 장태희 이한별\n이렇게 싸우는 분위기야?\n아니 이렇게 싸우는",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 1221,
+   "candidatesTokenCount": 211,
+   "totalTokenCount": 2635,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 129
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 1092
+    }
+   ],
+   "thoughtsTokenCount": 1203,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "480p|default|r1",
+  "ok": true,
+  "latency_sec": 14.53,
+  "text": "가왕들의 센터 전쟁\n표심 스틸 대작전\n낮 게릴라 홍보전\n시선 강탈\n가왕쇼\n그릴라 콘서트에서\n기획\n황인영\n센터 전쟁은\n계속 된다\n여러분께 가장 많은\n크리에이터\n노윤\n표를 받으신 분이\n센터가 됩니다.\n오늘 1등은 나야\n총괄 프로듀서\n전수경\n여기서 센터 줘요.\n센터는 저예요\n제가 지금도 센터에\n앉아 있지 않습니까 여러분.\n숨 쉴 틈도 없이\n경쟁 하는 센터 후보들\n촬영\n[콘티미디어웍] 이기주 이정웅 송형석 한재호 김세권 김수연 박민수 전재웅\n한석하 문봉기 전미주 유대한 추 건 장태희 이한별\n이렇게 싸우는 분위기야?\n아니 이렇게 싸우는",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 1221,
+   "candidatesTokenCount": 207,
+   "totalTokenCount": 2400,
+   "promptTokensDetails": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 1092
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 129
+    }
+   ],
+   "thoughtsTokenCount": 972,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "480p|HIGH|r0",
+  "ok": true,
+  "latency_sec": 6.85,
+  "text": "가왕들의 센터 전쟁\n표심 스틸 대작전\n낮 게릴라 홍보전\n서진팀\n기획\n황인영\n센터 전쟁은 계속 된다\n크리에이터\n노윤\n오늘 1등은 나야\n센터는 저예요\n총괄 프로듀서\n전수경\n2대 가왕\n숨 쉴 틈도 없이\n경쟁하는 센터 후보들\n촬영\n[콘미디어텍] 이기주 이정웅 송형석 한제호 김세권 김수연 박민수 전재웅 한석하 문봉기 전미주 유태환 주 건 장태희 이한별\n이렇게 싸우는 분위기야?\n가왕쇼\n그릴라 콘서트에서\n여러분께 가장 많은\n표를 받으신 분이\n센터가 됩니다.\n여기서 센터 줘요.\n제가 지금도 센터에\n앉아 있지 않습니까 여러분.\n아니 이렇게 싸우는",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 3597,
+   "candidatesTokenCount": 208,
+   "totalTokenCount": 4295,
+   "promptTokensDetails": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 3468
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 129
+    }
+   ],
+   "thoughtsTokenCount": 490,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "480p|HIGH|r1",
+  "ok": true,
+  "latency_sec": 3.92,
+  "text": "가왕들의 센터 전쟁\n표심 스틸 대작전\n낮 게릴라 홍보전\n서진팀\n가왕쇼\n그릴라 콘서트에서\n기획\n황인영\n센터 전쟁은\n계속 된다\n여러분께 가장 많은\n크리에이터\n노윤\n표를 받으신 분이\n센터가 됩니다.\n오늘 1등은 나야\n총괄 프로듀서\n전수경\n여기서 센터 줘요.\n센터는 저예요\n2대 가왕\n제가 지금도 센터에\n앉아 있지 않습니까 여러분.\n숨 쉴 틈도 없이\n경쟁하는 센터 후보들\n촬영\n[콘미디어택] 이기주 이정웅 송형석 한제호 김세권 김수연 박민수 전재웅\n한석하 문봉기 전미주 유태환 주 건 장태희 이한별\n이렇게 싸우는 분위기야?\n아니 이렇게 싸우는",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 3597,
+   "candidatesTokenCount": 211,
+   "totalTokenCount": 4469,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 129
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 3468
+    }
+   ],
+   "thoughtsTokenCount": 661,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "720p|default|r0",
+  "ok": true,
+  "latency_sec": 6.65,
+  "text": "가왕들의 센터 전쟁\n표심 스틸 대작전\n낮 게릴라 홍보전\n시선강탈\n가왕쇼\n그릴라 콘서트에서\n기획\n황인영\n센터 전쟁은\n계속된다\n여러분께 가장 많은\n크리에이터\n노윤\n표를 받으신 분이\n센터가 됩니다.\n오늘 1등은 나야\n총괄 프로듀서\n전수경\n여기서 센터 줘요.\n센터는 저예요\n제가 지금도 센터에\n숨 쉴 틈도 없이\n경쟁하는 센터 후보들\n촬영\n[콘티디아틱] 이기주 이정웅 송형석 한재호 김세권 김수연 박민수 전재웅\n한석하 문봉기 전미주 유대한 추 건 장태희 이한별\n앉아 있지 않습니까 여러분.\n이렇게 싸우는 분위기야?\n아니 이렇게 싸우는",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 1221,
+   "candidatesTokenCount": 207,
+   "totalTokenCount": 2028,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 129
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 1092
+    }
+   ],
+   "thoughtsTokenCount": 600,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "720p|default|r1",
+  "ok": true,
+  "latency_sec": 7.02,
+  "text": "가왕들의 센터 전쟁\n표심 스틸 대작전\n낮 게릴라 홍보전\n사전선거\n기획\n황인영\n센터 전쟁은 계속된다\n크리에이터\n노윤\n오늘 1등은 나야\n총괄 프로듀서\n전수경\n센터는 저예요\n2대 가왕\n첫번째 가왕\n숨 쉴 틈도 없이\n경쟁하는 센터 후보들\n촬영\n[콘디미디어] 이기주 이정웅 송형석 한재호 김세권 김수연 박민수 전재웅\n한석하 문봉기 전미주 유대한 추진 장태희 이한별\n이렇게 싸우는 분위기야?\n가왕쇼\n그릴라 콘서트에서\n여러분께 가장 많은\n표를 받으신 분이\n센터가 됩니다.\n여기서 센터 줘요.\n제가 지금도 센터에\n앉아 있지 않습니까 여러분.\n아니 이렇게 싸우는",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 1221,
+   "candidatesTokenCount": 213,
+   "totalTokenCount": 2280,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 129
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 1092
+    }
+   ],
+   "thoughtsTokenCount": 846,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "720p|HIGH|r0",
+  "ok": true,
+  "latency_sec": 11.81,
+  "text": "가왕들의 센터 전쟁\n표심 스틸 대작전\n낮 게릴라 홍보전\n서진팀\n가왕 쇼\n그릴라 콘서트에서\n기획\n황인영\n센터 전쟁은 계속 된다\n크리에이터\n노윤\n여러분께 가장 많은\n표를 받으신 분이\n센터가 됩니다.\n오늘 1등은 나야\n총괄 프로듀서\n전수경\n여기서 센터 줘요.\n센터는 저예요\n제가 지금도 센터에\n2대 가왕\n숨 쉴 틈도 없이\n경쟁하는 센터 후보들\n앉아 있지 않습니까 여러분.\n촬영\n[콘미디어택] 이기주 이정웅 송형석 한제호 김세권 김수연 박민수 전재웅\n한석하 문봉기 전미주 유태환 주 건 장태희 이한별\n이렇게 싸우는 분위기야?\n아니 이렇게 싸우는",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 3597,
+   "candidatesTokenCount": 209,
+   "totalTokenCount": 4662,
+   "promptTokensDetails": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 3468
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 129
+    }
+   ],
+   "thoughtsTokenCount": 856,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "720p|HIGH|r1",
+  "ok": true,
+  "latency_sec": 12.02,
+  "text": "가왕들의 센터 전쟁\n표심 스틸 대작전\n낮 게릴라 홍보전\n서진팀\n가 왕 쇼\n그릴라 콘서트에서\n기획 황인영\n센터 전쟁은 계속 된다\n여러분께 가장 많은\n크리에이터 노윤\n표를 받으신 분이\n센터가 됩니다.\n오늘 1등은 나야\n총괄 프로듀서 전수경\n여기서 센터 줘요.\n센터는 저예요\n제가 지금도 센터에\n2대 가왕\n참 트롯 진\n앉아 있지 않습니까 여러분.\n숨 쉴 틈도 없이\n경쟁하는 센터 후보들\n촬영\n[콘미디어택] 이기주 이정웅 송형석 한제호 김세권 김수연 박민수 전재웅\n한석하 문봉기 전미주 유태환 주 건 장태희 이한별\n아니 이렇게 싸우는\n이렇게 싸우는 분위기야?",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 3597,
+   "candidatesTokenCount": 211,
+   "totalTokenCount": 4729,
+   "promptTokensDetails": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 3468
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 129
+    }
+   ],
+   "thoughtsTokenCount": 921,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "1080p|default|r0",
+  "ok": true,
+  "latency_sec": 5.69,
+  "text": "가왕들의 센터 전쟁\n표심 스틸 대작전\n낮 게릴라 홍보전 시민들과 만남\n가왕쇼\n그릴라 콘서트에서\n센터 전쟁은 계속 된다\n기획 황인영\n여러분께 가장 많은\n크리에이터 노윤\n표를 받으신 분이\n센터가 됩니다.\n오늘 1등은 나야\n총괄 프로듀서 전수경\n여기서 센터 줘요.\n센터는 저예요\n제가 지금도 센터에\n2대가왕\n앉아 있지 않습니까 여러분.\n숨 쉴 틈도 없이\n경쟁하는 센터 후보들\n촬영\n[콘티디렉] 이기주 이정웅 송형석 한재호 김세권 김수연 박민수 전재용\n한석하 문봉기 전미주 유대한 추 건 장태희 이한별\n아니 이렇게 싸우는\n이렇게 싸우는 분위기야?\n1대가왕\n3대가왕",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 1221,
+   "candidatesTokenCount": 212,
+   "totalTokenCount": 2138,
+   "promptTokensDetails": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 1092
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 129
+    }
+   ],
+   "thoughtsTokenCount": 705,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "1080p|default|r1",
+  "ok": true,
+  "latency_sec": 21.84,
+  "text": "가왕들의 센터 전쟁\n표심 스틸 대작전\n낮 게릴라 홍보전\n시선 집중\n가왕쇼\n그릴라 콘서트에서\n기획\n황인영\n센터 전쟁은\n계속 된다\n여러분께 가장 많은\n크리에이터\n노윤\n표를 받으신 분이\n센터가 됩니다.\n오늘 1등은 나야\n총괄 프로듀서\n전수경\n여기서 센터 줘요.\n센터는 저예요\n제가 지금도 센터에\n2대 가왕\n참 돋보이\n앉아 있지 않습니까 여러분.\n숨 쉴 틈도 없이\n경쟁하는 센터 후보들\n촬영\n[콘티디아픽] 이기주 이정웅 송형석 한재호 김세권 김수연 박민수 전재웅\n한석하 문봉기 전미주 유대한 추 건 장태희 이한별\n아니 이렇게 싸우는\n이렇게 싸우는 분위기야?\n1대 가왕",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 1221,
+   "candidatesTokenCount": 222,
+   "totalTokenCount": 1841,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 129
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 1092
+    }
+   ],
+   "thoughtsTokenCount": 398,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "1080p|HIGH|r0",
+  "ok": true,
+  "latency_sec": 5.29,
+  "text": "가왕들의 센터 전쟁\n표심 스틸 대작전\n낮 게릴라 홍보전\n서진팀\n기획\n황인영\n센터 전쟁은\n계속 된다\n크리에이터\n노윤\n오늘 1등은 나야\n총괄 프로듀서\n전수경\n센터는 저예요\n2대 가왕\n숨 쉴 틈도 없이\n경쟁 하는 센터 후보들\n촬영\n[콘미디어택] 이기주 이정웅 송형석 한제호 김세권 김수연 박민수 전재웅 한석하 문봉기 전미주 유태환 주 건 장태희 이한별\n이렇게 싸우는 분위기야?\n가왕쇼\n그릴라 콘서트에서\n여러분께 가장 많은\n표를 받으신 분이\n센터가 됩니다.\n여기서 센터 줘요.\n제가 지금도 센터에\n앉아 있지 않습니까 여러분.\n아니 이렇게 싸우는",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 3597,
+   "candidatesTokenCount": 209,
+   "totalTokenCount": 4300,
+   "promptTokensDetails": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 3468
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 129
+    }
+   ],
+   "thoughtsTokenCount": 494,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "1080p|HIGH|r1",
+  "ok": true,
+  "latency_sec": 8.07,
+  "text": "가왕들의 센터 전쟁\n표심 스틸 대작전\n낮 게릴라 홍보전\n서진팀\n기획\n황인영\n그릴라 콘서트에서\n센터 전쟁은\n계속 된다\n크리에이터\n노윤\n여러분께 가장 많은\n표를 받으신 분이\n센터가 됩니다.\n오늘 1등은 나야\n총괄 프로듀서\n전수경\n여기서 센터 줘요.\n센터는 저예요\n제가 지금도 센터에\n가왕쇼\n2대 가왕\n가왕쇼\n참\n숨 쉴 틈도 없이\n경쟁하는 센터 후보들\n촬영\n[콘미디어택] 이기주 이정웅 송형석 한제호 김세권 김수연 박민수 전재웅\n한석하 문봉기 전미주 유태환 주 건 장태희 이한별\n앉아 있지 않습니까 여러분.\n이렇게 싸우는 분위기야?\n아니 이렇게 싸우는",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 3597,
+   "candidatesTokenCount": 217,
+   "totalTokenCount": 4172,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 129
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 3468
+    }
+   ],
+   "thoughtsTokenCount": 358,
+   "serviceTier": "standard"
+  }
+ }
+]

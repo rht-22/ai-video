@@ -1,0 +1,434 @@
+[
+ {
+  "tag": "480p|default|r0",
+  "ok": true,
+  "latency_sec": 28.83,
+  "text": "HQ-7300, MU-4420, LT-0654, QR-9906, NV-4734, UK-5601, LD-0020, WU-5542, RJ-9130, DR-3435, XQ-6081, PU-0558, NV-2521, US-1250, TT-4504, HC-1549, TQ-2751, AQ-4202, LK-7633, NC-6171, FR-1046, TN-9188, EW-1076, DT-2029, UV-0740, ML-4613, JW-4375, AF-1965, WR-6318, DW-8155, NP-6651, VF-7833, RW-7614, MX-8871, VS-0862, VB-6125, RX-3176, YP-2467, XK-8030, XN-0208, AF-7489, SM-7832, FE-5319, CK-4310, KP-2565, TZ-7691, UF-1418, FN-7558",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 1584,
+   "candidatesTokenCount": 339,
+   "totalTokenCount": 3797,
+   "promptTokensDetails": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 1456
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 128
+    }
+   ],
+   "thoughtsTokenCount": 1874,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "480p|default|r1",
+  "ok": true,
+  "latency_sec": 13.6,
+  "text": "HQ-7300, MU-4420, LT-0654, GK-9506, NV-4738, BK-5287, LD-0020, WU-5542, RJ-9130, DR-3435, RZ-6401, PU-0558, MJ-2521, GS-1250, TT-4504, HC-1548, TQ-2153, AQ-4202, GR-9683, NC-6171, FR-1046, TN-9188, EW-1815, DT-2029, SV-9749, HE-3877, JW-4375, AF-1965, WR-8318, DW-8155, NP-6831, UC-8003, RW-7614, MX-8871, VS-0862, VB-6125, RO-5178, YP-2467, XK-8030, XN-0208, AF-7389, SM-7832, FE-5319, CK-4510, KP-2565, TZ-7491, UF-1418, FK-7004",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 1584,
+   "candidatesTokenCount": 339,
+   "totalTokenCount": 4012,
+   "promptTokensDetails": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 1456
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 128
+    }
+   ],
+   "thoughtsTokenCount": 2089,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "480p|default|r2",
+  "ok": true,
+  "latency_sec": 24.59,
+  "text": "HQ-7300, MU-4420, LT-0654, GR-9764, NV-4734, UK-7631, LD-0020, WU-5542, RJ-9130, DW-3435, KJ-2453, PU-0558, NV-2521, GS-1250, TT-4504, HC-1342, TQ-2751, AQ-4202, GA-5633, NC-6171, FR-1046, TN-9188, EW-1015, DT-2029, QO-9147, WZ-4670, JW-4375, AF-1965, WR-8318, DW-8155, NP-6537, UF-7832, RW-7614, MX-8871, VS-0862, VB-6125, KD-5742, YP-2467, XK-8030, XN-0208, AF-7489, SM-7832, FE-5319, OK-4370, KP-2565, TZ-7571, UF-1418, FK-7038",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 1584,
+   "candidatesTokenCount": 340,
+   "totalTokenCount": 3323,
+   "promptTokensDetails": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 1456
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 128
+    }
+   ],
+   "thoughtsTokenCount": 1399,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "480p|HIGH|r0",
+  "ok": true,
+  "latency_sec": 10.29,
+  "text": "HQ-7300, MU-4420, LT-0654, NV-4734, LD-0020, WU-5542, DW-3435, PU-0558, US-1250, TT-4504, TQ-2753, AQ-4202, NC-6171, FR-1046, TN-9188, DF-2029, JW-4375, AF-1965, WR-6318, DW-8155, NP-6537, MX-8871, VS-0862, VB-6125, YP-2467, XK-8030, XN-0208, SW-7832, FE-5319, CK-4370, KP-2565, UF-1418",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 4752,
+   "candidatesTokenCount": 225,
+   "totalTokenCount": 6275,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 128
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 4624
+    }
+   ],
+   "thoughtsTokenCount": 1298,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "480p|HIGH|r1",
+  "ok": true,
+  "latency_sec": 10.16,
+  "text": "HQ-7300, MU-4420, LT-0654, NV-4734, LD-0020, WU-5542, DW-3435, PU-0558, US-1250, TT-4504, TQ-2753, AQ-4202, NC-6171, FR-1046, TN-9188, DF-2029, JW-4375, AF-1965, WR-6318, DW-8155, NP-6537, MX-8871, VS-0862, VB-6125, YP-2467, XK-8030, XN-0208, SW-7832, FE-5319, CK-4370, KP-2565, UF-1418",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 4752,
+   "candidatesTokenCount": 226,
+   "totalTokenCount": 7359,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 128
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 4624
+    }
+   ],
+   "thoughtsTokenCount": 2381,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "480p|HIGH|r2",
+  "ok": true,
+  "latency_sec": 7.27,
+  "text": "HQ-7300, MU-4420, LT-0654, NV-4734, LD-0020, WU-5542, DW-3435, PU-0558, US-1250, TT-4504, TQ-2753, AQ-4202, NC-6171, FR-1046, TN-9188, DF-2029, JW-4375, AF-1965, WR-6318, DW-8155, NP-6537, MX-8871, VS-0862, VB-6125, YP-2467, XK-8030, XN-0208, SW-7832, FE-5319, CK-4370, KP-2565, UF-1418",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 4752,
+   "candidatesTokenCount": 226,
+   "totalTokenCount": 6289,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 128
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 4624
+    }
+   ],
+   "thoughtsTokenCount": 1311,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "720p|default|r0",
+  "ok": true,
+  "latency_sec": 9.38,
+  "text": "HQ-7300, MU-4420, LT-0654, GR-4956, NV-4734, VK-5207, LD-0020, WU-5542, RJ-9130, DM-3405, KC-0931, PU-0558, MJ-2521, GS-1250, TT-4504, HC-7140, TQ-2151, AQ-4202, GA-5631, NC-6171, FR-1046, TN-9188, EW-9576, DT-2029, SV-9147, WL-4670, JW-4375, AF-1965, WR-6318, DW-8155, NP-6551, UC-7822, HW-7004, MX-8871, VS-8862, VB-6125, KH-5742, YP-2467, XK-8030, XN-0208, JR-7249, SM-7832, FE-5319, CK-4310, KP-2565, TZ-7691, UF-1418, VG-7004",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 1584,
+   "candidatesTokenCount": 338,
+   "totalTokenCount": 3195,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 128
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 1456
+    }
+   ],
+   "thoughtsTokenCount": 1273,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "720p|default|r1",
+  "ok": true,
+  "latency_sec": 21.21,
+  "text": "HQ-7300, MU-4420, LT-0654, SR-9566, NV-4734, VK-5007, LD-0020, WU-5542, KH-6180, DM-3435, WZ-8451, PU-0558, NO-2921, GS-1250, TT-4504, HY-1549, TQ-2151, AQ-4202, CA-5631, NC-6171, FR-1046, TN-9188, EW-4606, DT-2029, OV-9141, HL-4870, JW-6375, AF-1965, WR-6318, DW-8155, NP-6531, UC-8822, RN-5024, MX-8871, VS-8862, VB-6125, RG-9296, YP-2467, XK-8030, XN-0208, JK-7649, SW-7832, FE-5319, CK-4370, KR-2565, TC-5411, UF-1418, PK-7558",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 1584,
+   "candidatesTokenCount": 339,
+   "totalTokenCount": 3483,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 128
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 1456
+    }
+   ],
+   "thoughtsTokenCount": 1560,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "720p|default|r2",
+  "ok": true,
+  "latency_sec": 8.99,
+  "text": "HQ-7300, MU-4420, LT-0654, GR-9766, NV-4734, UE-5207, LD-0020, WU-5542, RQ-7419, DH-3435, RC-2483, PU-0558, RU-2521, GS-1250, TT-4504, VK-1549, TQ-2153, AQ-4202, CA-5631, NC-6171, FR-1046, TN-9188, EW-1025, DT-2029, ED-5704, ML-4672, JW-4375, AF-1965, WR-8318, DW-8155, NP-6531, UC-3832, KW-7654, MX-8871, VS-8852, VB-6125, KO-5276, YP-2467, XK-8830, XN-0208, JE-7260, SH-7832, FE-5319, CK-4370, KP-2565, TZ-5611, UF-1418, PG-7594",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 1584,
+   "candidatesTokenCount": 338,
+   "totalTokenCount": 3365,
+   "promptTokensDetails": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 1456
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 128
+    }
+   ],
+   "thoughtsTokenCount": 1443,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "720p|HIGH|r0",
+  "ok": true,
+  "latency_sec": 5.74,
+  "text": "HQ-7300, MU-4420, LT-0654, QX-8966, NV-4734, DD-9277, LD-0020, WU-5542, KU-4130, DW-3435, KS-2057, PU-0558, MV-2421, US-1250, TT-4504, YR-1544, TQ-2753, AQ-4202, GX-9247, NC-6171, FR-1046, TN-9188, LK-3076, DF-2029, TU-0554, AR-9610, JW-4375, AF-1965, WR-6318, DW-8155, NP-6537, QL-9657, XW-9004, MX-8871, VS-0862, VB-6125, KU-8356, YP-2467, XK-8030, XN-0208, JR-5868, SW-7832, FE-5319, CK-4370, KP-2565, TU-2233, UF-1418, QL-5558",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 4752,
+   "candidatesTokenCount": 343,
+   "totalTokenCount": 6083,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 128
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 4624
+    }
+   ],
+   "thoughtsTokenCount": 988,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "720p|HIGH|r1",
+  "ok": true,
+  "latency_sec": 5.22,
+  "text": "HQ-7300, MU-4420, LT-0654, QX-8966, NV-4734, DD-9277, LD-0020, WU-5542, KU-4180, DW-3435, KS-2057, PU-0558, MV-2421, US-1250, TT-4504, YR-1544, TQ-2753, AQ-4202, GK-9247, NC-6171, FR-1046, TN-9188, LK-3076, DF-2029, TU-0554, AR-9610, JW-4375, AF-1965, WR-6318, DW-8155, NP-6537, QL-9657, XW-9004, MX-8871, VS-0862, VB-6125, KU-8356, YP-2467, XK-8030, XN-0208, JR-5868, SW-7832, FE-5319, CK-4370, KP-2565, TU-2233, UF-1418, QC-5558",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 4752,
+   "candidatesTokenCount": 342,
+   "totalTokenCount": 6183,
+   "promptTokensDetails": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 4624
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 128
+    }
+   ],
+   "thoughtsTokenCount": 1089,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "720p|HIGH|r2",
+  "ok": true,
+  "latency_sec": 8.4,
+  "text": "HQ-7300, MU-4420, LT-0654, QX-8966, NV-4734, OO-9277, LD-0020, WU-5542, KU-4130, DW-3435, KS-2057, PU-0558, MV-2421, US-1250, TT-4504, YR-9544, TQ-2753, AQ-4202, GX-9247, NC-6171, FR-1046, TN-9188, LK-3076, DF-2029, TU-0554, AR-9610, JW-4375, AF-1965, WR-6318, DW-8155, NP-6537, QL-9657, XW-9004, MX-8871, VS-0862, VB-6125, KU-8356, YP-2467, XK-8030, XN-0208, JR-5868, SW-7832, FE-5319, CK-4370, KP-2565, TU-2233, UF-1418, QC-5558",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 4752,
+   "candidatesTokenCount": 342,
+   "totalTokenCount": 6344,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 128
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 4624
+    }
+   ],
+   "thoughtsTokenCount": 1250,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "1080p|default|r0",
+  "ok": true,
+  "latency_sec": 21.11,
+  "text": "HQ-7300, MU-4420, LT-0654, NV-4738, LD-0020, WU-5542, DM-3435, PU-0558, GS-1250, TT-4504, TQ-2753, AQ-4202, NC-6171, FR-1046, TN-9188, DT-2029, JW-4375, AF-1965, WR-6318, DW-8155, NP-6631, MX-8871, VS-8862, VB-6125, YP-2467, XK-8030, XN-0208, SM-7832, FE-5319, OK-4310, KP-2565, UF-1418",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 1584,
+   "candidatesTokenCount": 226,
+   "totalTokenCount": 3824,
+   "promptTokensDetails": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 1456
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 128
+    }
+   ],
+   "thoughtsTokenCount": 2014,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "1080p|default|r1",
+  "ok": true,
+  "latency_sec": 7.88,
+  "text": "HQ-7300, MU-4420, LT-0654, GR-9706, NV-4734, HL-5207, LD-0020, WU-5542, RO-6130, DM-3435, WZ-6811, PU-0558, MV-2921, GS-1250, TT-4504, VA-7548, TQ-2753, AQ-4202, CA-5631, NC-6171, FR-1046, TN-9188, EW-4826, DF-2029, DV-9148, NE-4071, JW-4375, AF-1965, WR-6318, DW-8155, NP-6531, AF-7803, XW-9004, MX-8871, VS-8862, VB-6125, RS-6276, YP-2467, XK-8830, XN-0208, HL-7344, SM-7832, FE-5319, OX-4357, KP-2565, TY-2541, UF-1418, FA-7958",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 1584,
+   "candidatesTokenCount": 340,
+   "totalTokenCount": 3616,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 128
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 1456
+    }
+   ],
+   "thoughtsTokenCount": 1692,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "1080p|default|r2",
+  "ok": true,
+  "latency_sec": 8.09,
+  "text": "HQ-7300, MU-4420, LT-0654, GR-9566, NV-4734, DL-5257, LD-0020, WU-5542, XU-6180, DM-3435, XC-0833, PU-0558, NU-2521, GS-3250, TT-4504, HC-7543, TQ-2753, AQ-4202, CK-5011, NC-6171, FR-1046, TN-9188, EM-1035, DT-2029, SV-9144, WL-8221, JW-4375, AF-1965, WR-6318, DW-8155, NP-6537, HP-7833, KW-9004, MX-8371, VS-0862, VB-6125, WU-6736, YP-2467, XK-8030, XN-0208, JR-7589, SM-7872, FE-5319, CK-4357, KP-2565, TZ-2681, UF-1418, VK-7554",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 1584,
+   "candidatesTokenCount": 339,
+   "totalTokenCount": 3304,
+   "promptTokensDetails": [
+    {
+     "modality": "VIDEO",
+     "tokenCount": 1456
+    },
+    {
+     "modality": "TEXT",
+     "tokenCount": 128
+    }
+   ],
+   "thoughtsTokenCount": 1381,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "1080p|HIGH|r0",
+  "ok": true,
+  "latency_sec": 7.08,
+  "text": "HQ-7300, MU-4420, LT-0654, QX-8966, NV-4734, DD-1277, LD-0020, WU-5542, KU-4180, DW-3435, KS-2057, PU-0558, MV-2421, US-1250, TT-4504, YR-1544, TQ-2753, AQ-4202, GX-9247, NC-6171, FR-1046, TN-9188, LK-3076, DF-2029, TU-0554, AR-9610, JW-4375, AF-1965, WR-6318, DW-8155, NP-6537, QL-9657, XW-9004, MX-8871, VS-0862, VB-6125, KU-8356, YP-2467, XK-8030, XN-0208, JR-5868, SW-7832, FE-5319, CK-4370, KP-2565, TU-7241, UF-1418, QC-5558",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 4752,
+   "candidatesTokenCount": 342,
+   "totalTokenCount": 6159,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 128
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 4624
+    }
+   ],
+   "thoughtsTokenCount": 1065,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "1080p|HIGH|r1",
+  "ok": true,
+  "latency_sec": 11.47,
+  "text": "HQ-7300, MU-4420, LT-0654, QX-8966, NV-4734, DD-1277, LD-0020, WU-5542, KU-4180, DW-3435, KS-2057, PU-0558, MV-2421, US-1250, TT-4504, YR-1544, TQ-2753, AQ-4202, GK-9247, NC-6171, FR-1046, TN-9188, LK-3076, DF-2029, TU-0554, AR-9610, JW-4375, AF-1965, WR-6318, DW-8155, NP-6537, QL-9657, XW-9004, MX-8871, VS-0862, VB-6125, KU-8356, YP-2467, XK-8030, XN-0208, JR-5868, SW-7832, FE-5319, CK-4370, KP-2565, TU-7231, UF-1418, QC-5558",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 4752,
+   "candidatesTokenCount": 342,
+   "totalTokenCount": 6082,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 128
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 4624
+    }
+   ],
+   "thoughtsTokenCount": 988,
+   "serviceTier": "standard"
+  }
+ },
+ {
+  "tag": "1080p|HIGH|r2",
+  "ok": true,
+  "latency_sec": 7.46,
+  "text": "HQ-7300, MU-4420, LT-0654, QX-8966, NV-4734, DD-1277, LD-0020, WU-5542, KU-4180, DW-3435, KS-2057, PU-0558, MV-2421, US-1250, TT-4504, YR-1544, TQ-2753, AQ-4202, GK-9247, NC-6171, FR-1046, TN-9188, LK-3076, DF-2029, TU-0554, AR-9610, JW-4375, AF-1965, WR-6318, DW-8155, NP-6537, QL-9657, XW-9004, MX-8871, VS-0862, VB-6125, KU-8356, YP-2467, XK-8030, XN-0208, JR-5868, SW-7832, FE-5319, CK-4370, KP-2565, TU-7231, UF-1418, QC-5558",
+  "finish": "STOP",
+  "usage": {
+   "promptTokenCount": 4752,
+   "candidatesTokenCount": 342,
+   "totalTokenCount": 6069,
+   "promptTokensDetails": [
+    {
+     "modality": "TEXT",
+     "tokenCount": 128
+    },
+    {
+     "modality": "VIDEO",
+     "tokenCount": 4624
+    }
+   ],
+   "thoughtsTokenCount": 975,
+   "serviceTier": "standard"
+  }
+ }
+]

@@ -1,0 +1,330 @@
+[
+ {
+  "frame": 0,
+  "lines": [
+   {
+    "height_px": 4,
+    "actual_ink_px": 4,
+    "code": "DD-3328",
+    "row": 0
+   },
+   {
+    "height_px": 5,
+    "actual_ink_px": 5,
+    "code": "TP-6716",
+    "row": 1
+   },
+   {
+    "height_px": 6,
+    "actual_ink_px": 6,
+    "code": "CW-1064",
+    "row": 2
+   },
+   {
+    "height_px": 7,
+    "actual_ink_px": 7,
+    "code": "WT-0091",
+    "row": 3
+   },
+   {
+    "height_px": 8,
+    "actual_ink_px": 8,
+    "code": "AJ-5497",
+    "row": 4
+   },
+   {
+    "height_px": 9,
+    "actual_ink_px": 9,
+    "code": "SY-8504",
+    "row": 5
+   }
+  ]
+ },
+ {
+  "frame": 1,
+  "lines": [
+   {
+    "height_px": 4,
+    "actual_ink_px": 4,
+    "code": "HE-2755",
+    "row": 0
+   },
+   {
+    "height_px": 5,
+    "actual_ink_px": 5,
+    "code": "MT-4018",
+    "row": 1
+   },
+   {
+    "height_px": 6,
+    "actual_ink_px": 6,
+    "code": "YF-9137",
+    "row": 2
+   },
+   {
+    "height_px": 7,
+    "actual_ink_px": 7,
+    "code": "KD-3207",
+    "row": 3
+   },
+   {
+    "height_px": 8,
+    "actual_ink_px": 8,
+    "code": "KC-0474",
+    "row": 4
+   },
+   {
+    "height_px": 9,
+    "actual_ink_px": 9,
+    "code": "LJ-1825",
+    "row": 5
+   }
+  ]
+ },
+ {
+  "frame": 2,
+  "lines": [
+   {
+    "height_px": 4,
+    "actual_ink_px": 4,
+    "code": "US-4269",
+    "row": 0
+   },
+   {
+    "height_px": 5,
+    "actual_ink_px": 5,
+    "code": "TZ-3013",
+    "row": 1
+   },
+   {
+    "height_px": 6,
+    "actual_ink_px": 6,
+    "code": "PT-3857",
+    "row": 2
+   },
+   {
+    "height_px": 7,
+    "actual_ink_px": 7,
+    "code": "DF-5560",
+    "row": 3
+   },
+   {
+    "height_px": 8,
+    "actual_ink_px": 8,
+    "code": "ST-2487",
+    "row": 4
+   },
+   {
+    "height_px": 9,
+    "actual_ink_px": 9,
+    "code": "UH-2179",
+    "row": 5
+   }
+  ]
+ },
+ {
+  "frame": 3,
+  "lines": [
+   {
+    "height_px": 4,
+    "actual_ink_px": 4,
+    "code": "RA-3470",
+    "row": 0
+   },
+   {
+    "height_px": 5,
+    "actual_ink_px": 5,
+    "code": "VG-4193",
+    "row": 1
+   },
+   {
+    "height_px": 6,
+    "actual_ink_px": 6,
+    "code": "AX-5479",
+    "row": 2
+   },
+   {
+    "height_px": 7,
+    "actual_ink_px": 7,
+    "code": "LN-0225",
+    "row": 3
+   },
+   {
+    "height_px": 8,
+    "actual_ink_px": 8,
+    "code": "CJ-6155",
+    "row": 4
+   },
+   {
+    "height_px": 9,
+    "actual_ink_px": 9,
+    "code": "JB-7478",
+    "row": 5
+   }
+  ]
+ },
+ {
+  "frame": 4,
+  "lines": [
+   {
+    "height_px": 4,
+    "actual_ink_px": 4,
+    "code": "GC-5024",
+    "row": 0
+   },
+   {
+    "height_px": 5,
+    "actual_ink_px": 5,
+    "code": "BY-3142",
+    "row": 1
+   },
+   {
+    "height_px": 6,
+    "actual_ink_px": 6,
+    "code": "TT-1996",
+    "row": 2
+   },
+   {
+    "height_px": 7,
+    "actual_ink_px": 7,
+    "code": "GM-6837",
+    "row": 3
+   },
+   {
+    "height_px": 8,
+    "actual_ink_px": 8,
+    "code": "XH-2216",
+    "row": 4
+   },
+   {
+    "height_px": 9,
+    "actual_ink_px": 9,
+    "code": "UU-3278",
+    "row": 5
+   }
+  ]
+ },
+ {
+  "frame": 5,
+  "lines": [
+   {
+    "height_px": 4,
+    "actual_ink_px": 4,
+    "code": "LN-3155",
+    "row": 0
+   },
+   {
+    "height_px": 5,
+    "actual_ink_px": 5,
+    "code": "GH-8609",
+    "row": 1
+   },
+   {
+    "height_px": 6,
+    "actual_ink_px": 6,
+    "code": "ZL-5490",
+    "row": 2
+   },
+   {
+    "height_px": 7,
+    "actual_ink_px": 7,
+    "code": "ZD-0966",
+    "row": 3
+   },
+   {
+    "height_px": 8,
+    "actual_ink_px": 8,
+    "code": "UA-1131",
+    "row": 4
+   },
+   {
+    "height_px": 9,
+    "actual_ink_px": 9,
+    "code": "RN-0322",
+    "row": 5
+   }
+  ]
+ },
+ {
+  "frame": 6,
+  "lines": [
+   {
+    "height_px": 4,
+    "actual_ink_px": 4,
+    "code": "ZH-4365",
+    "row": 0
+   },
+   {
+    "height_px": 5,
+    "actual_ink_px": 5,
+    "code": "FF-7870",
+    "row": 1
+   },
+   {
+    "height_px": 6,
+    "actual_ink_px": 6,
+    "code": "GT-4301",
+    "row": 2
+   },
+   {
+    "height_px": 7,
+    "actual_ink_px": 7,
+    "code": "PP-5713",
+    "row": 3
+   },
+   {
+    "height_px": 8,
+    "actual_ink_px": 8,
+    "code": "CZ-1433",
+    "row": 4
+   },
+   {
+    "height_px": 9,
+    "actual_ink_px": 9,
+    "code": "CJ-6716",
+    "row": 5
+   }
+  ]
+ },
+ {
+  "frame": 7,
+  "lines": [
+   {
+    "height_px": 4,
+    "actual_ink_px": 4,
+    "code": "TD-2984",
+    "row": 0
+   },
+   {
+    "height_px": 5,
+    "actual_ink_px": 5,
+    "code": "TZ-9592",
+    "row": 1
+   },
+   {
+    "height_px": 6,
+    "actual_ink_px": 6,
+    "code": "KU-1607",
+    "row": 2
+   },
+   {
+    "height_px": 7,
+    "actual_ink_px": 7,
+    "code": "UC-7090",
+    "row": 3
+   },
+   {
+    "height_px": 8,
+    "actual_ink_px": 8,
+    "code": "KN-8746",
+    "row": 4
+   },
+   {
+    "height_px": 9,
+    "actual_ink_px": 9,
+    "code": "TU-5268",
+    "row": 5
+   }
+  ]
+ }
+]
