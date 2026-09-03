@@ -384,6 +384,8 @@ def test_reason_vocabulary_is_frozen():
 def test_approval_record_always_carries_the_same_keys():
     """감사 기록의 모양이 실행마다 달라지면 run_log 를 읽는 쪽이 키 유무를 추측해야 한다."""
     keys = {"approved", "rejected", "fallback", "fallback_id", "fallback_reasons",
-            "capped", "max_shorts", "scoring_unavailable", "considered"}
+            "capped", "max_shorts", "scoring_unavailable", "considered",
+            # 승인 0 이고 폴백조차 못 세운 상태 — 배선이 크게 실패할 근거다.
+            "no_publishable"}
     assert set(approve(**case(["c01"])).keys()) == keys
     assert set(approve(funnel={}, verify={}, flags={}, ranking=[]).keys()) == keys

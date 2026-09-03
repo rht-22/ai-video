@@ -23,6 +23,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+from app.modules.clip_guard import CLIP_LOST_TOLERANCE_SEC, clips_beyond_source
 from app.modules.speech import plausible_speech_intervals, speech_coverage_ratio
 
 FUNNEL_KEEP = 8               # 8단계로 넘길 상한
@@ -41,10 +42,11 @@ TAIL_SECTORS = ("teaser", "credit")
 SECTOR_OVERLAP_TOLERANCE_SEC = 0.05
 
 # 소스 끝 경계가 소수점에서 어긋나는 정상 케이스(실측 0~0.2s)는 통과시키고 통째로
-# 밖에 나간 것만 잡는다 — v1 `clips_beyond_source` 의 CLIP_LOST_TOLERANCE_SEC 과 같은 자.
-# ⚠ 그 함수를 부르지 않는 이유: 계약 §7 이 `app/modules/clip_guard.py` 로 추출하기
-# 전이고, `app/v4/*` 는 `app.pipeline` 을 import 하지 않는다(AST 가드).
-SOURCE_BOUNDS_TOLERANCE_SEC = 1.0
+# 밖에 나간 것만 잡는다. **값을 다시 적지 않고 v1 판정의 것을 그대로 쓴다** —
+# 이 레포는 베낀 수식으로 여러 번 다쳤고(E17-2 밴드 기하 · L-P1 환각 클램프),
+# 두 곳에 적힌 관용치는 언젠가 한쪽만 고쳐진다. `app/modules/clip_guard.py` 는
+# V4-M1 §7 이 모놀리스에서 추출한 것이라 `app.pipeline` 을 끌어오지 않는다.
+SOURCE_BOUNDS_TOLERANCE_SEC = CLIP_LOST_TOLERANCE_SEC
 
 LENGTH_TOLERANCE_SEC = 0.05   # 길이 비교의 부동소수 관용
 
@@ -89,6 +91,12 @@ CODE_TOO_SHORT = "too_short"
 CODE_TOO_LONG = "too_long"
 CODE_DUPLICATE = "duplicate"
 CODE_KEEP_CAP = "keep_cap"
+
+# 전량 하드 탈락 시 **되살릴 수 있는** 사유 — '품질'로 떨어진 것만이다.
+# ⚠ 여기 없는 사유(예고·크레딧 겹침 · 소스 밖 · 조각 없음)는 부활 불가다. 그건 품질이
+# 아니라 **오염이거나 물리적으로 불가능**한 것이고(가왕쇼 6화 예고 오염 · 소스 밖 클립이
+# 만든 반쪽 쇼츠 5건), 조용한 결번보다 나쁘다.
+RESURRECTABLE_CODES = frozenset({CODE_LOW_SPEECH_COVERAGE, CODE_TOO_SHORT, CODE_TOO_LONG})
 
 HARD_CODES = frozenset({CODE_NO_SEGMENTS, CODE_INVALID_SEGMENT, CODE_SECTOR_OVERLAP,
                         CODE_BEYOND_SOURCE, CODE_LOW_SPEECH_COVERAGE,
@@ -294,11 +302,20 @@ def hard_problems(cand: dict, *, exception_sectors: dict, source_duration_sec: f
             problems.append(f"{CODE_SECTOR_OVERLAP}: {name} 구역과 {over:.2f}s 겹침 "
                             f"({lo:.1f}~{hi:.1f})")
 
-    # ② 소스 밖 — 길이를 모르면(≤0) 판정하지 않는다(오판 금지).
+    # ② 소스 밖 — **판정은 v1 의 것을 그대로 부른다**(`clips_beyond_source`).
+    # 렌더가 `-ss start -to end` 로 읽어 소스를 넘으면 조용히 짧아지고 시작 자체가 밖이면
+    # 프레임도 오디오도 0개다. 그 판례(2026-08-24 · 185런 중 5건 · 18~26.6초 소실)를 낳은
+    # 함수가 이미 있는데 여기서 다시 적으면 언젠가 한쪽만 고쳐진다.
+    # 길이를 모르면(≤0) 그 함수가 빈 목록을 돌려준다 — 오판 금지 규율이 거기 들어 있다.
+    lost = clips_beyond_source(segments, source_duration_sec or 0.0,
+                               SOURCE_BOUNDS_TOLERANCE_SEC)
+    # ⚠ 관용치보다 짧으면서 **통째로** 소스 밖인 조각은 위 함수의 `lost > tolerance` 에
+    # 안 걸린다(0.5초짜리는 lost 0.5). 그건 '조금 잘림'이 아니라 '한 프레임도 없음'이라
+    # 종류가 다르므로 여기서 따로 잡는다. 6c 가 1초 미만 조각을 이미 버리지만, 그 사실에
+    # 기대면 6c 상수를 바꾸는 날 이 가드가 조용히 사라진다.
     if source_duration_sec and source_duration_sec > 0:
-        outside = [i for i, s in enumerate(segments)
-                   if s.start_sec >= source_duration_sec
-                   or s.end_sec > source_duration_sec + SOURCE_BOUNDS_TOLERANCE_SEC]
+        empty = [i for i, s in enumerate(segments) if s.start_sec >= source_duration_sec]
+        outside = sorted({d["index"] for d in lost} | set(empty))
         if outside:
             problems.append(f"{CODE_BEYOND_SOURCE}: 조각 {outside} 이 소스 끝"
                             f"({source_duration_sec:.1f}s) 밖")
@@ -530,6 +547,44 @@ def run_funnel(cands: list[dict], *, exception_sectors, source_duration_sec,
         else:
             survivors.append((cid, cand))
 
+    # 🛑 **전량 하드 탈락 = 조용한 결번.** 이 레포는 '최소 1편 보장'을 네 곳에 깔아 뒀고
+    # (`app/pipeline.py` 3446·3586·3598 · `app/v3/story.py` fallback_highlight), E20-B4 가
+    # 정확히 같은 상황(스토리라인 셋이 전부 커버리지 미달)에서 정한 답이 **"탈락분 중
+    # 최고를 경고와 함께 쓴다"**(run_log `story_coverage_fallback`)다.
+    #
+    # 여기서 빈 목록을 돌려주면 9단계 폴백도 무력해진다 — 그쪽 폴백은 `ranking` 1위를
+    # 집는데 ranking 이 이 함수의 kept 로 만들어지기 때문이다. 통합 스모크 실측
+    # (2026-09-03): 후보 2개가 전부 커버리지 미달 → kept=[] → approved=[] · fallback=False.
+    # 유닛 테스트는 두 모듈이 각각 옳아서 이걸 못 잡았다. **이음새의 결함이다.**
+    funnel_fallback: dict | None = None
+    if not survivors and dropped:
+        revivable = [d for d in dropped
+                     if d.get("reasons")
+                     and all(str(r).split(":", 1)[0] in RESURRECTABLE_CODES
+                             for r in d["reasons"])]
+        if revivable:
+            by_id = dict(zip(ids, cands or []))
+            # 되살릴 하나는 **소프트 점수가 가장 낮은(= 가장 나은)** 것. 동점은 다른
+            # 곳과 같은 규칙으로 깬다(소스 시각 → id) — 여기만 다르면 결정성이 깨진다.
+            ranked = sorted(
+                ((score(soft_signals(by_id[d["id"]], scene_cuts=scene_cuts,
+                                     speech_intervals=speech_intervals, words=words)),
+                  _first_start(by_id[d["id"]]), d["id"]) for d in revivable))
+            _sc, _st, best_id = ranked[0]
+            survivors.append((best_id, by_id[best_id]))
+            reasons = next(d["reasons"] for d in revivable if d["id"] == best_id)
+            dropped = [d for d in dropped if d["id"] != best_id]
+            funnel_fallback = {"id": best_id, "reasons": list(reasons),
+                               "of": len(ids), "revivable": len(revivable),
+                               "why": "전량 하드 탈락 — 품질 사유로 떨어진 것 중 최고를 "
+                                      "경고와 함께 되살린다(E20-B4 판례)"}
+        else:
+            # 되살릴 수 없는 전량 탈락(전부 예고 오염·소스 밖)은 **살리지 않는다**.
+            # 9단계가 `approved=[]` 를 내고 배선이 크게 실패하는 것이 맞다.
+            funnel_fallback = {"id": None, "of": len(ids), "revivable": 0,
+                               "why": "전량 하드 탈락 · 부활 가능한 사유 없음 "
+                                      "(오염·소스 밖) — 발행할 편이 없다"}
+
     signals = {cid: soft_signals(cand, scene_cuts=scene_cuts,
                                  speech_intervals=speech_intervals, words=words)
                for cid, cand in survivors}
@@ -575,6 +630,7 @@ def run_funnel(cands: list[dict], *, exception_sectors, source_duration_sec,
         "keep_cap": keep,
         "capped": capped,
         "intro_overlap": intro_overlap,
+        "fallback": funnel_fallback,   # 전량 탈락 폴백(없으면 None — 조용한 결번 방지)
         "speech_filtered": filtered,   # plausible 필터가 뺀 환각성 전사 건수
         "of": len(ids),
     }

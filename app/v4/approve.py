@@ -286,6 +286,10 @@ def approve(*, funnel: dict, verify: dict, flags: dict, ranking: list[dict],
         "fallback": fallback,
         "fallback_id": fallback_id,
         "fallback_reasons": fallback_reasons,
+        # 승인 0 **이고** 폴백조차 못 세운 상태 — 7단계가 전량 오염(예고 구역·소스 밖)
+        # 으로 아무것도 안 넘겼을 때만 참이다. 배선은 이 값을 보고 **크게 실패해야 한다**
+        # (조용한 결번이 이 레포에서 가장 나쁜 실패다 — 무인 노드 6대).
+        "no_publishable": not approved_ids,
         "capped": capped,
         "max_shorts": cap,
         "scoring_unavailable": scoring_unavailable,

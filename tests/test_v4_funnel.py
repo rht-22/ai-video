@@ -206,7 +206,14 @@ def test_coverage_goes_through_plausible_speech_intervals():
     assert "0.125" in got[0]                       # 5/40 — 필터 없으면 1.000 이다
 
     kept, rec = F.run_funnel([cand], **{**BASE, "speech_intervals": intervals})
-    assert kept == [] and rec["speech_filtered"] == 1   # 몇 건을 걸렀는지 남긴다
+    assert rec["speech_filtered"] == 1                  # 몇 건을 걸렀는지 남긴다
+    # ⚠ 하나뿐인 후보가 커버리지로 떨어졌으므로 **전량 탈락 폴백**이 되살린다 —
+    # 판정이 무력해진 것이 아니라(사유가 그대로 남는다) 조용한 결번을 막는 것이다.
+    # 커버리지가 여러 후보 사이의 순위를 가르는 힘은 그대로다(아래 테스트가 고정).
+    assert len(kept) == 1
+    fb = rec["fallback"]
+    assert fb["id"] == "c01" and fb["revivable"] == 1
+    assert [F.problem_code(r) for r in fb["reasons"]] == [F.CODE_LOW_SPEECH_COVERAGE]
 
 
 def test_plausible_intervals_keeps_textless_tuples():
@@ -465,3 +472,64 @@ def test_contract_constants_are_fixed():
     assert F.MIN_SPEECH_COVERAGE == 0.55
     assert F.STALL_MAX_GAP_SEC == 12.0
     assert F.TAIL_SECTORS == ("teaser", "credit")
+
+
+# ── 전량 하드 탈락 폴백 (2026-09-03 통합 스모크가 잡은 이음새 결함) ──────────
+
+def test_all_hard_dropped_revives_the_best_quality_reject():
+    """🛑 전량 탈락에 빈 목록을 돌려주면 **조용한 결번**이 된다.
+
+    9단계 폴백은 `ranking` 1위를 집는데 그 ranking 이 이 함수의 kept 로 만들어진다 —
+    여기가 비면 그쪽도 아무것도 못 낸다(통합 스모크 실측 2026-09-03:
+    후보 2개가 전부 커버리지 미달 → kept=[] → approved=[] · fallback=False).
+    유닛 테스트는 두 모듈이 각각 옳아서 못 잡았다. **이음새의 결함이다.**
+
+    되살리는 하나는 소프트 점수가 가장 나은 것이고, 사유는 그대로 남는다."""
+    # ⚠ 전사가 **비면** 커버리지를 판정하지 않는다(오판 금지) — 둘 다 통과해 버린다.
+    # 전사는 있는데 이 두 후보 자리에 발화가 없는 상황이어야 커버리지로 떨어진다.
+    a = _cand("c01", [(100, 145)])
+    b = _cand("c02", [(200, 245)])
+    elsewhere = [_iv(3000, 3010), _iv(3020, 3030)]     # 후보들과 겹치지 않는 발화
+    kept, rec = F.run_funnel([a, b], **{**BASE, "speech_intervals": elsewhere})
+    assert all(F.CODE_LOW_SPEECH_COVERAGE in " ".join(d["reasons"])
+               for d in rec["dropped"]) or rec["fallback"]["revivable"] == 2
+    assert len(kept) == 1
+    assert rec["fallback"]["id"] in ("c01", "c02")
+    assert rec["fallback"]["revivable"] == 2
+    assert rec["kept"] == [rec["fallback"]["id"]]
+    # 되살린 편은 dropped 에서 빠진다 — 같은 id 가 두 곳에 있으면 집계가 이중으로 센다
+    assert rec["fallback"]["id"] not in [d["id"] for d in rec["dropped"]]
+
+
+def test_contaminated_rejects_are_never_revived():
+    """부활은 **품질** 사유에만 열린다. 예고 구역·소스 밖은 오염이자 물리적 불가라
+    조용한 결번보다 나쁘다(가왕쇼 6화 예고 오염 · 소스 밖 클립이 만든 반쪽 쇼츠 5건).
+
+    이때는 살리지 않고 사유를 남긴다 — 9단계가 approved=[] 를 내고 배선이 크게 실패한다."""
+    teaser = _cand("c01", [(3900, 3960)])
+    kept, rec = F.run_funnel(
+        [teaser], **{**BASE, "exception_sectors": {"teaser": {"start_sec": 3800.0,
+                                                              "end_sec": 4000.0}}})
+    assert kept == [] and rec["kept"] == []
+    assert rec["fallback"]["id"] is None and rec["fallback"]["revivable"] == 0
+    assert [d["id"] for d in rec["dropped"]] == ["c01"]
+
+
+def test_no_fallback_when_something_survives():
+    """평상시에는 폴백 자리가 None 이다 — 있으면 '전량 탈락이었다'는 거짓 신호가 된다."""
+    ok = _cand("c01", [(100, 160)])
+    _kept, rec = F.run_funnel([ok], **BASE)
+    assert rec["kept"] == ["c01"] and rec["fallback"] is None
+
+
+def test_source_bounds_judgment_is_the_v1_function_not_a_copy():
+    """소스 밖 판정은 v1 `clips_beyond_source` 를 부른다 — 이 레포는 베낀 수식으로
+    여러 번 다쳤다(E17-2 밴드 기하 · L-P1 환각 클램프). 관용치도 그쪽 것을 쓴다."""
+    from app.modules.clip_guard import CLIP_LOST_TOLERANCE_SEC
+    assert F.SOURCE_BOUNDS_TOLERANCE_SEC is CLIP_LOST_TOLERANCE_SEC
+    # 통째로 소스 밖이지만 관용치보다 짧은 조각 — lost > tolerance 에는 안 걸리므로
+    # 따로 잡아야 한다('조금 잘림'이 아니라 '한 프레임도 없음'이다)
+    tiny = _cand("c01", [(100, 160), (4000.5, 4000.9)])
+    got = F.hard_problems(tiny, exception_sectors={}, source_duration_sec=4000.0,
+                          speech_intervals=[], min_sec=40.0, max_sec=120.0)
+    assert F.CODE_BEYOND_SOURCE in [F.problem_code(r) for r in got]
