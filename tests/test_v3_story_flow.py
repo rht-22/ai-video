@@ -480,3 +480,29 @@ def test_probe_window_keeps_whole_window_and_centers_focus():
     t0, t1 = cv.probe_window(win, L=2.0, focus=(40.0, 42.0))
     assert t1 - t0 == cv.PROBE_MAX_WINDOW_SEC and t0 <= 40.0 <= t1
     assert cv.probe_window(win, L=2.0) == (0.0, cv.PROBE_MAX_WINDOW_SEC)
+
+
+def test_beats_budget_floor_rejects_thin_plans_only_when_enabled():
+    """예산 미달 반려(2026-09-03): 호출부가 floor_ratio 를 줄 때만. 50s→46s 실사고 대비."""
+    allowed = _allowed()
+    resp = {"beats": [{"scene": "m000", "role": "hook", "first": "sp0001", "last": "sp0002"}]}  # 4.5s
+    obj, pr, _ = sl.validate_beats(resp, IDX, allowed, budget_sec=30)                 # 종전: 통과
+    assert obj is not None
+    obj, pr, _ = sl.validate_beats(resp, IDX, allowed, budget_sec=30, floor_ratio=0.85)
+    assert obj is None and any("85% 미만" in p for p in pr)
+    obj, pr, _ = sl.validate_beats(resp, IDX, allowed, budget_sec=5, floor_ratio=0.85)   # 4.5 ≥ 4.25
+    assert obj is not None
+    # 재료가 예산보다 적으면 미달을 따지지 않는다(없는 재료를 요구 안 함)
+    obj, pr, _ = sl.validate_beats(resp, IDX, allowed, budget_sec=30, floor_ratio=0.85, material_sec=17.0)
+    assert obj is not None
+    # 재료가 넉넉하면(≥예산) 예산 기준으로 미달 반려
+    obj, pr, _ = sl.validate_beats(resp, IDX, allowed, budget_sec=30, floor_ratio=0.85, material_sec=90.0)
+    assert obj is None and any("85% 미만" in p for p in pr)
+
+
+def test_trim_headroom_widens_lines_budget():
+    from app.v3 import story_flow as flow
+    assert flow.TRIM_HEADROOM_SEC == 4.0
+    # 이번 실사고 수치: max 60 · 씬 5 → 종전 45s, 여유분 반영 49s
+    n_hint = 5
+    assert max(20.0, 60 + flow.TRIM_HEADROOM_SEC - flow.NARRATION_ALLOWANCE_SEC * (n_hint + 1)) == 49.0

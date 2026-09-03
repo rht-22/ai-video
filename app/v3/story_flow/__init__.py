@@ -32,6 +32,8 @@ from app.v3.story_flow.common import (
 
 TEMPLATE = "human_flow"
 NARRATION_ALLOWANCE_SEC = 2.5    # 대사 예산에서 내레이션 자리로 미리 비워 두는 몫(곳당)
+TRIM_HEADROOM_SEC = 4.0          # watch_trim 이 잘라낼 여유(2026-09-03): 계획을 이만큼 넘치게 짜고
+                                 # 초안을 본 뒤 덜어낸다. 상한(max_sec)은 기존 예산 컷 벨트가 지킨다.
 
 
 def _research_block(research_context: str) -> str:
@@ -116,12 +118,15 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
     # 3 대사
     material, allowed = sl.lines_material(scenes, rows, span_index)
     n_hint = max(2, len(scenes))
-    budget = max(20.0, max_sec - NARRATION_ALLOWANCE_SEC * (n_hint + 1))
+    budget = max(20.0, max_sec + TRIM_HEADROOM_SEC - NARRATION_ALLOWANCE_SEC * (n_hint + 1))
     beats = _loop("lines", lambda rej: sl.LINES_PROMPT.format(
         topic=topic["topic"], title_line1=title["line1"], title_line2=title["line2"],
         budget_sec=budget, material_block=material, reject_block=rej,
         skip_sec=sl.SKIP_MAX_VOICED_SEC, skip_lines=sl.SKIP_MAX_LINES),
-        lambda r: sl.validate_beats(r, span_index, allowed, budget_sec=budget),
+        lambda r: sl.validate_beats(r, span_index, allowed, budget_sec=budget,
+                                    floor_ratio=sl.BUDGET_FLOOR_RATIO,
+                                    material_sec=sum(span_index[x]["t_out"] - span_index[x]["t_in"]
+                                                     for x in allowed if x in span_index)),
         gemini, audit, log)
     _dial = sum(span_index[x]["t_out"] - span_index[x]["t_in"]
                 for b in beats for x in b["span_ids"])

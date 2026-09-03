@@ -28,6 +28,9 @@ PURPOSES = ("배경", "맥락", "과정", "결과", "반응")
 ROLES = ("hook", "build", "turn", "climax", "reaction", "ending")
 MIN_SCENES, MAX_SCENES = 2, 7
 TITLE_MAX_CHARS = 16          # 상단 밴드 2줄 각각의 실측 상한(story.TITLE_MAX_CHARS)
+BUDGET_FLOOR_RATIO = 0.85     # 대사 합계가 예산의 이 비율 미만이면 반려(재료를 더 넣어라) —
+                              # 2026-09-03: 계획이 얇으면 watch_trim 이 자를 여유가 없고
+                              # 잘라내면 목표에서 더 멀어진다(50s → 46s 실사고). 호출부가 켠다.
 BUDGET_TOLERANCE = 1.3        # 대사 합계가 예산의 이 배수를 넘으면 반려(그 아래는
                               # watch-trim 이 초안을 보고 덜어낸다 — 산술 트림 금지)
 SKIP_MAX_VOICED_SEC = 3.0     # 구간 안에서 빼도 되는 구멍 — 유성 합계 이하면 컷(추임새)
@@ -83,7 +86,7 @@ LINES_PROMPT = """당신은 리캡 쇼츠 편집자다. 영상은 볼 수 없다
 - **주고받음이 보여야 한다**: 질문·비난이 들어가면 상대의 답도 구간 안에 있어야 한다.
 - 화면만으로 뜻이 오는 무성 장면(리빌·행동)도 구간으로 잡을 수 있다(first·last 가 무성 조각). 결정적 무성 장면은 잘게 썰지 말고 이어지는 구간 하나로.
 - 내레이션 자리는 여기서 만들지 않는다 — 다음 단계가 따로 만든다.
-- 예산: 구간 길이 합(skip 제외) ≤ **{budget_sec:.0f}초** — 길이 열을 더해 가며 짜라.
+- 예산: 구간 길이 합(skip 제외) ≤ **{budget_sec:.0f}초** — 길이 열을 더해 가며 짜라. **예산을 채워라** — 85% 미만이면 반려한다(얇은 편은 다듬을 여유가 없다). 초안을 본 뒤 코드가 늘어지는 곳을 몇 초 잘라내므로 조금 넉넉한 게 맞다.
 - 비트 역할: hook(사건 한복판에서 시작 — 인사·자기소개·상황 설명 대사 금지) · build · turn · climax(핵심 대사는 통째로) · reaction · ending(펀치·선언·떡밥 대사 직후 뚝 — 해소·정리 장면 금지).
 - 비트는 원본 시간 순서, 구간끼리 겹치지 않게.
 
@@ -240,7 +243,9 @@ def compute_jumps(beats: list[dict], span_index: dict[str, dict],
 
 
 def validate_beats(resp: Any, span_index: dict[str, dict], allowed: dict[str, int],
-                   *, budget_sec: float) -> tuple[list[dict] | None, list[str], list[str]]:
+                   *, budget_sec: float, floor_ratio: float | None = None,
+                   material_sec: float | None = None
+                   ) -> tuple[list[dict] | None, list[str], list[str]]:
     """allowed: span id → 씬(meaning idx). 반환 비트: {scene, role, span_ids, skipped,
     hole_before, action}. 구간은 grid 순(pos)으로 펼치고 긴 구멍은 나눈다."""
     if not isinstance(resp, dict):
@@ -317,6 +322,13 @@ def validate_beats(resp: Any, span_index: dict[str, dict], allowed: dict[str, in
             for b in beats)
         problems.append(f"구간 합계 {total:.0f}초 — 예산 {budget_sec:.0f}초를 크게 "
                         f"넘는다(비트별: {per}). 구간을 좁히거나 비트를 빼서 다시 내라")
+    elif floor_ratio and (material_sec is None or material_sec >= budget_sec) \
+            and total < budget_sec * floor_ratio:
+        # 재료(고른 씬 합계)가 예산보다 적으면 미달을 따지지 않는다 — 없는 재료를
+        # 채우라 할 순 없다. 실전은 재료가 목표의 2~3배라 예산 기준이 그대로 선다.
+        problems.append(f"구간 합계 {total:.0f}초 — 예산 {budget_sec:.0f}초의 {floor_ratio:.0%} 미만이다. "
+                        "재료가 얇으면 완성본이 짧고 다듬을 여유도 없다 — 같은 사건 안의 "
+                        "대사 구간·리액션을 더 넣어 예산을 채워라")
     if not any(span_index[x]["is_audio"] for b in beats for x in b["span_ids"]):
         problems.append("대사가 하나도 없다 — 대사 인용이 뼈대다")
     if problems:
