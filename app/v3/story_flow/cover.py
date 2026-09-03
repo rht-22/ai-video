@@ -345,10 +345,14 @@ def run_probe(gemini, video: Path, out_dir: Path, tag: str, win: dict, L: float,
         return None
     prompt = build_probe_prompt(t0, t1, L, text, refers_to, grid, span_index,
                                 attach=win["attach"])
-    try:
-        resp = _call_probe(gemini, clip, prompt)
-    except Exception as e:  # noqa: BLE001 — 프로브 실패는 폴백(조용한 실패 아님 — 로그)
-        log(f"  [v3/cover] ⚠ 프로브 호출 실패({tag}): {e}")
+    resp = None
+    for attempt in range(2):                # JSON 깨짐·일시 오류는 한 번 더(실측: 문자열 미종결)
+        try:
+            resp = _call_probe(gemini, clip, prompt)
+            break
+        except Exception as e:  # noqa: BLE001 — 프로브 실패는 폴백(조용한 실패 아님 — 로그)
+            log(f"  [v3/cover] ⚠ 프로브 호출 실패({tag}, 시도 {attempt + 1}/2): {e}")
+    if resp is None:
         return None
     rel, why = validate_probe(resp, L, t1 - t0)
     if rel is None:
