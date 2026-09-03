@@ -141,12 +141,11 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
         work_title=work_title, research_block=research_block, topic=topic["topic"],
         title_line1=title["line1"], title_line2=title["line2"],
         beats_block=nr.beats_block(beats, span_index, rows_by_idx, jumps),
-        available_block=nr.available_block(available, span_index, allowed, beats),
+        available_block=nr.available_block(available, span_index, allowed),
         tone_block=(f"\n{tone_block}\n" if tone_block else ""), reject_block=rej),
         lambda r: nr.validate_narrations(r, len(beats), required=required,
                                          available=set(available)),
         gemini, audit, log)
-    nr.filter_covers_by_anchor(groups, beats, span_index, log=log)
     nar_dir = (output_dir / "narration") if output_dir else Path("narration")
     nr.synthesize_groups(groups, nar_dir, synth_fn, log=log)
     for g in groups:

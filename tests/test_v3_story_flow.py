@@ -480,28 +480,3 @@ def test_probe_window_keeps_whole_window_and_centers_focus():
     t0, t1 = cv.probe_window(win, L=2.0, focus=(40.0, 42.0))
     assert t1 - t0 == cv.PROBE_MAX_WINDOW_SEC and t0 <= 40.0 <= t1
     assert cv.probe_window(win, L=2.0) == (0.0, cv.PROBE_MAX_WINDOW_SEC)
-
-
-def test_available_covers_excludes_in_range_skips_and_labels_anchor():
-    # 비트 [0] 구간 2.0~6.5 안의 조각은 (skip 이어도) 덮개 재료가 아니다
-    beats = [{"scene": 0, "role": "hook", "span_ids": ["sp0001"], "action": ""},   # 2.0~4.0
-             {"scene": 1, "role": "climax", "span_ids": ["sp0004", "sp0005"], "action": ""}]
-    beats[0]["span_ids"] = ["sp0001", "sp0002"]
-    av = nr.available_covers(beats, {0: ROWS_BY[0], 1: ROWS_BY[1], 2: ROWS_BY[2]}, IDX)
-    assert av == ["sp0000", "sp0003", "sp0006"]
-    assert nr.anchor_label("sp0000", beats, IDX) == "before_beat 0"
-    assert nr.anchor_label("sp0003", beats, IDX) == "before_beat 1"
-    assert nr.anchor_label("sp0006", beats, IDX) == "after_last"
-    block = nr.available_block(av, IDX, {"sp0000": 0, "sp0003": 1, "sp0006": 2}, beats)
-    assert "sp0003 | 00:06.5 | 2.5s | before_beat 1 용" in block
-
-
-def test_filter_covers_by_anchor_drops_rewind():
-    beats = _beats()
-    groups = [{"anchor": ("before", 1), "cover_ids": ["sp0003", "sp0000", "sp0006"]},
-              {"anchor": ("after", 1), "cover_ids": ["sp0003", "sp0006"]},
-              {"anchor": ("before", 0), "cover_ids": ["sp0000", "sp0003"]}]
-    nr.filter_covers_by_anchor(groups, beats, IDX, log=lambda *a: None)
-    assert groups[0]["cover_ids"] == ["sp0003"]      # 비트 0 뒤·비트 1 앞만
-    assert groups[1]["cover_ids"] == ["sp0006"]      # 마지막 비트 뒤만
-    assert groups[2]["cover_ids"] == ["sp0000"]      # 첫 비트 앞만
