@@ -913,6 +913,14 @@ def _video_encoder_args(encoder: str, preset: str) -> list[str]:
 
 
 def _relpath_or_abs(p: Path, base: Path) -> Path:
+    """ffmpeg 에 넘길 경로 — base(=cwd 가 될 output_dir) 기준 상대경로, 안 되면 절대경로.
+
+    ⚠ 상대경로 입력은 **프로세스 cwd 기준으로 먼저 절대화**한다(2026-09-03 실사고:
+    `--video sources_local/x.mp4` 처럼 상대로 주면 relative_to 가 실패해 상대경로가
+    그대로 나가고, ffmpeg 는 cwd=output_dir 에서 그 파일을 못 찾아 최종 렌더만 즉사한다.
+    초안 렌더는 cwd 를 안 바꿔 통과하므로 여기서만 터진다). 절대경로 입력은 종전 그대로."""
+    if not p.is_absolute():
+        p = (Path.cwd() / p).resolve()
     try:
         return p.relative_to(base)
     except ValueError:

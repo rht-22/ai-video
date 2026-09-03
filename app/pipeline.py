@@ -5534,6 +5534,12 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
                 _avoid_log["pervasive_burned_hint"] = True
                 break
 
+    # Gemini 호출 원장(2026-09-03) — 이 프로세스가 만든 모든 클라이언트의 합계
+    try:
+        from app.modules.gemini_usage import global_summary as _gemini_usage_summary
+        run_log["gemini_usage"] = _gemini_usage_summary()
+    except Exception as _e:  # noqa: BLE001 — 집계가 본편을 막지 않는다
+        run_log["gemini_usage"] = {"error": str(_e)}
     run_log_serializable = _make_json_serializable(_slim_run_log(run_log))
     run_log_path = output_dir / "run_log.json"
     run_log_path.write_text(json.dumps(run_log_serializable, ensure_ascii=False, indent=2), encoding="utf-8")

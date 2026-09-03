@@ -168,6 +168,9 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
 
     def step(name: str, **fields) -> None:
         run_log["steps"].append({"step": name, **fields})
+        # 호출 원장: 이 step 직전까지의 미태그 Gemini 호출은 이 단계의 것이다
+        if gemini is not None and getattr(gemini, "usage", None) is not None:
+            gemini.usage.close_stage(name)
 
     gemini = None
 
@@ -428,6 +431,10 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
                     get_gemini=get_gemini, step=step, log=log)
         return output_dir
     finally:
+        if gemini is not None and getattr(gemini, "usage", None) is not None:
+            gemini.usage.close_stage("(unassigned)")
+            run_log["gemini_usage"] = gemini.usage.summary()
+            log(f"  [gemini] {gemini.usage.one_line()}")
         _write_json(output_dir / "run_log.json", run_log)
 
 

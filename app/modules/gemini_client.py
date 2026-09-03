@@ -1605,7 +1605,11 @@ class GeminiClient:
         self.config = config
         from google import genai
         from google.genai import types
-        self.client = genai.Client(api_key=config.api_key)
+        from app.modules.gemini_usage import CountingClient, GeminiUsage
+        # 호출 원장(2026-09-03): 이 클라이언트를 지나는 generate_content·files.upload 를
+        # 전부 센다. run_log["gemini_usage"] 의 출처. SDK 객체는 손대지 않는다.
+        self.usage = GeminiUsage()
+        self.client = CountingClient(genai.Client(api_key=config.api_key), self.usage)
         self.types = types
 
     # ─────────────────────────────────────────
