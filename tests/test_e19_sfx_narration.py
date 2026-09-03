@@ -192,7 +192,7 @@ def test_v3_render_final_wires_sfx_audio():
     from app.v3 import finalize
     src = inspect.getsource(finalize.render_final)
     assert "place_narration_sfx" in src
-    assert "sfx_audio=_narr_sfx or None" in src
+    assert "sfx_audio=_all_sfx or None" in src   # 내레이션 + 라벨 합본
     # cue_files 확정 뒤여야 리드인 실측이 성립한다
     assert src.index("cue_files = [f for f") < src.index("place_narration_sfx")
 
@@ -226,3 +226,235 @@ def test_bundled_gain_is_minus_six():
     if not mf:
         pytest.skip("번들에 narration_manifest.json 이 없다")
     assert mf["config"]["gain_db"] == -6.0
+
+
+# ── 라벨 효과음 ──────────────────────────────────────────────────────────────
+
+LABEL_ITEMS = ITEMS + [
+    {"id": "pop-a", "file": "pa.wav", "family": "pop-a",
+     "opening": [], "mid": ["label"], "peak_sec": 0.01},
+    {"id": "pop-b", "file": "pb.wav", "family": "pop-b",
+     "opening": [], "mid": ["label"], "peak_sec": 0.02},
+    {"id": "pop-c", "file": "pc.wav", "family": "pop-c",
+     "opening": [], "mid": ["label"], "peak_sec": 0.03},
+    {"id": "pop-up-something", "file": "pu.wav", "family": "pop-up-something",
+     "opening": [], "mid": ["label_visual_only"], "peak_sec": 0.04},
+]
+
+
+def _labels(spans):
+    return [{"start_sec": a, "end_sec": b, "text": f"L{i}"}
+            for i, (a, b) in enumerate(spans)]
+
+
+def _lbundle(tmp_path, *, mode="all", enabled=True, items=None):
+    return _bundle(tmp_path, items if items is not None else LABEL_ITEMS,
+                   narration={"enabled": True, "gain_db": -6.0, "opening_max_t": 1.5,
+                              "no_repeat_window": 3,
+                              "label": {"enabled": enabled, "gain_db": -6.0,
+                                        "mode": mode, "no_repeat_window": 3}})
+
+
+def test_label_off_is_noop(tmp_path):
+    """label 절이 꺼져 있으면 빈 리스트 — 렌더 종전과 동일."""
+    root = _lbundle(tmp_path, enabled=False)
+    assert sn.place_label_sfx(_labels([(5.0, 8.0)]), app_root=root,
+                              run_dir=tmp_path / "r", seed="s") == []
+
+
+def test_label_peak_lands_on_appearance(tmp_path):
+    """라벨은 리드인 보정이 없다 — 피크가 등장 시각에 떨어지게 앞당기기만 한다."""
+    root = _lbundle(tmp_path)
+    out = sn.place_label_sfx(_labels([(10.0, 13.0)]), app_root=root,
+                             run_dir=tmp_path / "r", seed="s")
+    assert out[0]["start_sec"] == pytest.approx(10.0 - out[0]["_label"]["peak_sec"],
+                                                abs=1e-3)
+
+
+def test_quiet_label_prefers_visual_only_sound(tmp_path):
+    """대사·내레이션이 없는 자리면 화면 전용 소리를 먼저 쓴다."""
+    root = _lbundle(tmp_path)
+    out = sn.place_label_sfx(_labels([(30.0, 33.0)]), app_root=root,
+                             run_dir=tmp_path / "r", seed="s",
+                             busy_windows=[(0.0, 10.0)])
+    assert out[0]["_label"]["quiet"] is True
+    assert out[0]["_label"]["id"] == "pop-up-something"
+
+
+def test_busy_label_never_gets_visual_only_sound(tmp_path):
+    """소리가 깔린 자리에는 그 소리를 쓰지 않는다(사용자 분류: 대사 중에는 X)."""
+    root = _lbundle(tmp_path)
+    out = sn.place_label_sfx(_labels([(5.0, 8.0)]), app_root=root,
+                             run_dir=tmp_path / "r", seed="s",
+                             busy_windows=[(4.0, 9.0)])
+    assert out[0]["_label"]["quiet"] is False
+    assert out[0]["_label"]["id"] != "pop-up-something"
+
+
+def test_no_busy_windows_means_treat_as_busy(tmp_path):
+    """창 정보가 없으면 보수적으로 '소리 있음' — 화면 전용 소리를 안 쓴다."""
+    root = _lbundle(tmp_path)
+    out = sn.place_label_sfx(_labels([(5.0, 8.0)]), app_root=root,
+                             run_dir=tmp_path / "r", seed="s")
+    assert out[0]["_label"]["quiet"] is False
+
+
+def test_quiet_only_mode_skips_busy_labels(tmp_path):
+    root = _lbundle(tmp_path, mode="quiet_only")
+    out = sn.place_label_sfx(_labels([(5.0, 8.0), (30.0, 33.0)]), app_root=root,
+                             run_dir=tmp_path / "r", seed="s",
+                             busy_windows=[(4.0, 9.0)])
+    assert [o["_label"]["at"] for o in out] == [30.0]
+
+
+def test_all_mode_places_every_label(tmp_path):
+    root = _lbundle(tmp_path, mode="all")
+    out = sn.place_label_sfx(_labels([(5.0, 8.0), (30.0, 33.0)]), app_root=root,
+                             run_dir=tmp_path / "r", seed="s",
+                             busy_windows=[(4.0, 9.0)])
+    assert len(out) == 2
+
+
+def test_visual_only_falls_back_when_pool_empty(tmp_path):
+    """화면 전용 소리가 번들에 없으면 일반 라벨 소리로 떨어진다(드롭 금지)."""
+    items = [i for i in LABEL_ITEMS if i["id"] != "pop-up-something"]
+    root = _lbundle(tmp_path, items=items)
+    out = sn.place_label_sfx(_labels([(30.0, 33.0)]), app_root=root,
+                             run_dir=tmp_path / "r", seed="s", busy_windows=[(0.0, 1.0)])
+    assert len(out) == 1 and out[0]["_label"]["quiet"] is True
+
+
+def test_label_no_consecutive_family(tmp_path):
+    root = _lbundle(tmp_path)
+    for seed in ("a", "b", "c", "d"):
+        out = sn.place_label_sfx(_labels([(5, 6), (10, 11), (15, 16), (20, 21)]),
+                                 app_root=root, run_dir=tmp_path / f"r{seed}", seed=seed,
+                                 busy_windows=[(0, 100)])
+        fams = [o["_label"]["family"] for o in out]
+        assert all(x != y for x, y in zip(fams, fams[1:])), (seed, fams)
+
+
+def test_bundled_label_pool_exists():
+    """번들에 라벨용·화면전용 소리가 각각 있어야 배치가 성립한다."""
+    from pathlib import Path
+    app_root = Path(__file__).resolve().parents[1] / "app"
+    mf = sn.load_narration_manifest(app_root)
+    if not mf:
+        pytest.skip("번들 없음")
+    tags = [t for it in mf["items"] for t in (it.get("mid") or [])]
+    assert tags.count("label") >= 3
+    assert "label_visual_only" in tags
+
+
+def test_v3_render_final_wires_label_sfx():
+    import inspect
+    from app.v3 import finalize
+    src = inspect.getsource(finalize.render_final)
+    assert "place_label_sfx" in src and "sfx_audio=_all_sfx or None" in src
+
+
+def test_label_sfx_source_is_rendered_labels_not_plan_labels():
+    """소스는 실제로 그려지는 `labels` 여야 한다.
+
+    human_flow 는 story 비트의 labels 가 비어 있고 Stage 4 가 직접 쓴
+    v3_style.labels 가 화면에 나간다 — plan_labels 를 보면 라벨이 떠 있는데
+    효과음은 0개가 된다(2026-09-03 실측 94a86e4c: ASS 2줄 · plan_labels 0).
+    """
+    import inspect
+    from app.v3 import finalize
+    src = inspect.getsource(finalize.render_final)
+    call = src[src.index("place_label_sfx("):]
+    first_arg = call[len("place_label_sfx("):call.index(",")].strip()
+    assert first_arg == "labels", first_arg
+    # 그리고 labels 조립이 끝난 뒤여야 한다
+    assert src.index("texts_path = output_dir") < src.index("place_label_sfx")
+
+
+def test_visual_only_pool_of_one_does_not_repeat(tmp_path):
+    """화면 전용 후보가 하나뿐이어도 연달아 같은 소리를 쓰지 않는다.
+
+    실측(94a86e4c_run1): 라벨 2개가 둘 다 조용해 pop-up-something 이 연속으로
+    나갔다 — 전용 소리를 한 번 포기하고 일반 라벨 풀로 간다.
+    """
+    root = _lbundle(tmp_path)
+    out = sn.place_label_sfx(_labels([(30.0, 32.0), (40.0, 42.0)]), app_root=root,
+                             run_dir=tmp_path / "r", seed="s", busy_windows=[(0.0, 1.0)])
+    ids = [o["_label"]["id"] for o in out]
+    assert len(ids) == 2 and ids[0] != ids[1], ids
+    assert ids[0] == "pop-up-something"          # 첫 번째는 전용 소리를 쓴다
+
+
+def test_bundled_peak_sec_is_the_attack_not_the_max():
+    """peak_sec 은 최대 진폭이 아니라 **타격**(최대치 70% 첫 도달)이어야 한다.
+
+    몸통이 부푸는 소리는 최대 진폭이 한참 뒤다 — impact-cinematic-boom-02 는
+    최대 0.303s · 타격 0.025s 였고, 최대로 정렬하면 타격이 278ms 앞으로 샜다.
+    """
+    import array
+    import subprocess
+    from pathlib import Path
+    app_root = Path(__file__).resolve().parents[1] / "app"
+    mf = sn.load_narration_manifest(app_root)
+    if not mf:
+        pytest.skip("번들 없음")
+    bad = []
+    for it in mf["items"]:
+        f = app_root / "assets" / "sfx" / it["file"]
+        pcm = subprocess.run(["ffmpeg", "-v", "quiet", "-i", str(f), "-ac", "1",
+                              "-ar", "48000", "-f", "s16le", "-"],
+                             capture_output=True).stdout
+        a = array.array("h"); a.frombytes(pcm[:len(pcm) // 2 * 2])
+        if not a:
+            continue
+        pk = max(max(a), -min(a)) or 1
+        att = next((i for i, v in enumerate(a) if abs(v) >= pk * 0.7), 0) / 48000
+        if abs(att - float(it.get("peak_sec", 0))) > 0.01:
+            bad.append((it["id"], round(att, 4), it.get("peak_sec")))
+    assert not bad, bad
+
+
+# ── 동시 타격 시 내레이션 우선 (사용자 지시 2026-09-03) ──────────────────────
+
+def _n(start, peak): return {"start_sec": start, "_narration": {"peak_sec": peak}}
+def _l(start, peak): return {"start_sec": start, "_label": {"peak_sec": peak, "at": start}}
+
+
+def test_simultaneous_hit_drops_the_label():
+    """같은 순간에 때리면 내레이션만 남는다."""
+    keep, dropped = sn.drop_label_collisions([_n(9.9, 0.1)], [_l(9.95, 0.05)])
+    assert keep == [] and len(dropped) == 1
+
+
+def test_separated_hits_both_survive():
+    """충분히 벌어지면 둘 다 남는다 — 겹침 아님."""
+    keep, dropped = sn.drop_label_collisions([_n(9.9, 0.1)], [_l(12.0, 0.05)])
+    assert len(keep) == 1 and dropped == []
+
+
+def test_collision_compares_hit_not_start():
+    """비교는 start_sec 이 아니라 타격(start+peak)이다.
+
+    start 는 0.30 벌어졌지만 타격은 둘 다 10.0 — 시작으로 재면 놓친다.
+    """
+    keep, dropped = sn.drop_label_collisions([_n(9.70, 0.30)], [_l(9.99, 0.01)])
+    assert keep == [] and len(dropped) == 1
+
+
+def test_different_start_same_hit_is_not_false_positive():
+    """반대로 start 가 같아도 타격이 벌어지면 겹침이 아니다."""
+    keep, dropped = sn.drop_label_collisions([_n(10.0, 0.30)], [_l(10.0, 0.01)])
+    assert len(keep) == 1 and dropped == []
+
+
+def test_no_narration_keeps_every_label():
+    keep, dropped = sn.drop_label_collisions([], [_l(3.0, 0.01), _l(9.0, 0.02)])
+    assert len(keep) == 2 and dropped == []
+
+
+def test_v3_render_final_applies_collision_drop():
+    import inspect
+    from app.v3 import finalize
+    src = inspect.getsource(finalize.render_final)
+    assert "drop_label_collisions" in src
+    # 드롭 뒤에 합쳐야 한다
+    assert src.index("drop_label_collisions") < src.index("_all_sfx = _narr_sfx")

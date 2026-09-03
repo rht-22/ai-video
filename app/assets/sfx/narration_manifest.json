@@ -1,12 +1,19 @@
 {
   "schema": "narration_sfx/v1",
-  "note": "내레이션 시작 배치용. app/assets/sfx/manifest.json 과는 별개 파일이다 — manifest.json 을 만들면 AI 선택 경로(E19-5)까지 켜지므로 일부러 분리했다.",
+  "note": "내레이션 시작 배치용. app/assets/sfx/manifest.json 과는 별개 파일이다 — manifest.json 을 만들면 AI 선택 경로(E19-5)까지 켜지므로 일부러 분리했다. mid 는 '도입부가 아닌 모든 용도' — label 계열 태그도 여기 담긴다.",
   "narration": {
     "enabled": true,
     "gain_db": -6.0,
     "opening_max_t": 1.5,
     "no_repeat_window": 3,
-    "gain_note": "최종 loudnorm 이 트랜지언트에 반응해 밑에 깔린 소리를 누른다 — 0dB 에서 대사 위 -3.7dB, -6dB 에서 -1.2dB(2026-09-02 실측). 조용한 자리의 효과음 크기는 loudnorm 이 도로 올려서 거의 안 준다."
+    "gain_note": "최종 loudnorm 이 트랜지언트에 반응해 밑에 깔린 소리를 누른다 — 0dB 에서 대사 위 -3.7dB, -6dB 에서 -1.2dB(2026-09-02 실측). 조용한 자리의 효과음 크기는 loudnorm 이 도로 올려서 거의 안 준다.",
+    "label": {
+      "enabled": true,
+      "gain_db": -6.0,
+      "mode": "all",
+      "mode_note": "all = 라벨마다 무조건(테스트) · quiet_only = 대사·내레이션이 없는 자리에만. 실측 2026-09-03: 소리 빈 구간은 편의 20~52%라 quiet_only 는 편당 2~7곳뿐이다.",
+      "no_repeat_window": 3
+    }
   },
   "sfx": [
     {
@@ -19,7 +26,7 @@
       "mid": [
         "line_start"
       ],
-      "peak_sec": 0.0401
+      "peak_sec": 0.04
     },
     {
       "id": "whoosh-effect",
@@ -31,7 +38,7 @@
       "mid": [
         "line_start"
       ],
-      "peak_sec": 0.0525
+      "peak_sec": 0.05
     },
     {
       "id": "whoosh-1",
@@ -43,7 +50,7 @@
       "mid": [
         "line_start"
       ],
-      "peak_sec": 0.0379
+      "peak_sec": 0.0308
     },
     {
       "id": "whoosh-2",
@@ -56,7 +63,7 @@
         "line_start",
         "scene_transition"
       ],
-      "peak_sec": 0.0294
+      "peak_sec": 0.0264
     },
     {
       "id": "whoosh-3",
@@ -68,7 +75,7 @@
       "mid": [
         "line_start"
       ],
-      "peak_sec": 0.0312
+      "peak_sec": 0.0272
     },
     {
       "id": "movement-swipe-whoosh-3",
@@ -80,7 +87,7 @@
       "mid": [
         "line_start"
       ],
-      "peak_sec": 0.0879
+      "peak_sec": 0.0747
     },
     {
       "id": "whip-crack",
@@ -92,7 +99,7 @@
       "mid": [
         "line_start"
       ],
-      "peak_sec": 0.0591
+      "peak_sec": 0.0559
     },
     {
       "id": "hit3",
@@ -105,7 +112,7 @@
         "line_start",
         "emphasis_soft"
       ],
-      "peak_sec": 0.0187
+      "peak_sec": 0.0181
     },
     {
       "id": "gunshot",
@@ -117,7 +124,7 @@
       "mid": [
         "emphasis_followup"
       ],
-      "peak_sec": 0.041
+      "peak_sec": 0.0174
     },
     {
       "id": "punch",
@@ -129,7 +136,7 @@
       "mid": [
         "emphasis_followup"
       ],
-      "peak_sec": 0.1013
+      "peak_sec": 0.0973
     },
     {
       "id": "funny-boing-flexatone-wobble",
@@ -155,7 +162,7 @@
       "mid": [
         "line_start"
       ],
-      "peak_sec": 0.1064
+      "peak_sec": 0.1062
     },
     {
       "id": "thud-impact-sound-sfx",
@@ -169,7 +176,7 @@
       "mid": [
         "line_start"
       ],
-      "peak_sec": 0.0711
+      "peak_sec": 0.0708
     },
     {
       "id": "impact-thud",
@@ -183,7 +190,7 @@
       "mid": [
         "line_start"
       ],
-      "peak_sec": 0.026
+      "peak_sec": 0.0253
     },
     {
       "id": "whoosh-transition-6-tight",
@@ -198,7 +205,7 @@
         "line_start",
         "scene_transition"
       ],
-      "peak_sec": 0.098
+      "peak_sec": 0.0979
     },
     {
       "id": "low-thumpy-kick-reverb-hit",
@@ -212,7 +219,7 @@
       "mid": [
         "buildup"
       ],
-      "peak_sec": 0.0129
+      "peak_sec": 0.0098
     },
     {
       "id": "huge-cinematic-tom-hit",
@@ -226,7 +233,7 @@
       "mid": [
         "reveal"
       ],
-      "peak_sec": 0.0083
+      "peak_sec": 0.008
     },
     {
       "id": "cinematic-boom",
@@ -238,7 +245,7 @@
         "opening"
       ],
       "mid": [],
-      "peak_sec": 0.0252
+      "peak_sec": 0.0167
     },
     {
       "id": "riser-swoosh-transition-tight",
@@ -250,7 +257,7 @@
         "opening"
       ],
       "mid": [],
-      "peak_sec": 0.1697
+      "peak_sec": 0.161
     },
     {
       "id": "cinematic-impact-boom-05",
@@ -264,7 +271,7 @@
       "mid": [
         "reveal"
       ],
-      "peak_sec": 0.1005
+      "peak_sec": 0.0612
     },
     {
       "id": "impact-cinematic-boom-02",
@@ -276,7 +283,7 @@
         "opening"
       ],
       "mid": [],
-      "peak_sec": 0.3029
+      "peak_sec": 0.0247
     },
     {
       "id": "cinematic-impact-boom-03",
@@ -288,7 +295,7 @@
       "mid": [
         "reveal"
       ],
-      "peak_sec": 0.0205
+      "peak_sec": 0.015
     },
     {
       "id": "hit-low-gravity-absorber",
@@ -300,7 +307,142 @@
         "opening_tts_only"
       ],
       "mid": [],
-      "peak_sec": 0.0128
+      "peak_sec": 0.0083
+    },
+    {
+      "id": "bubble-pop-02",
+      "file": "bubble-pop-02.wav",
+      "desc": "밝고 가벼움",
+      "family": "bubble-pop",
+      "weight": "light",
+      "opening": [],
+      "mid": [
+        "label"
+      ],
+      "peak_sec": 0.0203,
+      "dur_sec": 0.812
+    },
+    {
+      "id": "happy-pop-3",
+      "file": "happy-pop-3.wav",
+      "desc": "밝고 가벼움",
+      "family": "happy-pop",
+      "weight": "light",
+      "opening": [],
+      "mid": [
+        "label"
+      ],
+      "peak_sec": 0.0053,
+      "dur_sec": 1.012
+    },
+    {
+      "id": "sharp-pop",
+      "file": "sharp-pop.wav",
+      "desc": "밝고 가벼움",
+      "family": "sharp-pop",
+      "weight": "light",
+      "opening": [],
+      "mid": [
+        "label"
+      ],
+      "peak_sec": 0.0068,
+      "dur_sec": 0.995
+    },
+    {
+      "id": "pop-g",
+      "file": "pop-g.wav",
+      "desc": "밝고 가벼움",
+      "family": "pop-g",
+      "weight": "light",
+      "opening": [],
+      "mid": [
+        "label"
+      ],
+      "peak_sec": 0.0091,
+      "dur_sec": 0.742
+    },
+    {
+      "id": "ui-pop-sound",
+      "file": "ui-pop-sound.wav",
+      "desc": "밝고 가벼움",
+      "family": "ui-pop-sound",
+      "weight": "light",
+      "opening": [],
+      "mid": [
+        "label"
+      ],
+      "peak_sec": 0.0198,
+      "dur_sec": 1.302
+    },
+    {
+      "id": "bubble-pop-04",
+      "file": "bubble-pop-04.wav",
+      "desc": "밝고 가벼움",
+      "family": "bubble-pop",
+      "weight": "light",
+      "opening": [],
+      "mid": [
+        "label"
+      ],
+      "peak_sec": 0.0156,
+      "dur_sec": 0.952
+    },
+    {
+      "id": "pop-f",
+      "file": "pop-f.wav",
+      "desc": "중간 가벼움 — 범용성 좋음",
+      "family": "pop-f",
+      "weight": "light-mid",
+      "opening": [],
+      "mid": [
+        "label"
+      ],
+      "peak_sec": 0.0192,
+      "dur_sec": 0.07
+    },
+    {
+      "id": "pop-e",
+      "file": "pop-e.wav",
+      "desc": "중간 가벼움 — 범용성 좋음",
+      "family": "pop-e",
+      "weight": "light-mid",
+      "opening": [],
+      "mid": [
+        "label"
+      ],
+      "peak_sec": 0.0103,
+      "dur_sec": 0.611
+    },
+    {
+      "id": "pop-sound",
+      "file": "pop-sound.wav",
+      "desc": "중간 가벼움 — 범용성 좋음",
+      "family": "pop-sound",
+      "weight": "light-mid",
+      "opening": [],
+      "mid": [
+        "label"
+      ],
+      "peak_sec": 0.0053,
+      "dur_sec": 1.663
+    },
+    {
+      "id": "pop-up-something",
+      "file": "pop-up-something.wav",
+      "desc": "대사 중에는 X. 화면에 라벨만 있고 주목시킬 때만",
+      "family": "pop-up-something",
+      "weight": "light-mid",
+      "opening": [],
+      "mid": [
+        "label_visual_only"
+      ],
+      "peak_sec": 0.023,
+      "dur_sec": 0.212
     }
-  ]
+  ],
+  "usage_keys": {
+    "label": "라벨(효과 텍스트) 등장",
+    "label_visual_only": "라벨만 있고 대사·내레이션이 없을 때(화면 주목)"
+  },
+  "peak_note": "peak_sec 은 파일 최대 진폭이 아니라 **지각되는 타격 시각**(최대치의 70% 를 처음 넘는 지점)이다. 몸통이 부푸는 소리는 최대 진폭이 한참 뒤라 그걸로 정렬하면 타격이 앞으로 새어 나간다 — impact-cinematic-boom-02 실측 최대 0.303s vs 타격 0.025s(2026-09-03)."
 }

@@ -628,6 +628,39 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
         _n = _s["_narration"]
         log(f"  [sfx-narration] cue{_n['cue_index']} {_n['tag']} {_s['start_sec']:.3f}s "
             f"← {_n['id']} (리드인 {_n['lead_in_sec']*1000:.0f}ms, 피크 {_n['peak_sec']*1000:.0f}ms)")
+    # 라벨 등장 효과음 — 같은 믹스 경로에 더한다. `busy_windows` 는 소리 있는 구간
+    # (cue 창 ∪ 대사 자막)이고, `pop-up-something` 처럼 "화면에 라벨만 있을 때"로
+    # 한정된 소리가 그 판정을 쓴다. 라벨이 0개면 빈 리스트라 종전과 같다.
+    try:
+        from app.modules.sfx_narration import place_label_sfx
+        _busy = [(float(f["cue"]["start_sec"]), float(f["cue"]["end_sec"]))
+                 for f in cue_files if f.get("cue", {}).get("end_sec") is not None]
+        _busy += [(float(s["start_sec"]), float(s["end_sec"])) for s in segments
+                  if s.get("start_sec") is not None and s.get("end_sec") is not None]
+        # ⚠ 소스는 **실제로 그려지는 `labels`** 다(plan_labels 가 아니라).
+        # human_flow 는 story 비트의 labels 가 비어 있고 Stage 4 가 직접 쓴
+        # `v3_style.labels`(authored)가 화면에 나간다 — plan_labels 를 보면
+        # 라벨이 2개 떠 있는데 효과음은 0개가 된다(2026-09-03 실측).
+        _label_sfx = place_label_sfx(
+            labels, app_root=_root, run_dir=output_dir,
+            seed=output_dir.name,
+            speed=float(getattr(design, "video_speed", 1.0) or 1.0),
+            busy_windows=_busy)
+    except Exception as _e:                    # 효과음 때문에 편이 죽지 않는다
+        log(f"  [sfx-label] 배치 실패 — 효과음 없이 계속: {_e}")
+        _label_sfx = []
+    # 동시에 때리는 쌍은 내레이션만 남긴다(사용자 지시 2026-09-03).
+    from app.modules.sfx_narration import drop_label_collisions
+    _label_sfx, _collided = drop_label_collisions(_narr_sfx, _label_sfx)
+    for _s in _label_sfx:
+        _n = _s["_label"]
+        log(f"  [sfx-label] {_n['at']:.3f}s 「{_n['text']}」 ← {_n['id']} "
+            f"({'화면 전용' if _n['quiet'] else '소리 있음'})")
+    for _s in _collided:
+        _n = _s["_label"]
+        log(f"  [sfx-label] 내레이션과 동시 타격 → 드롭: {_n['at']:.3f}s "
+            f"「{_n['text']}」 ({_n['id']})")
+    _all_sfx = _narr_sfx + _label_sfx
     inputs = RenderInputs(
         video_path=Path(video_path),
         clips=clips,
@@ -647,7 +680,7 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
         text_subtitle_path=texts_path,
         muted_windows=muted_windows or None,
         source_fps=plan.get("source_fps"),
-        sfx_audio=_narr_sfx or None,
+        sfx_audio=_all_sfx or None,
     )
     t0 = time.time()
     render_short(inputs)

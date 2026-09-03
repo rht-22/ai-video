@@ -159,3 +159,132 @@ def place_narration_sfx(tts_cue_files: list[dict], *, app_root: Path, run_dir: P
                                    "lead_in_sec": round(lead, 4), "peak_sec": peak}})
         recent.append(it.get("family") or it["id"])
     return out
+
+
+# ── 라벨(효과 텍스트) 등장 효과음 ────────────────────────────────────────────
+#
+# 내레이션과 다른 점 둘.
+#   ① 리드인 보정이 없다 — 라벨은 화면에 그려지는 것이라 `start_sec` 가 곧 등장 시각이다.
+#   ② 밑에 소리가 있는지를 본다. 사용자 분류(2026-09-03)에서 `pop-up-something` 은
+#      "대사 중에는 X, 화면에 라벨만 있고 주목시킬 때"라 조건이 붙었다 — 그 조건을
+#      **대사도 내레이션도 없다**로 환산한다(관객이 들을 게 없으면 화면이 유일한 사건).
+#
+# ⚠ 실측(2026-09-03, 6편): 소리가 완전히 빈 구간은 편의 20~52%(0.8초 이상 구간 2~7개)다.
+#    `label_visual_only` 후보가 한 번도 안 걸리는 편이 있으므로 폴백이 필수다.
+
+LABEL_TAG = "label"
+LABEL_QUIET_TAG = "label_visual_only"
+
+
+def _overlaps(a: float, b: float, windows) -> bool:
+    return any(not (y <= a or x >= b) for x, y in windows)
+
+
+def place_label_sfx(labels: list[dict], *, app_root: Path, run_dir: Path, seed: str,
+                    speed: float = 1.0,
+                    busy_windows: list[tuple[float, float]] | None = None,
+                    ) -> list[dict[str, Any]]:
+    """라벨 목록 → 렌더에 실을 `sfx_audio` 항목들.
+
+    `busy_windows` 는 편집 타임라인의 **소리 있는 구간**(내레이션 cue 창 ∪ 대사 자막).
+    비면 전부 '소리 있음'으로 본다(모르면 보수적으로 — 조용한 자리 전용 소리를
+    시끄러운 자리에 놓지 않는다).
+
+    매니페스트 `label` 절이 없거나 꺼져 있으면 빈 리스트(= 렌더 종전과 동일).
+    """
+    mf = load_narration_manifest(app_root)
+    if not mf or not labels:
+        return []
+    cfg = (mf["config"].get("label") or {}) if isinstance(mf["config"], dict) else {}
+    if not cfg.get("enabled"):
+        return []
+    gain_db = float(cfg.get("gain_db", -6.0))
+    no_repeat = int(cfg.get("no_repeat_window", 3))
+    # "all" = 라벨마다 무조건(테스트 기본) · "quiet_only" = 소리 빈 자리에만
+    mode = str(cfg.get("mode", "all"))
+    # None(모름) 과 빈 리스트(재 봤더니 소리가 없음)는 다르다 — 모르면 보수적으로
+    # '소리 있음'으로 봐서 화면 전용 소리를 시끄러운 자리에 놓지 않는다.
+    unknown = busy_windows is None
+    busy = list(busy_windows or [])
+    src_dir = Path(app_root) / "assets" / SFX_DIR_NAME
+    dest_dir = Path(run_dir) / STAGE_SUBDIR
+
+    out: list[dict[str, Any]] = []
+    recent: list[str] = []
+    for step, lb in enumerate(labels):
+        try:
+            at = float(lb["start_sec"])
+            end = float(lb.get("end_sec", at))
+        except (TypeError, ValueError, KeyError):
+            continue
+        quiet = (not unknown) and not _overlaps(at, max(end, at + 0.01), busy)
+        if mode == "quiet_only" and not quiet:
+            continue
+        # 조용한 자리면 전용 소리를 먼저 — 없으면 일반 라벨 소리로 떨어진다(폴백 필수).
+        it = None
+        if quiet:
+            it = _pick(mf["items"], LABEL_QUIET_TAG, seed, step, recent, no_repeat)
+            # 화면 전용 후보가 하나뿐이면 반복 방지가 무력해진다(실측 94a86e4c_run1:
+            # 라벨 2개가 둘 다 조용해서 같은 소리가 연달아 나갔다). 직전과 같은
+            # 계열이면 일반 라벨 풀에서 다른 것을 찾는다 — 전용 소리를 한 번 포기하는
+            # 편이 같은 소리 반복보다 낫다(사용자 지시: 연속 반복은 지루하다).
+            if it is not None and recent and (it.get("family") or it["id"]) == recent[-1]:
+                alt = _pick(mf["items"], LABEL_TAG, seed, step, recent, no_repeat)
+                if alt is not None and (alt.get("family") or alt["id"]) != recent[-1]:
+                    it = alt
+        if it is None:
+            it = _pick(mf["items"], LABEL_TAG, seed, step, recent, no_repeat)
+        if it is None:
+            continue
+        src = src_dir / it["file"]
+        if not src.is_file():
+            print(f"  [sfx-label] 번들에 파일이 없어 건너뜀: {it['file']}")
+            continue
+
+        peak = float(it.get("peak_sec", 0.0))
+        start = at - peak * speed          # 피크가 라벨 등장 프레임에 떨어지게
+        if start < 0:
+            start = 0.0
+
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = (dest_dir / src.name).resolve()
+        if not dest.exists():
+            shutil.copy2(src, dest)
+
+        out.append({"path": dest, "start_sec": round(start, 3), "gain_db": gain_db,
+                    "_label": {"id": it["id"], "family": it.get("family"),
+                               "quiet": quiet, "at": round(at, 3),
+                               "text": str(lb.get("text") or "")[:20],
+                               "peak_sec": peak}})
+        recent.append(it.get("family") or it["id"])
+    return out
+
+
+# 두 타격이 이 안에 들면 한 번의 두꺼운 소리로 뭉쳐 들린다(플램). 그보다 벌어지면
+# 서로 다른 두 사건으로 들리므로 겹침으로 보지 않는다.
+COLLIDE_TOL_SEC = 0.05
+
+
+def drop_label_collisions(narration: list[dict], labels: list[dict], *,
+                          tol: float = COLLIDE_TOL_SEC,
+                          ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """내레이션 효과음과 **동시에 타격하는** 라벨 효과음을 버린다(사용자 지시:
+    동시에 시작하면 내레이션만 남긴다). Returns: (남길 라벨, 버린 라벨).
+
+    ⚠ 비교는 `start_sec` 이 아니라 **타격 시각**(start_sec + peak_sec)이다.
+    두 소리는 피크 보정만큼 서로 다른 시각에 시작하지만 귀에 닿는 순간은 앵커다 —
+    시작으로 재면 같은 순간에 때리는 쌍을 놓치고, 엉뚱한 쌍을 겹침으로 잡는다.
+    """
+    def hit(s: dict, key: str) -> float:
+        return float(s.get("start_sec", 0.0)) + float((s.get(key) or {}).get("peak_sec", 0.0))
+
+    narr_hits = [hit(s, "_narration") for s in narration]
+    keep: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for lb in labels:
+        h = hit(lb, "_label")
+        if any(abs(h - n) <= tol for n in narr_hits):
+            dropped.append(lb)
+        else:
+            keep.append(lb)
+    return keep, dropped
