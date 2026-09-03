@@ -943,7 +943,12 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
             log("  [v3/watch-trim] 지목 0 — 그대로 진행"
                 + (f"(거부 {len(wt_audit.get('rejected') or [])}건)"
                    if wt_audit.get("rejected") else ""))
-        step("watch_trim", cuts=len(cuts), removed_sec=removed_sec,
+        _pr = wt_audit.get("pacing_review")
+        if _pr:
+            log(f"  [v3/watch-trim] 호흡 판정(기록만) — 루즈 {'예' if _pr['loose'] else '아니오'}"
+                + (f" · 내레이션 필요 자리 {_pr['narration_missing_at']}" if _pr['narration_missing_at'] else "")
+                + (f" · {_pr['note']}" if _pr['note'] else ""))
+        step("watch_trim", cuts=len(cuts), removed_sec=removed_sec, pacing_review=_pr,
              rejected=len(wt_audit.get("rejected") or []),
              error=wt_audit.get("error"), audit=wt_audit)
         _write_json(wt_path, {"pre_fingerprint": pre_fp,

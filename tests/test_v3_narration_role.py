@@ -80,3 +80,40 @@ def test_title_self_review_spoiler_is_bounced_back():
     # 칸 없음(구 응답) = 종전 통과
     obj, pr, _ = sl.validate_scenes({"scenes": scenes, "title": ok["title"]}, list(ROWS_BY.values()))
     assert obj is not None
+
+
+def test_scene_rhythm_numbers_and_block():
+    grid = {"words": [{"t0": 1.0, "t1": 1.4, "text": "가나"}, {"t0": 2.0, "t1": 2.5, "text": "다라마"},
+                      {"t0": 50.0, "t1": 50.5, "text": "밖"}],
+            "scene_cuts": [0.5, 3.5, 6.0, 9.5]}
+    rows = {0: {"t0": 0.0, "t1": 10.0}}
+    r = nr.scene_rhythm(rows, grid)
+    assert r["words"] == 2 and r["speech_cps"] == 0.5          # 5자 / 10초 · 범위 밖 단어 제외
+    assert r["cut_gap_med"] == 3.0 and r["longest_silence"] == 7.5   # 2.5→10.0
+    block = nr.rhythm_block(r)
+    assert "발화 밀도 0.5자/초" in block and "최장 무발화 7.5초" in block
+    assert nr.rhythm_block(None) == "" and nr.scene_rhythm({}, grid) is None
+
+
+def test_cap_head_gap_trims_silent_head_only():
+    """덮개 뒤 머리 무발화 6.5초 → 무성 조각 제거 + 첫 조각 안 트림으로 1.5초. 유성은 불변."""
+    from app.v3.story_flow import cover as cv
+    idx = {"s0": {"t_in": 0.0, "t_out": 3.0, "is_audio": False},
+           "s1": {"t_in": 3.0, "t_out": 6.5, "is_audio": False},
+           "s2": {"t_in": 6.5, "t_out": 9.0, "is_audio": True},
+           "s3": {"t_in": 9.0, "t_out": 10.0, "is_audio": True}}
+    b = {"span_ids": ["s0", "s1", "s2", "s3"], "lines": ["s2", "s3"], "visual": ["s0", "s1"]}
+    rec = cv.cap_head_gap(b, idx, cap=1.5)
+    assert rec["before_sec"] == 6.5 and rec["after_sec"] == 1.5
+    assert rec["removed_span_ids"] == ["s0"] and rec["head_trim_sec"] == 5.0
+    assert b["span_ids"] == ["s1", "s2", "s3"] and b["visual"] == ["s1"] and b["head_trim_sec"] == 5.0
+    # 이미 짧으면 무변경 · 유성으로 시작하면 무변경
+    assert cv.cap_head_gap({"span_ids": ["s2", "s3"]}, idx) is None
+    short = {"span_ids": ["s1", "s2"]}
+    assert cv.cap_head_gap(short, idx, cap=4.0) is None and short["span_ids"] == ["s1", "s2"]
+
+
+def test_watch_trim_prompt_asks_pacing_and_keeps_cuts_schema():
+    from app.v3 import watch_trim as wt
+    assert '"pacing"' in wt.PROMPT and '"cuts"' in wt.PROMPT
+    assert "되돌리지는 않는다" in wt.PROMPT          # 기록만 — 자동 되돌리기 아님

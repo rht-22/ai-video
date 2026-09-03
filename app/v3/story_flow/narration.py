@@ -50,6 +50,7 @@ PROMPT = """당신은 리캡 쇼츠 구성작가다. 영상은 볼 수 없다 �
 주제: {topic}
 제목: {title_line1} / {title_line2}
 
+{rhythm_block}
 ## 편성 (비트 순 · 대사와 화면 기록)
 {beats_block}
 
@@ -62,6 +63,50 @@ PROMPT = """당신은 리캡 쇼츠 구성작가다. 영상은 볼 수 없다 �
   {{"before_beat": 3, "text": "…", "cover": ["sp0140"], "closed": false}},
   {{"after_last": true, "text": "…", "cover": ["sp0190"], "closed": true}}
 ]}}"""
+
+
+def scene_rhythm(scene_rows: dict[int, dict], grid: dict) -> dict | None:
+    """고른 씬의 호흡 숫자 3개(순수) — 발화 밀도(공백 제외 글자/초)·컷 간격 중앙값·최장 무발화.
+
+    2026-09-03 사용자 지적: 원본 호흡이 짧아 내레이션이 거의 필요 없는 작품도 있다.
+    '루즈한가'는 판단이지만 그 재료는 전사·장면컷에서 코드가 정확히 낸다 — 숫자를 주고
+    몇 줄을 쓸지는 모델이 정한다. 재료가 없으면 None(블록 생략 = 프롬프트 종전과 동일)."""
+    ranges = [(float(r["t0"]), float(r["t1"])) for r in scene_rows.values()
+              if r.get("t0") is not None and r.get("t1") is not None]
+    if not ranges:
+        return None
+    total = sum(z - a for a, z in ranges)
+    if total <= 0:
+        return None
+    inside = lambda t: any(a - 1e-6 <= t <= z + 1e-6 for a, z in ranges)  # noqa: E731
+    words = [w for w in (grid.get("words") or [])
+             if isinstance(w, dict) and inside(float(w.get("t0", -1)))]
+    chars = sum(len(str(w.get("text") or "").replace(" ", "")) for w in words)
+    cuts = sorted(float(c) for c in (grid.get("scene_cuts") or []) if inside(float(c)))
+    gaps = [b - a for a, b in zip(cuts, cuts[1:])]
+    cut_med = sorted(gaps)[len(gaps) // 2] if gaps else None
+    # 최장 무발화: 각 씬 구간 안에서 단어 사이(및 양 끝) 공백의 최댓값
+    longest = 0.0
+    for a, z in ranges:
+        ts = sorted((float(w["t0"]), float(w["t1"])) for w in words if a - 1e-6 <= float(w["t0"]) <= z + 1e-6)
+        cur = a
+        for t0, t1 in ts:
+            longest = max(longest, t0 - cur)
+            cur = max(cur, t1)
+        longest = max(longest, z - cur)
+    return {"speech_cps": round(chars / total, 2), "cut_gap_med": (round(cut_med, 1) if cut_med is not None else None),
+            "longest_silence": round(longest, 1), "scene_sec": round(total, 1), "words": len(words)}
+
+
+def rhythm_block(rhythm: dict | None) -> str:
+    if not rhythm:
+        return ""
+    cg = f"{rhythm['cut_gap_med']:.1f}초" if rhythm.get("cut_gap_med") is not None else "측정 불가"
+    return (f"\n## 고른 씬의 호흡 (코드 실측 · 씬 합계 {rhythm['scene_sec']:.0f}초)\n"
+            f"- 발화 밀도 {rhythm['speech_cps']:.1f}자/초 · 컷 간격 중앙값 {cg} · 최장 무발화 {rhythm['longest_silence']:.1f}초\n"
+            f"- 대사가 촘촘하고(≈3자/초↑) 컷이 빠르면(≈3초↓) 내레이션은 훅·점프·전환 자리에만 — 원본 호흡이 이미 끌고 간다.\n"
+            f"- 대사가 성기거나 한 장면이 길게 이어지면(무발화 ≈4초↑) 시청자가 놓치지 않게 상황 설명을 더 넣어라.\n"
+            f"몇 줄을 쓸지는 네가 정한다 — 숫자는 근거다, 규칙이 아니다.\n")
 
 
 def beats_block(beats: list[dict], span_index: dict[str, dict],

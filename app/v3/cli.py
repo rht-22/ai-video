@@ -101,6 +101,12 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("GEMINI_API_KEY 없음 — Stage 1/리서치를 쓰려면 필수. "
                          "grid 만 만들려면 --skip-research --skip-seq-analyze.")
 
+    # 사람 흐름 체인은 인명 교정을 기본으로 켠다(2026-09-03): 받아쓰기가 낸 표기('애지')가
+    # 자막에 그대로 나갔다 — 리서치에 정본('예지')이 있는데 경고만 남기고 지나갔다.
+    if args.story_flow == "human" and not args.fix_names:
+        args.fix_names = True
+        print("  [v3] --story-flow human → 인명 교정(--fix-names) 기본 켬")
+
     from app.v3.pipeline import run_v3
     out = run_v3(video_path=video, work_title=args.work_title,
                  outdir=Path(args.outdir), srt_path=srt, episode=args.episode,

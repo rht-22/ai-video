@@ -478,7 +478,50 @@ def apply_cover_to_beats(cover: dict, beats: list[dict], span_index: dict[str, d
     return removed
 
 
+HEAD_GAP_MAX_SEC = 1.5   # 덮개(내레이션) 끝 → 첫 대사까지 허용하는 무발화 머리(2026-09-03)
+
+
+def cap_head_gap(beat: dict, span_index: dict[str, dict],
+                 cap: float = HEAD_GAP_MAX_SEC) -> dict | None:
+    """덮개 뒤 비트의 무발화 머리를 cap 초까지만 남긴다(순수 · 비트를 제자리에서 고친다).
+
+    사용자 지적(2026-09-03): 내레이션이 끝나고 첫 대사(또는 훅 장면)까지 너무 멀면 문제 —
+    이번 실런은 훅 비트 머리에 6초가 비어 있었다(내레이션 → 무발화 6초 → 첫 대사).
+    이건 시간 문제라 코드 자리다. 앞의 **무성 조각을 통째로** 덜어내고, 그래도 남으면
+    첫 조각 안에서 head_trim_sec 로 시작을 당긴다(assemble 은 첫 조각 안의 트림만 안다).
+    유성 조각은 안 건드린다. 반환: 바뀌었으면 기록 dict, 아니면 None."""
+    ids = [x for x in beat.get("span_ids") or [] if x in span_index]
+    voiced = [x for x in ids if span_index[x]["is_audio"]]
+    if not ids or not voiced:
+        return None
+    anchor_t = span_index[voiced[0]]["t_in"]
+    start_t = float(beat.get("head_trim_sec") or span_index[ids[0]]["t_in"])
+    before = anchor_t - start_t
+    if before <= cap + 1e-6:
+        return None
+    removed: list[str] = []
+    keep = list(ids)
+    while keep and keep[0] != voiced[0] and not span_index[keep[0]]["is_audio"] \
+            and anchor_t - span_index[keep[0]]["t_out"] >= cap - 1e-6:
+        removed.append(keep.pop(0))
+    head_trim = None
+    first = span_index[keep[0]]
+    if not first["is_audio"] and anchor_t - first["t_in"] > cap + 1e-6:
+        head_trim = round(anchor_t - cap, 3)
+    if removed or head_trim is not None:
+        beat["span_ids"] = keep
+        beat["lines"] = [x for x in beat.get("lines") or [] if x in keep]
+        beat["visual"] = [x for x in beat.get("visual") or [] if x in keep]
+        if head_trim is not None:
+            beat["head_trim_sec"] = head_trim
+        elif beat.get("head_trim_sec") is not None and beat["head_trim_sec"] < span_index[keep[0]]["t_in"]:
+            beat.pop("head_trim_sec")
+    after = anchor_t - (head_trim if head_trim is not None else span_index[keep[0]]["t_in"])
+    return {"before_sec": round(before, 3), "after_sec": round(after, 3),
+            "removed_span_ids": removed, "head_trim_sec": head_trim}
+
+
 __all__ = ["choose_cover", "apply_cover_to_beats", "candidate_windows", "subtract",
            "used_intervals", "snap_time", "validate_probe", "build_probe_prompt",
            "arithmetic_start", "probe_window", "spans_overlapping", "NAR_PAD_SEC",
-           "JOIN_GAP_SEC", "FLASH_BUDGET"]
+           "JOIN_GAP_SEC", "FLASH_BUDGET", "HEAD_GAP_MAX_SEC", "cap_head_gap"]

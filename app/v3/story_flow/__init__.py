@@ -136,11 +136,17 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
     scene_rows = {s["meaning"]: rows_by_idx[s["meaning"]] for s in scenes}
     available = nr.available_covers(beats, scene_rows, span_index)
     required = {0} | {j["before_beat"] for j in jumps}
+    rhythm = nr.scene_rhythm(scene_rows, grid)
+    audit["rhythm"] = rhythm
+    if rhythm:
+        log(f"  [v3/flow/narration] 호흡 실측 — 발화 {rhythm['speech_cps']}자/초 · "
+            f"컷 간격 {rhythm['cut_gap_med']}s · 최장 무발화 {rhythm['longest_silence']}s")
     groups = _loop("narration", lambda rej: nr.PROMPT.format(
         max_chars=nr.NAR_MAX_CHARS, max_n=max(nr.MAX_NARRATIONS, len(required) + 1),
         work_title=work_title, research_block=research_block, topic=topic["topic"],
         title_line1=title["line1"], title_line2=title["line2"],
         beats_block=nr.beats_block(beats, span_index, rows_by_idx, jumps),
+        rhythm_block=nr.rhythm_block(rhythm),
         available_block=nr.available_block(available, span_index, allowed),
         tone_block=(f"\n{tone_block}\n" if tone_block else ""), reject_block=rej),
         lambda r: nr.validate_narrations(r, len(beats), required=required,
@@ -178,6 +184,14 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
             budget=pbudget, placed=placed, log=log)
         removed = cv.apply_cover_to_beats(cover, beats, span_index, k)
         cover["removed_span_ids"] = removed
+        if kind == "before":
+            capped = cv.cap_head_gap(beats[k], span_index)
+            if capped:
+                cover["head_gap_cap"] = capped
+                log(f"  [v3/flow/cover] 비트 {k} 머리 무발화 {capped['before_sec']:.1f}s → "
+                    f"{capped['after_sec']:.1f}s (상한 {cv.HEAD_GAP_MAX_SEC}s · 조각 "
+                    f"{len(capped['removed_span_ids'])}개 제거"
+                    + (f" · 첫 조각 {capped['head_trim_sec']}s 부터" if capped['head_trim_sec'] else "") + ")")
         placed.append((cover["t_in"], cover["t_out"]))
         beats[k]["covers"].append(cover)
         # cue — 묶음의 줄들을 덮개 안에 순서대로(측정 길이 비례가 아니라 실측 그대로,

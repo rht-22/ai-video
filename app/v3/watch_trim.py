@@ -352,8 +352,11 @@ PROMPT = """너는 쇼츠의 최종 검수 편집자다. 첨부 영상은 렌더
 참고 재료표(클립·대사·내레이션 창 — 판단은 네가 본 화면으로, 표는 좌표 확인용):
 {material_block}
 
+또 하나, 자르기와 별개로 **호흡 판정**을 적어라(참고 기록 — 이 판정으로 편집을 되돌리지는 않는다):
+초안이 전체적으로 루즈한가, 시청자가 '지금 누구·무슨 상황'인지 놓칠 자리(내레이션이 있어야 할 자리)가 있는가.
 출력(JSON 만):
-{{"cuts": [{{"start_sec": 12.0, "end_sec": 14.5, "reason": "한 줄"}}]}}
+{{"cuts": [{{"start_sec": 12.0, "end_sec": 14.5, "reason": "한 줄"}}],
+ "pacing": {{"loose": false, "narration_missing_at": [31.5], "note": "한 줄"}}}}
 """
 
 # 예산 컷 판(초과 발행 금지)에만 끼워 넣는 절 — 없으면 프롬프트는 종전과 동일하다.
@@ -456,7 +459,16 @@ def run_watch_trim(gemini, draft_path: Path, *, timeline: list[dict],
                 gemini.client.files.delete(name=uploaded.name)
             except Exception:  # noqa: BLE001
                 pass
-        raw = json.loads(response.text or "{}").get("cuts")
+        parsed = json.loads(response.text or "{}")
+        raw = parsed.get("cuts") if isinstance(parsed, dict) else None
+        # 호흡 판정(2026-09-03, C-2층): 기록만 — 되돌리기는 몇 편 쌓인 뒤 결정
+        pr = parsed.get("pacing") if isinstance(parsed, dict) else None
+        if isinstance(pr, dict):
+            audit["pacing_review"] = {
+                "loose": bool(pr.get("loose")),
+                "narration_missing_at": [round(float(x), 2) for x in (pr.get("narration_missing_at") or [])
+                                         if isinstance(x, (int, float))][:10],
+                "note": str(pr.get("note") or "")[:200]}
     except Exception as e:  # noqa: BLE001 — 관측 실패가 본편 발행을 막지 않는다
         audit["error"] = str(e)[:200]
         log(f"  [v3/watch-trim] ⚠ 호출 실패 — "
