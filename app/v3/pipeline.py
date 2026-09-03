@@ -110,7 +110,8 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
            story_max_sec: float | None = None, fix_names: bool = False,
            max_chunks: int | None = None,
            story_templates: tuple[str, ...] | None = None,
-           style_preset: str | None = None,
+           style_preset: str | None = None, style_tone: str | None = None,
+           story_flow: str = "legacy",
            scene_threshold: float = SCENE_THRESHOLD, log=print) -> Path:
     """v3 실행(M1 grid·Stage1 + M2 chunk_split·Stage2) → output_dir 반환.
     실패해도 run_log 는 남긴다(finally). max_chunks 는 스모크용 — 계획 앞에서부터
@@ -396,7 +397,8 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
                     from_step=from_step,
                     story_target_sec=story_target_sec,
                     story_max_sec=story_max_sec, fix_names=fix_names,
-                    story_templates=story_templates,
+                    story_templates=story_templates, style_tone=style_tone,
+                    story_flow=story_flow,
                     get_gemini=get_gemini, step=step, log=log)
 
         # ── M6-A: 훅 변형 — M3 산출 위에(본편 불변 · 렌더는 변형 발주 시) ──
@@ -573,7 +575,9 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
             research: dict | None, from_step: str | None,
             story_target_sec: float | None, story_max_sec: float | None,
             get_gemini, step, log, fix_names: bool = False,
-            story_templates: tuple[str, ...] | None = None) -> None:
+            story_templates: tuple[str, ...] | None = None,
+            style_tone: str | None = None,
+            story_flow: str = "legacy") -> None:
     """Stage 3(story) + 경계면 조립 + resources(TTS 합성) — 발주서 v3-m3.
 
     story 캐시는 M2 와 같은 규율로 **상류 지문**에 묶는다 — stage2 의 meaning/span
@@ -600,6 +604,26 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
     # 안 넣어 기존 잡의 지문이 그대로 유지된다(캐시 회귀 0).
     if story_templates:
         _fp_payload["templates"] = sorted(st.resolve_story_templates(story_templates))
+    # 채널 톤 프로파일(선택) — 프롬프트에 덧붙는 절 하나. 미지정이면 tone_block 이
+    # 빈 문자열이라 프롬프트가 종전과 바이트 동일하고, 지문에도 키를 안 넣어 기존
+    # 잡의 캐시가 그대로 산다(--story-templates 와 같은 규율).
+    tone_block = ""
+    if style_tone:
+        from app.modules import style_tone as _tonemod
+        _tone = _tonemod.load_style_tone(style_tone)   # 없는 이름은 즉시 실패
+        tone_block = _tonemod.v3_story_prompt_block(_tone)
+        _fp_payload["style_tone"] = _tone.sha12
+        log(f"  [v3/story] 채널 톤 프로파일: {_tone.name} (sha {_tone.sha12})")
+        # 조용히 안 실리는 노브는 반드시 말한다 — '프리셋 켰는데 왜 그대로지' 방지
+        for _skipped in _tonemod.v3_unapplied_knobs(_tone):
+            log(f"  [v3/story] ⚠ 톤 노브 v3 비적용 — {_skipped}")
+    # 사람 편집 흐름 체인(2026-09-03) — 다른 편성기라 캐시도 갈린다. legacy 는 키를
+    # 안 넣어 기존 잡의 지문이 그대로다(회귀 0).
+    if story_flow not in ("legacy", "human"):
+        raise ValueError(f"--story-flow 는 legacy|human: {story_flow!r}")
+    if story_flow == "human":
+        from app.v3.story_flow.narration import NAR_SPEED as _nar_speed
+        _fp_payload["flow"] = f"human:{_nar_speed}"    # 배속이 바뀌면 합성·덮개가 다르다
     fingerprint = hashlib.sha1(json.dumps(
         _fp_payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
@@ -615,10 +639,42 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
     if story_doc is None and from_step != "resources":
         t0 = time.time()
         research_ctx = (research or {}).get("work_context") or ""
-        story_doc, audit = st.run_story(
-            get_gemini(), stage2_doc, grid, work_title=work_title,
-            research_context=research_ctx, target_sec=target, max_sec=max_sec,
-            story_templates=story_templates, log=log)
+        # 프로토 규약 — 내레이션은 승자 확정 후 실제로 합성해 재고, 그 길이만큼
+        # 자리를 만든다(견적은 목소리·배속 앞에서 전부 틀린다 — interval-proto 실증).
+        def _measure_narration(text: str) -> float | None:
+            import subprocess as _sp
+            import tempfile as _tf
+            from app.modules.tts import synthesize_tts
+            tmp = Path(_tf.gettempdir()) / "_v3_nar_measure.mp3"
+            synthesize_tts(text, tmp, voice="ko_female", speed="normal")
+            r = _sp.run(["ffprobe", "-v", "error", "-show_entries",
+                         "format=duration", "-of", "csv=p=0", str(tmp)],
+                        capture_output=True, text=True)
+            return float(r.stdout.strip())
+
+        # 본 눈의 추천(2026-09-02) — Stage 1 이 영상 전체를 훑으며 지명한 쇼츠감
+        # 순간들을 생성 재료로 싣는다(구 stage1 캐시엔 키가 없다 → 조용히 빈 채 진행)
+        _s1p = output_dir / "stage1.json"
+        _shorts = ((_read_json(_s1p).get("shorts_candidates") or None)
+                   if _s1p.exists() else None)
+        if _shorts:
+            log(f"  [v3/story] 본 눈의 추천 {len(_shorts)}건 — 프롬프트에 싣는다")
+        if story_flow == "human":
+            from app.v3.story_flow import run_story_flow
+            log("  [v3/story] 사람 편집 흐름 체인(topic→scenes→lines→narration→cover)")
+            story_doc, audit = run_story_flow(
+                get_gemini(), stage2_doc, grid, work_title=work_title,
+                research_context=research_ctx, target_sec=target, max_sec=max_sec,
+                video_path=video_path, output_dir=output_dir,
+                stage1_doc=(_read_json(_s1p) if _s1p.exists() else None),
+                tone_block=tone_block, log=log)
+        else:
+            story_doc, audit = st.run_story(
+                get_gemini(), stage2_doc, grid, work_title=work_title,
+                research_context=research_ctx, target_sec=target, max_sec=max_sec,
+                story_templates=story_templates, tone_block=tone_block,
+                shorts_hints=_shorts,
+                measure_fn=_measure_narration, log=log)
         _write_json(story_ckpt, {"fingerprint": fingerprint, "story": story_doc})
         step("story", elapsed=round(time.time() - t0, 1),
              attempts=len(audit["attempts"]), fallback=audit.get("fallback", False),
@@ -681,22 +737,32 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
     from app.modules.tts import (
         active_backend,
         elevenlabs_disabled,
+        get_audio_duration,
         synthesize_tts_with_fit,
     )
     tts_cue_files = []
     for ci, cue in enumerate(cues):
         tts_path = output_dir / f"tts_cue_{ci}.mp3"
         try:
-            # v1 과 같은 fit 합성 — 실측이 창(duration_sec)을 넘으면 다음 대사를
-            # 밟는다(스모크 실측: 5.198s > 창 4.133s). 배속 재시도는 tts.py 몫.
-            # 창 초과 시 축약은 v1 과 같이 Flash(shorten_text)에 맡긴다 —
-            # shorten_fn 없이는 '단순 절단'이 문장을 중간에서 잘라먹는다(스모크 실측)
-            shorten = getattr(get_gemini(), "shorten_text", None)
-            final_text, actual = synthesize_tts_with_fit(
-                cue["text"], tts_path, target_sec=float(cue["duration_sec"]),
-                voice=cue["voice"], speed=cue["speed"], shorten_fn=shorten)
-            cue["text"] = final_text
-            cue["fit_actual_sec"] = round(actual, 3)
+            _pre = cue.get("audio_path")
+            if _pre and Path(_pre).is_file():
+                # story_flow(2026-09-03) — 걸음 4 가 이미 합성했고 덮개가 그 길이에
+                # 맞춰졌다. 재합성·축약 없음(문장 불변 계약).
+                import shutil as _sh
+                _sh.copy2(_pre, tts_path)
+                cue["fit_actual_sec"] = round(float(cue.get("measured_sec")
+                                                    or get_audio_duration(tts_path)), 3)
+            else:
+                # v1 과 같은 fit 합성 — 실측이 창(duration_sec)을 넘으면 다음 대사를
+                # 밟는다(스모크 실측: 5.198s > 창 4.133s). 배속 재시도는 tts.py 몫.
+                # 창 초과 시 축약은 v1 과 같이 Flash(shorten_text)에 맡긴다 —
+                # shorten_fn 없이는 '단순 절단'이 문장을 중간에서 잘라먹는다(스모크 실측)
+                shorten = getattr(get_gemini(), "shorten_text", None)
+                final_text, actual = synthesize_tts_with_fit(
+                    cue["text"], tts_path, target_sec=float(cue["duration_sec"]),
+                    voice=cue["voice"], speed=cue["speed"], shorten_fn=shorten)
+                cue["text"] = final_text
+                cue["fit_actual_sec"] = round(actual, 3)
         except Exception as e:  # noqa: BLE001 — 합성 실패가 계획 산출을 막지 않는다
             log(f"  [v3/resources] ⚠ cue {ci} 합성 실패 — 계획만 유지: {e}")
             cue["fit_actual_sec"] = None
@@ -731,6 +797,8 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
              "subtitle_repetition_warns": rep_warns,
              "subtitle_name_warns": name_warns, "subtitle_name_fixes": name_fixes,
              "cues_lost_to_trim": [c["text"][:40] for c in lost],
+             "cue_windows_rescued": sum(1 for c in cues
+                                        if c.get("window_rescued")),
              "time_alignment": belt, "clip_stats": stats,
              "subtitle_segments": len(segments)}
     fallback = elevenlabs_disabled()
@@ -797,8 +865,6 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
         # 캐시 유무에 따라 Flash 입력 순서가 갈렸다(적대 리뷰 확정 · 결정성)
         frame_list = [{"path": str(f)} for f in expected]
     else:
-             "cue_windows_rescued": sum(1 for c in cues
-                                        if c.get("window_rescued")),
         cost = stage4.render_draft(video_path, plan["timeline"], draft_path, log=log)
         frame_list = stage4.sample_beat_frames(draft_path, windows, frames_dir,
                                                log=log)
@@ -806,72 +872,6 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
                     {"fingerprint": fingerprint})
         step("draft_render", **cost, frames=len(frame_list))
 
-    # ── style (12) — 상류 지문 규율 ───────────────────────────────────────
-    style_ckpt = output_dir / "checkpoint_style.json"
-    style_doc = None
-    if style_ckpt.exists() and from_step not in ("draft_render", "style"):
-        cached = _read_json(style_ckpt)
-        if cached.get("fingerprint") == fingerprint:
-            style_doc = cached.get("style")
-            log("  [v3/style] 캐시 로드")
-        else:
-            log("  [v3/style] ⚠ 상류(edit_plan) 변경 감지 — 캐시 폐기")
-    if style_doc is None:
-        t0 = time.time()
-        # 편집본 좌표 비트 창 — draft 영상 속 시각과 정합(원본 절대초 금지)
-        win = [{"beat": w["beat"], "start": w["start"], "end": w["end"]}
-               for w in windows]
-        # M12: 라벨을 화면 보고 배치하려면 Stage 4 가 **무엇이 언제 뜨는지** 알아야
-        # 한다 — 렌더와 같은 계획(plan_labels)·같은 밴드 기하를 넘긴다.
-        # 밴드는 **채널 프리셋** 기준으로 프롬프트에 싣고, 모델이 aspect_ratio 를
-        # 바꾸면 validate 가 확정 design 으로 다시 재서 클램프한다(리뷰 C1).
-        # 프리셋은 채널 선택(--style-preset · 미지정 = recap 그대로) — 밴드 기하와
-        # run_style 이 **같은 프리셋**을 봐야 한다(어긋나면 라벨이 검정 밴드를 뚫는다).
-        _preset = stage4.get_style_preset(style_preset)
-        band = finalize.video_band_ratio(finalize.design_from_style(_preset))
-        style_doc, audit = stage4.run_style(get_gemini(), draft_path, story_doc,
-                                            preset=_preset,
-                                            windows=win, labels=label_plan,
-                                            band=band, log=log)
-        _write_json(style_ckpt, {"fingerprint": fingerprint, "style": style_doc})
-        step("style", elapsed=round(time.time() - t0, 1),
-             attempts=len(audit["attempts"]), fallback=audit.get("fallback", False),
-             diff_keys=audit.get("diff_keys"), audit_attempts=audit["attempts"])
-        log(f"  [v3/style] 완료 — 프리셋 diff {len(style_doc.get('diff') or {})}키")
-    _write_json(output_dir / "style.json", style_doc)
-
-    # ── render (13) — 캐시는 지문 사이드카로만 유효(파일 존재만 보면 낡은
-    # 최종본이 납품된다 — 적대 리뷰 확정 critical) ─────────────────────────
-    final_path = output_dir / "final_1080x1920.mp4"
-    # 렌더 지문 = 상류 지문 + **확정 스타일** — 라벨 좌표·색·crop/pop 이 바뀌었는데
-    # 캐시가 옛 화면을 내보내면 안 된다(리뷰 C2)
-    render_fp = hashlib.sha1(json.dumps([fingerprint, style_doc], sort_keys=True,
-                                        ensure_ascii=False).encode()).hexdigest()[:16]
-    if final_path.exists() and _sidecar_ok("render_fingerprint.json", render_fp) \
-            and from_step not in ("draft_render", "style", "render"):
-        log("  [v3/render] 캐시 유효(지문 일치) — 재사용")
-    else:
-        final_path, cost = finalize.render_final(
-            video_path=video_path, plan=plan, style_doc=style_doc,
-            segments=segments, resources=resources, story_doc=story_doc,
-            output_dir=output_dir, log=log)
-        _write_json(output_dir / "render_fingerprint.json",
-                    {"fingerprint": render_fp})
-        step("render", **cost)
-
-    # ── validate (14) — 항상 재계산(산출이 아니라 검증이다) ───────────────
-    t0 = time.time()
-    stage1_doc = _read_json(output_dir / "stage1.json")
-    stage2_doc = _read_json(output_dir / "stage2.json")
-    tmp_dir = output_dir / "validate_tmp"
-    tmp_dir.mkdir(exist_ok=True)
-    _res_names = []
-    _rp = output_dir / "checkpoint_research.json"
-    if _rp.exists():
-        _res_names = [c["character_name"] for c in
-                      (_read_json(_rp) or {}).get("cast_images") or []
-                      if c.get("character_name")]
-    vdoc = finalize.run_validate(
     # ── watch_trim (11.5) — 초안 시청 트림(2026-09-02 사용자 설계) ────────
     # 초안을 실제로 보고 늘어지는 구간을 빼기 전용으로 걷는다(watch_trim.py 독스트링).
     # 자리는 draft 뒤·style 앞 — 트림이 생기면 draft 를 다시 렌더해 Stage 4 가
@@ -941,6 +941,86 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
                               "post_fingerprint": fingerprint,
                               "cuts": cuts, "audit": wt_audit})
 
+    # ── style (12) — 상류 지문 규율 ───────────────────────────────────────
+    style_ckpt = output_dir / "checkpoint_style.json"
+    style_doc = None
+    if style_ckpt.exists() and from_step not in ("draft_render", "style"):
+        cached = _read_json(style_ckpt)
+        if cached.get("fingerprint") == fingerprint:
+            style_doc = cached.get("style")
+            log("  [v3/style] 캐시 로드")
+        else:
+            log("  [v3/style] ⚠ 상류(edit_plan) 변경 감지 — 캐시 폐기")
+    if style_doc is None:
+        t0 = time.time()
+        # 편집본 좌표 비트 창 — draft 영상 속 시각과 정합(원본 절대초 금지)
+        win = [{"beat": w["beat"], "start": w["start"], "end": w["end"]}
+               for w in windows]
+        # M12: 라벨을 화면 보고 배치하려면 Stage 4 가 **무엇이 언제 뜨는지** 알아야
+        # 한다 — 렌더와 같은 계획(plan_labels)·같은 밴드 기하를 넘긴다.
+        # 밴드는 **채널 프리셋** 기준으로 프롬프트에 싣고, 모델이 aspect_ratio 를
+        # 바꾸면 validate 가 확정 design 으로 다시 재서 클램프한다(리뷰 C1).
+        # 프리셋은 채널 선택(--style-preset · 미지정 = recap 그대로) — 밴드 기하와
+        # run_style 이 **같은 프리셋**을 봐야 한다(어긋나면 라벨이 검정 밴드를 뚫는다).
+        _preset = stage4.get_style_preset(style_preset)
+        band = finalize.video_band_ratio(finalize.design_from_style(_preset))
+        # M16: 라벨은 Stage 4 가 초안을 보며 직접 쓴다 — 대사 타임라인(편집본
+        # 좌표)과 영상 길이를 준다. label_plan 은 구 체크포인트 호환용으로만 남긴다.
+        _dur = sum(float(c["clip_end_sec"]) - float(c["clip_start_sec"])
+                   for c in plan["timeline"])
+        style_doc, audit = stage4.run_style(get_gemini(), draft_path, story_doc,
+                                            preset=_preset,
+                                            windows=win, labels=label_plan,
+                                            dialogue=segments, duration=_dur,
+                                            band=band, log=log)
+        _write_json(style_ckpt, {"fingerprint": fingerprint, "style": style_doc})
+        step("style", elapsed=round(time.time() - t0, 1),
+             attempts=len(audit["attempts"]), fallback=audit.get("fallback", False),
+             diff_keys=audit.get("diff_keys"), audit_attempts=audit["attempts"])
+        log(f"  [v3/style] 완료 — 프리셋 diff {len(style_doc.get('diff') or {})}키")
+    _write_json(output_dir / "style.json", style_doc)
+
+    # ── render (13) — 캐시는 지문 사이드카로만 유효(파일 존재만 보면 낡은
+    # 최종본이 납품된다 — 적대 리뷰 확정 critical) ─────────────────────────
+    final_path = output_dir / "final_1080x1920.mp4"
+    # 렌더 지문 = 상류 지문 + **확정 스타일** — 라벨 좌표·색·crop/pop 이 바뀌었는데
+    # 캐시가 옛 화면을 내보내면 안 된다(리뷰 C2)
+    render_fp = hashlib.sha1(json.dumps([fingerprint, style_doc], sort_keys=True,
+                                        ensure_ascii=False).encode()).hexdigest()[:16]
+    if final_path.exists() and _sidecar_ok("render_fingerprint.json", render_fp) \
+            and from_step not in ("draft_render", "style", "render"):
+        log("  [v3/render] 캐시 유효(지문 일치) — 재사용")
+    else:
+        if final_path.exists():
+            # 이전 판 보존(2026-09-02 사용자 지시 "기존 영상은 이름 바꿔 저장" —
+            # 반복 테스트에서 직전 산출이 덮여 비교·복기가 불가능했다)
+            import datetime as _dt
+            _ts = _dt.datetime.fromtimestamp(
+                final_path.stat().st_mtime).strftime("%m%d_%H%M%S")
+            _prev = output_dir / f"final_prev_{_ts}.mp4"
+            final_path.rename(_prev)
+            log(f"  [v3/render] 이전 판 보존 → {_prev.name}")
+        final_path, cost = finalize.render_final(
+            video_path=video_path, plan=plan, style_doc=style_doc,
+            segments=segments, resources=resources, story_doc=story_doc,
+            output_dir=output_dir, log=log)
+        _write_json(output_dir / "render_fingerprint.json",
+                    {"fingerprint": render_fp})
+        step("render", **cost)
+
+    # ── validate (14) — 항상 재계산(산출이 아니라 검증이다) ───────────────
+    t0 = time.time()
+    stage1_doc = _read_json(output_dir / "stage1.json")
+    stage2_doc = _read_json(output_dir / "stage2.json")
+    tmp_dir = output_dir / "validate_tmp"
+    tmp_dir.mkdir(exist_ok=True)
+    _res_names = []
+    _rp = output_dir / "checkpoint_research.json"
+    if _rp.exists():
+        _res_names = [c["character_name"] for c in
+                      (_read_json(_rp) or {}).get("cast_images") or []
+                      if c.get("character_name")]
+    vdoc = finalize.run_validate(
         plan=plan, grid=grid, stage1_doc=stage1_doc, stage2_doc=stage2_doc,
         segments=segments, resources=resources, final_path=final_path,
         tmp_dir=tmp_dir, cast_names=_res_names, gemini=get_gemini(), log=log)
@@ -964,14 +1044,9 @@ def _apply_edit_overrides(*, output_dir: Path, overrides_path: Path, grid: dict,
     from app.v3.overrides import apply_overrides_to_plan
 
     ov = load_edit_overrides(overrides_path)
-        # M16: 라벨은 Stage 4 가 초안을 보며 직접 쓴다 — 대사 타임라인(편집본
-        # 좌표)과 영상 길이를 준다. label_plan 은 구 체크포인트 호환용으로만 남긴다.
-        _dur = sum(float(c["clip_end_sec"]) - float(c["clip_start_sec"])
-                   for c in plan["timeline"])
     if not ov:
         log("  [v3/overrides] 파일이 비어 있다 — 건너뜀")
         return
-                                            dialogue=segments, duration=_dur,
     plan = _read_json(output_dir / "edit_plan.json")
     segments = _read_json(output_dir / "subtitle_segments.json") \
         if (output_dir / "subtitle_segments.json").exists() else []
@@ -991,15 +1066,6 @@ def _apply_edit_overrides(*, output_dir: Path, overrides_path: Path, grid: dict,
 
 
 def _run_hook_variants(*, output_dir: Path, video_path: Path, work_title: str,
-        if final_path.exists():
-            # 이전 판 보존(2026-09-02 사용자 지시 "기존 영상은 이름 바꿔 저장" —
-            # 반복 테스트에서 직전 산출이 덮여 비교·복기가 불가능했다)
-            import datetime as _dt
-            _ts = _dt.datetime.fromtimestamp(
-                final_path.stat().st_mtime).strftime("%m%d_%H%M%S")
-            _prev = output_dir / f"final_prev_{_ts}.mp4"
-            final_path.rename(_prev)
-            log(f"  [v3/render] 이전 판 보존 → {_prev.name}")
                        grid: dict, n: int, get_gemini, step, log) -> None:
     """M6-A — 훅 변형 N개: edit_plan_variant_<k>.json + 변형별 자막·cue 계획.
 

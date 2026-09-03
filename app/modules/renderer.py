@@ -1995,6 +1995,12 @@ def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, num_cue_inpu
         sfx_input_idx = num_clip_inputs + num_cue_inputs + si
         gain = float(sf.get("gain_db", -6.0))
         start_sec = float(sf.get("start_sec", 0.0)) / speed
+        # 영상 끝을 넘는 효과음 꼬리를 자른다(2026-09-03 실사고: 마지막 내레이션의 6.6s
+        # whoosh 가 영상보다 3.7s 길어 amix=longest 가 컨테이너를 늘렸다 — 마지막 프레임이
+        # 멈춘 채 소리만 흐른다). 파일이 그보다 짧으면 atrim 은 무해하다. cue 경로는 불변.
+        _remain = video_out_duration(inputs.clips, speed) - start_sec
+        _trim = f"atrim=end={_remain:.3f}," if _remain > 0 else ""
+        tts_filters.append(f"[{sfx_input_idx}:a]{_trim}volume={gain:g}dB[sfx{si}_vol]")
         if start_sec > 0:
             delay_ms = int(start_sec * 1000)
             tts_filters.append(f"[sfx{si}_vol]adelay={delay_ms}|{delay_ms}[sfx{si}_delayed]")

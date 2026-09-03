@@ -63,6 +63,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "chemi_observe). 미지정 = 기본 2종(recap_dialogue·highlight)만")
     p.add_argument("--style-preset", default=None,
                    help="채널 스타일 프리셋(recap|drama_clip). 미지정 = recap")
+    # 사람 편집 흐름 체인(2026-09-03) — 미지정(legacy) = 종전 story.run_story(회귀 0)
+    p.add_argument("--story-flow", default="legacy", choices=["legacy", "human"],
+                   help="Stage 3 편성기: human = 주제→씬→대사→내레이션(즉시 합성)→덮개"
+                        "(그 자리 재관찰) 체인. legacy = 종전 단일 프롬프트")
+    p.add_argument("--style-tone", default=None,
+                   help="채널 톤 프로파일 이름(app/data/style_tones/<이름>.json) — "
+                        "Stage 3 스토리 프롬프트에 내레이션 말투·제목 톤·훅 규칙 절을 "
+                        "덧붙인다. 미지정 = 프롬프트 종전과 동일")
     return p
 
 
@@ -79,14 +87,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.edit_overrides and not args.job_id:
         raise SystemExit("--edit-overrides 는 --job-id 재개와 함께여야 한다 "
                          "(기존 산출 위에 정착시키는 수정이다 — C4)")
-    # 비싼 단계(전사·프록시) **앞**에서 자격 검사 — E11 규율
-    needs_gemini = not (args.skip_seq_analyze and args.skip_research)
-    if needs_gemini and not os.environ.get("GEMINI_API_KEY"):
-        raise SystemExit("GEMINI_API_KEY 없음 — Stage 1/리서치를 쓰려면 필수. "
-                         "grid 만 만들려면 --skip-research --skip-seq-analyze.")
-
-    from app.v3.pipeline import run_v3
-    out = run_v3(video_path=video, work_title=args.work_title,
     # 자격 검사 전에 프로젝트 .env 를 로드한다 — pipeline·gemini_client 와 같은
     # 위치. 여기만 안 읽으면 .env 에 키가 있어도 사전검사가 거짓 실패한다
     # (2026-09-02 실사고: shell env 없이 .env 만 있는 실행이 시작도 못 함).
@@ -95,6 +95,14 @@ def main(argv: list[str] | None = None) -> int:
         load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
     except ImportError:
         pass
+    # 비싼 단계(전사·프록시) **앞**에서 자격 검사 — E11 규율
+    needs_gemini = not (args.skip_seq_analyze and args.skip_research)
+    if needs_gemini and not os.environ.get("GEMINI_API_KEY"):
+        raise SystemExit("GEMINI_API_KEY 없음 — Stage 1/리서치를 쓰려면 필수. "
+                         "grid 만 만들려면 --skip-research --skip-seq-analyze.")
+
+    from app.v3.pipeline import run_v3
+    out = run_v3(video_path=video, work_title=args.work_title,
                  outdir=Path(args.outdir), srt_path=srt, episode=args.episode,
                  job_id=args.job_id, from_step=args.from_step,
                  skip_research=args.skip_research,
@@ -110,7 +118,8 @@ def main(argv: list[str] | None = None) -> int:
                  story_templates=(tuple(
                      s.strip() for s in args.story_templates.split(",") if s.strip())
                      if args.story_templates else None),
-                 style_preset=args.style_preset,
+                 style_preset=args.style_preset, style_tone=args.style_tone,
+                 story_flow=args.story_flow,
                  scene_threshold=args.scene_threshold)
     print(f"[v3] 완료 → {out}")
     return 0

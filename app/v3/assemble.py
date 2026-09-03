@@ -78,6 +78,91 @@ def split_by_windows(t0: float, t1: float,
 
 # ── edit_plan 조립 ──────────────────────────────────────────────────────────
 
+TAIL_PAD_MAX_SEC = 0.45      # 유성 꼬리 연장 상한(무음 시작점 목표일 때)
+TAIL_PAD_WORD_SEC = 0.25     # 파형 무음이 안 잡힐 때 다음 단어 직전까지의 상한
+# 무음 시작점 뒤 여유(2026-09-03 실사고 "아, 그런가?" 꼬리 잘림): silencedetect 는
+# −30dB 아래를 무음으로 보는데 의문형 어미의 감쇠 꼬리는 그 아래에서도 들린다 —
+# 종전 +0.05s 는 그 꼬리를 물었다. 상한(TAIL_PAD_MAX·다음 단어)은 그대로.
+TAIL_SIL_PAD_SEC = 0.20
+
+
+def pad_voiced_tails(timeline: list[dict], span_index: dict[str, dict],
+                     words: list[dict] | None,
+                     silences: list[list[float]] | None) -> int:
+    """유성으로 끝나는 클립의 꼬리 클리핑 보정(2026-09-02 실사고: 9클립 중 8개가
+    어미 감쇠 꼬리를 문 채 컷 — Whisper 단어 끝 시각이 체계적으로 빡빡하다).
+
+    프리미어 편집자가 파형을 보고 소리가 잦아드는 데서 자르는 것의 기계화(사용자
+    지시): 컷 직후 0.5초 안에 silencedetect 무음이 시작하면 **그 지점 + 0.05s** 까지,
+    없으면 다음 전사 단어 직전까지(상한 0.25s) 연장한다. 다음 클립이 소스에서 바로
+    이어지면 연장하지 않는다(재료 중복 금지). 전부 grid 실측 산술 — tail_pad 로
+    벨트에 정식 등록. 반환: 보정 클립 수."""
+    if not timeline or (not words and not silences):
+        return 0                            # 실측 재료가 없으면 불변(오판 금지)
+    word_starts = sorted(float(w["t0"]) for w in words or [])
+    word_ends = sorted(float(w["t1"]) for w in words or [])
+    sil_starts = sorted(float(s[0]) for s in silences or [])
+    import bisect
+    n = 0
+    for i, c in enumerate(timeline):
+        ids = c.get("span_ids") or []
+        if c.get("cover"):
+            continue                        # 덮개 경계는 내레이션 길이 실측 — 안 건드린다
+        # ④ 머리 패드(2026-09-02 실사고 "아동학대라고요?"의 '아' 잘림): 유성으로
+        # **시작**하는 클립은 Whisper 단어 시작 시각이 빡빡해 초성이 잘린다 —
+        # 직전 단어 끝과의 여유 안에서 시작을 최대 0.15초 당긴다. 앞 클립이 소스에서
+        # 바로 붙으면 안 당긴다(재료 중복 금지).
+        if ids and ids[0] in span_index and span_index[ids[0]]["is_audio"] \
+                and not c.get("head_trimmed"):
+            st = float(c["clip_start_sec"])
+            prev_end = float(timeline[i - 1]["clip_end_sec"]) if i > 0 else None
+            if prev_end is None or st - prev_end >= 0.05:
+                k2 = bisect.bisect_left(word_ends, st - 0.01) - 1
+                prev_w = word_ends[k2] if k2 >= 0 else None
+                room = st - prev_w if prev_w is not None else 0.5
+                room = min(room, st)        # 소스 0초 아래로는 못 당긴다
+                if prev_end is not None:
+                    room = min(room, st - prev_end)
+                pull = min(0.15, room - 0.05)
+                if pull >= 0.05:
+                    c["clip_start_sec"] = round(st - pull, 3)
+                    c["head_pad"] = round(pull, 3)
+                    n += 1
+        if not ids or ids[-1] not in span_index \
+                or not span_index[ids[-1]]["is_audio"]:
+            continue
+        e = float(c["clip_end_sec"])
+        nxt_start = float(timeline[i + 1]["clip_start_sec"]) \
+            if i + 1 < len(timeline) else None
+        if nxt_start is not None and nxt_start - e < 0.05:
+            continue                       # 소스에서 바로 이어짐 — 연장 불필요
+        limit = e + TAIL_PAD_MAX_SEC
+        if nxt_start is not None:
+            limit = min(limit, nxt_start - 0.02)
+        k = bisect.bisect_left(sil_starts, e - 0.05)
+        sil = sil_starts[k] if k < len(sil_starts) and sil_starts[k] <= e + 0.5 \
+            else None
+        j = bisect.bisect_right(word_starts, e + 0.01)
+        nxt_word = word_starts[j] if j < len(word_starts) else None
+        if sil is not None:
+            target = sil + TAIL_SIL_PAD_SEC
+        elif nxt_word is not None and nxt_word - e >= 0.15:
+            target = min(e + TAIL_PAD_WORD_SEC, nxt_word - 0.05)
+        elif nxt_word is None:
+            target = e + TAIL_PAD_WORD_SEC
+        else:
+            continue                       # 다음 단어가 바로 붙음 — 연장 여지 없음
+        if nxt_word is not None:
+            target = min(target, nxt_word - 0.05)
+        target = min(target, limit)
+        if target - e < 0.05:
+            continue
+        c["clip_end_sec"] = round(target, 3)
+        c["tail_pad"] = round(target - e, 3)
+        n += 1
+    return n
+
+
 def assemble_edit_plan(story_doc: dict, span_index: dict[str, dict], *,
                        video_path: str, work_title: str,
                        words: list[dict] | None = None,
@@ -90,6 +175,26 @@ def assemble_edit_plan(story_doc: dict, span_index: dict[str, dict], *,
     for b in story_doc["beats"]:
         muted = set(b.get("muted_span_ids") or [])
         group: list[str] = []
+
+        # 내레이션 덮개(story_flow · 2026-09-03) — 내레이션 실측 길이에 맞춰 **다시 본**
+        # 구간이라 경계가 grid 위가 아닐 수 있다. 제 클립(원음 끔)으로 정식 등록한다
+        # (tail_pad·head_trimmed 와 같은 지위 — 벨트가 `cover` 키를 인정한다).
+        def emit_cover(cv: dict, beat=b) -> None:
+            ids_c = [s for s in (cv.get("span_ids") or []) if s in span_index]
+            timeline.append({
+                "role": beat["role"],
+                "clip_start_sec": round(float(cv["t_in"]), 3),
+                "clip_end_sec": round(float(cv["t_out"]), 3),
+                "subtitle": "",
+                "use_original_audio": False,
+                "reframe": {"mode": "center"},
+                "span_ids": ids_c,
+                "cover": str(cv.get("kind") or "cover"),
+            })
+
+        for cv in b.get("covers") or []:
+            if cv.get("position", "before") == "before":
+                emit_cover(cv)
 
         def flush(group: list[str], beat=b, muted=muted) -> None:
             if not group:
@@ -138,6 +243,9 @@ def assemble_edit_plan(story_doc: dict, span_index: dict[str, dict], *,
                     group = []
             group.append(sid)
         flush(group)
+        for cv in b.get("covers") or []:
+            if cv.get("position") == "after":
+                emit_cover(cv)
         # 라벨은 **앵커 span 을 담은 클립**의 subtitle 필드에 싣는다(C1 — 편집실
         # 오버레이 재료). M11: 비트 시작 고정이 아니라 대사 순간 앵커.
         for lb in b.get("labels") or ([{"text": b["label"], "span_id": b["span_ids"][0]}]
@@ -147,6 +255,7 @@ def assemble_edit_plan(story_doc: dict, span_index: dict[str, dict], *,
                     c["subtitle"] = lb["text"]
                     break
 
+    pad_voiced_tails(timeline, span_index, words, silences)
     grid_marks = sorted({round(span_index[s][k], 3)
                          for c in timeline for s in c["span_ids"]
                          for k in ("t_in", "t_out")})
@@ -255,7 +364,6 @@ def _lines_for_span(words: list[dict], t_in: float, t_out: float) -> list[dict]:
 def _lines_from_text(text: str, t_in: float, t_out: float) -> list[dict]:
     """어절 타임코드 없는 텍스트(M9-C heard) → span 구간 균등 배분 라인. 순수.
 
-    pad_voiced_tails(timeline, span_index, words, silences)
     같은 표시 규칙(2~4어절·12자)을 쓰되 타이밍은 균등이다 — 팝인의 발화 동기화는
     포기하지만, 깨진 전사를 그대로 띄우는 것보다 낫다."""
     toks = str(text or "").split()
@@ -327,6 +435,35 @@ def span_speaker(sp: dict) -> str:
     return ""
 
 
+def _word_speakers(sp: dict, in_span: list[dict]) -> list[str] | None:
+    """다화자 span 의 단어별 화자 귀속(2026-09-02 — "빨리 / 자 잠깐만요" 색 실사고).
+
+    Stage 2 audio_script 가 화자별 행으로 나뉘어 있으면, 행 텍스트 길이를 단어열에
+    관용 정렬(공백·문장부호 무시)해 단어마다 화자를 단다. 화자가 하나거나 정렬이
+    깨지면 None — 종전(대표 화자 한 색)으로 폴백한다(오판 금지)."""
+    import re
+    _n = lambda t: re.sub(r"[^0-9A-Za-z가-힣]", "", str(t))
+    rows = [(str(r.get("speaker") or "").strip(), _n(r.get("line")))
+            for r in sp.get("audio_script") or []
+            if _n(r.get("line"))]
+    if len({r[0] for r in rows if r[0]}) < 2:
+        return None
+    out: list[str] = []
+    wi = 0
+    for spk, target in rows:
+        got = ""
+        start = wi
+        while wi < len(in_span) and len(got) < len(target):
+            got += _n(in_span[wi]["text"])
+            out.append(spk)
+            wi += 1
+        if wi == start:                      # 행에 배정된 단어 0개 — 정렬 붕괴
+            return None
+    while len(out) < len(in_span):
+        out.append(rows[-1][0])
+    return out
+
+
 def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                    grid_words: list[dict],
                    mute_windows: list[tuple[float, float]] | None = None) -> list[dict]:
@@ -372,6 +509,7 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                 lines = _lines_for_span(in_span, sp["t_in"], sp["t_out"])
             speaker = span_speaker(sp)
             color = colors.get(speaker, SPEAKER_DEFAULT_COLOR)
+            wspk = None if src == "heard" else _word_speakers(sp, in_span)
             for ln in lines:
                 # 소속 클립을 이미 안다 — offset 직접 계산(동률 스캔 매핑 금지)
                 e0 = round(off + (max(ln["start"], c0) - c0), 3)
@@ -403,6 +541,7 @@ def finalize_cues(narration_cues: list[dict], timeline: list[dict], *,
                   voice: str, speed: str) -> list[dict]:
     """스토리 cue 계획 → C2 계약 cue(편집본 start/end + source_time_sec 신원)."""
     offsets = edited_offsets(timeline)
+    total = round(sum(e - s for s, e, _ in offsets), 3)
     out: list[dict] = []
     for cue in narration_cues:
         e0 = to_edited_sec(cue["source_time_sec"], offsets, kind="start")
@@ -429,7 +568,15 @@ def finalize_cues(narration_cues: list[dict], timeline: list[dict], *,
             "voice": voice, "speed": cue.get("speed") or speed,
             "beat": cue["beat"], "mode": cue["mode"],
             "muted_span_ids": list(cue.get("muted_span_ids") or []),
-        })
+        }
+        if rescued:
+            fin["window_rescued"] = True
+        # story_flow(2026-09-03) — 걸음 4 에서 이미 합성한 mp3 와 실측 길이. resources
+        # 가 재합성 대신 그대로 쓴다(additive — 없으면 종전 경로).
+        for k_add in ("audio_path", "measured_sec"):
+            if cue.get(k_add) is not None:
+                fin[k_add] = cue[k_add]
+        out.append(fin)
     return out
 
 
@@ -439,7 +586,7 @@ def verify_edit_plan(plan: dict, grid: dict) -> dict:
     for sp in grid.get("span_candidates") or []:
         edges.add(round(float(sp["t_in"]), 3))
         edges.add(round(float(sp["t_out"]), 3))
-    checked = ok = 0
+    checked = ok = head_ok = tail_ok = cover_ok = 0
     bad: list[float] = []
     for c in plan.get("timeline") or []:
         for v, is_start in ((c["clip_start_sec"], True),
@@ -447,40 +594,28 @@ def verify_edit_plan(plan: dict, grid: dict) -> dict:
             checked += 1
             if round(float(v), 3) in edges:
                 ok += 1
+            elif c.get("cover"):
+                # 내레이션 덮개(story_flow) — 경계 출처가 합성 실측 길이 + 국소 재관찰
+                # (장면 전환 스냅)이라 시각 환각 방어 위반이 아니다. 클립에 `cover`
+                # 로 기록된 것만 허용(기록 없는 비스냅 경계는 여전히 위반).
+                ok += 1
+                cover_ok += 1
+            elif is_start and (c.get("head_trimmed") or c.get("head_pad")):
+                # 머리 데드에어 컷의 산술 경계(창 시작−리드) — 기록된 트림만 허용.
+                # 출처가 실측 mp3 길이라 시각 환각 방어 위반이 아니다(2026-09-02).
+                ok += 1
+                head_ok += 1
+            elif not is_start and c.get("tail_pad"):
+                # 유성 꼬리 파형 연장(silencedetect·단어 시각 산술) — 같은 지위
+                ok += 1
+                tail_ok += 1
             else:
                 bad.append(v)
     return {"checked": checked, "from_grid": ok,
             "pct": round(ok / checked * 100, 2) if checked else None,
+            "head_trimmed": head_ok, "tail_padded": tail_ok,
+            "cover_edges": cover_ok,
             "violations": bad[:10]}
-
-
-def _word_speakers(sp: dict, in_span: list[dict]) -> list[str] | None:
-    """다화자 span 의 단어별 화자 귀속(2026-09-02 — "빨리 / 자 잠깐만요" 색 실사고).
-
-    Stage 2 audio_script 가 화자별 행으로 나뉘어 있으면, 행 텍스트 길이를 단어열에
-    관용 정렬(공백·문장부호 무시)해 단어마다 화자를 단다. 화자가 하나거나 정렬이
-    깨지면 None — 종전(대표 화자 한 색)으로 폴백한다(오판 금지)."""
-    import re
-    _n = lambda t: re.sub(r"[^0-9A-Za-z가-힣]", "", str(t))
-    rows = [(str(r.get("speaker") or "").strip(), _n(r.get("line")))
-            for r in sp.get("audio_script") or []
-            if _n(r.get("line"))]
-    if len({r[0] for r in rows if r[0]}) < 2:
-        return None
-    out: list[str] = []
-    wi = 0
-    for spk, target in rows:
-        got = ""
-        start = wi
-        while wi < len(in_span) and len(got) < len(target):
-            got += _n(in_span[wi]["text"])
-            out.append(spk)
-            wi += 1
-        if wi == start:                      # 행에 배정된 단어 0개 — 정렬 붕괴
-            return None
-    while len(out) < len(in_span):
-        out.append(rows[-1][0])
-    return out
 
 
 def clip_stats(plan: dict) -> dict:
@@ -491,5 +626,3 @@ def clip_stats(plan: dict) -> dict:
     return {"clips": len(durs), "total_sec": total,
             "median_sec": sorted(durs)[len(durs) // 2] if durs else None,
             "durations": durs}
-            wspk = None if src == "heard" else _word_speakers(sp, in_span)
-    total = round(sum(e - s for s, e, _ in offsets), 3)

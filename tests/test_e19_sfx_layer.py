@@ -162,7 +162,7 @@ def _sfx(start=2.0, gain=-6.0):
 
 def test_audio_filter_sfx_only():
     af = _build_audio_filter(_inputs(sfx_audio=[_sfx()]), 1, 0)
-    assert "[1:a]volume=-6dB[sfx0_vol]" in af               # 입력 idx = 클립 1 + cue 0
+    assert "[1:a]atrim=end=8.000,volume=-6dB[sfx0_vol]" in af   # 입력 idx = 클립 1 + cue 0 · 영상 끝(8s)까지 트림
     assert "adelay=2000|2000" in af
     assert "amix=inputs=2" in af
 
@@ -171,7 +171,7 @@ def test_audio_filter_sfx_after_cues(tmp_path):
     cue = {"path": tmp_path / "c.mp3", "cue": {"start_sec": 1.0, "end_sec": 2.0}}
     af = _build_audio_filter(_inputs(tts_cue_files=[cue], sfx_audio=[_sfx()]), 2, 1)
     assert "[2:a]volume=-4dB[cue0_vol]" in af               # cue idx = 클립 수(2)
-    assert "[3:a]volume=-6dB[sfx0_vol]" in af               # sfx idx = 클립 2 + cue 1
+    assert "[3:a]atrim=end=" in af and "volume=-6dB[sfx0_vol]" in af   # sfx idx = 클립 2 + cue 1
     assert "amix=inputs=3" in af
 
 
