@@ -191,6 +191,7 @@ def assemble_edit_plan(story_doc: dict, span_index: dict[str, dict], *,
                 "reframe": {"mode": "center"},
                 "span_ids": ids_c,
                 "cover": str(cv.get("kind") or "cover"),
+                **({"hold_sec": round(float(cv["hold_sec"]), 3)} if cv.get("hold_sec") else {}),
             })
 
         for cv in b.get("covers") or []:
@@ -308,6 +309,15 @@ def clip_duration(dur_sec: float, fps: float | None) -> float:
     return float(dur_sec) if n is None else n / float(fps)
 
 
+def clip_len(c: dict) -> float:
+    """클립이 편집본에서 차지하는 길이(격자 반올림 전) = 소스 구간 + 붙잡은 시간(hold_sec).
+
+    2026-09-03 '정보 화면 붙잡기': 덮개 화면(메시지·문서)이 내레이션보다 짧으면 마지막
+    프레임을 hold_sec 만큼 붙잡는다. 편집본 길이를 더하는 곳은 **전부 이 함수**를 써야
+    한다 — 한 곳이라도 (end−start) 를 직접 쓰면 좌표가 밀리고 프레임 격자 정렬이 깨진다."""
+    return float(c["clip_end_sec"]) - float(c["clip_start_sec"]) + float(c.get("hold_sec") or 0.0)
+
+
 def edited_offsets(timeline: list[dict],
                    fps: float | None = None) -> list[tuple[float, float, float]]:
     """클립별 (소스 시작, 소스 끝, 편집본 오프셋) — 편성 순서 누적.
@@ -318,7 +328,7 @@ def edited_offsets(timeline: list[dict],
     for c in timeline:
         s, e = float(c["clip_start_sec"]), float(c["clip_end_sec"])
         out.append((s, e, off))
-        off += clip_duration(e - s, fps)
+        off += clip_duration(clip_len(c), fps)
     return out
 
 
@@ -587,11 +597,18 @@ def finalize_cues(narration_cues: list[dict], timeline: list[dict], *,
                   voice: str, speed: str, fps: float | None = None) -> list[dict]:
     """스토리 cue 계획 → C2 계약 cue(편집본 start/end + source_time_sec 신원)."""
     offsets = edited_offsets(timeline, fps)
-    total = round(sum(e - s for s, e, _ in offsets), 3)
+    total = round(sum(clip_duration(clip_len(c), fps) for c in timeline), 3)
     out: list[dict] = []
     for cue in narration_cues:
         e0 = to_edited_sec(cue["source_time_sec"], offsets, kind="start")
         e1 = to_edited_sec(cue["source_end_sec"], offsets, kind="end")
+        # 붙잡은 덮개(hold_sec): 소스 끝에 맞춘 cue 끝은 붙잡은 꼬리까지 이어진다
+        if e1 is not None:
+            for c in timeline:
+                h = float(c.get("hold_sec") or 0.0)
+                if h > 0 and abs(float(cue["source_end_sec"]) - float(c["clip_end_sec"])) < 0.02:
+                    e1 = round(e1 + h, 3)
+                    break
         rescued = False
         if e0 is not None and (e1 is None or e1 <= e0):
             # 창 끝만 소스 구멍(미편성 span·트림)에 떨어졌다 — 내레이션은 **편집본**
@@ -667,8 +684,7 @@ def verify_edit_plan(plan: dict, grid: dict) -> dict:
 
 def clip_stats(plan: dict) -> dict:
     """분포 지표 — 하네스 §3(구간 중앙 7.5s±·6~8개) 대조용 요약."""
-    durs = [round(float(c["clip_end_sec"]) - float(c["clip_start_sec"]), 3)
-            for c in plan.get("timeline") or []]
+    durs = [round(clip_len(c), 3) for c in plan.get("timeline") or []]
     total = round(sum(durs), 3)
     return {"clips": len(durs), "total_sec": total,
             "median_sec": sorted(durs)[len(durs) // 2] if durs else None,

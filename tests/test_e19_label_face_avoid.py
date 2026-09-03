@@ -191,7 +191,11 @@ def test_glow_ass_tags(tmp_path):
                       "start_sec": 1.0, "end_sec": 2.0}], p)
     ass = p.read_text(encoding="utf-8-sig")
     assert "\\blur" in ass
-    assert ass.count("3246FF") >= 2                       # 글자색 = 테두리색(발광)
+    assert ass.count("3246FF") >= 2                       # 아래층: 글자색 = 테두리색(후광)
+    # 2026-09-03 D 안: 후광(Layer 1) + 흰 글자/검정 외곽(Layer 2) 두 줄
+    dl = [ln for ln in ass.splitlines() if ln.startswith("Dialogue:")]
+    assert len(dl) == 2 and dl[0].startswith("Dialogue: 1,") and dl[1].startswith("Dialogue: 2,")
+    assert "\\1c&HFFFFFF&" in dl[1] and "\\3c&H000000&" in dl[1] and "\\blur" not in dl[1]
 
 
 def test_non_glow_has_no_blur(tmp_path):

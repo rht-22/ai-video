@@ -167,12 +167,17 @@ def render_draft(video_path: Path, timeline: list[dict], out_path: Path,
     filters = []
     for i, c in enumerate(timeline):
         s, e = float(c["clip_start_sec"]), float(c["clip_end_sec"])
+        # 정보 화면 붙잡기(2026-09-03): 초안도 마지막 프레임을 hold_sec 만큼 유지해야
+        # watch_trim·style 이 보는 시계가 최종과 같다
+        _h = float(c.get("hold_sec") or 0.0)
+        _hold_v = f",tpad=stop_mode=clone:stop_duration={_h:.3f}" if _h > 0 else ""
+        _hold_a = f",apad,atrim=end={e - s + _h:.3f}" if _h > 0 else ""
         filters.append(
             f"[0:v]trim=start={s:.3f}:end={e:.3f},setpts=PTS-STARTPTS,"
-            f"scale=-2:{height}[v{i}]")
+            f"scale=-2:{height}{_hold_v}[v{i}]")
         vol = "" if c.get("use_original_audio", True) else ",volume=0"
         filters.append(
-            f"[0:a]atrim=start={s:.3f}:end={e:.3f},asetpts=PTS-STARTPTS{vol}[a{i}]")
+            f"[0:a]atrim=start={s:.3f}:end={e:.3f},asetpts=PTS-STARTPTS{vol}{_hold_a}[a{i}]")
         parts_v.append(f"[v{i}]")
         parts_a.append(f"[a{i}]")
     n = len(timeline)
@@ -209,7 +214,7 @@ def edited_beat_windows(story_doc: dict, timeline: list[dict]) -> list[dict]:
     windows: list[dict] = []
     off = 0.0
     for c in timeline:
-        dur = float(c["clip_end_sec"]) - float(c["clip_start_sec"])
+        dur = float(c["clip_end_sec"]) - float(c["clip_start_sec"]) + float(c.get("hold_sec") or 0.0)
         owner = next((i for i, s in enumerate(spans_of_beat)
                       if set(c.get("span_ids") or []) & s), None)
         if owner is not None:

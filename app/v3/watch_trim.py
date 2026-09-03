@@ -20,6 +20,7 @@ M4 는 이미 초안(draft 480p)을 렌더하고 Stage 4 가 그것을 보며 �
 from __future__ import annotations
 
 import json
+from app.v3.assemble import clip_len
 import time
 from pathlib import Path
 from typing import Any
@@ -47,14 +48,14 @@ def edited_span_edges(timeline: list[dict], grid: dict) -> list[float]:
     for c in timeline:
         s, e = float(c["clip_start_sec"]), float(c["clip_end_sec"])
         edges.add(round(off, 3))
-        edges.add(round(off + e - s, 3))
+        edges.add(round(off + clip_len(c), 3))
         for sid in c.get("span_ids") or []:
             if sid not in span_t:
                 continue
             for t in span_t[sid]:
                 if s + 0.01 < t < e - 0.01:
                     edges.add(round(off + t - s, 3))
-        off += e - s
+        off += clip_len(c)
     return sorted(edges)
 
 
@@ -78,7 +79,7 @@ def free_zones(timeline: list[dict], grid: dict) -> list[tuple[float, float]]:
                 a, z = max(a, s), min(z, e)
                 if z - a > 0.05:
                     out.append((round(off + a - s, 3), round(off + z - s, 3)))
-        off += e - s
+        off += clip_len(c)
     return sorted(out)
 
 
@@ -131,7 +132,7 @@ def protected_intervals(timeline: list[dict], resources: dict,
     n = len(timeline)
     for i, c in enumerate(timeline):
         s, e = float(c["clip_start_sec"]), float(c["clip_end_sec"])
-        dur = e - s
+        dur = clip_len(c)
         if c.get("role") in ("ending", "payoff") or i == n - 1:
             out.append((off, off + dur, f"{c.get('role') or '마지막'} 클립(리빌·여운)"))
         else:
@@ -251,7 +252,7 @@ def budget_fallback_cuts(timeline: list[dict], grid: dict,
     n = len(timeline)
     for i, c in enumerate(timeline):
         s, e = float(c["clip_start_sec"]), float(c["clip_end_sec"])
-        dur = e - s
+        dur = clip_len(c)
         ids = [sid for sid in (c.get("span_ids") or []) if sid in span_t]
         if c.get("role") in ("climax", "ending", "payoff") or i == n - 1 \
                 or len(ids) <= 1:
@@ -323,17 +324,29 @@ def apply_cuts_to_timeline(timeline: list[dict], cuts: list[dict], grid: dict,
     off = 0.0
     for c in timeline:
         s, e = float(c["clip_start_sec"]), float(c["clip_end_sec"])
-        dur = e - s
+        dur = clip_len(c)
         # 이 클립 위 제거 구간(소스 좌표로 환산)
         holes = []
+        hold = float(c.get("hold_sec") or 0.0)
+        hold_cut = 0.0                     # 붙잡은 꼬리(소스 시각 없음) 위의 제거량
         for cut in cuts:
             a = max(cut["start"], off)
             z = min(cut["end"], off + dur)
             if z - a > 0.01:
-                holes.append((s + (a - off), s + (z - off)))
-        if not holes:
+                src_end = off + (e - s)
+                if z > src_end:            # 꼬리(hold)에 걸친 부분은 hold_sec 에서 뺀다
+                    hold_cut += z - max(a, src_end)
+                    z = min(z, src_end)
+                if z - a > 0.01:
+                    holes.append((s + (a - off), s + (z - off)))
+        if not holes and hold_cut <= 0.01:
             out.append(dict(c))
             off += dur
+            continue
+        if not holes:                      # 꼬리만 잘렸다 — 소스 구간은 그대로
+            piece = dict(c); piece["hold_sec"] = round(max(0.0, hold - hold_cut), 3)
+            if piece["hold_sec"] <= 0.0: piece.pop("hold_sec", None)
+            out.append(piece); off += dur
             continue
         pieces: list[tuple[float, float]] = []
         cur = s
@@ -360,6 +373,13 @@ def apply_cuts_to_timeline(timeline: list[dict], cuts: list[dict], grid: dict,
                 piece["head_trimmed"] = True
             if abs(z - e) > 0.001 and round(z, 3) not in grid_edges:
                 piece["tail_trim"] = True
+            # 붙잡은 꼬리는 소스 끝에 닿은 마지막 조각만 이어받는다
+            if hold > 0:
+                if abs(z - e) <= 0.001:
+                    piece["hold_sec"] = round(max(0.0, hold - hold_cut), 3)
+                    if piece["hold_sec"] <= 0.0: piece.pop("hold_sec", None)
+                else:
+                    piece.pop("hold_sec", None)
             out.append(piece)
         off += dur
     return out
@@ -435,7 +455,7 @@ def build_material_block(timeline: list[dict], segments: list[dict],
     lines = []
     off = 0.0
     for i, c in enumerate(timeline):
-        dur = float(c["clip_end_sec"]) - float(c["clip_start_sec"])
+        dur = clip_len(c)
         lines.append(f"클립{i:02d} {off:.1f}~{off + dur:.1f}s [{c.get('role')}]")
         off += dur
     for sg in segments or []:
@@ -460,8 +480,7 @@ def run_watch_trim(gemini, draft_path: Path, *, timeline: list[dict],
     budget_deficit > 0 이면 **예산 컷 판**: 프롬프트에 초과분을 싣고(빈 배열 금지),
     모델이 덜 지목하면 budget_fallback_cuts 산술 벨트가 남은 만큼을 마저 던다.
     호출 실패도 벨트는 돈다 — 상한 초과 발행이 트림 부재보다 나쁘다(8/24 실사고)."""
-    duration = sum(float(c["clip_end_sec"]) - float(c["clip_start_sec"])
-                   for c in timeline)
+    duration = sum(clip_len(c) for c in timeline)
     audit: dict[str, Any] = {"duration": round(duration, 2),
                              "sample_fps": WATCH_SAMPLE_FPS}
     edges = edited_span_edges(timeline, grid)

@@ -924,8 +924,7 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
                         for lb in (b.get("labels") or [])}
             plan["timeline"] = wt.apply_cuts_to_timeline(
                 plan["timeline"], cuts, grid, _anchors)
-            _total = sum(float(c["clip_end_sec"]) - float(c["clip_start_sec"])
-                         for c in plan["timeline"])
+            _total = sum(assemble.clip_len(c) for c in plan["timeline"])
             segments = wt.remap_segments(segments, cuts, _total)
             resources = wt.remap_resources(resources, cuts, _total)
             _write_json(output_dir / "edit_plan.json", plan)
@@ -987,8 +986,7 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
         band = finalize.video_band_ratio(finalize.design_from_style(_preset))
         # M16: 라벨은 Stage 4 가 초안을 보며 직접 쓴다 — 대사 타임라인(편집본
         # 좌표)과 영상 길이를 준다. label_plan 은 구 체크포인트 호환용으로만 남긴다.
-        _dur = sum(float(c["clip_end_sec"]) - float(c["clip_start_sec"])
-                   for c in plan["timeline"])
+        _dur = sum(assemble.clip_len(c) for c in plan["timeline"])
         style_doc, audit = stage4.run_style(get_gemini(), draft_path, story_doc,
                                             preset=_preset,
                                             windows=win, labels=label_plan,

@@ -1077,19 +1077,29 @@ def build_texts_ass(texts: list[dict], output_path: Path, *, speed: float = 1.0)
         fx = str(t.get("fx") or "none")
         outline_color, bord_ratio = _TEXT_STROKE_BORDER.get(stroke, _TEXT_STROKE_BORDER["dark"])
         bord = max(1, int(round(size * bord_ratio))) if bord_ratio else 0
+        color_ass = _hex_to_ass_color(str(t.get('color') or '#FFFFFF'))
+        head = [f"\\an5\\pos({px},{py})", f"\\fn{to_font_family(str(t.get('font') or 'Jalnan'))}",
+                f"\\fs{size}"]
+        tail = ([f"\\frz{rot_ass:g}"] if rot_ass != 0.0 else []) + [_text_fx_tags(fx, rot_ass)]
         if fx == "glow":
-            # E19-4 괄호형 라벨 발광 — 외곽선을 글자 **자기 색**으로 두껍게 + \blur 로 번짐.
-            # stroke 지정은 glow 가 대체한다(발광과 검정 외곽선은 양립하지 않는다).
-            outline_color = _hex_to_ass_color(str(t.get('color') or '#FFFFFF'))
-            bord = max(2, int(round(size * 0.12)))
-        tags = [f"\\an5\\pos({px},{py})", f"\\fn{to_font_family(str(t.get('font') or 'Jalnan'))}",
-                f"\\fs{size}", f"\\1c{_hex_to_ass_color(str(t.get('color') or '#FFFFFF'))}",
-                f"\\3c{outline_color}", f"\\bord{bord}", "\\shad0"]
-        if fx == "glow":
-            tags.append(f"\\blur{max(2, int(round(size * 0.08)))}")
-        if rot_ass != 0.0:
-            tags.append(f"\\frz{rot_ass:g}")
-        tags.append(_text_fx_tags(fx, rot_ass))
+            # E19-4 → 2026-09-03 개정(사용자 선택 D): 발광을 **두 층**으로 그린다.
+            #  · 아래층(Layer 1): 글자 색으로 두꺼운 외곽선 + 큰 블러 = 색 후광
+            #  · 위층(Layer 2): 흰 글자 + 얇은 검정 외곽선 = 읽히는 글자
+            # 종전(같은 색 외곽선 7px + 블러 4 한 층)은 글자 윤곽이 통째로 뭉개져
+            # 어두운 얼굴 위에서 읽히지 않았다(EP01 실측 — 6종 비교 뒤 선택).
+            halo = max(4, int(round(size * 0.18)))
+            thin = max(2, int(round(size * 0.05)))
+            halo_tags = head + [f"\\1c{color_ass}", f"\\3c{color_ass}", f"\\bord{halo}",
+                                "\\shad0", f"\\blur{halo}"] + tail
+            text_tags = head + ["\\1c&HFFFFFF&", "\\3c&H000000&", f"\\bord{thin}",
+                                "\\shad0"] + tail
+            lines.append(f"Dialogue: 1,{_format_time(s)},{_format_time(e)},Text,,0,0,0,,"
+                         f"{{{''.join(halo_tags)}}}{_escape_ass_text(t['text'])}\n")
+            lines.append(f"Dialogue: 2,{_format_time(s)},{_format_time(e)},Text,,0,0,0,,"
+                         f"{{{''.join(text_tags)}}}{_escape_ass_text(t['text'])}\n")
+            continue
+        tags = head + [f"\\1c{color_ass}", f"\\3c{outline_color}", f"\\bord{bord}",
+                       "\\shad0"] + tail
         lines.append(f"Dialogue: 2,{_format_time(s)},{_format_time(e)},Text,,0,0,0,,"
                      f"{{{''.join(tags)}}}{_escape_ass_text(t['text'])}\n")
     output_path.write_text("".join(lines), encoding="utf-8-sig")

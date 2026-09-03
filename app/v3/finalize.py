@@ -248,7 +248,7 @@ def cover_mute_windows(timeline: list[dict],
     off = 0.0
     for c in timeline:
         cs, ce = float(c["clip_start_sec"]), float(c["clip_end_sec"])
-        dur = assemble.clip_duration(ce - cs, fps)
+        dur = assemble.clip_duration(assemble.clip_len(c), fps)
         if not c.get("use_original_audio"):
             for a, z, on in assemble.split_by_windows(cs, ce, narration_windows_src):
                 if on:
@@ -424,7 +424,8 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                        start_sec=float(c["clip_start_sec"]),
                        end_sec=float(c["clip_end_sec"]),
                        subtitle=str(c.get("subtitle") or ""),
-                       use_original_audio=bool(c.get("use_original_audio", True)))
+                       use_original_audio=bool(c.get("use_original_audio", True)),
+                       hold_sec=float(c.get("hold_sec") or 0.0))
              for c in plan["timeline"]]
 
     # 하단 밴드 — 작품 로고 이미지가 있으면 텍스트 대신 그것을 쓴다(렌더러는 이미
@@ -721,7 +722,7 @@ def check_progression(timeline: list[dict], segments: list[dict],
     role_at: list[tuple[float, float, str]] = []
     off = 0.0
     for c in timeline:
-        dur = float(c["clip_end_sec"]) - float(c["clip_start_sec"])
+        dur = assemble.clip_len(c)
         role_at.append((off, off + dur, str(c.get("role") or "")))
         events.append(off)
         off += dur

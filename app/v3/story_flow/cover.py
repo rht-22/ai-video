@@ -391,6 +391,20 @@ def choose_cover(anchor: tuple[str, int], group: dict, beats: list[dict],
     focus: tuple[float, float] | None = None
     if group.get("cover_ids"):
         dw = designated_window(group["cover_ids"], beats, span_index, L, extra_used=placed)
+        if dw is not None and group.get("hold") and dw["focus1"] - dw["focus0"] < L - 1e-6:
+            # 정보 화면 붙잡기(2026-09-03): 모델이 '글자가 있는 화면'이라 판정한 지정 화면이
+            # 내레이션보다 짧으면, 이웃 조각으로 넓히지 않고 **마지막 프레임을 붙잡는다**
+            # (넓히면 얼굴 컷이 섞여 정보가 사라진다 — EP01 카톡 화면 0.1초 실사고).
+            # 프로브는 안 한다 — 창이 곧 지정 화면이라 고를 시작점이 없다.
+            f0, f1 = dw["focus0"], dw["focus1"]
+            hold = round(L - (f1 - f0), 3)
+            note = f"정보 화면 붙잡기 — 지정 화면 {f1 - f0:.1f}s 뒤 마지막 프레임 {hold:.1f}s 유지"
+            log(f"  [v3/cover] {tag}: {note}")
+            return {"position": kind, "kind": "hold",
+                    "t_in": round(f0, 3), "t_out": round(f1, 3), "hold_sec": hold,
+                    "span_ids": spans_overlapping(f0, f1, span_index),
+                    "probe": None, "note": note,
+                    "window": [round(f0, 3), round(f1, 3)], "L": L}
         if dw is not None:
             wins.append(dw)
             focus = (dw["focus0"], dw["focus1"])

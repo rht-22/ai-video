@@ -1314,12 +1314,17 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         # 프레임을 복제해 N 을 채운다 — 남으면 trim 이 잘라내므로 평소엔 무해하다.
         # 소리도 같은 길이로 맞춰야(apad→atrim) concat 이 영상을 덧대지 않는다.
         pin_v, pin_a = "", "anull"
+        _hold = float(getattr(clip, "hold_sec", 0.0) or 0.0)   # 정보 화면 붙잡기(2026-09-03)
         if _clip_fps:
-            n_fr = max(1, round((float(clip.end_sec) - float(clip.start_sec)) * _clip_fps))
+            n_fr = max(1, round((float(clip.end_sec) - float(clip.start_sec) + _hold) * _clip_fps))
             dur_q = n_fr / _clip_fps
-            pin_v = (f",tpad=stop_mode=clone:stop_duration=1"
+            pin_v = (f",tpad=stop_mode=clone:stop_duration={1 + _hold:.3f}"
                      f",trim=end_frame={n_fr},setpts=PTS-STARTPTS")
             pin_a = f"apad,atrim=end={dur_q:.6f},asetpts=PTS-STARTPTS"
+        elif _hold > 0:
+            _len = float(clip.end_sec) - float(clip.start_sec) + _hold
+            pin_v = f",tpad=stop_mode=clone:stop_duration={_hold:.3f},setpts=PTS-STARTPTS"
+            pin_a = f"apad,atrim=end={_len:.6f},asetpts=PTS-STARTPTS"
 
         v_filter = (
             f"[{i}:v]{crop_filter}"

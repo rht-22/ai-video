@@ -16,6 +16,8 @@ class StoryClip:
     character_focus: tuple[str, ...] = ()
     visual_essential: bool = False
     tts_draft: str = ""
+    # 2026-09-03 정보 화면 붙잡기 — 소스 구간 뒤에 마지막 프레임을 이만큼 유지(초). 0 = 종전
+    hold_sec: float = 0.0
 
 
 @dataclass(frozen=True)

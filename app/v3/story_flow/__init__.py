@@ -202,6 +202,7 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
         # cue — 묶음의 줄들을 덮개 안에 순서대로(측정 길이 비례가 아니라 실측 그대로,
         # 남는 여유는 마지막 줄 꼬리에)
         t = cover["t_in"] + 0.1
+        # 붙잡은 덮개는 소스 끝(t_out)에 cue 끝을 두고, 붙잡은 꼬리는 finalize_cues 가 잇는다
         for li, (text, m, path) in enumerate(zip(g["lines"], g["measured"], g["audio_paths"])):
             end = cover["t_out"] if li == len(g["lines"]) - 1 else min(cover["t_out"], t + m)
             cue = {"beat": k, "line": li, "text": text, "mode": "cover",
@@ -253,7 +254,7 @@ def beat_duration(b: dict, span_index: dict[str, dict]) -> float:
             if first["t_in"] < ht < first["t_out"]:
                 d -= ht - first["t_in"]
     for c in b.get("covers") or []:
-        d += c["t_out"] - c["t_in"]
+        d += c["t_out"] - c["t_in"] + float(c.get("hold_sec") or 0.0)
     return d
 
 
