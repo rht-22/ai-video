@@ -468,3 +468,53 @@ def test_speech_span_extraction_is_one_rule():
             {"start_sec": None, "end_sec": 6.0, "text": "라마바"}]   # 시각 깨짐 → 제외
     assert _speech_spans(segs) == [(1.0, 2.0)]
     assert [(a, b) for a, b, _t in _speech_spans_texted(segs)] == _speech_spans(segs)
+
+
+# ── 창을 감싸는 히트 (2026-09-03 적대 검증 · 반박을 견딘 유일한 지적) ────────
+
+# 격자 cue 규칙(≤6s)대로 쪼갠 전사에 한 줄 인용이 여러 cue 에 걸친 경우.
+# `_timeline` 이 글자마다 **그 cue 의 (start,end) 통째**를 넣으므로 히트는
+# '첫 글자가 든 cue 의 시작 ~ 마지막 글자가 든 cue 의 끝'으로 넓어진다.
+_LONG_LINE = "언니가 지금 하는 쏘맥 비율은 코미디 빅리그 녹화 끝나고 먹는 비율이야 정말로 그렇다니까"
+_WIDE_SEGS = [{"start_sec": 100.0, "end_sec": 106.0, "text": _LONG_LINE[:10]},
+              {"start_sec": 106.0, "end_sec": 112.0, "text": _LONG_LINE[10:20]},
+              {"start_sec": 112.0, "end_sec": 118.0, "text": _LONG_LINE[20:30]},
+              {"start_sec": 118.0, "end_sec": 124.0, "text": _LONG_LINE[30:38]},
+              {"start_sec": 124.0, "end_sec": 132.0, "text": _LONG_LINE[38:]}]
+
+
+def test_a_hit_that_encloses_the_segment_is_inside_not_elsewhere():
+    """🛑 판정은 **겹침**이지 끝점이 아니다.
+
+    종전 술어 `lo <= h[0] <= hi or lo <= h[1] <= hi` 는 히트가 조각 창을 **감싸면**
+    (h[0] < lo 이고 h[1] > hi) 둘 다 거짓이라 '다른 시각에서만 발견'으로 오판하고
+    멀쩡한 조각을 옮겼다 — 이 모듈이 막으라고 있는 바로 그 일(경계가 조용히 움직이는
+    것)을 스스로 한 것이다. 그리고 남는 노트("인용이 여기가 아니라 저기에 있다")는
+    사실도 아니다. 인용은 그 조각에서도 발화되고 있다.
+
+    히트가 넓어지는 것은 예외가 아니라 정상이다 — 인용이 여러 cue 에 걸치면 20~30초가
+    되고, E13-0 이 기록한 24.7초 Whisper cue 면 단일 cue 로도 그렇다."""
+    hits = timestamp_check.find_quote_times(_LONG_LINE, _WIDE_SEGS)
+    seg = (106.0, 112.0)
+    lo, hi = seg[0] - V.QUOTE_MATCH_TOLERANCE_SEC, seg[1] + V.QUOTE_MATCH_TOLERANCE_SEC
+    # 픽스처가 실제로 '감싸는' 상황인지부터 못박는다(아니면 이 테스트는 아무것도 안 지킨다)
+    assert hits and all(h[0] < lo and h[1] > hi for h in hits)
+    assert [h for h in hits if lo <= h[0] <= hi or lo <= h[1] <= hi] == []   # 종전 술어
+
+    cand = {"id": "c1", "segments": [
+        {"start_sec": seg[0], "end_sec": seg[1], "quote": _LONG_LINE},
+        {"start_sec": 300.0, "end_sec": 350.0, "quote": None}]}
+    got = verify_candidate(cand, segments=_WIDE_SEGS, source_duration_sec=1200.0)
+    assert got["verdict"] == "ok"
+    assert (got["segments"][0]["start_sec"], got["segments"][0]["end_sec"]) == seg
+    assert "relocated" not in [n["action"] for n in got["notes"]]
+
+
+def test_genuine_relocation_still_fires_after_the_overlap_fix():
+    """겹침 판정은 끝점 판정보다 **엄밀히 더 관대**하다 — 진짜 밀림(샤먼 실측)은
+    히트와 창이 여전히 안 겹치므로 그대로 재배치된다."""
+    cand = {"id": "c1", "segments": [{"start_sec": 830.0, "end_sec": 887.0,
+                                      "quote": SHAMAN_LINE}]}
+    got = verify_candidate(cand, segments=SEGMENTS, source_duration_sec=1200.0)
+    assert got["verdict"] == "relocated"
+    assert got["segments"][0]["start_sec"] == pytest.approx(518.9)

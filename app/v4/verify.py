@@ -290,7 +290,21 @@ def verify_candidate(cand: dict, *, segments: list[dict], source_duration_sec: f
                                          f"{QUOTE_FUZZY_MAX_RATIO} 이내로 찾았습니다 — "
                                          f"\"{quote_text[:24]}…\""})
             lo, hi = start - QUOTE_MATCH_TOLERANCE_SEC, end + QUOTE_MATCH_TOLERANCE_SEC
-            inside = [h for h in hits if lo <= h[0] <= hi or lo <= h[1] <= hi]
+            # 🛑 **겹침**을 본다(끝점이 창 안인가가 아니라). 종전엔
+            # `lo <= h[0] <= hi or lo <= h[1] <= hi` 라, 히트가 창을 **감싸면**
+            # (h[0] < lo 이고 h[1] > hi) '다른 시각에서만 발견'으로 오판해 멀쩡한
+            # 조각을 옮겼다 — 이 모듈이 막으라고 있는 바로 그 일(경계가 조용히 움직이는
+            # 것)을 스스로 했다. 2026-09-03 적대 검증이 잡았고 실측으로 재현됐다.
+            #
+            # 히트가 넓어지는 것은 예외가 아니라 정상이다: `_timeline` 이 글자마다
+            # **그 cue 의 (start,end) 통째**를 넣으므로, 인용이 여러 cue 에 걸치면
+            # 히트는 '첫 글자가 든 cue 의 시작 ~ 마지막 글자가 든 cue 의 끝'으로
+            # 20~30초가 된다(E13-0 의 24.7초 Whisper cue 면 단일 cue 로도 그렇다).
+            # 조각이 그 안쪽에 있으면 종전 판정은 언제든 발동했다.
+            #
+            # 겹침은 끝점 판정보다 **엄밀히 더 관대**하므로 진짜 재배치(샤먼 실측 —
+            # 히트 518.9~575.9 vs 창 825~892, 여전히 비겹침)는 그대로 살아난다.
+            inside = [h for h in hits if h[1] >= lo and h[0] <= hi]
 
             if hits and not inside:
                 # ② relocated — 시간축만 밀린 전형. 길이를 유지한 채 실제 발화 자리로 옮긴다.
