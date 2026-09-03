@@ -43,3 +43,20 @@ def test_fix_span_words_and_word_subtitles_wiring():
     # cast_names 없으면 종전 그대로
     segs0 = assemble.word_subtitles(tl, idx, words, None)
     assert "임지영이" in " ".join(s["text"] for s in segs0)
+
+
+def test_pipeline_defines_name_arb_before_use():
+    """2026-09-03 실런 크래시(UnboundLocalError): step('story') 가 자막 블록보다 먼저 찍히는데
+    그 기록에 _name_arb 를 붙였다. 정의 줄이 모든 사용 줄보다 앞서야 한다(AST 고정)."""
+    import ast, pathlib
+    tree = ast.parse(pathlib.Path("app/v3/pipeline.py").read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_run_m3")
+    stores, loads = [], []
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Name) and n.id == "_name_arb":
+            (stores if isinstance(n.ctx, ast.Store) else loads).append(n.lineno)
+    assert stores and loads and min(stores) < min(loads)
+    # story 기록에는 안 붙는다(자막 전이라 늘 비어 있을 자리)
+    src = pathlib.Path("app/v3/pipeline.py").read_text(encoding="utf-8")
+    assert 'step("story", elapsed=round(time.time() - t0, 1), name_arbitrations' not in src
+    assert 'step("subtitles", lines=len(segments), name_arbitrations=_name_arb)' in src

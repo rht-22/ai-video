@@ -683,7 +683,7 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
                 shorts_hints=_shorts,
                 measure_fn=_measure_narration, log=log)
         _write_json(story_ckpt, {"fingerprint": fingerprint, "story": story_doc})
-        step("story", elapsed=round(time.time() - t0, 1), name_arbitrations=_name_arb,
+        step("story", elapsed=round(time.time() - t0, 1),
              attempts=len(audit["attempts"]), fallback=audit.get("fallback", False),
              template=story_doc["template"], pieces=audit.get("pieces"),
              budget=story_doc["budget"],
@@ -721,6 +721,8 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
     for f in _name_arb:
         log(f"  [v3/자막] 인명 대조 교정 {f.get('span_id')} {f['from']!r} → {f['to']!r} "
             f"(근거: 모델 청취 + 인물표)")
+    # 자막 단계 기록(2026-09-03) — story 기록은 자막 생성보다 앞서 찍히므로 여기 따로 남긴다
+    step("subtitles", lines=len(segments), name_arbitrations=_name_arb)
     # ── M9-A/B: 자막 텍스트 신뢰 검사(순수 코드 · LLM 0콜) ────────────────
     from app.v3 import textcheck
     segments, rep_warns = textcheck.drop_repetition(segments)   # B 예방
