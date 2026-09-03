@@ -38,7 +38,7 @@ PROMPT = """당신은 리캡 쇼츠 구성작가다. 영상은 볼 수 없다 �
 - 한 문장 = **공백 제외 {max_chars}자 이내**(2~3초). 길면 두 문장으로 나눠 따로 적어라. 쉼표로 끝내 다음 대사가 받게 하는 형식("협박까지 나왔는데,")이 좋다.
 - 서술체(~했죠 / ~는데,). 예고형이 완료 묘사형보다 낫다. **다음 대사의 내용을 먼저 말하지 마라** — 상황만 깔고 대사가 답하게.
 - 근거는 기록뿐: 구체 명사·인물명을 기록 그대로 써라. 화면에 없는 행동을 지어내지 마라.
-- `cover`: 이 문장이 흐르는 동안 **보여줄 화면**을 아래 「쓸 수 있는 화면」에서 조각 id 로 골라라(1~3개, 이어지는 조각). 코드가 그 화면의 소리를 끄고 그 위에 얹는다. **문장은 그 화면이 보여주는 것을 말해야 한다** — 발장난을 말하려면 발장난 조각을 짚어라. 대사 중인 얼굴이라도 내레이션이 가리키는 장면이면 괜찮다. 짚을 화면이 없는 말은 쓰지 마라.
+- `cover`: 이 문장이 흐르는 동안 **보여줄 화면**을 아래 「쓸 수 있는 화면」에서 조각 id 로 골라라(1~3개, 이어지는 조각). 각 조각에 적힌 "before_beat k 용 / after_last 용" 자리에서만 쓸 수 있다 — 그 비트보다 뒤 시각의 화면을 앞에 깔면 완성본에서 시간이 되감긴다. 코드가 그 화면의 소리를 끄고 그 위에 얹는다. **문장은 그 화면이 보여주는 것을 말해야 한다** — 발장난을 말하려면 발장난 조각을 짚어라. 대사 중인 얼굴이라도 내레이션이 가리키는 장면이면 괜찮다. 짚을 화면이 없는 말은 쓰지 마라.
 - 훅(before_beat: 0)은 **필수**. ⚠ 점프 자리도 **필수**. 엔딩 뒤 한 줄(after_last)은 선택 — 다음에 벌어질 일의 암시·떡밥(작품 정보·다른 씬 요약에 있는 사건은 화면 없이 말로 예고할 수 있다). 해소·정리 멘트 금지.
 - 최대 {max_n}곳.
 
@@ -84,17 +84,74 @@ def beats_block(beats: list[dict], span_index: dict[str, dict],
     return "\n".join(out)
 
 
+def _beat_ranges(beats: list[dict], span_index: dict[str, dict]) -> list[tuple[float, float]]:
+    out = []
+    for b in beats:
+        ids = [x for x in b.get("span_ids") or [] if x in span_index]
+        if ids:
+            out.append((span_index[ids[0]]["t_in"], span_index[ids[-1]]["t_out"]))
+    return out
+
+
 def available_covers(beats: list[dict], scene_rows: dict[int, dict],
                      span_index: dict[str, dict]) -> list[str]:
-    """고른 씬의 분석된 조각 중 어느 비트에도 안 쓰인 것 — grid 순."""
-    used = {x for b in beats for x in b["span_ids"]}
-    out = [sid for r in scene_rows.values() for sid in r["span_ids"]
-           if sid in span_index and not span_index[sid].get("unanalyzed") and sid not in used]
+    """고른 씬의 분석된 조각 중 어느 비트 **구간 밖**인 것 — grid 순.
+
+    비트 구간 안의 조각(skip 으로 뺀 추임새·구멍)은 제외한다(2026-09-03 실사고: 뺀
+    조각을 덮개로 쓰니 완성본에서 시간이 되감겼다 — 43:12 화면 뒤에 43:04 대사)."""
+    ranges = _beat_ranges(beats, span_index)
+    out = []
+    for r in scene_rows.values():
+        for sid in r["span_ids"]:
+            sp = span_index.get(sid)
+            if sp is None or sp.get("unanalyzed"):
+                continue
+            if any(a - 1e-6 <= sp["t_in"] and sp["t_out"] <= z + 1e-6 for a, z in ranges):
+                continue
+            out.append(sid)
     return sorted(set(out), key=lambda s: span_index[s]["pos"])
 
 
+def anchor_label(sid: str, beats: list[dict], span_index: dict[str, dict]) -> str:
+    """이 조각을 쓸 수 있는 자리 — 첫 비트보다 앞이면 before_beat 0, 비트 k-1 과 k 사이면
+    before_beat k, 마지막 비트 뒤면 after_last."""
+    t = span_index[sid]["t_in"]
+    ranges = _beat_ranges(beats, span_index)
+    for k, (a, _z) in enumerate(ranges):
+        if t < a:
+            return f"before_beat {k}"
+    return "after_last"
+
+
+def cover_allowed(sid: str, anchor: tuple[str, int], beats: list[dict],
+                  span_index: dict[str, dict]) -> bool:
+    """before k → 비트 k 첫 조각보다 앞 시각(그리고 비트 k-1 뒤) · after → 마지막 비트 뒤.
+    시간을 되감는 덮개를 형식으로 막는다."""
+    kind, k = anchor
+    ranges = _beat_ranges(beats, span_index)
+    if not ranges:
+        return True
+    sp = span_index[sid]
+    if kind == "after":
+        return sp["t_in"] >= ranges[-1][1] - 1e-6
+    hi = ranges[min(k, len(ranges) - 1)][0]
+    lo = ranges[k - 1][1] if k > 0 else float("-inf")
+    return sp["t_out"] <= hi + 1e-6 and sp["t_in"] >= lo - 1e-6
+
+
+def filter_covers_by_anchor(groups: list[dict], beats: list[dict],
+                            span_index: dict[str, dict], log=print) -> None:
+    for g in groups:
+        ok = [x for x in g.get("cover_ids") or [] if cover_allowed(x, g["anchor"], beats, span_index)]
+        bad = [x for x in g.get("cover_ids") or [] if x not in ok]
+        if bad:
+            log(f"  [v3/flow/narration] · {g['anchor'][0]}{g['anchor'][1]} cover {bad} 는 그 자리와 "
+                "시각이 어긋나 무시(되감기 방지)")
+        g["cover_ids"] = ok
+
+
 def available_block(available: list[str], span_index: dict[str, dict],
-                    scene_of: dict[str, int]) -> str:
+                    scene_of: dict[str, int], beats: list[dict] | None = None) -> str:
     out: list[str] = []
     cur_scene = None
     for sid in available:
@@ -106,7 +163,8 @@ def available_block(available: list[str], span_index: dict[str, dict],
         desc = sp.get("scene_script") or ""
         if sp["is_audio"]:
             desc = (desc + f" (대사: {span_text(sp)[:30]})").strip()
-        out.append(f"{sid} | {fmt_t(sp['t_in'])} | {sp['t_out'] - sp['t_in']:.1f}s | {desc}")
+        slot = f" | {anchor_label(sid, beats, span_index)} 용" if beats else ""
+        out.append(f"{sid} | {fmt_t(sp['t_in'])} | {sp['t_out'] - sp['t_in']:.1f}s{slot} | {desc}")
     return "\n".join(out) if out else "(없음 — 고른 씬의 모든 조각이 대사로 쓰였다)"
 
 
@@ -247,6 +305,7 @@ def synthesize_groups(groups: list[dict], out_dir: Path,
 
 
 __all__ = ["PROMPT", "NAR_MAX_CHARS", "NAR_SPEED", "NAR_VOICE", "beats_block",
-           "available_covers", "available_block", "split_sentences",
+           "available_covers", "available_block", "anchor_label", "cover_allowed",
+           "filter_covers_by_anchor", "split_sentences",
            "validate_narrations", "synthesize_groups", "default_synth", "estimate_sec",
            "reject_block"]
