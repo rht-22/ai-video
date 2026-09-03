@@ -669,281 +669,33 @@ def _filter_candidates_by_chunk_intro_credits(
 
 
 # ─────────────────────────────────────────────────────────────
-# TTS cue 앵커 해석 — 원본 절대시간 → 편집 타임라인 절대시간
+# 소스 밖 클립 가드 · TTS cue 앵커 해석 — app/modules 로 물리 이동(V4-M1 §7)
 # ─────────────────────────────────────────────────────────────
-# cue 는 story 단계에서 (clip_index, offset_sec) 앵커로 정규화되고 source_time_sec
-# (원본 영상 절대시간)를 갖는다. 클립 경계는 그 뒤 silence_cut(분할) → snap/extend/fill →
-# 길이 클램프로 여러 번 바뀌므로, 절대시간 변환은 **최종 클립이 확정된 뒤 여기서 한 번만** 한다.
-# 최종 클립 자체가 원본 구간(start_sec~end_sec)을 갖고 있어 "원본시간 → 편집시간" 조각별
-# 매핑만으로 충분하다 — 첫 클립이 앞으로 확장돼도 cue 는 *화면 내용*에 붙어 따라온다.
-
-_MIN_CUE_TAIL = 0.5  # 앵커 소재가 잘려나갔을 때 클립 끝에서 확보할 최소 여유
-
-# 소스 밖으로 나가 실제로 렌더되지 않는 분량이 이보다 크면 실패시킨다.
-# 1.0s: 끝 경계가 소스 길이와 소수점에서 어긋나는 정상 케이스(실측 0~0.2s)는 통과시키고,
-# 클립이 통째로/대부분 증발하는 경우만 잡는다.
-CLIP_LOST_TOLERANCE_SEC = 1.0
-
-
-def clips_beyond_source(clips, source_duration_sec: float,
-                        tolerance: float = CLIP_LOST_TOLERANCE_SEC) -> list[dict]:
-    """소스 영상 밖이라 **실제로 렌더되지 않는** 클립을 찾는다. 순수(테스트 대상).
-
-    ⚠ **왜 필요한가**: 렌더는 클립마다 `-ss start -to end -i <소스>` 로 읽는데, 구간이
-    소스 끝을 넘으면 그만큼 **조용히 짧아지고**, 시작 자체가 소스 밖이면 **프레임도
-    오디오도 0개**가 나온다. concat 은 남은 클립만 이어 붙이므로 **반쪽짜리 쇼츠가
-    아무 경고 없이 발행된다.**
-
-    2026-08-24 실측(185개 런 중 5건, 4개 채널): 전부 클립 2개짜리에서 하나가 통째로
-    증발해 18~26.6초(기획 분량의 절반 가까이)를 잃었다. 예: 혜미리예채파 2화 —
-    소스 189.99s 인데 payoff 클립이 200.0~226.0s. 내레이션은 "결국 0캐시로 전부
-    날려버렸다"고 말하는데 **그 장면이 화면에 없다.**
-
-    Gemini 가 소스 길이 밖 타임스탬프를 만들어내는 것이 원인이고, 파이프라인 어디에도
-    클립 경계를 소스 길이와 대조하는 코드가 없었다.
-
-    Returns: 소실이 tolerance 를 넘는 클립별 dict
-             (index·start·end·planned·rendered·lost) — 비어 있으면 정상."""
-    src = float(source_duration_sec or 0.0)
-    if src <= 0:
-        return []                      # 소스 길이를 모르면 판정하지 않는다(오판 금지)
-    out: list[dict] = []
-    for i, c in enumerate(clips or []):
-        start = float(getattr(c, "start_sec", 0.0))
-        end = float(getattr(c, "end_sec", 0.0))
-        planned = max(0.0, end - start)
-        rendered = max(0.0, min(end, src) - start)
-        lost = planned - rendered
-        if lost > tolerance:
-            out.append({"index": i, "start": start, "end": end,
-                        "planned": planned, "rendered": rendered, "lost": lost})
-    return out
-
-
-def _resolve_cue_anchors(
-    cues: list[dict],
-    clips: list,  # 최종 variant StoryClip 리스트 (silence_cut·snap/extend/fill·클램프 반영 후)
-) -> list[dict]:
-    """앵커 cue 의 source_time_sec 를 최종 편집 타임라인 절대 start_sec/end_sec 로 변환.
-
-    - source_time 을 포함하는 최종 클립 조각을 찾아 그 안의 상대 위치로 배치.
-      같은 원본 구간이 여러 조각에 걸치면 앵커의 (chunk_index, candidate_index) 일치 우선.
-    - 소재가 컷으로 빠졌으면: 같은 (chunk_index, candidate_index) 조각의 다음 kept 시작으로
-      스냅, 그마저 없으면 마지막 조각 끝 - _MIN_CUE_TAIL. 앵커 클립이 통째로 제거됐으면 드롭.
-    - end = start + duration_sec, 영상 전체 길이로 클램프.
-    - 변환 후 시간순 정렬 + cue 간 겹침 제거 (뒤 cue 시작을 앞 cue 끝 + 0.05 로 이동).
-    - source_time_sec 없는 cue (옛 체크포인트 재개 경로) 는 절대시간으로 간주하고
-      영상 길이 클램프만 적용해 통과시킨다 (구 동작 보존).
-
-    Returns: start_sec/end_sec 가 채워진 cue dict 리스트 (앵커 필드는 디버깅용 보존)
-    """
-    if not cues or not clips:
-        return []
-
-    # 편집 타임라인 조각: (원본 start, 원본 end, 편집 base, chunk_index, candidate_index)
-    spans: list[tuple[float, float, float, int, int]] = []
-    base = 0.0
-    for c in clips:
-        c_start = float(c.start_sec)
-        c_end = float(c.end_sec)
-        spans.append((c_start, c_end, base,
-                      int(getattr(c, "chunk_index", -1)), int(getattr(c, "candidate_index", -1))))
-        base += max(0.0, c_end - c_start)
-    total = base
-
-    out: list[dict] = []
-    for cue in cues:
-        duration = float(cue.get("duration_sec", 0.0) or 0.0)
-        t_raw = cue.get("source_time_sec")
-
-        if t_raw is None:
-            # 구 스키마 (이미 절대시간) — 옛 체크포인트에서 재개된 경로. 클램프만.
-            try:
-                s = float(cue.get("start_sec"))
-                e = float(cue.get("end_sec"))
-            except (TypeError, ValueError):
-                continue
-            if e <= s or s >= total - 0.1:
-                continue
-            new_cue = dict(cue)
-            new_cue["end_sec"] = min(e, total)
-            out.append(new_cue)
-            continue
-
-        t = float(t_raw)
-        key = (int(cue.get("chunk_index", -1)), int(cue.get("candidate_index", -1)))
-        containing = [sp for sp in spans if sp[0] <= t < sp[1]]
-        pick = None
-        if containing:
-            keyed = [sp for sp in containing if (sp[3], sp[4]) == key]
-            pick = (keyed or containing)[0]
-        else:
-            # 앵커 지점의 소재가 컷/트림으로 빠짐 → 같은 앵커 클립 소재 안으로 스냅
-            keyed = [sp for sp in spans if (sp[3], sp[4]) == key]
-            after = [sp for sp in keyed if sp[0] >= t]
-            if after:
-                pick = min(after, key=lambda sp: sp[0])
-                t = pick[0]
-            elif keyed:
-                pick = max(keyed, key=lambda sp: sp[1])
-                t = max(pick[0], pick[1] - _MIN_CUE_TAIL)
-            else:
-                print(f"  [cue-resolve] 앵커 클립 소재가 최종 타임라인에 없음 → cue 드롭: "
-                      f"{str(cue.get('text', ''))[:24]!r}")
-                continue
-
-        start = pick[2] + (t - pick[0])
-        end = min(start + duration, total)
-        if end - start < 0.3:
-            print(f"  [cue-resolve] 변환 후 길이 {end - start:.2f}s < 0.3s → cue 드롭: "
-                  f"{str(cue.get('text', ''))[:24]!r}")
-            continue
-        new_cue = dict(cue)
-        new_cue["start_sec"] = start
-        new_cue["end_sec"] = end
-        out.append(new_cue)
-
-    # 시간순 정렬 + 겹침 제거 (duration 유지한 채 뒤 cue 를 밀고, 영상 밖이면 드롭)
-    out.sort(key=lambda x: x["start_sec"])
-    resolved: list[dict] = []
-    for cue in out:
-        if resolved and cue["start_sec"] < resolved[-1]["end_sec"]:
-            shift_to = resolved[-1]["end_sec"] + 0.05
-            dur = cue["end_sec"] - cue["start_sec"]
-            cue = dict(cue)
-            cue["start_sec"] = shift_to
-            cue["end_sec"] = min(shift_to + dur, total)
-            if cue["end_sec"] - cue["start_sec"] < 0.3:
-                print(f"  [cue-resolve] 겹침 보정 후 영상 밖 → cue 드롭: "
-                      f"{str(cue.get('text', ''))[:24]!r}")
-                continue
-        resolved.append(cue)
-    return resolved
-
-
-# ─────────────────────────────────────────────────────────────
-# E19-3: 내레이션 cue–대사 겹침 검사기 (2026-08-28)
-# ─────────────────────────────────────────────────────────────
-# 발주서: docs/prompts/e19-drama-clip-preset.md §3. 벤치마크(신병4·꿀벌무비 실측)의
-# "끊김 없는 호흡"의 반은 내레이션이 대사와 절대 겹치지 않는 릴레이 문법이다 —
-# 앵커가 어긋나면 TTS 가 원음 대사 위에 그대로 겹쳐 나가던 구멍을 여기서 막는다.
-# 게이트는 톤 프로파일(narration.placement == "dialogue_gaps_only") — 미지정 채널은
-# 이 검사 자체가 없다(회귀 0). 자리는 앵커 해석 직후·resources(비싼 합성) 앞.
-
-# 릴레이는 경계가 맞닿는 문법이라(cue 가 대사 끝에 바로 붙는다) 관용치가 필요하다.
-CUE_OVERLAP_TOLERANCE_SEC = 0.2
+# 세 함수는 여기서 정의되던 것이고 **동작은 한 글자도 바뀌지 않았다**. 옮긴 이유는
+# v4 가 같은 함수를 부르게 하기 위해서다 — v3 는 이 모놀리스를 한 줄도 import 하지
+# 못해 E10·E12·E14·E18-2·E19·E20·E21 대응을 하나도 승계하지 못했고, 같은 판정을
+# 두 벌 적으면 언젠가 한쪽만 고쳐진다.
+# 이 모듈 안의 호출 지점이 전부 그대로 돌도록 **같은 이름으로 재수출**한다
+# (옛 비공개 이름 `_resolve_cue_anchors` 포함 — 그 이름으로 부르는 테스트가 있다).
+from app.modules.clip_guard import (  # noqa: F401  (재수출)
+    CLIP_LOST_TOLERANCE_SEC,
+    clips_beyond_source,
+)
+from app.modules.cues import (  # noqa: F401  (재수출)
+    CUE_OVERLAP_TOLERANCE_SEC,
+    _MIN_CUE_TAIL,
+    _resolve_cue_anchors,
+    resolve_cue_anchors,
+    snap_cues_to_dialogue_gaps,
+)
 
 # 렌더 컨테이너/오디오 priming 오버헤드(~0.1s) 여유 — 길이 클램프 상한과 narrative-ext
 # 확장 예산이 **같은 값**을 봐야 확장이 만든 초과를 클램프가 되무는 자기충돌이 없다
 # (E20-A2, 김부장 v3 실측: 확장이 60.5s 를 만들고 클램프 59.7s 가 build 를 지웠다).
+# ⚠ 이 상수는 E19-3 cue 블록 옆에 적혀 있었지만 **cue 판정이 아니라 길이 클램프의 값**이라
+# app/modules/cues.py 로 따라가지 않았다 — 쓰는 코드(_fit_storyline_to_duration 계열)가
+# 이 파일에 있다.
 RENDER_SAFETY_MARGIN_SEC = 0.3
-
-
-def snap_cues_to_dialogue_gaps(
-    cues: list[dict],
-    segments: list,          # 대사 자막 — start_sec/end_sec 속성 (final_segments)
-    total_sec: float,
-) -> tuple[list[dict], dict[str, Any]]:
-    """대사와 겹치는 cue 를 가장 가까운 대사 gap 으로 스냅한다.
-
-    - 겹침 합계가 CUE_OVERLAP_TOLERANCE_SEC 이하면 그대로 둔다.
-    - 스냅은 **cue 길이가 통째로 들어가는 gap** 이 있을 때만 — 원위치에서 가장 가까운
-      배치점을 고른다(gap 안에서 원래 시작에 최대한 붙인다). 이미 자리 잡은 다른 cue 의
-      창도 점유물로 본다(스냅이 cue 끼리의 새 겹침을 만들면 안 된다).
-    - 들어갈 gap 이 없으면 **옮기지 않고 경고만** 센다 — 멀쩡한 내레이션을 지우거나
-      엉뚱한 자리로 보내는 것이 겹침보다 나쁘다(영상 밖 cue 안전망의 규율).
-    - 시간이 깨진 cue 는 판정을 포기하고 그대로 싣는다(같은 규율).
-    - 순수: 넘겨받은 cue 를 건드리지 않고 사본을 돌려준다.
-
-    Returns: (새 cue 리스트(시간순), {"of", "cue_snapped", "warned", "details"}).
-    details 항목: {text, from_sec, to_sec(실패 시 None), overlap_sec}.
-    """
-    report: dict[str, Any] = {"of": len(cues), "cue_snapped": 0, "warned": 0, "details": []}
-    out = [dict(c) for c in cues]
-    if not out:
-        return out, report
-
-    # 대사 구간 정리(클램프·병합) — 재료가 없으면 아무것도 안 한다.
-    dialogue: list[tuple[float, float]] = []
-    for seg in segments or []:
-        try:
-            s = float(getattr(seg, "start_sec"))
-            e = float(getattr(seg, "end_sec"))
-        except (TypeError, ValueError, AttributeError):
-            continue
-        s, e = max(0.0, s), min(float(total_sec), e)
-        if e > s:
-            dialogue.append((s, e))
-    dialogue.sort()
-    merged: list[list[float]] = []
-    for s, e in dialogue:
-        if merged and s <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], e)
-        else:
-            merged.append([s, e])
-    if not merged or float(total_sec) <= 0:
-        return out, report
-
-    def _times(c: dict) -> tuple[float, float] | None:
-        try:
-            s, e = float(c["start_sec"]), float(c["end_sec"])
-        except (TypeError, ValueError, KeyError):
-            return None
-        return (s, e) if e > s else None
-
-    def _overlap_sec(s: float, e: float) -> float:
-        return sum(max(0.0, min(e, de) - max(s, ds)) for ds, de in merged)
-
-    for i, cue in enumerate(out):
-        t = _times(cue)
-        if t is None:
-            continue
-        s, e = t
-        ov = _overlap_sec(s, e)
-        if ov <= CUE_OVERLAP_TOLERANCE_SEC:
-            continue
-        cue_len = e - s
-        # 점유물 = 대사 + (자기 자신을 뺀) 다른 cue 들의 현재 창
-        occupied = [(ds, de) for ds, de in merged]
-        for j, other in enumerate(out):
-            if j == i:
-                continue
-            to = _times(other)
-            if to is not None:
-                occupied.append(to)
-        occupied.sort()
-        occ: list[list[float]] = []
-        for os_, oe in occupied:
-            if occ and os_ <= occ[-1][1]:
-                occ[-1][1] = max(occ[-1][1], oe)
-            else:
-                occ.append([os_, oe])
-        gaps: list[tuple[float, float]] = []
-        prev = 0.0
-        for os_, oe in occ:
-            if os_ - prev >= cue_len - 1e-9:
-                gaps.append((prev, os_))
-            prev = max(prev, oe)
-        if float(total_sec) - prev >= cue_len - 1e-9:
-            gaps.append((prev, float(total_sec)))
-        detail = {"text": str(cue.get("text", ""))[:24], "from_sec": round(s, 3),
-                  "to_sec": None, "overlap_sec": round(ov, 2)}
-        if not gaps:
-            report["warned"] += 1
-            report["details"].append(detail)
-            continue
-        best = min(gaps, key=lambda g: (abs(min(max(s, g[0]), g[1] - cue_len) - s), g[0]))
-        new_s = min(max(s, best[0]), best[1] - cue_len)
-        cue["start_sec"] = round(new_s, 3)
-        cue["end_sec"] = round(new_s + cue_len, 3)
-        report["cue_snapped"] += 1
-        detail["to_sec"] = cue["start_sec"]
-        report["details"].append(detail)
-
-    # 시간순 정렬 — 깨진 cue 는 원래 자리 순서를 유지한 채 뒤로 보낸다.
-    order = sorted(range(len(out)),
-                   key=lambda i: (0, _times(out[i])[0]) if _times(out[i]) else (1, i))
-    return [out[i] for i in order], report
 
 
 # ─────────────────────────────────────────────────────────────
