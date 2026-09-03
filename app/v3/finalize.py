@@ -43,6 +43,19 @@ LABEL_MAX_SEC = 4.0               # 라벨 표시 상한 — 레퍼런스 실측
 QC_FRAME_COUNT = 4
 
 
+_CAPTION_TRAIL = ",.、。 \t"
+
+
+def narration_caption(text: str) -> str:
+    """내레이션 **자막**용 문구(순수) — 말투는 그대로 두고 화면 글자에서만 쉼표·온점을 뺀다.
+
+    2026-09-03 사용자 지시: "~데," 말투는 좋은데 자막에서는 쉼표가 안 나오는 게 낫고,
+    마지막 온점도 마찬가지. 합성(TTS)은 원문으로 이미 끝났고 story 문서도 그대로다 —
+    바뀌는 건 v3_tts.ass 에 그리는 글자뿐. 물음표·느낌표·말줄임표는 남긴다(억양 정보)."""
+    t = " ".join(str(text or "").replace(",", " ").replace("、", " ").split())
+    return t.rstrip(_CAPTION_TRAIL)
+
+
 def _style_color(hex_color: str) -> str:
     """hex → ASS Style 블록 표기(&H00BBGGRR). 인라인 태그(&H..&)와 혼동 금지."""
     return f"&H00{_hex_to_ass_color(hex_color).strip('&H&')}"
@@ -540,7 +553,7 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
         build_tts_ass(
             [SpeechSegment(start_sec=float(f["cue"]["start_sec"]),
                            end_sec=float(f["cue"]["end_sec"]),
-                           text=str(f["cue"]["text"])) for f in cue_files],
+                           text=narration_caption(str(f["cue"]["text"]))) for f in cue_files],
             tts_path, tts_style)
 
     # 괄호 라벨 — 편집실 자유 텍스트 레이어 재사용(비트 창 전체에 표시)
