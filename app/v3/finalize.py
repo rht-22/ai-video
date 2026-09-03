@@ -304,6 +304,59 @@ def detect_burned_subtitles(video_path: Path, clips: list, design, output_dir: P
 
 # ── 최종 렌더 어댑터 ────────────────────────────────────────────────────────
 
+def subject_crop_map(timeline: list[dict], *, video_path: Path,
+                     aspect_ratio: str, output_dir: Path,
+                     src_size: tuple[int, int] | None = None,
+                     log=print) -> dict[str, Path]:
+    """무성 인서트 클립의 subject_pos → 렌더러 crop_timeline_map (2026-09-02).
+
+    v3 는 얼굴 크롭이 범위 외라 전 클립 고정 **중앙** 크롭이었다 — 구석의 주 피사체
+    (실사고: GPS 폰 화면)가 세로 크롭에 통째로 잘려 나갔다. Stage 2 가 영상을 보며
+    적어 둔 subject_pos(left/right)를 그 클립의 crop x 앵커로 소비한다. 렌더러는
+    이미 crop_timeline_map 을 받게 되어 있으므로(v1 얼굴 추적과 같은 통로) 렌더
+    코드는 무변경. 키가 없는 클립 = 종전 중앙(회귀 0). 순수 재료라 재개마다 재도출
+    해도 같은 좌표다(E19-4 얼굴 회피와 같은 이유로 체크포인트에 안 남긴다)."""
+    anchored = [(i, c) for i, c in enumerate(timeline)
+                if c.get("subject_pos") in ("left", "right")]
+    if not anchored:
+        return {}
+    if src_size is None:
+        try:
+            out = subprocess.run(
+                [find_ffmpeg_command("ffprobe"), "-v", "error",
+                 "-select_streams", "v:0", "-show_entries", "stream=width,height",
+                 "-of", "csv=p=0", str(video_path)],
+                capture_output=True, text=True, check=True).stdout.strip()
+            w_s, h_s = out.split("\n")[0].split(",")[:2]
+            src_size = (int(w_s), int(h_s))
+        except Exception as e:  # noqa: BLE001 — 앵커는 부가물, 실패 = 종전 중앙
+            log(f"  [v3/render] ⚠ 소스 해상도 프로브 실패 — 피사체 앵커 생략: {e}")
+            return {}
+    src_w, src_h = src_size
+    try:
+        r_w, r_h = (int(x) for x in str(aspect_ratio).split(":"))
+    except (ValueError, AttributeError):
+        return {}
+    # 밴드 비율의 최대 크롭 — 렌더러 하류(scale increase → 중앙 crop)가 재크롭으로
+    # 앵커를 되물리지 않으려면 여기서 **정확히 밴드 비율**로 잘라야 한다
+    crop_h = src_h
+    crop_w = int(src_h * r_w / r_h) & ~1
+    if crop_w >= src_w - 2:          # 가로 여유가 없다(세로 크롭 소재) — 앵커 무의미
+        return {}
+    out_map: dict[str, Path] = {}
+    for i, c in anchored:
+        frac = 0.25 if c["subject_pos"] == "left" else 0.75
+        x_center = min(max(frac * src_w, crop_w / 2), src_w - crop_w / 2)
+        kf = [{"time_sec": 0.0, "x_center": round(x_center, 1),
+               "y_center": src_h / 2, "crop_w": crop_w, "crop_h": crop_h}]
+        p = output_dir / f"v3_crop_subject_{i}.json"
+        p.write_text(json.dumps(kf), encoding="utf-8")
+        out_map[f"{c.get('role') or 'build'}_{i}"] = p
+        log(f"  [v3/render] 피사체 앵커 clip{i} {c['subject_pos']} — "
+            f"crop x_center {x_center:.0f}/{src_w}")
+    return out_map
+
+
 def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                  segments: list[dict], resources: dict, story_doc: dict,
                  output_dir: Path, out_name: str = "final_1080x1920.mp4",
@@ -466,19 +519,36 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     # 괄호 라벨 — 편집실 자유 텍스트 레이어 재사용(비트 창 전체에 표시)
     # 라벨 — 계획은 공용(plan_labels), 위치는 Stage 4 가 화면을 보고 정한 값을 쓴다
     # (M12: 가운데 고정이면 인물 얼굴·방송 자막을 덮는다는 사용자 지적).
-    placed = {int(x["index"]): x for x in (style_doc.get("v3_style") or {}).get("labels")
-              or [] if isinstance(x, dict) and x.get("index") is not None}
+    style_labels = (style_doc.get("v3_style") or {}).get("labels") or []
+    # M16(2026-09-01): text 를 가진 라벨은 Stage 4 가 **직접 쓴** 것 — 문구·시각·
+    # 위치가 한 몸이라 그대로 쓴다. index 만 가진 라벨은 구 체크포인트(M12 —
+    # Stage 3 문구 + Stage 4 위치)라 종전 병합 경로로 — 재렌더 회귀 0.
+    authored = [x for x in style_labels
+                if isinstance(x, dict) and isinstance(x.get("text"), str)]
+    placed = {int(x["index"]): x for x in style_labels
+              if isinstance(x, dict) and x.get("index") is not None
+              and x.get("text") is None}
     labels = []
-    for lb in plan_labels(story_doc, plan):
-        pos = placed.get(lb["index"]) or {}
-        labels.append({"text": lb["text"], "start_sec": lb["start_sec"],
-                       "end_sec": lb["end_sec"],
-                       "x": float(pos.get("x", 0.5)),
-                       "y": float(pos.get("y", LABEL_Y_RATIO)),
-                       "rotate": float(pos.get("rotate", 0.0)),
+    for lb in authored:
+        labels.append({"text": lb["text"], "start_sec": float(lb["start_sec"]),
+                       "end_sec": float(lb["end_sec"]),
+                       "x": float(lb.get("x", 0.5)),
+                       "y": float(lb.get("y", LABEL_Y_RATIO)),
+                       "rotate": float(lb.get("rotate", 0.0)),
                        "size": stage4.LABEL_SIZE, "stroke": "dark_thick",
-                       "fx": str(pos.get("fx") or "pop"),
-                       "color": str(pos.get("color") or _cycle_color(lb["index"]))})
+                       "fx": str(lb.get("fx") or "pop"),
+                       "color": str(lb.get("color") or _cycle_color(len(labels)))})
+    if not authored:
+        for lb in plan_labels(story_doc, plan):
+            pos = placed.get(lb["index"]) or {}
+            labels.append({"text": lb["text"], "start_sec": lb["start_sec"],
+                           "end_sec": lb["end_sec"],
+                           "x": float(pos.get("x", 0.5)),
+                           "y": float(pos.get("y", LABEL_Y_RATIO)),
+                           "rotate": float(pos.get("rotate", 0.0)),
+                           "size": stage4.LABEL_SIZE, "stroke": "dark_thick",
+                           "fx": str(pos.get("fx") or "pop"),
+                           "color": str(pos.get("color") or _cycle_color(lb["index"]))})
     texts_path = None
     if labels:
         texts_path = output_dir / "v3_labels.ass"
@@ -504,11 +574,33 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
 
     out_path = output_dir / out_name
     audio_mix = plan.get("audio_mix") or {}
+    # 얼굴 크롭은 여전히 범위 외(발주서) — 이 맵은 무성 인서트의 **피사체 앵커**만
+    # 싣는다(subject_crop_map 독스트링 참조). 앵커 없는 판은 빈 dict = 종전 그대로.
+    crop_map = subject_crop_map(plan["timeline"], video_path=Path(video_path),
+                                aspect_ratio=design.aspect_ratio,
+                                output_dir=output_dir, log=log)
+    # 내레이션 시작 효과음 — cue 와 같은 믹스 경로(E19-5 sfx_audio)를 탄다.
+    # 번들에 narration_manifest.json 이 없으면 빈 리스트라 RenderInputs 도 필터그래프도
+    # 종전과 완전히 같다. 자리는 cue_files 가 확정된 뒤(존재하는 파일만 남은 목록) —
+    # 리드인 실측이 그 mp3 를 읽어야 한다.
+    try:
+        from app.modules.sfx_narration import place_narration_sfx
+        _narr_sfx = place_narration_sfx(
+            cue_files, app_root=_root, run_dir=output_dir,
+            seed=output_dir.name,
+            speed=float(getattr(design, "video_speed", 1.0) or 1.0))
+    except Exception as _e:                    # 효과음 때문에 편이 죽지 않는다
+        log(f"  [sfx-narration] 배치 실패 — 효과음 없이 계속: {_e}")
+        _narr_sfx = []
+    for _s in _narr_sfx:
+        _n = _s["_narration"]
+        log(f"  [sfx-narration] cue{_n['cue_index']} {_n['tag']} {_s['start_sec']:.3f}s "
+            f"← {_n['id']} (리드인 {_n['lead_in_sec']*1000:.0f}ms, 피크 {_n['peak_sec']*1000:.0f}ms)")
     inputs = RenderInputs(
         video_path=Path(video_path),
         clips=clips,
         subtitle_path=sub_path,
-        crop_timeline_map={},                    # 얼굴 크롭은 범위 외(발주서)
+        crop_timeline_map=crop_map,
         title_text=(plan.get("layout") or {}).get("top_title") or "",
         work_title=(plan.get("layout") or {}).get("bottom_label") or "",
         output_path=out_path,
@@ -522,12 +614,14 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
         tts_audio_gain_db=int(audio_mix.get("tts_gain_db", -3)),
         text_subtitle_path=texts_path,
         muted_windows=muted_windows or None,
+        sfx_audio=_narr_sfx or None,
     )
     t0 = time.time()
     render_short(inputs)
     cost = {"elapsed": round(time.time() - t0, 1), "bytes": out_path.stat().st_size,
             "clips": len(clips), "cues": len(cue_files),
-            "muted_windows": len(inputs.muted_windows or []), "labels": len(labels)}
+            "muted_windows": len(inputs.muted_windows or []), "labels": len(labels),
+            "subject_anchor_clips": len(crop_map)}
     log(f"  [v3/render] {out_path.name} — {cost['elapsed']}s · "
         f"{cost['bytes'] // (1024 * 1024)}MB")
     return out_path, cost
@@ -575,7 +669,10 @@ def check_tts_conflicts(resources: dict, plan: dict, stage2_doc: dict,
             if not sp or not sp["is_audio"] or sid in muted \
                     or sp["importance"] <= MUTE_MAX_IMPORTANCE:
                 continue
-            if min(c1, sp["t_out"]) - max(c0, sp["t_in"]) > 0.01:
+            # 허용치는 리소스의 물리 트림 임계(+0.05 '잘림 감수')와 같은 자여야
+            # 한다 — 0.01 로 재면 시스템이 스스로 허용한 0.04s 삐짐이 hard_fail 로
+            # 승격된다(2026-09-02 EP02 실사고).
+            if min(c1, sp["t_out"]) - max(c0, sp["t_in"]) > 0.06:
                 violations.append({"cue_beat": cue.get("beat"), "span": sid,
                                    "importance": sp["importance"]})
     return {"checked_cues": len(resources.get("tts_cue_files") or []),

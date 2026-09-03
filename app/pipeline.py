@@ -4820,6 +4820,44 @@ def run_pipeline(payload: PipelineInput, from_step: str | None = None, job_id: s
             raise FileNotFoundError("체크포인트 파일이나 edit_plan.json을 찾을 수 없습니다.")
 
     # ═══════════════════════════════════════
+    # [sfx] 내레이션 시작 효과음 (2026-09-02)
+    # ═══════════════════════════════════════
+    # 자리: face avoid 와 같은 이유로 **리소스 3분기가 수렴한 직후** — tts_cue_files 가
+    # 어느 경로(생성·캐시·재개)로 왔든 확정됐다. 생성 분기 안에 두면 `--from-step render`
+    # 가 캐시 else 로 빠지며 효과음만 조용히 사라진다(E19-4 가 겪은 그 버그다).
+    #
+    # AI 선택 경로(_style_plan["sfx"])와 **더한다**. 둘은 붙는 자리가 다르고
+    # (감정 비트 vs 내레이션 시작) 매니페스트 파일부터 분리돼 있다 —
+    # `manifest.json` 이 없으면 AI 경로는 꺼진 채이고 이쪽만 동작한다.
+    # 번들에 narration_manifest.json 이 없으면 빈 리스트라 렌더는 종전과 완전히 같다.
+    try:
+        from app.modules.sfx_narration import place_narration_sfx
+        _narr_sfx = place_narration_sfx(
+            tts_cue_files, app_root=paths.app_root, run_dir=output_dir,
+            seed=output_dir.name, speed=_speed)
+    except Exception as _e:                     # 효과음 때문에 편이 통째로 죽지 않는다
+        print(f"  [sfx-narration] 배치 실패 — 효과음 없이 계속: {_e}")
+        _narr_sfx = []
+    if _narr_sfx:
+        _sfx_audio = list(_sfx_audio) + _narr_sfx
+        for _s in _narr_sfx:
+            _n = _s["_narration"]
+            print(f"  [sfx-narration] cue{_n['cue_index']} {_n['tag']} "
+                  f"{_s['start_sec']:.3f}s ← {_n['id']} "
+                  f"(리드인 {_n['lead_in_sec']*1000:.0f}ms, 피크 {_n['peak_sec']*1000:.0f}ms)")
+        # 어느 소리가 어디에 붙었는지 남긴다 — 검수함에서 '이 편만 다르다'를 추적하려면
+        # 선택 결과가 산출물에 있어야 한다(TTS 백엔드 기록과 같은 규율).
+        run_log["steps"].append({
+            "step": "sfx_narration",
+            "placed": [{"cue_index": _s["_narration"]["cue_index"],
+                        "id": _s["_narration"]["id"],
+                        "tag": _s["_narration"]["tag"],
+                        "start_sec": _s["start_sec"],
+                        "lead_in_sec": _s["_narration"]["lead_in_sec"]}
+                       for _s in _narr_sfx],
+        })
+
+    # ═══════════════════════════════════════
     # [face avoid] E19-4 AI 라벨 얼굴 회피 (2026-08-28)
     # ═══════════════════════════════════════
     # 자리: 리소스 **3분기(캐시 로드·생성·재개 폴백)가 수렴한 직후** — crop_map(얼굴 박스의

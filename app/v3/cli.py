@@ -87,6 +87,14 @@ def main(argv: list[str] | None = None) -> int:
 
     from app.v3.pipeline import run_v3
     out = run_v3(video_path=video, work_title=args.work_title,
+    # 자격 검사 전에 프로젝트 .env 를 로드한다 — pipeline·gemini_client 와 같은
+    # 위치. 여기만 안 읽으면 .env 에 키가 있어도 사전검사가 거짓 실패한다
+    # (2026-09-02 실사고: shell env 없이 .env 만 있는 실행이 시작도 못 함).
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
+    except ImportError:
+        pass
                  outdir=Path(args.outdir), srt_path=srt, episode=args.episode,
                  job_id=args.job_id, from_step=args.from_step,
                  skip_research=args.skip_research,

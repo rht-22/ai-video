@@ -5,7 +5,7 @@
 공유 모듈을 import 재사용만 하고 기존 코드를 한 줄도 바꾸지 않는다.
 
 M1 범위(이 커밋): 정본 격자(grid) + Stage 1(seq_analyze).
-  schemas     시각 표기·스냅·커버리지 검증(순수) — 933초 방어의 관문
+  schemas     시각 표기·스냅·커버리지 검증(순수) — 시각 환각 방어의 관문
   audio       PCM 로드·silencedetect 구간 목록
   arousal     정서 곡선(전 장르 공통 오디오 피처 — 소비는 M3)
   transcribe  단어 타임스탬프 전사(speech 설정 재사용) + 실패 창 커버리지

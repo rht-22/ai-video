@@ -211,14 +211,23 @@ def validate_stage2_response(resp: Any, chunk_spans: list[dict], *,
             if not isinstance(sp_imp, int) or isinstance(sp_imp, bool) \
                     or not 1 <= sp_imp <= 5:
                 sp_imp = imp
-            spans_out.append({
+            # 주 피사체 가로 위치(2026-09-02) — 무성 인서트의 크롭 앵커 재료.
+            # 선택 필드·관용: 값이 이상하면 키만 버린다(중앙 폴백 = 종전과 동일).
+            subj = entry.get("subject_pos")
+            if subj is not None and subj not in ("left", "center", "right"):
+                notes.append(f"{sid} subject_pos {subj!r} 폐기(left/center/right 만)")
+                subj = None
+            row = {
                 "span_id": sid,
                 "scene_script": str(entry.get("scene_script") or "").strip(),
                 "characters": _name_list(entry.get("characters"), notes, sid),
                 "importance": sp_imp,
                 "audio": audio,
                 "heard": list(audio) if gsp["is_audio"] else [],
-            })
+            }
+            if subj:
+                row["subject_pos"] = subj
+            spans_out.append(row)
         if missing:
             if final_attempt:
                 notes.append(f"meanings[{k}] span 상세 누락 {len(missing)}건 — 전사 "
@@ -430,6 +439,8 @@ def assemble_chunk_meanings(norm: list[dict], chunk_spans: list[dict]) -> list[d
                 "characters": s["characters"],
                 "importance": s["importance"],
                 "time_authority": gsp["time_authority"],
+                **({"subject_pos": s["subject_pos"]}
+                   if s.get("subject_pos") else {}),          # additive — 크롭 앵커 재료
             })
         out.append({
             "number": num,
@@ -478,7 +489,8 @@ PROMPT_TEMPLATE = """당신은 방송 영상의 장면 기록가다. 첨부한 �
 {research_block}## 이 편의 구조 (Stage 1)
 {stage1_block}
 
-## 이 청크의 span 목록 (id | 시각 | 유성/무성 | 전사)
+## 이 청크의 span 목록 (id | **영상 내 시각** | 유성/무성 | 전사)
+⚠ 아래 시각은 **첨부 영상 자체의 시계**다(첨부 영상 0:00 = 원본 {chunk_start_abs}).
 전사는 시각(span 경계)의 근거다. 대사 텍스트는 아래 heard 로 당신이 들은 것을 적고, 확정은 코드에 맡긴다.
 {span_table}
 {faces_block}
@@ -486,7 +498,11 @@ PROMPT_TEMPLATE = """당신은 방송 영상의 장면 기록가다. 첨부한 �
 1. 연속한 span 들을 하나의 meaning 으로 묶어라 — "누가 무엇을 하고 있다"가 바뀌는 지점이 경계다. 이 청크의 **모든 span 이 정확히 하나의 meaning** 에 속해야 한다(빈틈·겹침 금지).
 2. meaning 마다: content(한 문장) · characters(등장인물명) · importance(1~5, 이야기 기여도) · mood(한 단어).
 3. span 마다: scene_script(화면 묘사 한 문장) · characters · importance(1~5) · heard(유성 span 만 — **당신이 실제로 들은 대사**를 화자와 함께 적어라. 무성 span 은 생략).
+   ⚠ **scene_script 는 화면에 보이는 것만 적어라.** 확실치 않으면 "쓰러진 사람 형체"·"~로 보이는 것" 처럼 남겨라 — 작품 배경(시놉시스)은 인명·관계 표기용이지 **화면 해석용이 아니다**. 배경 지식이 아는 사건(살인·불륜 등)을 화면이 실제로 보여주기 전에 단정해 적으면 기록이 거짓말을 하고, 그 거짓이 편성과 제목까지 흘러간다.
+   ⚠ **묘사는 그 span 의 영상 내 시각으로 실제로 이동해 확인하고 적어라** — 이야기 흐름으로 짐작해 앞당겨 적지 마라(실사고: 뒤에 나올 장면을 14초 이른 span 에 적었다).
+   ⚠ **조각 안에서 화자가 바뀌면 heard 를 화자별 여러 행으로**, 말한 순서대로 나눠 적어라 — 자막이 화자별 색을 입히는 근거다(한 행에 뭉치면 뒷사람 대사가 앞사람 색으로 나간다).
    ⚠ heard 는 전사를 베끼는 칸이 아니다. 위 전사표는 참고일 뿐이고, **들리는 대로** 적어라 — 전사가 잡음·음악에 망가져 있을 수 있다(같은 말이 수십 번 반복되는 등). 최종 대사는 코드가 전사와 당신의 heard 를 대조해 확정하니, 당신은 각색하지 말고 들은 것만 정확히 옮기면 된다.
+4. **무성 span 한정, 선택 필드** subject_pos: 그 span 의 주 피사체(화면이 보여주려는 대상 — 물건·화면·손 등)가 프레임 가로 어디에 있는지 "left"/"center"/"right" 로 적어라. **중앙에서 뚜렷이 벗어난 경우에만** 적고, 애매하면 생략하라(생략 = 중앙 취급). 세로 쇼츠 크롭이 이 값으로 잘리는 쪽을 정한다 — 구석의 피사체가 크롭에 잘려 나가는 것을 막는 재료다.
 {reject_block}
 ## 출력 (JSON 만)
 {{"meanings": [
@@ -494,7 +510,9 @@ PROMPT_TEMPLATE = """당신은 방송 영상의 장면 기록가다. 첨부한 �
     "content": "…", "characters": ["이름"], "importance": 4, "mood": "긴장",
     "spans": [
       {{"id": "sp0000", "scene_script": "…", "characters": ["이름"], "importance": 3,
-        "heard": [{{"speaker": "이름", "line": "들은 대사 그대로"}}]}}
+        "heard": [{{"speaker": "이름", "line": "들은 대사 그대로"}}]}},
+      {{"id": "sp0001", "scene_script": "…", "characters": [], "importance": 4,
+        "subject_pos": "right"}}
     ]}}
 ]}}"""
 
@@ -524,12 +542,16 @@ def build_stage2_prompt(chunk: dict, stage1_doc: dict, chunk_spans: list[dict],
         s1_lines.append(f"- seq{sq['number']} {sq['time']['start']}~{sq['time']['end']}: "
                         f"{sq['content']}{mark}")
     span_lines = []
+    # 시각은 **청크 상대**(첨부 영상 자체 시계)로 적는다(2026-09-01 실사고: 절대
+    # 시각 표 + 0:00 시작 영상 = 모델이 span 마다 오프셋 암산 — 후반에서 내용
+    # 귀속이 ~14초 밀렸다. 표와 영상의 시계를 일치시키면 암산이 사라진다).
+    _c0 = float(chunk["start_sec"])
     for sp in chunk_spans:
         kind = "유성" if sp["is_audio"] else "무성"
         text = sp.get("text") or "—"
         span_lines.append(
-            f"{sp['id']} | {schemas.format_ts(float(sp['t_in']))}~"
-            f"{schemas.format_ts(float(sp['t_out']))} | {kind} | {text}")
+            f"{sp['id']} | {schemas.format_ts(max(0.0, float(sp['t_in']) - _c0))}~"
+            f"{schemas.format_ts(max(0.0, float(sp['t_out']) - _c0))} | {kind} | {text}")
 
     faces_block = ""
     if appearances:
@@ -547,6 +569,7 @@ def build_stage2_prompt(chunk: dict, stage1_doc: dict, chunk_spans: list[dict],
     if reject_note:
         reject_block = f"\n## ⚠ 직전 제안 반려 사유 — 전부 고쳐서 다시 내라\n{reject_note}\n"
     return PROMPT_TEMPLATE.format(research_block=research_block,
+                                  chunk_start_abs=schemas.format_ts(float(chunk["start_sec"])),
                                   stage1_block="\n".join(s1_lines),
                                   span_table="\n".join(span_lines),
                                   faces_block=faces_block,
@@ -583,6 +606,113 @@ def _call_stage2_model(gemini, uploaded, prompt: str) -> dict:
             "응답 JSON 파싱 실패"
             + (f" (MAX_TOKENS 절단: {truncated})" if truncated else "")
             + f": {e} — 앞 200자: {text[:200]!r}") from e
+
+
+# ── 내용-시각 정합 벨트 (2026-09-01) ────────────────────────────────────────
+# 실사고: 모델이 청크 후반에서 내용을 ~14초 이른 span 에 귀속(피 웅덩이를 걷는
+# 장면 시각에 기록). "시각정합 100%" 는 span 산술만 봤지 픽셀은 아무도 안 봤다.
+# 대사의 전사 diff 가드와 대칭인 **화면판 가드**: 표본 span 의 실제 프레임을 뽑아
+# scene_script 와 Flash 로 대조 — 불일치가 많으면 반려(증거를 실어 재질의).
+BINDING_SAMPLE_COUNT = 4
+BINDING_REJECT_MIN = 2         # 표본 중 이만큼 불일치면 그 청크 반려
+BINDING_QUANTILES = (0.2, 0.5, 0.8, 0.95)   # 후반 편중 — 드리프트가 크는 곳
+
+_BINDING_PROMPT = """각 이미지가 딸린 묘사와 맞는지 판정하라. 묘사가 그 화면의 내용을
+대체로 가리키면 match true — 조명·각도 차이는 관용하되, **다른 사건·다른 피사체**면
+false 다. JSON 만: [{"i": 0, "match": true, "seen": "실제로 보이는 것 한 줄"}]"""
+
+
+def sample_binding_spans(norm: list[dict], chunk_spans: list[dict],
+                         *, count: int = BINDING_SAMPLE_COUNT) -> list[dict]:
+    """검증 표본 — scene_script 있는 무성 span 을 분위수 자리(후반 편중)에서. 순수."""
+    by_id = {sp["id"]: sp for sp in chunk_spans}
+    cands = []
+    for m in norm or []:
+        for sp in m.get("spans") or []:
+            # norm 은 span_id, 모델 원응답은 id — 둘 다 받는다(실사고: id 만 읽어
+            # 표본이 항상 비었고 벨트가 전 청크 스킵됐다)
+            base = by_id.get(sp.get("span_id") or sp.get("id"))
+            if base is None or base.get("is_audio"):
+                continue
+            script = str(sp.get("scene_script") or "").strip()
+            if script:
+                cands.append({"id": sp.get("span_id") or sp.get("id"),
+                              "scene_script": script,
+                              "t_in": float(base["t_in"]),
+                              "t_out": float(base["t_out"])})
+    if not cands:
+        return []
+    cands.sort(key=lambda x: x["t_in"])
+    picked: list[dict] = []
+    for q in BINDING_QUANTILES[:count]:
+        c = cands[min(len(cands) - 1, int(q * (len(cands) - 1)))]
+        if c not in picked:
+            picked.append(c)
+    return picked
+
+
+def binding_problems(details: list[dict]) -> list[str]:
+    """불일치 → 반려 사유(증거 포함). 순수."""
+    out = []
+    for d in details:
+        if d.get("match"):
+            continue
+        out.append(f"{d['id']} 의 scene_script(\"{d['scene_script'][:40]}…\")가 그 "
+                   f"시각의 실제 화면(\"{str(d.get('seen') or '')[:40]}\")과 다르다 — "
+                   "내용이 이른 시각에 귀속됐다. 각 span 의 **영상 내 시각으로 실제로 "
+                   "이동해** 확인하고 다시 묶어라")
+    return out
+
+
+def verify_scene_binding(gemini, chunk_file: Path, chunk: dict, norm: list[dict],
+                         chunk_spans: list[dict], log=print) -> dict:
+    """표본 프레임 ↔ scene_script 대조. 실패는 skip(경고 모드 — QC 규약)."""
+    import subprocess
+    import tempfile
+
+    samples = sample_binding_spans(norm, chunk_spans)
+    if not samples:
+        return {"status": "skipped", "reason": "무성 표본 없음"}
+    from app.modules.ffmpeg_utils import find_ffmpeg_command
+    ffmpeg = find_ffmpeg_command("ffmpeg")
+    c0 = float(chunk["start_sec"])
+    tmp = Path(tempfile.mkdtemp(prefix="v3_binding_"))
+    frames: list[Path] = []
+    try:
+        for i, sp in enumerate(samples):
+            rel = max(0.0, (sp["t_in"] + sp["t_out"]) / 2.0 - c0)
+            f = tmp / f"b{i}.jpg"
+            subprocess.run([ffmpeg, "-y", "-ss", f"{rel:.3f}", "-i", str(chunk_file),
+                            "-frames:v", "1", "-vf", "scale=480:-2", "-q:v", "5",
+                            str(f)], check=True, capture_output=True)
+            frames.append(f)
+    except Exception as e:  # noqa: BLE001
+        return {"status": "skipped", "reason": f"프레임 추출 실패: {e}"}
+    types = gemini.types
+    parts = []
+    for i, (f, sp) in enumerate(zip(frames, samples)):
+        parts.append(types.Part.from_bytes(data=f.read_bytes(), mime_type="image/jpeg"))
+        parts.append(f"이미지 {i} — {sp['id']} 의 묘사: {sp['scene_script']}")
+    parts.append(_BINDING_PROMPT)
+    try:
+        resp = gemini.client.models.generate_content(
+            model=gemini.config.flash_model_name, contents=parts,
+            config=types.GenerateContentConfig(
+                temperature=0.0, response_mime_type="application/json",
+                max_output_tokens=2048))
+        from app.modules.gemini_client import _extract_json_from_markdown
+        verdicts = json.loads(_extract_json_from_markdown(resp.text or ""))
+        assert isinstance(verdicts, list)
+    except Exception as e:  # noqa: BLE001 — 벨트 실패가 분석을 막지 않는다
+        return {"status": "skipped", "reason": f"판정 실패: {type(e).__name__}: {e}"}
+    details = []
+    for i, sp in enumerate(samples):
+        v = next((x for x in verdicts if isinstance(x, dict) and x.get("i") == i), {})
+        details.append({**sp, "match": bool(v.get("match")),
+                        "seen": str(v.get("seen") or "")[:80]})
+    mismatch = sum(1 for d in details if not d["match"])
+    return {"status": "ok", "checked": len(details), "mismatch": mismatch,
+            "details": details}
 
 
 def run_chunk_analyze(gemini, chunk_file: Path, chunk: dict, stage1_doc: dict,
@@ -626,6 +756,25 @@ def run_chunk_analyze(gemini, chunk_file: Path, chunk: dict, stage1_doc: dict,
                 log(f"  [v3/stage2] {audit['chunk']} 반려 — 사유 {len(problems)}건")
                 reject_note = "\n".join(f"- {p}" for p in problems[:20])
                 continue
+
+            # 내용-시각 정합 벨트 — 표본 프레임 ↔ scene_script 대조(화면판 전사 가드)
+            binding = verify_scene_binding(gemini, chunk_file, chunk, norm,
+                                           chunk_spans, log=log)
+            rec["scene_binding"] = {k: v for k, v in binding.items()
+                                    if k != "details"} | {
+                "details": [{"id": d["id"], "match": d["match"], "seen": d["seen"]}
+                            for d in binding.get("details") or []]}
+            if binding.get("status") == "ok" \
+                    and binding["mismatch"] >= BINDING_REJECT_MIN and not final:
+                problems = binding_problems(binding["details"])
+                log(f"  [v3/stage2] {audit['chunk']} 시각 귀속 불일치 "
+                    f"{binding['mismatch']}/{binding['checked']} — 반려(증거 첨부)")
+                reject_note = "\n".join(f"- {p}" for p in problems[:20])
+                audit["attempts"][-1]["problems"] = problems
+                continue
+            if binding.get("status") == "ok" and binding["mismatch"]:
+                log(f"  [v3/stage2] {audit['chunk']} ⚠ 시각 귀속 불일치 "
+                    f"{binding['mismatch']}/{binding['checked']} — 기록만(최종 시도)")
 
             decisions = adjudicate_transcript(norm, chunk_spans, grid.get("words"))
             meanings = assemble_chunk_meanings(norm, chunk_spans)

@@ -117,7 +117,7 @@ def heuristic_hints(grid: dict) -> dict:
     return out
 
 
-PROMPT_TEMPLATE = """당신은 방송 영상의 구조 분석가다. 첨부한 영상 전체(초저fps 프록시)를 훑고, 아래 격자 요약을 참고해 **구조만** 잡아라. 장면의 재미 판단은 하지 않는다.
+PROMPT_TEMPLATE = """당신은 방송 영상의 구조 분석가다. 첨부한 영상 전체(초저fps 프록시)를 훑고, 아래 격자 요약을 참고해 구조를 잡아라. 장면의 재미 판단은 과제 4(쇼츠감 지명)에서만 한다.
 
 {research_block}## 격자 요약
 {grid_summary}
@@ -133,6 +133,7 @@ PROMPT_TEMPLATE = """당신은 방송 영상의 구조 분석가다. 첨부한 �
    - 화면에 콜라주/장식 프레임 테두리, 스태프롤·제작진 자막 병행, "다음 이야기/다음 화" 문구, 본편 흐름과 단절된 빠른 몽타주(장소·의상이 컷마다 바뀜)가 보이면 예고다.
    - ⚠ 예고의 **시작은 장식 프레임이 뜨는 순간이 아니다** — 본편 서사가 끝난 뒤 예고 소재(다른 날/다른 장소 장면의 나열)가 시작되는 **첫 컷**이다. 예고 몽타주는 종종 본편처럼 보이는 하이라이트 컷으로 문을 연다.
    - 말미 3분 안에서 위 신호가 보이면 그 몽타주 **전체**를 teaser 로 잡아라. 경계가 불확실하면 **이른 쪽**(본편을 덜 남기는 쪽)을 골라라 — 본편에 예고가 새어 들어가는 것이 예고를 조금 잘라내는 것보다 훨씬 나쁘다.
+4. **shorts_candidates** — 훑는 김에, 이 회차에서 **쇼츠로 만들 만한 상황** 4~8개를 지명하라. 항목마다: approx_time(대략 "HH:MM:SS" — 편집에 쓰지 않는 지명일 뿐이니 정확할 필요 없다) · situation(무슨 상황인지 한 줄) · why(왜 강한지 한 구절 — 반전·미스터리·코믹·감정 폭발 등). **회차 전체를 놓고 상대 비교**해 골라라 — 뒤 단계는 청크 칸막이 안만 보므로, 전역 비교는 여기서만 가능하다(사람 편집자가 정밀 컷 전에 한 번 훑으며 "이거 쇼츠각"을 찍는 그 단계다).
 
 ## 규칙 (위반하면 반려된다)
 - 모든 시각은 "HH:MM:SS.mmm". 경계는 격자 요약의 장면 전환 시각 근처(±2초)로만.
@@ -148,7 +149,10 @@ PROMPT_TEMPLATE = """당신은 방송 영상의 구조 분석가다. 첨부한 �
       "content": "…", "chunks": [{{"number": 0, "time": {{"start": "00:00:00.000", "end": "00:12:12.000"}}}}]}}
   ],
   "exception_sector": {{"intro": null, "recap": null,
-    "teaser": {{"start": "…", "end": "…"}}, "credit": {{"start": "…", "end": "…"}}, "end": null}}
+    "teaser": {{"start": "…", "end": "…"}}, "credit": {{"start": "…", "end": "…"}}, "end": null}},
+  "shorts_candidates": [
+    {{"approx_time": "00:31:20", "situation": "마당의 정체불명 덮개를 여는 부부", "why": "미스터리+코믹"}}
+  ]
 }}"""
 
 
@@ -394,10 +398,31 @@ def _call_model(gemini, uploaded, prompt: str) -> dict:
             + f": {e} — 앞 200자: {text[:200]!r}") from e
 
 
+def extract_shorts_candidates(raw: Any, cap: int = 12) -> list[dict]:
+    """Stage 1 응답의 쇼츠감 지명 목록 — 관용 추출(2026-09-02 생성 레버).
+
+    시각은 **스냅하지 않는다** — 경계가 아니라 지명이고, Stage 3 프롬프트에 "대략
+    이 근처의 이 상황"으로만 실린다(확정 시각은 언제나 격자·Stage 2 몫). 형식이
+    깨진 항목은 조용히 버린다(부가 재료라 반려 사유가 아니다)."""
+    out: list[dict] = []
+    for it in (raw or {}).get("shorts_candidates") or []:
+        if not isinstance(it, dict):
+            continue
+        situation = str(it.get("situation") or "").strip()[:80]
+        if not situation:
+            continue
+        out.append({"approx_time": str(it.get("approx_time") or "").strip()[:12],
+                    "situation": situation,
+                    "why": str(it.get("why") or "").strip()[:60]})
+        if len(out) >= cap:
+            break
+    return out
+
+
 def run_seq_analyze(gemini, scan_proxy: Path, grid: dict, *,
                     research_context: str = "", log=print) -> tuple[dict, dict]:
     """Stage 1 실행 → (stage1 doc, 감사 기록). 재질의 소진 시 RuntimeError(조용한
-    통과 금지 — 933 방어가 이 관문이다)."""
+    통과 금지 — **시각 환각 방어**가 이 관문이다. 유래: 모델이 소스 875초짜리 영상에 933~997초 타임스탬프를 지어낸 실사고 — 그래서 모델의 시각은 절대 믿지 않고 코드가 격자에서 확정한다)."""
     duration = float(grid["source"]["duration_sec"])
     grid_times = grid_snap_times(grid)
     hints = heuristic_hints(grid)
@@ -444,6 +469,8 @@ def run_seq_analyze(gemini, scan_proxy: Path, grid: dict, *,
             })
             if not problems:
                 doc = schemas.to_stage1_doc(snapped)
+                doc["shorts_candidates"] = extract_shorts_candidates(raw)
+                audit["shorts_candidates"] = len(doc["shorts_candidates"])
                 audit["heuristic_mismatch"] = hint_mismatch(
                     hints, snapped["exception_sector"])
                 return doc, audit

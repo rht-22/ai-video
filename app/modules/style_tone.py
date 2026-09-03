@@ -278,11 +278,21 @@ _ENDING_TEXT = {
         "- 엔딩: 마지막 클립은 마지막 대사(또는 감탄 리액션)가 끝나는 지점에서 **즉시** "
         "끝나야 한다. 여운·정적 꼬리를 남기지 마라(루프 재생 유도).",
 }
-_NARRATION_TONE_TEXT = {
+# 문체 문구는 **본체 + 꼬리**로 나눠 둔다 — 꼬리가 "위 [텍스트 톤] 절"처럼 구 엔진
+# 프롬프트의 절 이름을 가리키기 때문이다. v3 프롬프트에는 그 절이 없어서 그대로 실으면
+# 모델이 없는 절을 찾는다. 합친 문자열(_NARRATION_TONE_TEXT)은 종전과 바이트 동일하다.
+_NARRATION_TONE_CORE = {
     "recall_first_person":
         "- 문체: **1인칭 회상체 초단문**. 주인공 시점 과거형으로 전환·반전만 잇는 접착제형 "
         "cue 다(예: \"고민하는데\", \"물어본 선임을 찍었죠\", \"지목당했고\"). 설명형·"
-        "헤드라인체 금지. 위 [텍스트 톤] 절의 권장 결(명사형 종결 등)보다 **이 문체가 이긴다**.",
+        "헤드라인체 금지.",
+}
+_NARRATION_TONE_TAIL_LEGACY = (
+    " 위 [텍스트 톤] 절의 권장 결(명사형 종결 등)보다 **이 문체가 이긴다**.")
+_NARRATION_TONE_TAIL_V3 = (
+    " 위 규칙 4 의 서술체(~했어요/~했죠)보다 **이 문체가 이긴다**.")
+_NARRATION_TONE_TEXT = {
+    k: v + _NARRATION_TONE_TAIL_LEGACY for k, v in _NARRATION_TONE_CORE.items()
 }
 _CATEGORY_TEXT = {
     "state_paren":
@@ -400,4 +410,84 @@ def style_prompt_block(tone: StyleTone | None) -> str:
         lines.append(
             "- ⚠ 페이오프(핵심 대답·반전·카타르시스) 구간에는 **아무 연출도 얹지 마라** — "
             "웃기는 것은 대사 자신이다. 연출은 그 앞뒤에서 비켜선다.")
+    return "\n".join(lines) + "\n"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# v3 후크 — Stage 3(story) 프롬프트에 덧붙는 절
+# ══════════════════════════════════════════════════════════════════════════
+# story_prompt_block() 은 구 엔진 어휘(cue·clip·start_sec)로 쓰여 있어 v3 에 그대로
+# 실을 수 없다. v3 는 **시각 비접촉**이라 모델이 cue 시각을 못 쓰고, 내레이션은
+# 비트별 짧은 문장 배열이며 슬롯 배치는 코드가 한다(ⓐ무성 → ⓑ뮤트 → ⓒ드랍).
+# 그래서 같은 프로파일에서 **v3 어휘로 번역되는 노브만** 싣는다.
+#
+# 비적용 노브를 조용히 삼키면 '프리셋 적용했는데 왜 그대로지'가 된다(이 모듈 §머리말
+# 규율). v3_unapplied_knobs() 가 목록을 돌려주고 파이프라인이 로그·run_log 에 남긴다.
+V3_APPLIED_KNOBS = (
+    "narration.tone", "narration.cue_len_chars", "narration.max_cues",
+    "narration.relay_rule", "story.title_tone", "story.ending",
+    "story.hook_max_sec", "story.hook_title_scene",
+)
+
+
+def v3_unapplied_knobs(tone: StyleTone | None) -> list[str]:
+    """이 프로파일에서 **v3 Stage 3 에 실리지 않는** 노브 목록(사유 포함).
+
+    빈 목록이 아니면 호출부가 로그로 알린다 — 켠 줄 알았는데 안 켜진 노브를
+    사람이 모르고 지나가면 안 된다."""
+    if tone is None:
+        return []
+    out: list[str] = []
+    if tone.narration.get("placement"):
+        out.append("narration.placement(코드가 강제 — v3 는 무성/뮤트 슬롯에만 얹는다)")
+    if tone.narration.get("fill_gaps"):
+        out.append("narration.fill_gaps(v3 는 슬롯을 코드가 찾는다 — 문장을 늘리면 "
+                   "드랍이 늘고 루브릭이 감점한다)")
+    if tone.story.get("structure"):
+        out.append(f"story.structure({tone.story['structure']} — v3 는 스토리 템플릿이 "
+                   "구조를 정한다. --story-templates 를 쓴다)")
+    if tone.story.get("payoff_longtake"):
+        out.append("story.payoff_longtake(템플릿 문구가 이미 담고 있다)")
+    if tone.labels:
+        out.append("labels.*(v3 라벨은 Stage 3 규칙 5 + Stage 4 프리셋 소관)")
+    for opt in ("sfx", "subtitle", "pacing"):
+        if getattr(tone, opt, None):
+            out.append(f"{opt}.*(v3 Stage 4·렌더 소관 — Stage 3 프롬프트 밖)")
+    return out
+
+
+def v3_story_prompt_block(tone: StyleTone | None) -> str:
+    """v3 Stage 3 스토리 프롬프트에 덧붙는 채널 톤 절. tone=None 이면 빈 문자열.
+
+    반환 문자열은 앞뒤로 개행을 하나씩 물고 있다 — 프롬프트의 `{tone_block}` 자리에
+    빈 문자열이 들어가면 종전 프롬프트와 **바이트 동일**하다(회귀 0)."""
+    if tone is None:
+        return ""
+    nar, sty = tone.narration, tone.story
+    lo, hi = int(nar["cue_len_chars"][0]), int(nar["cue_len_chars"][1])
+    lines = [
+        "",
+        f"## 채널 톤 프로파일 — {tone.name}",
+        "이 채널의 문법이다. 위 편성 규칙과 충돌하면 **이 절이 이긴다**.",
+        _NARRATION_TONE_CORE[nar["tone"]] + _NARRATION_TONE_TAIL_V3,
+        f"- 내레이션 길이: 한 문장 {lo}~{hi}자(위 규칙 4 의 12~16자 대신 이 값). "
+        f"{hi}자를 넘으면 얹을 창을 못 찾아 코드가 잘라낸다 — 넘기지 마라.",
+        f"- 내레이션 개수: 편 전체 {int(nar['max_cues'])}문장 이하. 대사가 서사를 끌고, "
+        "내레이션은 그 사이를 잇는다.",
+    ]
+    if nar.get("relay_rule"):
+        lines.append(
+            "- 릴레이: 직전 비트의 대사가 질문이면 그 질문을 받아치는 문장을 우선하라"
+            "(대사 \"근데 이거 어디다 버리지?\" → 내레이션 \"누구나 갈 수 있는 곳\").")
+    lines.append(_TITLE_TONE_TEXT[sty["title_tone"]])
+    lines.append(_ENDING_TEXT[sty["ending"]])
+    if sty.get("hook_title_scene"):
+        lines.append(
+            "- 제목-훅 일치: 제목이 약속하는 바로 그 장면의 span 을 **hook 비트**에 "
+            "써라. 첫 2초 안에 사건·행동·강한 대사 중 하나가 있어야 한다 — 배경 "
+            "설명 span 으로 열지 마라(그건 뒤 비트 자리다).")
+    if sty.get("hook_max_sec") is not None:
+        lines.append(
+            f"- 훅 상한: hook 비트의 span 범위는 {sty['hook_max_sec']:g}초 이내로 — "
+            "도입을 길게 끌면 첫 이탈 곡선이 무너진다.")
     return "\n".join(lines) + "\n"

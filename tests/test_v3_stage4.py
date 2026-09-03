@@ -417,3 +417,136 @@ def test_place_above_burned_clears_every_band_not_just_the_lowest():
     # 제목에 막히면 갈 수 있는 데까지만 가고 모자란 양을 남긴다(조용한 포기 금지)
     m2, note2 = p(518, burned, canvas_height=1920, subtitle_height=150, floor_top=1100)
     assert "제목에 막혀" in note2 and 1920 - m2 - 150 >= 1100
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# M16 — 라벨 저작: Stage 4 가 초안을 보며 문구·시각·위치를 직접 쓴다 (2026-09-01)
+# ══════════════════════════════════════════════════════════════════════════
+# 계기(사용자 지적): 라벨의 재료는 화면(표정·행동·구도)인데 화면을 못 보는 Stage 3 이
+# 문구·시각을 정하니, Stage 4 가 배치를 잘해도 장면과 안 물렸다.
+
+def _authored(**over):
+    base = {"text": "(정색)", "start_sec": 3.0, "end_sec": 4.5,
+            "x": 0.7, "y": 0.4, "rotate": -4, "color": "yellow", "fx": "pop"}
+    base.update(over)
+    return base
+
+
+def test_authored_label_accepted_with_own_timing():
+    styled, problems, notes = stage4.validate_style_response(
+        {"labels": [_authored()]}, n_beats=1, band=(0.2, 0.8), duration=60.0)
+    assert not problems
+    lb = styled["labels"][0]
+    assert lb["text"] == "(정색)" and lb["start_sec"] == 3.0 and lb["end_sec"] == 4.5
+    assert lb["color"] == stage4.LABEL_PALETTE["yellow"]
+
+
+def test_authored_label_time_clamped_to_video():
+    """영상 길이 밖·과잉 길이는 클램프 — 라벨을 잃지 않는다(M12 규율 계승)."""
+    styled, _, notes = stage4.validate_style_response(
+        {"labels": [_authored(start_sec=58.0, end_sec=70.0)]},
+        n_beats=1, band=(0.2, 0.8), duration=60.0)
+    lb = styled["labels"][0]
+    assert lb["end_sec"] <= 60.0 and lb["end_sec"] - lb["start_sec"] >= stage4.LABEL_MIN_DUR_SEC
+    long = stage4.validate_style_response(
+        {"labels": [_authored(end_sec=3.0 + 9.9)]},
+        n_beats=1, band=(0.2, 0.8), duration=60.0)[0]["labels"][0]
+    assert long["end_sec"] - long["start_sec"] <= stage4.LABEL_MAX_DUR_SEC + 1e-6
+
+
+def test_authored_label_count_capped_and_paren_fixed():
+    items = [_authored(text=f"라벨{i}", start_sec=i * 5.0, end_sec=i * 5.0 + 1.0)
+             for i in range(5)]
+    styled, _, notes = stage4.validate_style_response(
+        {"labels": items}, n_beats=1, band=(0.2, 0.8), duration=60.0)
+    assert len(styled["labels"]) == stage4.LABEL_MAX_COUNT      # 초과 드롭
+    assert all(lb["text"].startswith("(") and lb["text"].endswith(")")
+               for lb in styled["labels"])                       # 괄호 보정
+    assert any("초과" in n for n in notes)                       # 조용한 절단 금지
+
+
+def test_authored_broken_time_dropped_not_fatal():
+    """시각이 깨진 라벨은 그 항목만 드롭 — 플랜 전체는 산다(라벨을 잃지 않는다)."""
+    styled, problems, notes = stage4.validate_style_response(
+        {"labels": [_authored(start_sec=5.0, end_sec=4.0), _authored()],
+         "design": {"subtitle_color": "#FFFFFF"}},
+        n_beats=1, band=(0.2, 0.8), duration=60.0)
+    assert not problems
+    assert len(styled["labels"]) == 1
+    assert styled["design"]["subtitle_color"] == "#FFFFFF"
+
+
+def test_legacy_index_labels_still_merge():
+    """구 체크포인트(M12 — index+위치만) 경로 회귀 0."""
+    plan_lbs = [{"index": 0, "text": "(구라벨)", "start_sec": 1.0, "end_sec": 3.0}]
+    styled, problems, _ = stage4.validate_style_response(
+        {"labels": [{"index": 0, "x": 0.6, "y": 0.5}]},
+        n_beats=1, band=(0.2, 0.8), labels=plan_lbs)
+    assert not problems
+    assert styled["labels"][0]["index"] == 0 and "text" not in styled["labels"][0]
+
+
+def test_style_prompt_carries_dialogue_and_authoring():
+    p = stage4.build_style_prompt(
+        dict(stage4.RECAP_PRESET), {"beats": []},
+        dialogue=[{"start_sec": 1.0, "end_sec": 2.5, "text": "대사 한 줄"}])
+    assert "1.0~2.5s 「대사 한 줄」" in p
+    assert "0~3개를 직접 써라" in p
+    assert "0개가 정상일 수 있다" in p            # 없으면 안 쓴다
+    assert "인물 바로 옆" in p                    # ⓐ 인물 지목 배치 유지
+    assert "{labels_block}" not in p
+
+
+def test_story_prompt_no_longer_authors_labels():
+    from app.v3 import story as st
+    idx = {f"sp{i:04d}": {"pos": i, "t_in": i * 2.0, "t_out": i * 2.0 + 2.0,
+                          "is_audio": True, "importance": 3, "audio_script": [],
+                          "text_source": "heard", "heard_text": "", "conf": 0.9,
+                          "scene_script": "", "meaning_content": "", "mood": ""}
+           for i in range(4)}
+    p = st.build_story_prompt({"sequences": []}, idx, work_title="T")
+    assert "여기서 만들지 않는다" in p
+    assert '"label"' not in p                     # 출력 예시에서도 제거
+
+
+# ── 피사체 크롭 앵커 (2026-09-02) — subject_crop_map ───────────────────────
+# v3 는 얼굴 크롭 범위 외 = 전 클립 고정 중앙 크롭이었다. 무성 인서트의 구석 피사체
+# (실사고: GPS 폰 화면)가 잘려 나가, Stage 2 subject_pos 를 crop x 앵커로 소비한다.
+
+def test_subject_crop_map_left_right_clamped(tmp_path):
+    from app.v3.finalize import subject_crop_map
+    tl = [{"role": "build", "subject_pos": "left"},
+          {"role": "ending", "subject_pos": "right"},
+          {"role": "build"}]                                   # 앵커 없음 → 맵 제외
+    m = subject_crop_map(tl, video_path=tmp_path / "v.mp4", aspect_ratio="24:23",
+                         output_dir=tmp_path, src_size=(1920, 1080), log=lambda *a: None)
+    assert set(m) == {"build_0", "ending_1"}
+    import json as _j
+    kf0 = _j.loads(m["build_0"].read_text())[0]
+    kf1 = _j.loads(m["ending_1"].read_text())[0]
+    assert kf0["crop_w"] == 1126 and kf0["crop_h"] == 1080     # 밴드 24:23 비율 크롭
+    assert kf0["x_center"] == 563.0                            # 0.25×1920=480 → 클램프
+    assert kf1["x_center"] == 1357.0                           # 0.75×1920=1440 → 클램프
+    assert kf0["y_center"] == 540.0
+
+
+def test_subject_crop_map_no_anchor_or_no_room_is_empty(tmp_path):
+    from app.v3.finalize import subject_crop_map
+    tl = [{"role": "build"}]
+    assert subject_crop_map(tl, video_path=tmp_path / "v.mp4", aspect_ratio="24:23",
+                            output_dir=tmp_path, src_size=(1920, 1080),
+                            log=lambda *a: None) == {}         # 앵커 0 = 종전(회귀 0)
+    tl = [{"role": "build", "subject_pos": "right"}]
+    assert subject_crop_map(tl, video_path=tmp_path / "v.mp4", aspect_ratio="16:9",
+                            output_dir=tmp_path, src_size=(1920, 1080),
+                            log=lambda *a: None) == {}         # 가로 여유 없음(세로 크롭 소재)
+
+
+def test_render_final_wires_subject_crop_map():
+    """배선 고정 — crop_timeline_map 이 빈 dict 하드코딩으로 되돌아가면 실패."""
+    from pathlib import Path as _P
+
+    import app.v3.finalize as _fin
+    src = _P(_fin.__file__).read_text("utf-8")
+    assert "crop_timeline_map=crop_map" in src
+    assert "subject_crop_map(plan[\"timeline\"]" in src

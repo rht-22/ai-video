@@ -125,6 +125,13 @@ LABEL_ROTATE_LIMIT = 8.0       # 기울기 상한(°, 시계방향 +) — 넘으
 LABEL_PALETTE = {"white": "#FFFFFF", "red": "#FF5540", "yellow": "#FFE94A",
                  "blue": "#7ED0FF", "orange": "#FFB637"}
 LABEL_COLOR_CYCLE = ("#FF5540", "#FFE94A", "#7ED0FF", "#FFB637")  # 미지정 시 순환
+# 라벨 저작(M16, 2026-09-01) — Stage 4 가 초안을 보며 문구·시각·위치를 직접 쓴다.
+# 라벨의 재료는 화면(표정·행동·구도)인데 종전에는 화면을 못 보는 Stage 3 이 문구와
+# 시각을 정했다 — 배치를 잘해도 문구·시각이 장면과 안 물리는 실사고(사용자 지적).
+LABEL_MAX_COUNT = 3            # 편당 상한(Stage 3 규칙 5 의 0~3 계승) — 초과는 드롭+기록
+LABEL_MIN_DUR_SEC = 0.6        # 이보다 짧으면 읽기 전에 사라진다
+LABEL_MAX_DUR_SEC = 4.0        # finalize.LABEL_MAX_SEC 와 같은 값(레퍼런스 실측 상한)
+LABEL_TEXT_MAX = 12            # 괄호 제외 자수 — 길면 화면을 가로지른다
 # 등장 효과 — 렌더러(build_texts_ass/_text_fx_tags)가 이미 굽는 어휘. 기본은 pop
 # ("띠용" 오버슈트 30%→110%→100%, 220ms). 미지정이 none 이면 라벨이 그냥 튀어나온다.
 LABEL_FX = ("pop", "glow", "shake", "none")
@@ -243,7 +250,8 @@ def sample_beat_frames(draft_path: Path, windows: list[dict], out_dir: Path,
 def validate_style_response(resp: Any, n_beats: int,
                             band: tuple[float, float] | None = None,
                             labels: list[dict] | None = None,
-                            preset: dict | None = None) \
+                            preset: dict | None = None,
+                            duration: float | None = None) \
         -> tuple[dict | None, list[str], list[str]]:
     """모델 응답 → (정규화 스타일 | None, 반려 사유, 노트). 순수.
 
@@ -304,6 +312,78 @@ def validate_style_response(resp: Any, n_beats: int,
         # 밴드를 모르면 검정 밴드 침범을 못 막는다 → 배치를 포기하되 **플랜은 살린다**
         notes.append("밴드 기하 미상 — 라벨은 기본 위치로 둔다")
         label_items = []
+    # ── M16 저작 라벨 — item 에 text 가 있으면 모델이 직접 쓴 라벨이다 ──────
+    # 규율은 M12 그대로: **라벨을 잃지 않는다** — 항목 단위 드롭+노트, 플랜 반려 없음.
+    authored: list[dict] = []
+    remaining: list = []
+    for item in label_items:
+        if isinstance(item, dict) and isinstance(item.get("text"), str) \
+                and item["text"].strip():
+            authored.append(item)
+        else:
+            remaining.append(item)
+    authored_out: list[dict] = []
+    for item in authored:
+        if len(authored_out) >= LABEL_MAX_COUNT:
+            notes.append(f"라벨 {LABEL_MAX_COUNT}개 초과 — 이후 항목 드롭: "
+                         f"{item.get('text')!r}")
+            continue
+        text = item["text"].strip()
+        if not (text.startswith("(") and text.endswith(")")):
+            notes.append(f"라벨 괄호 보정: {text!r}")
+            text = f"({text.strip('()')})"
+        if len(text) - 2 > LABEL_TEXT_MAX:
+            notes.append(f"라벨 {len(text) - 2}자 — {LABEL_TEXT_MAX}자 초과 드롭: {text!r}")
+            continue
+        try:
+            t0, t1 = float(item["start_sec"]), float(item["end_sec"])
+        except (KeyError, TypeError, ValueError):
+            notes.append(f"라벨 {text!r} 시각 없음/형식 오류 — 드롭")
+            continue
+        if not (math.isfinite(t0) and math.isfinite(t1)) or t1 <= t0:
+            notes.append(f"라벨 {text!r} 시각 역전/비정상 — 드롭")
+            continue
+        if duration is not None:
+            t0 = min(max(t0, 0.0), max(0.0, duration - LABEL_MIN_DUR_SEC))
+            t1 = min(t1, duration)
+        if t1 - t0 < LABEL_MIN_DUR_SEC:
+            t1 = t0 + LABEL_MIN_DUR_SEC
+            if duration is not None and t1 > duration:
+                notes.append(f"라벨 {text!r} 영상 밖 — 드롭")
+                continue
+        if t1 - t0 > LABEL_MAX_DUR_SEC:
+            notes.append(f"라벨 {text!r} {t1 - t0:.1f}s → {LABEL_MAX_DUR_SEC:g}s 로 자름")
+            t1 = t0 + LABEL_MAX_DUR_SEC
+        try:
+            x, y = float(item.get("x")), float(item.get("y"))
+        except (TypeError, ValueError):
+            x, y = 0.5, LABEL_Y_FALLBACK
+            notes.append(f"라벨 {text!r} 좌표 없음 — 기본 위치")
+        if not (math.isfinite(x) and math.isfinite(y)):
+            x, y = 0.5, LABEL_Y_FALLBACK
+        x_lo, x_hi = label_x_range(text)
+        cx = min(max(x, x_lo), x_hi)
+        cy = y
+        if band is not None:
+            cy = min(max(y, band[0] + LABEL_BAND_MARGIN), band[1] - LABEL_BAND_MARGIN)
+        try:
+            rot = float(item.get("rotate") or 0.0)
+        except (TypeError, ValueError):
+            rot = 0.0
+        if not math.isfinite(rot):
+            rot = 0.0
+        cr = min(max(rot, -LABEL_ROTATE_LIMIT), LABEL_ROTATE_LIMIT)
+        color = LABEL_PALETTE.get(str(item.get("color") or "").strip().lower()) \
+            or LABEL_COLOR_CYCLE[len(authored_out) % len(LABEL_COLOR_CYCLE)]
+        fx = str(item.get("fx") or "pop").strip().lower()
+        if fx not in LABEL_FX:
+            fx = "pop"
+        authored_out.append({"text": text,
+                             "start_sec": round(t0, 3), "end_sec": round(t1, 3),
+                             "x": round(cx, 3), "y": round(cy, 3),
+                             "rotate": round(cr, 1), "color": color, "fx": fx})
+    label_items = remaining          # 남은 것은 구(index) 경로 — 하위호환
+
     by_index = {int(lb["index"]): lb for lb in labels or [] if "index" in lb}
     n_labels = len(labels) if labels is not None else None
     labels_out: list[dict] = []
@@ -387,7 +467,8 @@ def validate_style_response(resp: Any, n_beats: int,
         beats_out.append({"number": num, "crop": crop, "pop": pop, "sfx_cue": sfx})
     if problems:
         return None, problems, notes
-    return {"design": design, "beats": beats_out, "labels": labels_out,
+    return {"design": design, "beats": beats_out,
+            "labels": authored_out + labels_out,
             "notes": str(resp.get("notes") or "").strip()[:400]}, [], notes
 
 
@@ -405,16 +486,18 @@ STYLE_PROMPT = """당신은 쇼츠 아트디렉터다. 첨부한 영상은 리�
 ## 비트 구성 (영상 내 시각 — 편집본 좌표)
 {beats_block}
 
-## 화면에 얹을 괄호 라벨 (시각은 이 영상 기준)
-{labels_block}
+## 대사 타임라인 (시각은 이 영상 기준 — 화면과 대조하라)
+{dialogue_block}
 
 ## 판단 기준
-0. **라벨 배치** — 위 각 라벨의 시각으로 가서 그 순간 화면을 보고 정하라.
-   - `x`·`y`(0~1 비율): 인물 얼굴·방송 자체 자막(보통 화면 중앙~하단)·자막 밴드를 **피해서** 빈 곳에. 세로는 영상 밴드({band_lo:.2f}~{band_hi:.2f}) 안, 가로는 라벨마다 아래 목록에 적힌 허용 범위 안(긴 라벨일수록 좁다 — 넘기면 글자가 잘려서 보정된다).
-   - **양옆으로도 움직여라.** 위아래로만 피하면 화면이 단조롭다 — 인물이 왼쪽에 서 있으면 오른쪽 여백, 오른쪽이면 왼쪽 여백으로 보낸다. 라벨마다 x 를 다시 판단하고, 가운데(0.5)는 **양쪽이 다 막혔을 때만** 쓴다.
-   - `rotate`(-8~8°, 시계방향 +): 감정이 튀는 라벨은 살짝 기울인다(3~6°). 차분한 설명 라벨은 0. 전부 기울이면 산만하다.
-   - `color`: {palette_names} 중 하나. 그 순간 화면에서 **가장 눈에 띄는** 색을 고르고, 연달아 나오는 라벨은 서로 다른 색으로.
-   - `fx`(등장 효과): `pop`(기본 — 띠용 튀어나옴) · `glow`(발광, 어두운 화면에서 강조) · `shake`(흔들림, 충격·놀람) · `none`(차분한 설명 라벨).
+0. **라벨 작성 + 배치** — 초안을 보고 괄호 라벨 **0~3개를 직접 써라**(문구·시각·위치 전부 네 몫이다). 라벨은 화면에 대한 반응이다 — 표정이 꺾이는 순간, 정체를 알려야 할 인물, 눈에 띄는 행동. **없으면 안 써도 된다(0개가 정상일 수 있다).**
+   - `text`: 괄호 심리·행동·정체 강조, 괄호 제외 12자 이내. **이 편의 화면·대사에서 뽑아라** — 특히 값진 것은 ① 인물 정체(작품을 모르는 시청자가 누군지 그 자리에서 알게) ② 심리가 꺾이는 순간 ③ 눈에 띄는 행동. 페이오프(핵심 대답·반전) 순간에는 얹지 마라 — 웃기는 것은 대사 자신이다.
+   - `start_sec`·`end_sec`: 이 영상(편집본) 기준. **그 표정·행동이 실제로 보이는 순간**에 맞춰라 — 0.6~2.5초면 충분하다(길게 띄우지 않는다).
+   - **종류별 배치.** ⓐ **인물 지목 라벨**(호칭·직업·정체·이름)은 **그 인물 바로 옆**: 머리 위나 어깨 옆, 얼굴을 가리지 않는 **가장 가까운** 여백(화면 반대편에 두면 여러 명 중 누구를 가리키는지 모른다). ⓑ 심리·행동·훈수 라벨은 빈 곳으로.
+   - `x`·`y`(0~1 비율): (ⓑ 기준) 인물 얼굴·방송 자체 자막·자막 밴드를 **피해서** 빈 곳에. 세로는 영상 밴드({band_lo:.2f}~{band_hi:.2f}) 안. 인물이 왼쪽이면 오른쪽 여백, 오른쪽이면 왼쪽 — 가운데(0.5)는 양쪽이 다 막혔을 때만. 긴 라벨일수록 가장자리 금지(잘리면 코드가 안쪽으로 당긴다). ⓐ 는 이 규칙의 예외다 — 인물을 따라가되 얼굴·자막은 가리지 않는다.
+   - `rotate`(-8~8°, 시계방향 +): 감정이 튀는 라벨만 살짝(3~6°). 차분한 라벨은 0.
+   - `color`: {palette_names} 중 하나 — **배경과의 대비가 우선이다.** 화면이 그 색 계열이면 쓰지 마라(붉은 조명 위 red 는 글자가 사라진다). 확신이 없으면 white·yellow. 연달아 나오면 서로 다른 색.
+   - `fx`: `pop`(기본 — 띠용) · `glow`(**어두운 화면 전용** — 밝거나 같은 색 계열 배경에서는 외곽선이 사라져 안 보인다) · `shake`(충격·놀람) · `none`(차분).
 1. 자막 가독성: 화면 하단이 밝거나 복잡하면 subtitle_color/외곽선 대비, 필요시 subtitle_y_margin 조정.
 2. 제목 밴드: 기본 유지 — 화면과 무관(검정 밴드 위)이라 특별한 사유 없으면 손대지 않는다.
 3. 비트별: crop(인물이 왼/오른쪽에 쏠린 구간 → left/right, 기본 center) · pop(팝인 강도 none/soft/strong — **실제 컷 리듬을 보고**: 컷이 잦고 호흡 빠른 비트만 soft+) · sfx(리듬 전환점의 효과음 큐 한 줄, 필수 아님).
@@ -424,11 +507,12 @@ STYLE_PROMPT = """당신은 쇼츠 아트디렉터다. 첨부한 영상은 리�
 ## 출력 (JSON 만)
 {{"design": {{"subtitle_color": "#FFFFFF"}},
  "beats": [{{"number": 0, "crop": "center", "pop": "soft", "sfx": null}}],
- "labels": [{{"index": 0, "x": 0.72, "y": 0.36, "rotate": -4, "color": "yellow", "fx": "pop"}}],
+ "labels": [{{"text": "(…)", "start_sec": 12.3, "end_sec": 14.0, "x": 0.72, "y": 0.36, "rotate": -4, "color": "yellow", "fx": "pop"}}],
  "notes": "판단 근거 한두 문장"}}"""
 
 
 def build_style_prompt(preset: dict, story_doc: dict, reject_note: str = "",
+                       dialogue: list[dict] | None = None,
                        windows: list[dict] | None = None,
                        labels: list[dict] | None = None,
                        band: tuple[float, float] = (0.231, 0.769)) -> str:
@@ -448,14 +532,13 @@ def build_style_prompt(preset: dict, story_doc: dict, reject_note: str = "",
     reject_block = ""
     if reject_note:
         reject_block = f"\n## ⚠ 직전 제안 반려 — 고쳐서 다시\n{reject_note}\n"
-    def _label_line(lb: dict) -> str:
-        lo, hi = label_x_range(str(lb.get("text", "")))
-        return (f"- index {lb['index']} · {lb['start_sec']:.1f}~{lb['end_sec']:.1f}s · "
-                f"{lb['text']} (x 허용 {lo:.2f}~{hi:.2f})")
-    labels_block = "\n".join(_label_line(lb) for lb in labels or []) or "- (라벨 없음)"
+    dialogue_block = "\n".join(
+        f"- {float(sg['start_sec']):.1f}~{float(sg['end_sec']):.1f}s 「{sg['text']}」"
+        for sg in dialogue or []) or "- (대사 없음)"
     return STYLE_PROMPT.format(
+        dialogue_block=dialogue_block,
         preset_block=json.dumps(preset, ensure_ascii=False, indent=1),
-        beats_block=beats_block, labels_block=labels_block,
+        beats_block=beats_block,
         band_lo=band[0] + LABEL_BAND_MARGIN, band_hi=band[1] - LABEL_BAND_MARGIN,
         band_mid=LABEL_Y_FALLBACK,
         palette_names=" · ".join(LABEL_PALETTE),
@@ -504,6 +587,8 @@ def _call_style_model(gemini, draft_path: Path, prompt: str) -> dict:
 def run_style(gemini, draft_path: Path, story_doc: dict, *,
               preset: dict | None = None, windows: list[dict] | None = None,
               labels: list[dict] | None = None,
+              dialogue: list[dict] | None = None,
+              duration: float | None = None,
               band: tuple[float, float] | None = None,
               log=print) -> tuple[dict, dict]:
     """Stage 4 실행 → (style 문서, 감사 기록). 소진 시 프리셋 폴백 — 렌더는 항상 간다."""
@@ -519,7 +604,8 @@ def run_style(gemini, draft_path: Path, story_doc: dict, *,
     styled: dict | None = None
     reject_note = ""
     for attempt in range(1 + MAX_REASKS):
-        prompt = build_style_prompt(preset, story_doc, reject_note, windows=windows,
+        prompt = build_style_prompt(preset, story_doc, reject_note,
+                                    dialogue=dialogue, windows=windows,
                                     labels=labels, band=band)
         log(f"  [v3/style] Flash vision 요청 (시도 {attempt + 1}/{1 + MAX_REASKS}, "
             f"draft {STYLE_SAMPLE_FPS:g}fps 표본)")
@@ -529,7 +615,8 @@ def run_style(gemini, draft_path: Path, story_doc: dict, *,
         try:
             resp = _call_style_model(gemini, draft_path, prompt)
             styled, problems, notes = validate_style_response(
-                resp, n_beats, band=band, labels=labels, preset=preset)
+                resp, n_beats, band=band, labels=labels, preset=preset,
+                duration=duration)
         except ValueError as e:
             styled, problems = None, [f"응답 오류: {e}"]
         audit["attempts"].append({"attempt": attempt + 1,

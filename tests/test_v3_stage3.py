@@ -476,10 +476,11 @@ def test_rubric_prefers_realizable_narration():
     best, table = pick_best([no_slot, with_slot], idx, target_sec=12.0)
     assert best == 1 and table[1]["parts"]["narration"] == 1.0
     assert table[0]["parts"]["narration"] == 0.0
-    # recap_dialogue 인데 내레이션을 아예 안 쓴 안도 규약 위반으로 0점
+    # 내레이션 0줄은 더 이상 처벌이 아니다(사용자 결정 2026-09-01 — 재료가
+    # 촘촘하면 0줄이 정당하다). 점프 없는 0줄 = 만점.
     none_planned = _cand([{"role": "hook", "span_ids": ["v1"],
                            "narration": None, "label": None}])
-    assert score_story(none_planned, idx, target_sec=6.0)["parts"]["narration"] == 0.0
+    assert score_story(none_planned, idx, target_sec=6.0)["parts"]["narration"] == 1.0
 
 
 def test_rubric_penalizes_scattered_arcs():
@@ -500,7 +501,11 @@ def test_rubric_intro_ban():
     greet = _cand([{"role": "hook", "span_ids": ["g"], "narration": None, "label": None}])
     mid = _cand([{"role": "hook", "span_ids": ["m"], "narration": None, "label": None}])
     assert score_story(greet, idx, target_sec=5.0)["parts"]["intro"] == 0.0
-    assert score_story(mid, idx, target_sec=5.0)["parts"]["intro"] == 1.0
+    # 2026-09-02: 도입 nar 없는 훅은 0.5(맥락 감점) — nar 를 얹으면 만점
+    assert score_story(mid, idx, target_sec=5.0)["parts"]["intro"] == 0.5
+    mid_nar = _cand([{"role": "hook", "span_ids": ["m"],
+                      "narration": ["맥락 한 줄"], "label": None}])
+    assert score_story(mid_nar, idx, target_sec=5.0)["parts"]["intro"] == 1.0
 
 
 def test_rubric_tie_break_is_deterministic():
@@ -530,7 +535,8 @@ def test_multi_narration_places_sequentially():
 
 def test_multi_narration_drops_tail_when_window_runs_out():
     """창이 모자라면 **뒤 문장부터** 버린다 — 앞 문장이 서사에 더 중요하다."""
-    # 창 1.5s — 첫 문장(견적 1.07s) 뒤 남는 0.43s 는 최소 노출(1.0s)에 못 미친다
+    # 창 1.5s — 첫 문장(견적 0.6+8/7=1.74s)이 창을 다 먹어 뒤 문장 자리가 없다
+    # (견적식은 고정 오버헤드 + 자수/속도 — story.NARRATION_LEAD_SEC 실측 주석 참조)
     grid2 = _mk_grid([(0.0, 1.5, False, "")])
     s2 = _mk_stage2(grid2, [(0, 0, 3, "m")])
     idx, _ = st.build_span_index(s2, grid2)
@@ -544,8 +550,13 @@ def test_multi_narration_drops_tail_when_window_runs_out():
 
 
 def test_multi_narration_uses_leftover_window_as_fit():
-    """남은 창이 최소 노출 이상이면 뒤 문장도 fit 으로 넣는다(버리기 전에 살린다)."""
-    grid2 = _mk_grid([(0.0, 2.2, False, "")])
+    """남은 창이 최소 노출 이상이면 뒤 문장도 fit 으로 넣는다(버리기 전에 살린다).
+
+    창 3.0s = 첫 문장 견적(0.6+8/7=1.74s) + 남는 1.26s(최소 노출 1.0s 이상).
+    ⚠ 이 숫자는 견적식을 따라간다 — 2026-09-01 실측으로 오버헤드 항이 생기며
+    종전 픽스처(2.2s)로는 남는 창이 0.46s 라 뒤 문장이 드랍됐다(의도 반대).
+    """
+    grid2 = _mk_grid([(0.0, 3.0, False, "")])
     s2 = _mk_stage2(grid2, [(0, 0, 3, "m")])
     idx, _ = st.build_span_index(s2, grid2)
     beats = [{"role": "hook", "span_ids": ["sp0000"],
@@ -553,7 +564,7 @@ def test_multi_narration_uses_leftover_window_as_fit():
     cues, dropped = st.plan_narration_slots(beats, idx)
     assert len(cues) == 2 and not dropped
     assert cues[1]["mode"] == "fit"
-    assert cues[1]["source_end_sec"] <= 2.2 + 1e-6
+    assert cues[1]["source_end_sec"] <= 3.0 + 1e-6
 
 
 def test_multi_narration_mute_scope_stays_window_local():

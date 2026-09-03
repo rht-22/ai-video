@@ -79,7 +79,9 @@ def split_by_windows(t0: float, t1: float,
 # ── edit_plan 조립 ──────────────────────────────────────────────────────────
 
 def assemble_edit_plan(story_doc: dict, span_index: dict[str, dict], *,
-                       video_path: str, work_title: str) -> dict:
+                       video_path: str, work_title: str,
+                       words: list[dict] | None = None,
+                       silences: list[list[float]] | None = None) -> dict:
     """비트 편성 → C1 동결 필드의 edit_plan. 클립 = 비트 안 span 병합 단위.
 
     분할 지점: (a) 소스 시간 불연속(원거리는 비트가 나뉘므로 방어) (b) 뮤트 여부가
@@ -94,8 +96,16 @@ def assemble_edit_plan(story_doc: dict, span_index: dict[str, dict], *,
                 return
             t0 = span_index[group[0]]["t_in"]
             t1 = span_index[group[-1]]["t_out"]
+            # 머리 데드에어 컷(2026-09-02) — 창 확정 후 story 가 산출한 트림 지점.
+            # span 내부라 시작점만 당긴다. 스냅 벨트에는 head_trimmed 로 정식 등록
+            # (기록 없는 비스냅 경계는 여전히 위반).
+            head = False
+            ht = beat.get("head_trim_sec")
+            if ht is not None and group[0] == beat["span_ids"][0] \
+                    and t0 < ht < t1 - 0.05:
+                t0, head = float(ht), True
 
-            timeline.append({
+            clip = {
                 "role": beat["role"],
                 "clip_start_sec": round(t0, 3),
                 "clip_end_sec": round(t1, 3),
@@ -103,7 +113,19 @@ def assemble_edit_plan(story_doc: dict, span_index: dict[str, dict], *,
                 "use_original_audio": group[0] not in muted,
                 "reframe": {"mode": "center"},
                 "span_ids": list(group),
-            })
+            }
+            # 크롭 앵커 재료(2026-09-02, additive) — **전부 무성**인 클립(시각 인서트)
+            # 에서 Stage 2 가 주 피사체를 좌/우로 봤으면 클립에 접는다. 판별 신호는
+            # 키워드가 아니라 '무성 인서트'라는 구성 자체다(범용 — 케이스 편향 금지).
+            # 대사 클립은 건드리지 않는다(중앙 크롭 종전 그대로).
+            if all(not span_index[s]["is_audio"] for s in group):
+                sides = [span_index[s].get("subject_pos") for s in group]
+                sides = [p for p in sides if p in ("left", "right")]
+                if sides and all(p == sides[0] for p in sides):
+                    clip["subject_pos"] = sides[0]
+            if head:
+                clip["head_trimmed"] = True
+            timeline.append(clip)
 
         for sid in b["span_ids"]:
             if group:
@@ -233,6 +255,7 @@ def _lines_for_span(words: list[dict], t_in: float, t_out: float) -> list[dict]:
 def _lines_from_text(text: str, t_in: float, t_out: float) -> list[dict]:
     """어절 타임코드 없는 텍스트(M9-C heard) → span 구간 균등 배분 라인. 순수.
 
+    pad_voiced_tails(timeline, span_index, words, silences)
     같은 표시 규칙(2~4어절·12자)을 쓰되 타이밍은 균등이다 — 팝인의 발화 동기화는
     포기하지만, 깨진 전사를 그대로 띄우는 것보다 낫다."""
     toks = str(text or "").split()
@@ -358,9 +381,17 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                 mid = (ln["start"] + ln["end"]) / 2      # 소속은 중점 기준(span 재단과 같은 규율)
                 if not any(a <= mid < z for a, z in audible):
                     continue                      # 뮤트 창 안 — 소리가 없으니 자막도 없다
-                # speaker·color 는 additive — 옛 소비자는 세 키만 읽는다(C6)
+                # speaker·color 는 additive — 옛 소비자는 세 키만 읽는다(C6).
+                # 다화자 span 이면 이 줄의 첫 단어가 속한 화자의 색을 쓴다.
+                l_spk, l_color = speaker, color
+                if wspk:
+                    for wi2, w2 in enumerate(in_span):
+                        if float(w2["t0"]) >= ln["start"] - 0.06:
+                            l_spk = wspk[wi2] or speaker
+                            l_color = colors.get(l_spk, SPEAKER_DEFAULT_COLOR)
+                            break
                 segments.append({"start_sec": e0, "end_sec": e1, "text": ln["text"],
-                                 "speaker": speaker, "color": color})
+                                 "speaker": l_spk, "color": l_color})
         off += c1 - c0
     segments.sort(key=lambda s: (s["start_sec"], s["end_sec"]))
     return segments
@@ -376,16 +407,26 @@ def finalize_cues(narration_cues: list[dict], timeline: list[dict], *,
     for cue in narration_cues:
         e0 = to_edited_sec(cue["source_time_sec"], offsets, kind="start")
         e1 = to_edited_sec(cue["source_end_sec"], offsets, kind="end")
-        if e0 is None or e1 is None or e1 <= e0:
-            # 창이 트리밍으로 사라졌다 — 드랍 기록은 호출자가 남긴다
+        rescued = False
+        if e0 is not None and (e1 is None or e1 <= e0):
+            # 창 끝만 소스 구멍(미편성 span·트림)에 떨어졌다 — 내레이션은 **편집본**
+            # 위에서 연속 재생되므로 편집본 좌표로 길이를 보존한다(2026-09-01 실사고:
+            # 배치기는 선택 span 길이 합으로 창을 재고 소스 연속 시각으로 적어, 비트가
+            # 건너뛴 span 위에 창 끝이 얹히면 여기서 통째 드랍 → 내레이션 0개 발행).
+            want = float(cue["source_end_sec"]) - float(cue["source_time_sec"])
+            e1 = round(min(e0 + want, total), 3)
+            rescued = True
+        if e0 is None or e1 is None or e1 - e0 < 0.5:
+            # 창 시작이 사라졌거나 남은 길이가 슬롯 구실을 못 한다 — 기록은 호출자가
             out.append({**cue, "start_sec": None, "end_sec": None})
             continue
-        out.append({
+        fin = {
             "text": cue["text"],
             "source_time_sec": cue["source_time_sec"],
             "start_sec": e0, "end_sec": e1,
             "duration_sec": round(e1 - e0, 3),
-            "voice": voice, "speed": speed,
+            # 배속 사다리(2026-09-02) — 계획이 cue 별로 고른 speed 가 기본값을 이긴다
+            "voice": voice, "speed": cue.get("speed") or speed,
             "beat": cue["beat"], "mode": cue["mode"],
             "muted_span_ids": list(cue.get("muted_span_ids") or []),
         })
@@ -401,7 +442,8 @@ def verify_edit_plan(plan: dict, grid: dict) -> dict:
     checked = ok = 0
     bad: list[float] = []
     for c in plan.get("timeline") or []:
-        for v in (c["clip_start_sec"], c["clip_end_sec"]):
+        for v, is_start in ((c["clip_start_sec"], True),
+                            (c["clip_end_sec"], False)):
             checked += 1
             if round(float(v), 3) in edges:
                 ok += 1
@@ -412,6 +454,35 @@ def verify_edit_plan(plan: dict, grid: dict) -> dict:
             "violations": bad[:10]}
 
 
+def _word_speakers(sp: dict, in_span: list[dict]) -> list[str] | None:
+    """다화자 span 의 단어별 화자 귀속(2026-09-02 — "빨리 / 자 잠깐만요" 색 실사고).
+
+    Stage 2 audio_script 가 화자별 행으로 나뉘어 있으면, 행 텍스트 길이를 단어열에
+    관용 정렬(공백·문장부호 무시)해 단어마다 화자를 단다. 화자가 하나거나 정렬이
+    깨지면 None — 종전(대표 화자 한 색)으로 폴백한다(오판 금지)."""
+    import re
+    _n = lambda t: re.sub(r"[^0-9A-Za-z가-힣]", "", str(t))
+    rows = [(str(r.get("speaker") or "").strip(), _n(r.get("line")))
+            for r in sp.get("audio_script") or []
+            if _n(r.get("line"))]
+    if len({r[0] for r in rows if r[0]}) < 2:
+        return None
+    out: list[str] = []
+    wi = 0
+    for spk, target in rows:
+        got = ""
+        start = wi
+        while wi < len(in_span) and len(got) < len(target):
+            got += _n(in_span[wi]["text"])
+            out.append(spk)
+            wi += 1
+        if wi == start:                      # 행에 배정된 단어 0개 — 정렬 붕괴
+            return None
+    while len(out) < len(in_span):
+        out.append(rows[-1][0])
+    return out
+
+
 def clip_stats(plan: dict) -> dict:
     """분포 지표 — 하네스 §3(구간 중앙 7.5s±·6~8개) 대조용 요약."""
     durs = [round(float(c["clip_end_sec"]) - float(c["clip_start_sec"]), 3)
@@ -420,3 +491,5 @@ def clip_stats(plan: dict) -> dict:
     return {"clips": len(durs), "total_sec": total,
             "median_sec": sorted(durs)[len(durs) // 2] if durs else None,
             "durations": durs}
+            wspk = None if src == "heard" else _word_speakers(sp, in_span)
+    total = round(sum(e - s for s, e, _ in offsets), 3)

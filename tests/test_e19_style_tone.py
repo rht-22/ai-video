@@ -153,7 +153,7 @@ def test_story_block_carries_values():
     b = st.story_prompt_block(_load())
     assert "drama_clip_kr" in b
     assert "1인칭 회상체" in b and "고민하는데" in b        # tone=recall_first_person
-    assert "3~12자" in b                                    # cue_len_chars
+    assert "10~18자" in b                                   # cue_len_chars
     assert "1.2~1.8초" in b                                 # cue_duration_sec (김부장 실측 후속)
     assert "5개 이하" in b                                  # max_cues
     assert "대사가 없는 틈" in b                            # placement

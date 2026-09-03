@@ -777,6 +777,10 @@ def render_short(inputs: RenderInputs) -> list[str]:
 
     # output_dir 기준 상대경로로 실행 (ass 필터 안정화)
     output_relative = _relpath_or_abs(inputs.output_path, output_dir)
+    # 필터 스크립트도 같은 규약 — 여기만 원본 경로를 넘기면 output_path 가 상대경로일 때
+    # cwd=output_dir 에서 ffmpeg 가 파일을 못 연다(2026-09-02 실사고: --outdir outputs
+    # 상대 실행에서 최종 렌더만 즉사. 절대경로 실행은 종전과 동일하게 통과한다).
+    filter_relative = _relpath_or_abs(filter_path, output_dir)
 
 
 
@@ -823,7 +827,7 @@ def render_short(inputs: RenderInputs) -> list[str]:
             cmd_try = [
                 ffmpeg_cmd, "-y",
                 *_build_input_args(hwaccel),
-                "-filter_complex_script", str(filter_path),
+                "-filter_complex_script", str(filter_relative),
                 "-map", "[vout]", "-map", "[aout]",
                 "-c:v", video_encoder, *encoder_args,
                 "-pix_fmt", "yuv420p",
@@ -1990,7 +1994,6 @@ def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, num_cue_inpu
     for si, sf in enumerate(sfx_items):
         sfx_input_idx = num_clip_inputs + num_cue_inputs + si
         gain = float(sf.get("gain_db", -6.0))
-        tts_filters.append(f"[{sfx_input_idx}:a]volume={gain:g}dB[sfx{si}_vol]")
         start_sec = float(sf.get("start_sec", 0.0)) / speed
         if start_sec > 0:
             delay_ms = int(start_sec * 1000)

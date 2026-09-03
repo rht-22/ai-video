@@ -501,3 +501,86 @@ def test_pipeline_m2_wiring(tmp_path, monkeypatch):
     from app.replay import loader
     arc = loader.load_archive(tmp_path / "o")
     assert arc["layout"] == "jobdir"
+
+# ══════════════════════════════════════════════════════════════════════════
+# 내용-시각 정합 (2026-09-01) — 좌표 일치 · 단정 금지 · 프레임 대조 벨트
+# ══════════════════════════════════════════════════════════════════════════
+# 실사고: 모델이 청크 후반에서 내용을 ~14초 이른 span 에 귀속(피 웅덩이를 걷는
+# 장면 시각에 기록 — 8/31 원격 분석에도 같은 결함). 원인 셋을 각각 박제한다.
+
+def _mk_chunk_for_prompt():
+    chunk = {"seq_number": 6, "chunk_number": 0,
+             "start_sec": 2698.25, "end_sec": 2930.75}
+    spans = [{"id": "sp1343", "t_in": 2891.4, "t_out": 2893.1,
+              "is_audio": False, "text": None},
+             {"id": "sp1344", "t_in": 2893.1, "t_out": 2893.7,
+              "is_audio": True, "text": "대사"}]
+    s1 = {"sequences": [{"number": 6, "time": {"start": "00:44:58.250",
+                                               "end": "00:48:50.750"},
+                         "content": "s", "chunks": [
+                             {"number": 0, "time": {"start": "00:44:58.250",
+                                                    "end": "00:48:50.750"}}]}]}
+    return chunk, spans, s1
+
+
+def test_span_table_uses_chunk_relative_clock():
+    """span 표는 첨부 영상 자체의 시계 — 절대시각 표 + 0:00 영상의 암산이
+    귀속 드리프트의 공범이었다(실측 +14초)."""
+    chunk, spans, s1 = _mk_chunk_for_prompt()
+    p = ca.build_stage2_prompt(chunk, s1, spans, None)
+    assert "00:03:13" in p                      # 2891.4-2698.25=193.15 → 영상 내 시각
+    assert "00:48:11" not in p                  # 절대시각은 표에서 사라짐
+    assert "첨부 영상 자체의 시계" in p
+    assert "00:44:58" in p                      # 0:00 = 원본 어디인지는 알려준다
+
+
+def test_prompt_forbids_synopsis_assertion():
+    """작품 배경은 표기용 — 화면 해석 금지(시놉시스가 '살인 현장'을 프라이밍해
+    모호한 화면에 '시신'을 단정 기록한 실사고)."""
+    chunk, spans, s1 = _mk_chunk_for_prompt()
+    p = ca.build_stage2_prompt(chunk, s1, spans, None, research_context="시놉시스…")
+    assert "화면 해석용이 아니다" in p
+    assert "보이는 것" in p and "형체" in p
+    assert "앞당겨 적지 마라" in p
+
+
+def test_binding_sampler_prefers_silent_tail():
+    """표본은 scene_script 있는 무성 span, 후반 편중(드리프트가 크는 곳)."""
+    chunk_spans = [{"id": f"s{i}", "t_in": float(i), "t_out": i + 1.0,
+                    "is_audio": (i % 3 == 0)} for i in range(20)]
+    # 실전 norm 은 span_id 키다 — id 만 읽던 버그로 벨트가 전 청크 스킵된 실사고
+    norm = [{"spans": [{"span_id": f"s{i}", "scene_script": f"장면{i}"}
+                       for i in range(20)]}]
+    picked = ca.sample_binding_spans(norm, chunk_spans)
+    assert 0 < len(picked) <= ca.BINDING_SAMPLE_COUNT
+    assert all(not chunk_spans[int(p["id"][1:])]["is_audio"] for p in picked)
+    assert picked[-1]["t_in"] >= 15.0           # 마지막 표본은 후반부
+
+
+def test_binding_problems_carry_evidence():
+    """반려 사유에 기록 vs 실제 화면이 나란히 실린다 — 모델이 고칠 근거."""
+    details = [{"id": "sp1343", "scene_script": "피 웅덩이가 보인다",
+                "match": False, "seen": "걷는 인물 실루엣"},
+               {"id": "sp1345", "scene_script": "문", "match": True, "seen": "문"}]
+    probs = ca.binding_problems(details)
+    assert len(probs) == 1
+    assert "피 웅덩이" in probs[0] and "걷는 인물" in probs[0]
+    assert "영상 내 시각으로 실제로 이동" in probs[0]
+
+
+# ── 주 피사체 가로 위치 (2026-09-02 크롭 앵커 재료) ─────────────────────────
+
+def test_subject_pos_kept_invalid_dropped_absent_no_key():
+    spans = _spans4()
+    r = _resp_ok()
+    r["meanings"][0]["spans"][1]["subject_pos"] = "right"       # 무성 span 정상값
+    r["meanings"][1]["spans"][0]["subject_pos"] = "upper-left"  # 오값 → 키만 폐기
+    norm, problems, notes = ca.validate_stage2_response(r, spans, final_attempt=False)
+    assert problems == []
+    assert norm[0]["spans"][1]["subject_pos"] == "right"
+    assert "subject_pos" not in norm[1]["spans"][0]             # 오값 = 중앙 폴백
+    assert any("subject_pos" in n for n in notes)               # 조용한 폐기 금지
+    assert "subject_pos" not in norm[0]["spans"][0]             # 미기록 = 키 없음
+    meanings = ca.assemble_chunk_meanings(norm, spans)
+    assert meanings[0]["spans"][1]["subject_pos"] == "right"    # 문서까지 승계
+    assert "subject_pos" not in meanings[0]["spans"][0]

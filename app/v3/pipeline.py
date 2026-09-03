@@ -637,7 +637,8 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
 
     # ── 경계면 조립(C1·C2·C6) — 순수, LLM 없음 ────────────────────────────
     plan = assemble.assemble_edit_plan(
-        story_doc, span_index, video_path=str(video_path), work_title=work_title)
+        story_doc, span_index, video_path=str(video_path), work_title=work_title,
+        words=grid.get("words"), silences=grid.get("silence"))
     belt = assemble.verify_edit_plan(plan, grid)
     if belt["pct"] is not None and belt["pct"] < 100.0:
         # Stage 2 벨트와 같은 규율 — 구조상 100% 여야 하고 아니면 코드 결함
@@ -796,6 +797,8 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
         # 캐시 유무에 따라 Flash 입력 순서가 갈렸다(적대 리뷰 확정 · 결정성)
         frame_list = [{"path": str(f)} for f in expected]
     else:
+             "cue_windows_rescued": sum(1 for c in cues
+                                        if c.get("window_rescued")),
         cost = stage4.render_draft(video_path, plan["timeline"], draft_path, log=log)
         frame_list = stage4.sample_beat_frames(draft_path, windows, frames_dir,
                                                log=log)
@@ -869,6 +872,75 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
                       (_read_json(_rp) or {}).get("cast_images") or []
                       if c.get("character_name")]
     vdoc = finalize.run_validate(
+    # ── watch_trim (11.5) — 초안 시청 트림(2026-09-02 사용자 설계) ────────
+    # 초안을 실제로 보고 늘어지는 구간을 빼기 전용으로 걷는다(watch_trim.py 독스트링).
+    # 자리는 draft 뒤·style 앞 — 트림이 생기면 draft 를 다시 렌더해 Stage 4 가
+    # **트림된 화면**을 보게 한다(낡은 초안 위 라벨 좌표가 밀리는 것 방지).
+    # 캐시: post 지문 일치 = 이미 반영된 판, pre 지문 일치 + 컷 0 = 재호출 불요.
+    wt_path = output_dir / "checkpoint_watch_trim.json"
+    _wt = _read_json(wt_path) if wt_path.exists() else {}
+    if _wt.get("post_fingerprint") == fingerprint \
+            and from_step not in ("draft_render",):
+        log("  [v3/watch-trim] 캐시(이미 반영된 판) — 건너뜀")
+    elif _wt.get("pre_fingerprint") == fingerprint and not _wt.get("cuts") \
+            and from_step not in ("draft_render",):
+        log("  [v3/watch-trim] 캐시(트림 0) — 건너뜀")
+    else:
+        from app.v3 import watch_trim as wt
+        from app.v3.story import build_span_index as _bsi
+        _s2 = _read_json(output_dir / "stage2.json")
+        _sidx, _ = _bsi(_s2, grid)
+        _imp = {sid: (sp["is_audio"], sp["importance"])
+                for sid, sp in _sidx.items()}
+        _deficit = float((story_doc.get("budget") or {}).get("deficit_sec") or 0.0)
+        log(f"  [v3/watch-trim] Flash vision 요청 (draft "
+            f"{wt.WATCH_SAMPLE_FPS:g}fps 표본)"
+            + (f" — 예산 컷 판(초과 {_deficit:.1f}s)" if _deficit > 0.1 else ""))
+        cuts, wt_audit = wt.run_watch_trim(
+            get_gemini(), draft_path, timeline=plan["timeline"], grid=grid,
+            resources=resources, segments=segments, importance=_imp,
+            span_index=_sidx, budget_deficit=_deficit, log=log)
+        pre_fp = fingerprint
+        removed_sec = round(sum(c["end"] - c["start"] for c in cuts), 2)
+        if cuts:
+            _anchors = {lb.get("span_id")
+                        for b in (story_doc.get("beats") or [])
+                        for lb in (b.get("labels") or [])}
+            plan["timeline"] = wt.apply_cuts_to_timeline(
+                plan["timeline"], cuts, grid, _anchors)
+            _total = sum(float(c["clip_end_sec"]) - float(c["clip_start_sec"])
+                         for c in plan["timeline"])
+            segments = wt.remap_segments(segments, cuts, _total)
+            resources = wt.remap_resources(resources, cuts, _total)
+            _write_json(output_dir / "edit_plan.json", plan)
+            _write_json(output_dir / "subtitle_segments.json", segments)
+            _write_json(output_dir / "checkpoint_resources.json", resources)
+            label_plan = finalize.plan_labels(story_doc, plan)
+            fingerprint = hashlib.sha1(json.dumps(
+                [[[c["clip_start_sec"], c["clip_end_sec"], c.get("span_ids"),
+                   c.get("use_original_audio")]
+                  for c in plan["timeline"]], label_plan],
+                sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
+            windows = stage4.edited_beat_windows(story_doc, plan["timeline"])
+            cost = stage4.render_draft(video_path, plan["timeline"], draft_path,
+                                       log=log)
+            frame_list = stage4.sample_beat_frames(draft_path, windows,
+                                                   frames_dir, log=log)
+            _write_json(output_dir / "draft_fingerprint.json",
+                        {"fingerprint": fingerprint})
+            log(f"  [v3/watch-trim] {len(cuts)}개 구간 · {removed_sec}s 컷 — "
+                f"초안 재렌더 후 진행")
+        else:
+            log("  [v3/watch-trim] 지목 0 — 그대로 진행"
+                + (f"(거부 {len(wt_audit.get('rejected') or [])}건)"
+                   if wt_audit.get("rejected") else ""))
+        step("watch_trim", cuts=len(cuts), removed_sec=removed_sec,
+             rejected=len(wt_audit.get("rejected") or []),
+             error=wt_audit.get("error"), audit=wt_audit)
+        _write_json(wt_path, {"pre_fingerprint": pre_fp,
+                              "post_fingerprint": fingerprint,
+                              "cuts": cuts, "audit": wt_audit})
+
         plan=plan, grid=grid, stage1_doc=stage1_doc, stage2_doc=stage2_doc,
         segments=segments, resources=resources, final_path=final_path,
         tmp_dir=tmp_dir, cast_names=_res_names, gemini=get_gemini(), log=log)
@@ -892,9 +964,14 @@ def _apply_edit_overrides(*, output_dir: Path, overrides_path: Path, grid: dict,
     from app.v3.overrides import apply_overrides_to_plan
 
     ov = load_edit_overrides(overrides_path)
+        # M16: 라벨은 Stage 4 가 초안을 보며 직접 쓴다 — 대사 타임라인(편집본
+        # 좌표)과 영상 길이를 준다. label_plan 은 구 체크포인트 호환용으로만 남긴다.
+        _dur = sum(float(c["clip_end_sec"]) - float(c["clip_start_sec"])
+                   for c in plan["timeline"])
     if not ov:
         log("  [v3/overrides] 파일이 비어 있다 — 건너뜀")
         return
+                                            dialogue=segments, duration=_dur,
     plan = _read_json(output_dir / "edit_plan.json")
     segments = _read_json(output_dir / "subtitle_segments.json") \
         if (output_dir / "subtitle_segments.json").exists() else []
@@ -914,6 +991,15 @@ def _apply_edit_overrides(*, output_dir: Path, overrides_path: Path, grid: dict,
 
 
 def _run_hook_variants(*, output_dir: Path, video_path: Path, work_title: str,
+        if final_path.exists():
+            # 이전 판 보존(2026-09-02 사용자 지시 "기존 영상은 이름 바꿔 저장" —
+            # 반복 테스트에서 직전 산출이 덮여 비교·복기가 불가능했다)
+            import datetime as _dt
+            _ts = _dt.datetime.fromtimestamp(
+                final_path.stat().st_mtime).strftime("%m%d_%H%M%S")
+            _prev = output_dir / f"final_prev_{_ts}.mp4"
+            final_path.rename(_prev)
+            log(f"  [v3/render] 이전 판 보존 → {_prev.name}")
                        grid: dict, n: int, get_gemini, step, log) -> None:
     """M6-A — 훅 변형 N개: edit_plan_variant_<k>.json + 변형별 자막·cue 계획.
 

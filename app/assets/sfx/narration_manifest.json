@@ -1,0 +1,306 @@
+{
+  "schema": "narration_sfx/v1",
+  "note": "내레이션 시작 배치용. app/assets/sfx/manifest.json 과는 별개 파일이다 — manifest.json 을 만들면 AI 선택 경로(E19-5)까지 켜지므로 일부러 분리했다.",
+  "narration": {
+    "enabled": true,
+    "gain_db": -6.0,
+    "opening_max_t": 1.5,
+    "no_repeat_window": 3,
+    "gain_note": "최종 loudnorm 이 트랜지언트에 반응해 밑에 깔린 소리를 누른다 — 0dB 에서 대사 위 -3.7dB, -6dB 에서 -1.2dB(2026-09-02 실측). 조용한 자리의 효과음 크기는 loudnorm 이 도로 올려서 거의 안 준다."
+  },
+  "sfx": [
+    {
+      "id": "swoosh-fight-2",
+      "file": "swoosh-fight-2.wav",
+      "desc": "가벼운 휙",
+      "family": "swoosh-fight",
+      "weight": "light",
+      "opening": [],
+      "mid": [
+        "line_start"
+      ],
+      "peak_sec": 0.0401
+    },
+    {
+      "id": "whoosh-effect",
+      "file": "whoosh-effect.wav",
+      "desc": "가벼운 휙",
+      "family": "whoosh-effect",
+      "weight": "light",
+      "opening": [],
+      "mid": [
+        "line_start"
+      ],
+      "peak_sec": 0.0525
+    },
+    {
+      "id": "whoosh-1",
+      "file": "whoosh-1.wav",
+      "desc": "가벼운 휙",
+      "family": "whoosh",
+      "weight": "light",
+      "opening": [],
+      "mid": [
+        "line_start"
+      ],
+      "peak_sec": 0.0379
+    },
+    {
+      "id": "whoosh-2",
+      "file": "whoosh-2.wav",
+      "desc": "장면 전환용으로 좋음",
+      "family": "whoosh",
+      "weight": "light",
+      "opening": [],
+      "mid": [
+        "line_start",
+        "scene_transition"
+      ],
+      "peak_sec": 0.0294
+    },
+    {
+      "id": "whoosh-3",
+      "file": "whoosh-3.wav",
+      "desc": "가벼운 휙",
+      "family": "whoosh",
+      "weight": "light",
+      "opening": [],
+      "mid": [
+        "line_start"
+      ],
+      "peak_sec": 0.0312
+    },
+    {
+      "id": "movement-swipe-whoosh-3",
+      "file": "movement-swipe-whoosh-3.wav",
+      "desc": "가벼운 스와이프",
+      "family": "movement-swipe-whoosh",
+      "weight": "light",
+      "opening": [],
+      "mid": [
+        "line_start"
+      ],
+      "peak_sec": 0.0879
+    },
+    {
+      "id": "whip-crack",
+      "file": "whip-crack.wav",
+      "desc": "싸대기 질감",
+      "family": "whip-crack",
+      "weight": "light",
+      "opening": [],
+      "mid": [
+        "line_start"
+      ],
+      "peak_sec": 0.0591
+    },
+    {
+      "id": "hit3",
+      "file": "hit3.wav",
+      "desc": "대사 중 살짝 강조",
+      "family": "hit",
+      "weight": "light-mid",
+      "opening": [],
+      "mid": [
+        "line_start",
+        "emphasis_soft"
+      ],
+      "peak_sec": 0.0187
+    },
+    {
+      "id": "gunshot",
+      "file": "gunshot.wav",
+      "desc": "가벼운 효과음 뒤 다음 문장에서 연이어 강조",
+      "family": "gunshot",
+      "weight": "light-mid",
+      "opening": [],
+      "mid": [
+        "emphasis_followup"
+      ],
+      "peak_sec": 0.041
+    },
+    {
+      "id": "punch",
+      "file": "punch.wav",
+      "desc": "가벼운 효과음 뒤 다음 문장에서 연이어 강조",
+      "family": "punch",
+      "weight": "light-mid",
+      "opening": [],
+      "mid": [
+        "emphasis_followup"
+      ],
+      "peak_sec": 0.1013
+    },
+    {
+      "id": "funny-boing-flexatone-wobble",
+      "file": "funny-boing-flexatone-wobble.wav",
+      "desc": "우스꽝·어이없음·들통난 상황의 문장 시작",
+      "family": "funny-boing-flexatone-wobble",
+      "weight": "light-mid",
+      "opening": [],
+      "mid": [
+        "situational_comic"
+      ],
+      "peak_sec": 0.0245
+    },
+    {
+      "id": "swoosh-015-tight",
+      "file": "swoosh-015-tight.wav",
+      "desc": "140ms 추가 절단판, 피크 0.110s",
+      "family": "swoosh",
+      "weight": "light-mid",
+      "opening": [
+        "opening_light"
+      ],
+      "mid": [
+        "line_start"
+      ],
+      "peak_sec": 0.1064
+    },
+    {
+      "id": "thud-impact-sound-sfx",
+      "file": "thud-impact-sound-sfx.wav",
+      "desc": "가볍게 시작하는 장면 한정",
+      "family": "thud-impact-sound-sfx",
+      "weight": "light-mid",
+      "opening": [
+        "opening_light"
+      ],
+      "mid": [
+        "line_start"
+      ],
+      "peak_sec": 0.0711
+    },
+    {
+      "id": "impact-thud",
+      "file": "impact-thud.wav",
+      "desc": "가볍게 시작하는 장면 한정",
+      "family": "impact-thud",
+      "weight": "light-mid",
+      "opening": [
+        "opening_light"
+      ],
+      "mid": [
+        "line_start"
+      ],
+      "peak_sec": 0.026
+    },
+    {
+      "id": "whoosh-transition-6-tight",
+      "file": "whoosh-transition-6-tight.wav",
+      "desc": "140ms 추가 절단판 (원본은 루즈해서 반려), 피크 0.090s",
+      "family": "whoosh-transition",
+      "weight": "light-mid",
+      "opening": [
+        "opening_light"
+      ],
+      "mid": [
+        "line_start",
+        "scene_transition"
+      ],
+      "peak_sec": 0.098
+    },
+    {
+      "id": "low-thumpy-kick-reverb-hit",
+      "file": "low-thumpy-kick-reverb-hit.wav",
+      "desc": "중요 대사 직전 대사에서 빌드업",
+      "family": "low-thumpy-kick-reverb-hit",
+      "weight": "mid",
+      "opening": [
+        "opening"
+      ],
+      "mid": [
+        "buildup"
+      ],
+      "peak_sec": 0.0129
+    },
+    {
+      "id": "huge-cinematic-tom-hit",
+      "file": "huge-cinematic-tom-hit.wav",
+      "desc": "무겁게 시작. 충격 진실·반전에도",
+      "family": "huge-cinematic-tom-hit",
+      "weight": "mid-heavy",
+      "opening": [
+        "opening"
+      ],
+      "mid": [
+        "reveal"
+      ],
+      "peak_sec": 0.0083
+    },
+    {
+      "id": "cinematic-boom",
+      "file": "cinematic-boom.wav",
+      "desc": "길어서 중간 대사에는 X — 보정 레벨에서 영상 시작용으로 확정",
+      "family": "cinematic-boom",
+      "weight": "mid-heavy",
+      "opening": [
+        "opening"
+      ],
+      "mid": [],
+      "peak_sec": 0.0252
+    },
+    {
+      "id": "riser-swoosh-transition-tight",
+      "file": "riser-swoosh-transition-tight.wav",
+      "desc": "100ms 추가 절단판, 피크 0.170s",
+      "family": "riser-swoosh-transition",
+      "weight": "heavy",
+      "opening": [
+        "opening"
+      ],
+      "mid": [],
+      "peak_sec": 0.1697
+    },
+    {
+      "id": "cinematic-impact-boom-05",
+      "file": "cinematic-impact-boom-05.wav",
+      "desc": "무겁게 시작. 충격 진실·반전에도 — 보정 레벨에서 영상 시작용으로 확정",
+      "family": "cinematic-impact-boom",
+      "weight": "heavy",
+      "opening": [
+        "opening"
+      ],
+      "mid": [
+        "reveal"
+      ],
+      "peak_sec": 0.1005
+    },
+    {
+      "id": "impact-cinematic-boom-02",
+      "file": "impact-cinematic-boom-02.wav",
+      "desc": "길어서 중간 대사에는 X — 보정 레벨에서 영상 시작용으로 확정",
+      "family": "impact-cinematic-boom",
+      "weight": "heavy",
+      "opening": [
+        "opening"
+      ],
+      "mid": [],
+      "peak_sec": 0.3029
+    },
+    {
+      "id": "cinematic-impact-boom-03",
+      "file": "cinematic-impact-boom-03.wav",
+      "desc": "길어서 시작용 부적합. 충격·반전 대사 앞에서만",
+      "family": "cinematic-impact-boom",
+      "weight": "heavy",
+      "opening": [],
+      "mid": [
+        "reveal"
+      ],
+      "peak_sec": 0.0205
+    },
+    {
+      "id": "hit-low-gravity-absorber",
+      "file": "hit-low-gravity-absorber.wav",
+      "desc": "잔향 길어 도입부에 TTS만 나올 때만",
+      "family": "hit-low-gravity-absorber",
+      "weight": "heavy",
+      "opening": [
+        "opening_tts_only"
+      ],
+      "mid": [],
+      "peak_sec": 0.0128
+    }
+  ]
+}
