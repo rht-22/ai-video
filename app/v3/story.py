@@ -166,6 +166,10 @@ def build_span_index(stage2_doc: dict, grid: dict) -> tuple[dict[str, dict], lis
                         "heard_text": s.get("heard_text") or "",
                         "conf": s.get("conf"),
                         "scene_script": s.get("scene_script") or "",
+                        # 인물(2026-09-03): 내레이션 걸음이 '지금 누구를 보는지'를 알아야
+                        # 전환을 말로 잇는다 — Stage 2 가 이미 적어 둔 것을 옮겨 담는다
+                        "characters": [str(x) for x in (s.get("characters") or []) if x],
+                        "meaning_characters": [str(x) for x in (m.get("characters") or []) if x],
                         "meaning_content": m.get("content") or "",
                         "mood": m.get("mood") or "",
                         "meaning_idx": mi,

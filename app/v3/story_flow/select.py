@@ -58,7 +58,7 @@ SCENES_PROMPT = """당신은 리캡 쇼츠 편집자다. 영상은 볼 수 없�
 ## 2단계 — 사용 씬 고르기
 주제: {topic}
 이 사건을 **작품을 모르는 사람이 봐도 다 이해하고 재미있으려면** 어떤 씬을 보여줘야 하나. 각 씬의 쓰임을 정하라 — 배경(왜 이 상황인지) · 맥락(인물 관계·무엇이 걸렸는지) · 과정(사건 진행) · 결과(정점·반전) · 반응(리액션·여운). 필요한 것만 {min_scenes}~{max_scenes}개, **원본 시간 순서**로. 씬 = 아래 사건 단위(id). 길이 감각: 완성본 {target_sec:.0f}초이고 씬 원본 합계는 그 2~3배까지 허용된다(다음 단계에서 대사를 골라 줄인다).
-제목 두 줄도 정하라 — line1(위) = 상황·도입, line2(아래) = 후킹. 각 {title_max}자 이내, 이어 읽어 한 호흡. 결말을 다 말하지 마라(읽은 사람이 '그래서?'를 묻게).
+제목 두 줄도 정하라 — line1(위) = 상황·도입, line2(아래) = 후킹. 각 {title_max}자 이내, 이어 읽어 한 호흡. 결말을 다 말하지 마라(읽은 사람이 '그래서?'를 묻게). 아랫줄이 사건의 **결과·반전 자체**(누가 무엇을 했다/당했다)를 말해버리면 볼 이유가 사라진다 — 결과 대신 그 직전의 질문·위기를 남겨라. `title_review.line2_reveals_ending` 에 네 판정을 적고, true 면 고쳐서 내라.
 
 ## 작품
 {work_title}{research_block}
@@ -68,7 +68,8 @@ SCENES_PROMPT = """당신은 리캡 쇼츠 편집자다. 영상은 볼 수 없�
 {reject_block}
 ## 출력 (JSON 만)
 {{"scenes": [{{"meaning": "m012", "purpose": "배경|맥락|과정|결과|반응", "why": "이 씬이 하는 일 한 줄"}}],
-  "title": {{"line1": "…", "line2": "…"}}}}"""
+  "title": {{"line1": "…", "line2": "…"}},
+  "title_review": {{"line2_reveals_ending": false}}}}"""
 
 LINES_PROMPT = """당신은 리캡 쇼츠 편집자다. 영상은 볼 수 없다 — 기록이 정본이다.
 
@@ -162,6 +163,11 @@ def validate_scenes(resp: Any, rows: list[dict], *,
     for name, line in (("line1", l1), ("line2", l2)):
         if len(line) > title_max:
             problems.append(f"title.{name} 이 {len(line)}자 — {title_max}자 이내로")
+    # 스포 판정은 모델의 것(title_review) — 코드는 되돌려 보낼 뿐
+    tr = resp.get("title_review") if isinstance(resp.get("title_review"), dict) else {}
+    if tr.get("line2_reveals_ending") is True:
+        problems.append(f"제목 아랫줄이 결말을 말한다(네 판정) — 결과 대신 직전의 질문·위기로 "
+                        f"다시 써라: {l2!r}")
     if problems:
         return None, problems, notes
     return {"scenes": scenes, "title": {"line1": l1, "line2": l2}}, [], notes

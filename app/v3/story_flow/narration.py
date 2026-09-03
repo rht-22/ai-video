@@ -34,8 +34,11 @@ PROMPT = """당신은 리캡 쇼츠 구성작가다. 영상은 볼 수 없다 �
 
 ## 4단계 — 내레이션 쓰기
 쇼츠는 사건 하나만 보여주므로 (a) 첫 장면 앞에 **이전 맥락** 한 줄이 필요하고, (b) 편성이 원본을 건너뛴 자리(아래 ⚠ 점프)는 시청자가 다음 장면·다음 대사를 따라가도록 **반드시** 잇는 말이 필요하다. 그 밖의 비트 앞에는 대사가 스스로 이어주면 넣지 마라. 대사 한 줄 → 내레이션 → 대사 한 줄도 된다.
+
+내레이션의 근본 역할: 시청자는 이 작품을 모른다. 화면만 보고는 **지금 누구를 보는지, 무슨 상황인지** 모를 때가 있다 — 그걸 알게 하는 것이 내레이션이다. 편성표에 ⚠ 인물 전환(다른 장소·다른 인물 조합으로 화면이 바뀜)이 표시된 자리는 시청자가 '지금 어디, 누구'인지 따라올 수 있는 한 줄을 넣어라(다른 집·다른 인물의 같은 시각 상황으로 넘어가면 그렇게 말해 준다). 대사가 그걸 스스로 알려 주면 생략해도 된다.
 규칙:
-- 한 문장 = **공백 제외 {max_chars}자 이내**(2~3초). 길면 두 문장으로 나눠 따로 적어라. 쉼표로 끝내 다음 대사가 받게 하는 형식("협박까지 나왔는데,")이 좋다.
+- 한 문장 = **공백 제외 {max_chars}자 이내**(2~3초). 길면 두 문장으로 나눠 따로 적어라. 다리 자리(훅·점프·전환)에서는 쉼표로 끝내 다음 대사가 받게 하는 형식("협박까지 나왔는데,")이 좋다.
+- **편의 마지막에 오는 내레이션은 반드시 문장을 닫아라** — 연결 어미(…는데, / …자, / …고,)로 끝내면 편이 끝나지 않은 느낌이 된다. 떡밥이어도 문장은 닫는다("…이 시작됐죠."). 각 줄의 `closed` 에 그 줄이 문장을 닫는지 네 판정을 적어라.
 - 서술체(~했죠 / ~는데,). 예고형이 완료 묘사형보다 낫다. **다음 대사의 내용을 먼저 말하지 마라** — 상황만 깔고 대사가 답하게.
 - 근거는 기록뿐: 구체 명사·인물명을 기록 그대로 써라. 화면에 없는 행동을 지어내지 마라.
 - `cover`: 이 문장이 흐르는 동안 **보여줄 화면**을 아래 「쓸 수 있는 화면」에서 조각 id 로 골라라(1~3개, 이어지는 조각). 코드가 그 화면의 소리를 끄고 그 위에 얹는다. **문장은 그 화면이 보여주는 것을 말해야 한다** — 발장난을 말하려면 발장난 조각을 짚어라. 대사 중인 얼굴이라도 내레이션이 가리키는 장면이면 괜찮다. 짚을 화면이 없는 말은 쓰지 마라.
@@ -55,9 +58,9 @@ PROMPT = """당신은 리캡 쇼츠 구성작가다. 영상은 볼 수 없다 �
 {tone_block}{reject_block}
 ## 출력 (JSON 만)
 {{"narrations": [
-  {{"before_beat": 0, "text": "…", "cover": ["sp0101", "sp0102"]}},
-  {{"before_beat": 3, "text": "…", "cover": ["sp0140"]}},
-  {{"after_last": true, "text": "…", "cover": ["sp0190"]}}
+  {{"before_beat": 0, "text": "…", "cover": ["sp0101", "sp0102"], "closed": false}},
+  {{"before_beat": 3, "text": "…", "cover": ["sp0140"], "closed": false}},
+  {{"after_last": true, "text": "…", "cover": ["sp0190"], "closed": true}}
 ]}}"""
 
 
@@ -73,12 +76,25 @@ def beats_block(beats: list[dict], span_index: dict[str, dict],
                        + (f" · 건너뛴 대사: {skipped}" if skipped else "")
                        + f" → **before_beat: {i} 내레이션 필수**")
         r = rows_by_idx.get(b["scene"], {})
+        # 인물 전환(2026-09-03): 앞 비트와 인물 구성이 다르면 표시만 — 쓸지·뭐라 쓸지는
+        # 모델 몫(코드는 기록의 인물 목록이 달라졌다는 사실만 안다)
+        chars = [str(x) for x in (r.get("characters") or []) if x]
+        if i > 0 and chars:
+            prev_r = rows_by_idx.get(beats[i - 1]["scene"], {})
+            prev_chars = [str(x) for x in (prev_r.get("characters") or []) if x]
+            if prev_chars and set(prev_chars) != set(chars) and j is None:
+                out.append(f"\n⚠ 인물 전환: 비트 [{i - 1}] → [{i}] — 화면의 인물이 "
+                           f"{', '.join(prev_chars)} → {', '.join(chars)} 로 바뀐다"
+                           f" · 시청자가 '지금 어디·누구'인지 알게 할 자리(before_beat: {i})")
         out.append(f"\n[{i}] {b['role']} · 씬 m{b['scene']:03d} {r.get('content', '')}"
-                   + (f" · {b['action']}" if b.get("action") else ""))
+                   + (f" · {b['action']}" if b.get("action") else "")
+                   + (f" · 인물: {', '.join(chars)}" if chars else ""))
         for sid in b["span_ids"]:
             sp = span_index[sid]
+            who = [str(x) for x in (sp.get("characters") or []) if x]
+            tag = f" ({', '.join(who)})" if who else ""
             if sp["is_audio"]:
-                out.append(f"   대사 {sid}: {span_text(sp)}")
+                out.append(f"   대사 {sid}{tag}: {span_text(sp)}")
             else:
                 out.append(f"   화면 {sid}: {sp.get('scene_script', '')}")
     return "\n".join(out)
@@ -193,6 +209,7 @@ def validate_narrations(resp: Any, n_beats: int, *,
                                "refers_to": str(n.get("refers_to") or "").strip()[:160]}
             order.append(key)
         g["lines"].extend(lines)
+        g["closed"] = n.get("closed") if isinstance(n.get("closed"), bool) else g.get("closed")
         for x in cover:
             if x not in g["cover_ids"]:
                 g["cover_ids"].append(x)
@@ -203,6 +220,15 @@ def validate_narrations(resp: Any, n_beats: int, *,
     if len(order) > MAX_NARRATIONS:
         notes.append(f"내레이션 {len(order)}곳 → 앞 {MAX_NARRATIONS}곳만")
         order = order[:MAX_NARRATIONS]
+    # 마지막 줄 닫힘 — 판정은 모델(closed), 코드는 그 답을 반려 사유로 되돌릴 뿐
+    # (어미 목록을 코드에 적지 않는다 — 열린 어미는 무궁무진하다)
+    if order:
+        last_key = ("after", max(0, n_beats - 1)) if ("after", max(0, n_beats - 1)) in groups \
+            else order[-1]
+        lg = groups[last_key]
+        if lg.get("closed") is False:
+            problems.append("편의 마지막 내레이션이 문장을 닫지 않았다(네 판정 closed=false) — "
+                            f"종결 어미로 닫아 다시 써라: {lg['lines'][-1]!r}")
     if problems:
         return None, problems, notes
     if not order:
