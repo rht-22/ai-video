@@ -35,6 +35,7 @@ from app.config import AppConfig
 from app.modules.ffmpeg_utils import find_ffmpeg_command
 from app.modules.media_probe import MediaInfo, probe_media
 from app.modules.provenance import build_provenance
+from app.v3.assemble import clip_len as _clip_len
 from app.modules.speech import extract_audio_from_video
 from app.modules.subtitle import parse_subtitle
 from app.v3 import seq_analyze as s1
@@ -924,7 +925,7 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
                         for lb in (b.get("labels") or [])}
             plan["timeline"] = wt.apply_cuts_to_timeline(
                 plan["timeline"], cuts, grid, _anchors)
-            _total = sum(assemble.clip_len(c) for c in plan["timeline"])
+            _total = sum(_clip_len(c) for c in plan["timeline"])
             segments = wt.remap_segments(segments, cuts, _total)
             resources = wt.remap_resources(resources, cuts, _total)
             _write_json(output_dir / "edit_plan.json", plan)
@@ -986,7 +987,7 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
         band = finalize.video_band_ratio(finalize.design_from_style(_preset))
         # M16: 라벨은 Stage 4 가 초안을 보며 직접 쓴다 — 대사 타임라인(편집본
         # 좌표)과 영상 길이를 준다. label_plan 은 구 체크포인트 호환용으로만 남긴다.
-        _dur = sum(assemble.clip_len(c) for c in plan["timeline"])
+        _dur = sum(_clip_len(c) for c in plan["timeline"])
         style_doc, audit = stage4.run_style(get_gemini(), draft_path, story_doc,
                                             preset=_preset,
                                             windows=win, labels=label_plan,

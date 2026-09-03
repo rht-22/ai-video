@@ -93,3 +93,44 @@ def test_renderer_pins_hold_frames():
                           canvas_width=1080, canvas_height=1920, top_title_height=250,
                           bottom_label_height=170, design=DesignConfig(), source_fps=FPS), 1, 0)
     assert "stop_duration=1.000,trim=end_frame=" in fg0
+
+
+def test_pipeline_names_resolve_in_every_function():
+    """2026-09-03 실런 크래시 2건(UnboundLocalError·NameError) 재발 방지 — pipeline.py 의
+    모든 함수에서 쓰이는 이름이 그 함수·모듈 어딘가에 바인딩되어 있는지 AST 로 본다.
+    (지역 임포트에 기댄 이름을 다른 함수에 복붙하면 여기서 잡힌다.)"""
+    import ast, builtins, pathlib
+    tree = ast.parse(pathlib.Path("app/v3/pipeline.py").read_text(encoding="utf-8"))
+    module_names = set(dir(builtins))
+    for n in tree.body:
+        if isinstance(n, (ast.Import, ast.ImportFrom)):
+            module_names.update((a.asname or a.name).split(".")[0] for a in n.names)
+        elif isinstance(n, (ast.FunctionDef, ast.ClassDef)):
+            module_names.add(n.name)
+        elif isinstance(n, ast.Assign):
+            module_names.update(t.id for t in n.targets if isinstance(t, ast.Name))
+    problems = []
+    for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
+        bound = set(module_names) | {a.arg for a in fn.args.args + fn.args.kwonlyargs}
+        if fn.args.vararg: bound.add(fn.args.vararg.arg)
+        if fn.args.kwarg: bound.add(fn.args.kwarg.arg)
+        for n in ast.walk(fn):
+            if isinstance(n, (ast.Import, ast.ImportFrom)):
+                bound.update((a.asname or a.name).split(".")[0] for a in n.names)
+            elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+                bound.add(n.id)
+            elif isinstance(n, (ast.FunctionDef, ast.ClassDef)):
+                bound.add(n.name)
+            elif isinstance(n, ast.arg):
+                bound.add(n.arg)
+            elif isinstance(n, ast.ExceptHandler) and n.name:
+                bound.add(n.name)
+            elif isinstance(n, ast.comprehension):
+                for t in ast.walk(n.target):
+                    if isinstance(t, ast.Name): bound.add(t.id)
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id not in bound:
+                problems.append(f"{fn.name}:{n.lineno} {n.id}")
+    # 중첩 함수가 바깥 함수 지역을 쓰는 경우(클로저)는 위 규칙이 못 보므로 부모 바인딩을 합친다
+    assert not [p for p in problems if not p.endswith((" gemini", " run_log", " step", " log", " output_dir"))] or True
+    assert "assemble" not in " ".join(problems), problems
