@@ -113,7 +113,7 @@ def apply_overrides_to_plan(ov: dict, plan: dict, grid: dict,
         record["applied"].append(f"subtitles({len(new_segments)}줄 · 전량 교체)")
 
     # cue 승계 — source_time_sec 신원(C2). 편집본 좌표만 새 timeline 으로 재계산.
-    offsets = assemble.edited_offsets(new_plan["timeline"])
+    offsets = assemble.edited_offsets(new_plan["timeline"], new_plan.get("source_fps"))
     new_files = []
     for f in resources.get("tts_cue_files") or []:
         cue = dict(f.get("cue") or {})

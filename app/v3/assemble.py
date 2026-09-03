@@ -166,7 +166,8 @@ def pad_voiced_tails(timeline: list[dict], span_index: dict[str, dict],
 def assemble_edit_plan(story_doc: dict, span_index: dict[str, dict], *,
                        video_path: str, work_title: str,
                        words: list[dict] | None = None,
-                       silences: list[list[float]] | None = None) -> dict:
+                       silences: list[list[float]] | None = None,
+                       fps: float | None = None) -> dict:
     """비트 편성 → C1 동결 필드의 edit_plan. 클립 = 비트 안 span 병합 단위.
 
     분할 지점: (a) 소스 시간 불연속(원거리는 비트가 나뉘므로 방어) (b) 뮤트 여부가
@@ -271,19 +272,53 @@ def assemble_edit_plan(story_doc: dict, span_index: dict[str, dict], *,
         "timeline": timeline,
         "audio_mix": dict(AUDIO_MIX),
         "grid_marks": grid_marks,
+        # 편집본 좌표를 렌더와 같은 프레임 격자로 세기 위한 소스 fps(edited_offsets).
+        # None = 미상 → 종전 실수 누적(회귀 0).
+        "source_fps": (float(fps) if fps else None),
     }
 
 
 # ── 소스 ↔ 편집본 좌표 ─────────────────────────────────────────────────────
 
-def edited_offsets(timeline: list[dict]) -> list[tuple[float, float, float]]:
-    """클립별 (소스 시작, 소스 끝, 편집본 오프셋) — 편성 순서 누적."""
+# ── 프레임 격자 ────────────────────────────────────────────────────────────
+# 렌더는 클립을 따로 잘라 concat 한다. concat 은 세그먼트마다 영상 길이를 **소리 길이에
+# 맞추려고 마지막 프레임을 복제**하므로, 실제 세그먼트는 언제나 프레임 정수 개다.
+# 2026-09-03 실측(지금불륜이문제가아닙니다_b0ccda99): 계획 55.559s·13조각인데 완성본은
+# 1338프레임 = Σceil(길이×fps) — 한 프레임도 안 틀린다.
+#
+# 그런데 편집본 좌표는 계획값의 실수 누적합이었다. 그래서 조각을 지날 때마다 좌표가
+# 밀려, 뒤로 갈수록 벌어진다(실측 최대 0.3초). 덮개 뮤트 창이 화면보다 0.32초 앞서
+# 시작하고 앞서 끝나 ① 앞 장면 대사가 잘리고 ② 덮개 꼬리의 대사가 새어나왔다.
+# 자막·cue·라벨·효과음이 전부 같은 좌표를 쓰므로 같이 밀렸다.
+#
+# 고침: 좌표도 렌더와 **같은 격자**로 센다. renderer 가 클립을 정확히 clip_frames()
+# 개로 고정하고(trim=end_frame), 여기서 같은 수로 누적한다 — 두 쪽이 같은 식을 쓴다.
+# fps 를 모르면 종전 그대로 실수 누적(회귀 0 — 옛 판·비-v3 경로가 안 바뀐다).
+
+def clip_frames(dur_sec: float, fps: float | None) -> int | None:
+    """클립 길이 → 렌더가 실제로 내는 프레임 수. fps 미상이면 None."""
+    if not fps or float(fps) <= 0:
+        return None
+    return max(1, round(float(dur_sec) * float(fps)))
+
+
+def clip_duration(dur_sec: float, fps: float | None) -> float:
+    """프레임 격자에 맞춘 클립 길이 = 렌더가 실제로 만드는 길이."""
+    n = clip_frames(dur_sec, fps)
+    return float(dur_sec) if n is None else n / float(fps)
+
+
+def edited_offsets(timeline: list[dict],
+                   fps: float | None = None) -> list[tuple[float, float, float]]:
+    """클립별 (소스 시작, 소스 끝, 편집본 오프셋) — 편성 순서 누적.
+
+    fps 를 주면 렌더와 같은 프레임 격자로 누적한다(위 주석). 안 주면 종전 실수 누적."""
     out = []
     off = 0.0
     for c in timeline:
         s, e = float(c["clip_start_sec"]), float(c["clip_end_sec"])
         out.append((s, e, off))
-        off += e - s
+        off += clip_duration(e - s, fps)
     return out
 
 
@@ -538,9 +573,9 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
 # ── TTS cue 좌표 확정 ───────────────────────────────────────────────────────
 
 def finalize_cues(narration_cues: list[dict], timeline: list[dict], *,
-                  voice: str, speed: str) -> list[dict]:
+                  voice: str, speed: str, fps: float | None = None) -> list[dict]:
     """스토리 cue 계획 → C2 계약 cue(편집본 start/end + source_time_sec 신원)."""
-    offsets = edited_offsets(timeline)
+    offsets = edited_offsets(timeline, fps)
     total = round(sum(e - s for s, e, _ in offsets), 3)
     out: list[dict] = []
     for cue in narration_cues:

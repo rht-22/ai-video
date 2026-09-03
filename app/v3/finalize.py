@@ -191,7 +191,7 @@ def plan_labels(story_doc: dict, plan: dict) -> list[dict]:
 
     M11: 앵커 span 시각에 뜬다(비트 시작 고정 아님). 위치(x·y)는 여기서 정하지
     않는다 — Stage 4 가 화면을 보고 채우고, 없으면 렌더가 기본값을 쓴다."""
-    offsets = assemble.edited_offsets(plan["timeline"])
+    offsets = assemble.edited_offsets(plan["timeline"], plan.get("source_fps"))
     span_t = {}
     for c in plan["timeline"]:
         for sid in c.get("span_ids") or []:
@@ -218,6 +218,33 @@ def plan_labels(story_doc: dict, plan: dict) -> list[dict]:
 
 
 SUB_GAP_PX = 12                   # 원본 자막과 우리 자막 사이 최소 여백
+
+
+def cover_mute_windows(timeline: list[dict],
+                       narration_windows_src: list[tuple[float, float]],
+                       fps: float | None = None) -> list[tuple[float, float]]:
+    """원음을 끌 편집본 좌표 창(순수) — use_original_audio=False 클립 중 내레이션이
+    점유하지 **않은** 구간.
+
+    누적은 렌더가 실제로 만드는 프레임 격자로 센다(assemble.clip_duration). 실수
+    누적을 쓰면 조각마다 밀려, 덮개 뮤트가 화면보다 먼저 시작하고 먼저 끝난다 —
+    ① 앞 장면 대사가 잘리고 ② 덮개 꼬리의 원본 대사가 새어나온다(2026-09-03 실측
+    0.32초, 지금불륜이문제가아닙니다_b0ccda99). 클립 끝까지 가는 창은 계획 길이가
+    아니라 격자 길이까지 덮어야 반 프레임분도 안 샌다."""
+    out: list[tuple[float, float]] = []
+    off = 0.0
+    for c in timeline:
+        cs, ce = float(c["clip_start_sec"]), float(c["clip_end_sec"])
+        dur = assemble.clip_duration(ce - cs, fps)
+        if not c.get("use_original_audio"):
+            for a, z, on in assemble.split_by_windows(cs, ce, narration_windows_src):
+                if on:
+                    continue
+                r0 = min(a - cs, dur)
+                r1 = dur if z >= ce - 1e-6 else min(z - cs, dur)
+                out.append((round(off + r0, 3), round(off + r1, 3)))
+        off += dur
+    return out
 
 
 def place_above_burned(margin_v: int, burned: list[tuple[int, int]], *,
@@ -560,17 +587,8 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     # 끄면 내레이션이 끝난 뒤가 완전 무음이 된다(실측 도입부 3.57초).
     src_windows = assemble.narration_windows(story_doc)
     all_windows = sorted(w for wins in src_windows.values() for w in wins)
-    muted_windows: list[tuple[float, float]] = []
-    _off = 0.0
-    for c in plan["timeline"]:
-        _dur = float(c["clip_end_sec"]) - float(c["clip_start_sec"])
-        if not c.get("use_original_audio"):
-            for a, z, on in assemble.split_by_windows(
-                    float(c["clip_start_sec"]), float(c["clip_end_sec"]), all_windows):
-                if not on:
-                    muted_windows.append((round(_off + (a - float(c["clip_start_sec"])), 3),
-                                          round(_off + (z - float(c["clip_start_sec"])), 3)))
-        _off += _dur
+    muted_windows = cover_mute_windows(plan["timeline"], all_windows,
+                                       plan.get("source_fps"))
 
     out_path = output_dir / out_name
     audio_mix = plan.get("audio_mix") or {}
@@ -614,6 +632,7 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
         tts_audio_gain_db=int(audio_mix.get("tts_gain_db", -3)),
         text_subtitle_path=texts_path,
         muted_windows=muted_windows or None,
+        source_fps=plan.get("source_fps"),
         sfx_audio=_narr_sfx or None,
     )
     t0 = time.time()

@@ -630,6 +630,12 @@ class RenderInputs:
     # 트랙([acat])에만 volume=0 을 걸어 cue 오디오는 그대로 산다. None/빈 목록 =
     # 필터 종전과 완전히 동일(v1 회귀 0 — sfx_audio 와 같은 additive 규약).
     muted_windows: list[tuple[float, float]] | None = None
+    # 2026-09-03: 소스 fps. 주면 클립을 **프레임 정수 개로 고정**해서 낸다(아래 [3]).
+    # concat 이 세그먼트 길이를 소리에 맞추며 프레임을 덧대는 바람에 실제 편집본이
+    # 계획보다 길어지고, 계획 좌표로 찍은 뮤트 창·자막·cue·라벨·효과음이 뒤로 갈수록
+    # 어긋났다(실측 최대 0.3초 — 덮개 꼬리 대사 유출). assemble.clip_frames 와 같은 식.
+    # None = 종전과 완전히 동일한 필터그래프(회귀 0).
+    source_fps: float | None = None
 
 
 def render_short(inputs: RenderInputs) -> list[str]:
@@ -1269,6 +1275,14 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
 
     filters: list[str] = []
 
+    # 프레임 고정에 쓸 fps(없으면 종전 동작). 0·음수·비정상은 없는 것으로 본다.
+    try:
+        _clip_fps = float(getattr(inputs, "source_fps", None) or 0) or None
+    except (TypeError, ValueError):
+        _clip_fps = None
+    if _clip_fps is not None and not (1.0 < _clip_fps < 1000.0):
+        _clip_fps = None
+
     # [3] 클립별 스케일 및 패딩 (여백 및 자막 위치 수정)
     for i, clip in enumerate(inputs.clips):
         crop_key = f"{clip.role}_{i}"
@@ -1285,15 +1299,29 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
                     crop_filter = f"crop={cw}:{ch}:x='({x_expr})-{cw}/2':y='({y_expr})-{ch}/2',"
             except: pass
 
+        # 프레임 고정 — 이 클립이 정확히 N 프레임(= N/fps 초)으로 나가게 못 박는다.
+        # 안 박으면 concat 이 영상 길이를 소리 길이에 맞추려 마지막 프레임을 복제해
+        # 세그먼트가 제멋대로 길어지고, 그 오차가 조각마다 누적된다(2026-09-03 실측:
+        # 13조각에 13프레임). tpad 는 컷이 소스 끝에 걸려 프레임이 모자랄 때만 마지막
+        # 프레임을 복제해 N 을 채운다 — 남으면 trim 이 잘라내므로 평소엔 무해하다.
+        # 소리도 같은 길이로 맞춰야(apad→atrim) concat 이 영상을 덧대지 않는다.
+        pin_v, pin_a = "", "anull"
+        if _clip_fps:
+            n_fr = max(1, round((float(clip.end_sec) - float(clip.start_sec)) * _clip_fps))
+            dur_q = n_fr / _clip_fps
+            pin_v = (f",tpad=stop_mode=clone:stop_duration=1"
+                     f",trim=end_frame={n_fr},setpts=PTS-STARTPTS")
+            pin_a = f"apad,atrim=end={dur_q:.6f},asetpts=PTS-STARTPTS"
+
         v_filter = (
             f"[{i}:v]{crop_filter}"
             f"scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=increase,"
             f"setsar=1,"
             f"crop={scaled_w}:{scaled_h},"
-            f"pad={W}:{H}:{pad_x}:{overlay_y}:color=#0D0011[v{i}]"
+            f"pad={W}:{H}:{pad_x}:{overlay_y}:color=#0D0011{pin_v}[v{i}]"
         )
         filters.append(v_filter)
-        filters.append(f"[{i}:a]anull[a{i}]")
+        filters.append(f"[{i}:a]{pin_a}[a{i}]")
 
     # [4] 연결(Concat)
     concat_inputs = []

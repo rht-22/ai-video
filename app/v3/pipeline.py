@@ -694,7 +694,8 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
     # ── 경계면 조립(C1·C2·C6) — 순수, LLM 없음 ────────────────────────────
     plan = assemble.assemble_edit_plan(
         story_doc, span_index, video_path=str(video_path), work_title=work_title,
-        words=grid.get("words"), silences=grid.get("silence"))
+        words=grid.get("words"), silences=grid.get("silence"),
+        fps=(grid.get("source") or {}).get("fps"))
     belt = assemble.verify_edit_plan(plan, grid)
     if belt["pct"] is not None and belt["pct"] < 100.0:
         # Stage 2 벨트와 같은 규율 — 구조상 100% 여야 하고 아니면 코드 결함
@@ -728,7 +729,8 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
     _write_json(output_dir / "subtitle_segments.json", segments)
 
     cues = assemble.finalize_cues(story_doc.get("narration_cues") or [],
-                                  plan["timeline"], voice="ko_female", speed="normal")
+                                  plan["timeline"], voice="ko_female", speed="normal",
+                                  fps=plan.get("source_fps"))
     lost = [c for c in cues if c.get("start_sec") is None]
     cues = [c for c in cues if c.get("start_sec") is not None]
 
@@ -1087,7 +1089,8 @@ def _run_hook_variants(*, output_dir: Path, video_path: Path, work_title: str,
     for k, vdoc in enumerate(docs, start=1):
         plan = assemble.assemble_edit_plan(vdoc, span_index,
                                            video_path=str(video_path),
-                                           work_title=work_title)
+                                           work_title=work_title,
+                                           fps=(grid.get("source") or {}).get("fps"))
         plan["variant_id"] = vdoc["variant_id"]          # additive — 성과 조인 키
         belt = assemble.verify_edit_plan(plan, grid)
         if belt["pct"] is not None and belt["pct"] < 100.0:
@@ -1097,7 +1100,7 @@ def _run_hook_variants(*, output_dir: Path, video_path: Path, work_title: str,
             sorted(w for wins in assemble.narration_windows(vdoc).values() for w in wins))
         cues = [c for c in assemble.finalize_cues(
                     vdoc.get("narration_cues") or [], plan["timeline"],
-                    voice="ko_female", speed="normal")
+                    voice="ko_female", speed="normal", fps=plan.get("source_fps"))
                 if c.get("start_sec") is not None]
         _write_json(output_dir / f"edit_plan_variant_{k}.json", plan)
         _write_json(output_dir / f"subtitle_segments_variant_{k}.json", segs)
