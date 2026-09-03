@@ -640,8 +640,9 @@ def verify_edit_plan(plan: dict, grid: dict) -> dict:
                 # 출처가 실측 mp3 길이라 시각 환각 방어 위반이 아니다(2026-09-02).
                 ok += 1
                 head_ok += 1
-            elif not is_start and c.get("tail_pad"):
-                # 유성 꼬리 파형 연장(silencedetect·단어 시각 산술) — 같은 지위
+            elif not is_start and (c.get("tail_pad") or c.get("tail_trim")):
+                # 유성 꼬리 파형 연장(silencedetect·단어 시각 산술) — 같은 지위.
+                # tail_trim: watch_trim 이 무대사 구간에서 눈금 밖으로 자른 끝(2026-09-03)
                 ok += 1
                 tail_ok += 1
             else:

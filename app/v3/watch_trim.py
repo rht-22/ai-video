@@ -28,6 +28,7 @@ MAX_CUTS = 3                 # 한 판에 지목 가능한 구간 수
 MAX_CUTS_BUDGET = 6          # 예산 컷 판(초과분을 반드시 덜어야 함)의 상한
 MIN_CUT_SEC = 0.5            # 스냅 후 이보다 짧으면 자를 실익이 없다
 SNAP_TOL_SEC = 0.25          # 모델은 0.1s 단위로 말한다 — 경계(예: 15.664)를 15.7 로
+KEEP_RATIO = 0.6             # 안쪽 스냅이 제안의 이만큼도 못 남기면 무대사 구간에선 제안 시각을 그대로 쓴다
                              # 부르면 0.01 톨러런스는 놓친다(실사고: 정확한 지목이
                              # '실익 없음' 거부). 제안 밖 확장은 이 값이 상한.
 TRIM_CAP_RATIO = 0.20        # 총 제거량 상한(초안 길이 대비) — 과잉 절제 방지
@@ -55,6 +56,53 @@ def edited_span_edges(timeline: list[dict], grid: dict) -> list[float]:
                     edges.add(round(off + t - s, 3))
         off += e - s
     return sorted(edges)
+
+
+def free_zones(timeline: list[dict], grid: dict) -> list[tuple[float, float]]:
+    """편집본 좌표에서 **대사가 없는** 조각들의 구간 — 여기서는 눈금 밖 컷을 허용한다.
+
+    2026-09-03 실사고(EP01 94a86e4c): 모델이 7.5~11.5s(4.0s) "정적인 구간 단축"을
+    제안했는데 안쪽 스냅이 0.59s 만 남겼다 — 무대사 화면 조각은 3~4초짜리 하나라
+    안에 눈금이 없다. 눈금 벨트의 목적은 대사 경계의 환각 방어이지 무성 화면의
+    프레임 단위 컷을 막는 게 아니다(head_trim·tail_pad 와 같은 지위)."""
+    audio = {sp["id"]: bool(sp.get("is_audio")) for sp in grid.get("span_candidates") or []}
+    span_t = {sp["id"]: (float(sp["t_in"]), float(sp["t_out"]))
+              for sp in grid.get("span_candidates") or []}
+    out: list[tuple[float, float]] = []
+    off = 0.0
+    for c in timeline:
+        s, e = float(c["clip_start_sec"]), float(c["clip_end_sec"])
+        for sid in c.get("span_ids") or []:
+            if sid in span_t and not audio.get(sid, True):
+                a, z = span_t[sid]
+                a, z = max(a, s), min(z, e)
+                if z - a > 0.05:
+                    out.append((round(off + a - s, 3), round(off + z - s, 3)))
+        off += e - s
+    return sorted(out)
+
+
+def _in_zone(t: float, zones: list[tuple[float, float]]) -> bool:
+    return any(a - 1e-6 <= t <= z + 1e-6 for a, z in zones)
+
+
+def snap_free(start: float, end: float, edges: list[float],
+              zones: list[tuple[float, float]]) -> tuple[float, float, bool] | None:
+    """안쪽 스냅 우선. 그게 제안의 KEEP_RATIO 도 못 남기면, 무대사 구간 안의 끝은
+    제안 시각 그대로(대사 조각에 걸린 끝만 눈금으로). 반환 (s, e, free)."""
+    inward = snap_inward(start, end, edges)
+    want = end - start
+    if inward is not None and (inward[1] - inward[0]) >= KEEP_RATIO * want:
+        return inward[0], inward[1], False
+    s2 = round(start, 3) if _in_zone(start, zones) else \
+        next((v for v in edges if v >= start - SNAP_TOL_SEC), None)
+    e2 = round(end, 3) if _in_zone(end, zones) else \
+        next((v for v in reversed(edges) if v <= end + SNAP_TOL_SEC), None)
+    if s2 is None or e2 is None or e2 - s2 < MIN_CUT_SEC:
+        return (inward[0], inward[1], False) if inward is not None else None
+    if inward is not None and (e2 - s2) <= (inward[1] - inward[0]):
+        return inward[0], inward[1], False
+    return s2, e2, True
 
 
 def snap_inward(start: float, end: float,
@@ -121,7 +169,8 @@ def _carve_guards(a: float, z: float, guards: list[tuple[float, float, str]]
 
 def validate_cuts(raw: Any, *, duration: float, edges: list[float],
                   guards: list[tuple[float, float, str]],
-                  max_cuts: int = MAX_CUTS
+                  max_cuts: int = MAX_CUTS,
+                  free_zones: list[tuple[float, float]] | None = None,
                   ) -> tuple[list[dict], list[dict]]:
     """모델 제안 → (적용 목록, 거부 기록). 전부 편집본 좌표·스냅 완료 상태로 반환."""
     applied: list[dict] = []
@@ -150,7 +199,13 @@ def validate_cuts(raw: Any, *, duration: float, edges: list[float],
                              "range": [a, z]})
             continue
         a, z = max(pieces, key=lambda p: p[1] - p[0])
-        snapped = snap_inward(a, z, edges)
+        free = False
+        if free_zones:
+            sf = snap_free(a, z, edges, free_zones)
+            snapped = (sf[0], sf[1]) if sf else None
+            free = bool(sf and sf[2])
+        else:
+            snapped = snap_inward(a, z, edges)
         if snapped is None:
             rejected.append({"index": k, "reason": "스냅 후 실익 없음(<0.5s)",
                              "range": [a, z]})
@@ -166,7 +221,8 @@ def validate_cuts(raw: Any, *, duration: float, edges: list[float],
         total += e2 - s2
         applied.append({"start": s2, "end": e2,
                         "proposed": [round(a, 2), round(z, 2)],
-                        "reason": str(it.get("reason") or "")[:80]})
+                        "reason": str(it.get("reason") or "")[:80],
+                        **({"free": True} if free else {})})
     applied.sort(key=lambda c: c["start"])
     return applied, rejected
 
@@ -262,6 +318,7 @@ def apply_cuts_to_timeline(timeline: list[dict], cuts: list[dict], grid: dict,
     버린다(남의 조각에 라벨이 붙으면 안 된다)."""
     span_t = {sp["id"]: (float(sp["t_in"]), float(sp["t_out"]))
               for sp in grid.get("span_candidates") or []}
+    grid_edges = {round(t, 3) for a, z in span_t.values() for t in (a, z)}
     out: list[dict] = []
     off = 0.0
     for c in timeline:
@@ -298,6 +355,11 @@ def apply_cuts_to_timeline(timeline: list[dict], cuts: list[dict], grid: dict,
                 piece["subtitle"] = ""
             if pi > 0 or abs(a - s) > 0.001:
                 piece.pop("head_trimmed", None)   # 시작이 바뀐 조각엔 무효
+            # 무대사 구간의 눈금 밖 컷(snap_free) — 벨트에 등록(head_trimmed·tail_trim)
+            if abs(a - s) > 0.001 and round(a, 3) not in grid_edges:
+                piece["head_trimmed"] = True
+            if abs(z - e) > 0.001 and round(z, 3) not in grid_edges:
+                piece["tail_trim"] = True
             out.append(piece)
         off += dur
     return out
@@ -477,7 +539,8 @@ def run_watch_trim(gemini, draft_path: Path, *, timeline: list[dict],
     audit["elapsed"] = round(time.time() - t0, 1)
     audit["proposed"] = raw if isinstance(raw, list) else []
     applied, rejected = validate_cuts(raw, duration=duration, edges=edges,
-                                      guards=guards, max_cuts=max_cuts)
+                                      guards=guards, max_cuts=max_cuts,
+                                      free_zones=free_zones(timeline, grid))
     audit["rejected"] = rejected
     applied = _belt(applied)
     audit["applied"] = applied

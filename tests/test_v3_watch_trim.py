@@ -63,10 +63,19 @@ def test_validate_cuts_snap_is_inward_only():
     applied, _ = wt.validate_cuts([{"start_sec": 1.9, "end_sec": 5.1}],
                                   duration=20.0, edges=edges, guards=[])
     assert (applied[0]["start"], applied[0]["end"]) == (2.0, 5.0)  # 안쪽 축소
-    # span 하나를 다 못 덮는 제안은 스냅 후 실익 없음 → 드랍(부분 span 컷 금지)
+    # free_zones 없이(종전 계약): span 하나를 다 못 덮는 제안은 실익 없음 → 드랍
     applied2, rejected2 = wt.validate_cuts([{"start_sec": 2.3, "end_sec": 4.6}],
                                            duration=11.0, edges=edges, guards=[])
     assert applied2 == [] and "실익" in rejected2[0]["reason"]
+    # 무대사 조각(sp0001 → 2~5) 안이면 제안 시각 그대로(2026-09-03 — 4.0s 제안이
+    # 0.59s 로 쪼그라들던 실사고). 대사 조각 안이면 여전히 금지.
+    # (duration 60 = 총량 상한 12s — 상한이 아니라 스냅을 보는 테스트)
+    applied3, _ = wt.validate_cuts([{"start_sec": 2.3, "end_sec": 4.6}], duration=60.0,
+                                   edges=edges, guards=[], free_zones=[(2.0, 5.0)])
+    assert (applied3[0]["start"], applied3[0]["end"], applied3[0].get("free")) == (2.3, 4.6, True)
+    applied4, rejected4 = wt.validate_cuts([{"start_sec": 0.3, "end_sec": 1.6}], duration=60.0,
+                                           edges=edges, guards=[], free_zones=[(2.0, 5.0)])
+    assert applied4 == [] and "실익" in rejected4[0]["reason"]
 
 
 def test_validate_cuts_total_cap():
@@ -206,3 +215,32 @@ def test_run_watch_trim_belt_survives_model_failure():
         object(), Path("/nonexistent.mp4"), timeline=TL_B, grid=GRID_B,
         resources={}, segments=[], importance=imp, log=lambda *a: None)
     assert cuts2 == [] and "budget" not in audit2
+
+
+def test_free_zones_and_sparse_silent_cut_is_kept():
+    """실사고 모양: 3.8초 무대사 조각 하나 안의 4초 제안 — 안쪽 스냅은 0.59s(60% 미만)라
+    제안 시각을 그대로 쓴다. 눈금이 촘촘하면 종전대로 안쪽 스냅."""
+    grid = {"span_candidates": [
+        {"id": "a", "t_in": 100.0, "t_out": 103.08, "is_audio": False},
+        {"id": "b", "t_in": 103.08, "t_out": 103.67, "is_audio": False},
+        {"id": "c", "t_in": 103.67, "t_out": 107.47, "is_audio": False},
+        {"id": "d", "t_in": 107.47, "t_out": 109.0, "is_audio": True}]}
+    tl = [{"clip_start_sec": 100.0, "clip_end_sec": 109.0, "span_ids": ["a", "b", "c", "d"],
+           "use_original_audio": True}]
+    edges = wt.edited_span_edges(tl, grid)
+    zones = wt.free_zones(tl, grid)
+    assert zones == [(0.0, 3.08), (3.08, 3.67), (3.67, 7.47)]
+    applied, _ = wt.validate_cuts([{"start_sec": 1.0, "end_sec": 5.0}], duration=60.0,
+                                  edges=edges, guards=[], free_zones=zones)
+    assert (applied[0]["start"], applied[0]["end"]) == (1.0, 5.0) and applied[0]["free"]
+    # 끝이 대사 조각(d: 7.47~9.0)에 걸치면 그 끝만 눈금(7.47)으로
+    applied2, _ = wt.validate_cuts([{"start_sec": 4.0, "end_sec": 8.2}], duration=60.0,
+                                   edges=edges, guards=[], free_zones=zones)
+    assert (applied2[0]["start"], applied2[0]["end"]) == (4.0, 7.47)
+    # 조각 경계가 눈금에 없으면 벨트용 표시가 붙고, 벨트가 100% 로 인정한다
+    new = wt.apply_cuts_to_timeline(tl, applied, grid, set())
+    assert [(c["clip_start_sec"], c["clip_end_sec"]) for c in new] == [(100.0, 101.0), (105.0, 109.0)]
+    assert new[0].get("tail_trim") is True and new[1].get("head_trimmed") is True
+    from app.v3 import assemble
+    belt = assemble.verify_edit_plan({"timeline": new}, grid)
+    assert belt["pct"] == 100.0 and belt["violations"] == []
