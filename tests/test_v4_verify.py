@@ -17,6 +17,11 @@ import pytest
 
 from app.modules import timestamp_check
 from app.v4 import verify as V
+from app.v4.verify import (
+    QUOTE_FUZZY_MAX_RATIO,
+    fuzzy_quote_hits,
+    verify_candidate,
+)
 
 # 샤먼 실측 그대로 — 대사는 518.9~524.2 에 있다.
 SHAMAN_LINE = "딱 봤는데 이거 목매달아 죽은 귀신인데 얘가 장난을 치는구나 라고 봤죠."
@@ -394,3 +399,72 @@ def test_speech_segment_objects_are_accepted_like_dicts():
                              segments=objs, source_duration_sec=4000.0)
     assert res["verdict"] == "relocated"
     assert res["segments"][0]["start_sec"] == pytest.approx(518.9)
+
+
+# ── 관용 인용 대조 (2026-09-03 적대 검증 critical) ──────────────────────────
+
+_FUZZY_SEGS = [{"start_sec": 120.0, "end_sec": 124.0,
+                "text": "이건 정말 대단한 순간이었습니다"},
+               {"start_sec": 300.0, "end_sec": 305.0,
+                "text": "그때 제가 완전히 무너졌어요 정말로"}]
+
+
+def _one(quote: str, span=(110.0, 180.0)):
+    cand = {"id": "c1", "segments": [{"start_sec": span[0], "end_sec": span[1],
+                                      "quote": quote}]}
+    return verify_candidate(cand, segments=_FUZZY_SEGS, source_duration_sec=1200.0)
+
+
+def test_paraphrased_quote_is_not_a_hallucination():
+    """🛑 `find_quote_times` 는 앞 max(10, 60%) 글자의 **정확 부분문자열**을 찾는다.
+    모델이 전사를 한 글자라도 다듬어 인용하면(조사·군더더기 제거·오탈자 교정) 그
+    후보가 '전사 어디에도 없음' = 환각으로 드롭됐다.
+
+    여기는 v4 의 시간 방어선이고 **거짓 드롭이 거짓 통과보다 비싸다** — 통과한 것은
+    소스 범위·발화 커버리지(7)·시각 플래그(8)가 다시 보지만, 드롭된 것은 아무도
+    되살리지 않는다. 기획서 §3 6c ② 가 정한 임계(편집거리 0.35)를 이제 실제로 건다."""
+    got = _one("이건 정말 대단한 순간입니다")          # '이었습' → '입'
+    assert got["verdict"] == "ok"
+    assert [n["action"] for n in got["notes"]] == ["fuzzy_match"]
+
+
+def test_real_hallucination_is_still_dropped():
+    """관용이 환각까지 통과시키면 6c 가 무의미해진다."""
+    got = _one("저는 화성에서 왔고 우주선을 타고 왔습니다")
+    assert got["verdict"] == "dropped"
+
+
+def test_fuzzy_match_also_relocates():
+    """다듬은 인용이 **다른 자리**에서 발견되면 그 자리로 옮긴다 — 정확 대조와 같은 규칙."""
+    got = _one("그때 제가 완전히 무너졌어요 정말루")     # '정말로' → '정말루'
+    assert got["verdict"] == "relocated"
+    assert got["segments"][0]["start_sec"] == pytest.approx(300.0, abs=1.0)
+
+
+def test_fuzzy_does_not_match_a_short_segment_to_a_long_quote():
+    """⚠ `timestamp_check._timeline` 이 경고한 착시(0.8초 조각이 30초 인용에 들어맞음)는
+    **부분문자열 포함** 판정의 문제다. 여기는 max(len) 으로 나눈 **비율**이라 길이가
+    크게 다르면 자동으로 탈락한다 — 같은 함정이 아님을 값으로 고정한다."""
+    tiny = [{"start_sec": 10.0, "end_sec": 10.8, "text": "네"},
+            {"start_sec": 20.0, "end_sec": 21.0, "text": "그렇죠"}]
+    assert fuzzy_quote_hits("이것은 아주 긴 인용문이고 전사에는 없습니다", tiny) == []
+
+
+def test_fuzzy_skips_short_quotes_like_v1_does():
+    """짧은 인용은 우연 일치가 잦아 v1 도 대조하지 않는다 — 관용 경로도 같은 규율."""
+    assert fuzzy_quote_hits("네", _FUZZY_SEGS) == []
+
+
+def test_fuzzy_threshold_is_the_planned_one():
+    assert QUOTE_FUZZY_MAX_RATIO == 0.35
+
+
+def test_speech_span_extraction_is_one_rule():
+    """텍스트를 함께 내는 쪽과 안 내는 쪽이 **같은 추출 규칙**을 쓴다(두 벌이면
+    언젠가 한쪽만 고쳐진다 — 이 레포가 여러 번 다친 그 방식)."""
+    from app.v4.verify import _speech_spans, _speech_spans_texted
+    segs = [{"start_sec": 1.0, "end_sec": 2.0, "text": "가나다"},
+            {"start_sec": 3.0, "end_sec": 4.0, "text": "   "},      # 빈 텍스트 → 제외
+            {"start_sec": None, "end_sec": 6.0, "text": "라마바"}]   # 시각 깨짐 → 제외
+    assert _speech_spans(segs) == [(1.0, 2.0)]
+    assert [(a, b) for a, b, _t in _speech_spans_texted(segs)] == _speech_spans(segs)

@@ -24,6 +24,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from app.modules.clip_guard import CLIP_LOST_TOLERANCE_SEC, clips_beyond_source
+from app.modules.grid.schemas import EXCEPTION_KEYS
 from app.modules.speech import plausible_speech_intervals, speech_coverage_ratio
 
 FUNNEL_KEEP = 8               # 8단계로 넘길 상한
@@ -31,10 +32,24 @@ IOU_DEDUP = 0.5               # 다중 구간 **합집합** IoU — v3 의 0.7 �
 MIN_SPEECH_COVERAGE = 0.55    # E20-B4 스토리라인 커버리지 가드와 같은 자
 STALL_MAX_GAP_SEC = 12.0      # 장면 전환 간 최대 간격(소프트 신호)
 
-# 예고·크레딧 구역은 **꼬리 구역만 하드**다(기획서 §3-7). intro 는 감점 축이 계약에
-# 없어 기록만 남긴다(run_funnel 의 `intro_overlap`).
-KNOWN_SECTORS = ("intro", "teaser", "credit")
-TAIL_SECTORS = ("teaser", "credit")
+# 🛑 예외 구역 **어휘의 정본은 격자다**(`grid.schemas.EXCEPTION_KEYS` 5종). 여기서
+# 목록을 다시 적었더니 `recap`·`end` 두 종이 빠졌고, 그중 `end` 는 이름 그대로 **꼬리**라
+# 하드 게이트에서 조용히 사라졌다 — 예고 오염을 막으려고 만든 게이트가 정작 꼬리 하나를
+# 못 보는 것이다(2026-09-03 적대 검증이 잡았다. 가왕쇼 6화가 그 사고다).
+# 이제 정본을 import 하고 머리/꼬리로만 나눈다. 둘의 합집합이 정본과 다르면 임포트
+# 시점에 죽는다 — 격자에 6번째 종이 생기는 날 여기가 조용히 무시하면 안 된다.
+KNOWN_SECTORS = EXCEPTION_KEYS
+
+# 꼬리는 하드다 — 한 프레임도 나가면 안 된다(기획서 §3-7).
+TAIL_SECTORS = ("teaser", "credit", "end")
+# 머리는 기록만 — 감점 축이 계약에 없다(`run_funnel` 의 `intro_overlap`).
+# `recap` 은 지난 회차 줄거리라 intro 와 같은 자리에서 사람이 판단할 몫이다.
+HEAD_SECTORS = ("intro", "recap")
+if set(TAIL_SECTORS) | set(HEAD_SECTORS) != set(KNOWN_SECTORS):
+    raise AssertionError(
+        f"예외 구역 어휘가 격자 정본과 갈렸다 — 정본 {sorted(KNOWN_SECTORS)} vs "
+        f"여기 {sorted(set(TAIL_SECTORS) | set(HEAD_SECTORS))}. "
+        "새 종이 생겼으면 하드(꼬리)인지 기록(머리)인지 여기서 정해야 한다.")
 
 # 겹침 관용은 **부동소수 오차만** 흡수한다. 예고편은 한 프레임도 나가면 안 된다
 # (2026-08-24 가왕쇼 사고 — 예고 50초가 쇼츠 엔딩을 오염시켰다). 경계 자체의 오차는
@@ -528,7 +543,8 @@ def run_funnel(cands: list[dict], *, exception_sectors, source_duration_sec,
     survivors: list[tuple[str, Any]] = []
     dropped: list[dict] = []
     intro_overlap: list[dict] = []
-    intro = _sector_span((exception_sectors or {}).get("intro"))
+    heads = [(n, _sector_span((exception_sectors or {}).get(n))) for n in HEAD_SECTORS]
+    heads = [(n, sp) for n, sp in heads if sp is not None]
 
     for cid, cand in zip(ids, cands or []):
         problems = hard_problems(cand, exception_sectors=exception_sectors,
@@ -537,11 +553,12 @@ def run_funnel(cands: list[dict], *, exception_sectors, source_duration_sec,
                                  min_sec=min_sec, max_sec=max_sec)
         # intro 겹침은 하드가 아니다(기획서 §3-7 — 꼬리 구역만 하드). 감점 축도 계약에
         # 없으므로 **기록만** 남긴다 — 6b 경계를 되짚을 때 필요한 사실이다.
-        if intro is not None:
-            over = sum(max(0.0, min(s.end_sec, intro[1]) - max(s.start_sec, intro[0]))
+        for hname, hspan in heads:
+            over = sum(max(0.0, min(s.end_sec, hspan[1]) - max(s.start_sec, hspan[0]))
                        for s in _segments_of(cand))
             if over > SECTOR_OVERLAP_TOLERANCE_SEC:
-                intro_overlap.append({"id": cid, "overlap_sec": round(over, 2)})
+                intro_overlap.append({"id": cid, "sector": hname,
+                                      "overlap_sec": round(over, 2)})
         if problems:
             dropped.append({"id": cid, "reasons": problems})
         else:

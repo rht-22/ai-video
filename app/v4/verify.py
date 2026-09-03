@@ -62,7 +62,15 @@ def _speech_spans(segments: Any) -> list[tuple[float, float]]:
     dict 전용 `s.get()` 만 쓰면 실행 경로에서 AttributeError 로 생성이 통째로 죽는다
     (2026-08-06 맥5 실측 — timestamp_check._timeline 이 같은 자리에서 같은 이유로 고쳐졌다).
     글자가 없는(정규화 후 빈) 세그먼트는 발화로 세지 않는다 — 대조에 쓰이지 않는 재료다."""
-    out: list[tuple[float, float]] = []
+    return [(st, en) for st, en, _text in _speech_spans_texted(segments)]
+
+
+def _speech_spans_texted(segments: Any) -> list[tuple[float, float, str]]:
+    """`_speech_spans` 와 **같은 추출 규칙**으로 텍스트까지 함께 낸다. 순수.
+
+    관용 대조(`fuzzy_quote_hits`)가 글자를 봐야 해서 갈라 뒀다 — 추출 규칙(dict/객체
+    양쪽 · 빈 텍스트 제외 · 숫자 아닌 시각 제외)을 두 벌로 적으면 언젠가 한쪽만 고쳐진다."""
+    out: list[tuple[float, float, str]] = []
     for s in segments or []:
         if isinstance(s, dict):
             raw_text, raw_st, raw_en = s.get("text"), s.get("start_sec"), s.get("end_sec")
@@ -76,7 +84,7 @@ def _speech_spans(segments: Any) -> list[tuple[float, float]]:
             st, en = float(raw_st), float(raw_en)
         except (TypeError, ValueError):
             continue
-        out.append((st, en))
+        out.append((st, en, str(raw_text)))
     return out
 
 
@@ -141,6 +149,46 @@ def _conflicts(new_span: tuple[float, float], others: list[tuple[int, tuple[floa
         if j > idx and os_ < ns:
             return f"재배치하면 조각{j} 보다 뒤로 가 편집 순서가 뒤집힙니다"
     return None
+
+
+# 기획서 §3 6c ② 가 정한 인용 대조 임계. `timestamp_check.find_quote_times` 는 앞
+# max(10, 60%) 글자의 **정확 부분문자열**을 찾는데, 모델이 전사를 한 글자라도 다듬어
+# 인용하면(조사·군더더기 제거·오탈자 교정) 그 후보가 '전사 어디에도 없음' = **환각으로
+# 드롭**된다. 여기는 v4 의 시간 방어선이고 **거짓 드롭이 거짓 통과보다 비싸다** —
+# 통과한 것은 소스 범위·발화 커버리지(7단계)·시각 플래그(8단계)가 다시 보지만,
+# 드롭된 것은 아무도 되살리지 않는다. v3 `chunk_analyze` 의 각색 판정과 같은 자다.
+QUOTE_FUZZY_MAX_RATIO = 0.35
+
+
+def fuzzy_quote_hits(quote: str, segments: list[dict], *,
+                     max_ratio: float = QUOTE_FUZZY_MAX_RATIO) -> list[tuple[float, float]]:
+    """정확 대조가 실패했을 때만 쓰는 관용 대조 → [(start, end), …]. 순수.
+
+    비교 단위는 전사 세그먼트와 **인접 2개 묶음**이다(인용이 문장 경계를 넘는 경우).
+    거리는 `textcheck.edit_distance`(M9-A)를 그대로 부르고 `max(len)` 으로 나눈다.
+
+    ⚠ `timestamp_check._timeline` 독스트링은 "문장 단위로 따로 비교하지 마라"고 경고한다.
+    그건 **부분문자열 포함** 판정 얘기다 — 0.8초짜리 조각이 30초 인용 안에 들어맞는
+    착시(2026-08-06 실측). 여기는 `max(len)` 으로 나눈 **비율**이라 길이가 크게 다르면
+    자동으로 탈락한다(짧은 조각 vs 긴 인용 = 비율 1에 가깝다). 같은 함정이 아니다.
+    """
+    from app.v3.textcheck import edit_distance
+
+    nq = timestamp_check.normalize(quote)
+    if len(nq) < timestamp_check.MIN_QUOTE_CHARS:
+        return []                     # 짧은 인용은 우연 일치가 잦다 — v1 규율 그대로
+    spans = _speech_spans_texted(segments)
+    out: list[tuple[float, float]] = []
+    for width in (1, 2):
+        for i in range(len(spans) - width + 1):
+            group = spans[i:i + width]
+            text = timestamp_check.normalize("".join(g[2] for g in group))
+            if not text:
+                continue
+            denom = max(len(nq), len(text))
+            if denom and edit_distance(nq, text) / denom <= max_ratio:
+                out.append((group[0][0], group[-1][1]))
+    return sorted(set(out))
 
 
 def verify_candidate(cand: dict, *, segments: list[dict], source_duration_sec: float,
@@ -231,6 +279,16 @@ def verify_candidate(cand: dict, *, segments: list[dict], source_duration_sec: f
 
         if judgeable:
             hits = timestamp_check.find_quote_times(quote_text, segments)
+            fuzzy_used = False
+            if not hits:
+                # 정확 대조가 실패했을 때만 **관용 대조**를 한 번 더 한다(§3 6c ②).
+                hits = fuzzy_quote_hits(quote_text, segments)
+                fuzzy_used = bool(hits)
+                if fuzzy_used:
+                    notes.append({"segment": idx, "action": "fuzzy_match",
+                                  "why": f"정확 대조 실패 · 편집거리 "
+                                         f"{QUOTE_FUZZY_MAX_RATIO} 이내로 찾았습니다 — "
+                                         f"\"{quote_text[:24]}…\""})
             lo, hi = start - QUOTE_MATCH_TOLERANCE_SEC, end + QUOTE_MATCH_TOLERANCE_SEC
             inside = [h for h in hits if lo <= h[0] <= hi or lo <= h[1] <= hi]
 

@@ -443,7 +443,10 @@ def test_funnel_records_intro_overlap_without_dropping():
                                                                         "end_sec": 43.0}},
                                         "speech_intervals": [(20.0, 80.0)]})
     assert [c["id"] for c in kept] == ["c01"]
-    assert rec["intro_overlap"] == [{"id": "c01", "overlap_sec": 23.0}]
+    # `sector` 가 함께 남는다 — 머리 구역이 둘(intro·recap)이라 어느 쪽인지 알아야
+    # 사람이 6b 경계를 되짚을 수 있다.
+    assert rec["intro_overlap"] == [{"id": "c01", "sector": "intro",
+                                     "overlap_sec": 23.0}]
 
 
 def test_funnel_duplicate_ids_fail_loud():
@@ -471,7 +474,10 @@ def test_contract_constants_are_fixed():
     assert F.IOU_DEDUP == 0.5
     assert F.MIN_SPEECH_COVERAGE == 0.55
     assert F.STALL_MAX_GAP_SEC == 12.0
-    assert F.TAIL_SECTORS == ("teaser", "credit")
+    # `end`(크레딧 이후 꼬리)가 빠져 있었다 — 2026-09-03 적대 검증 critical.
+    # 어휘 정본은 격자이고 머리/꼬리의 합집합이 그것과 같아야 한다(모듈이 임포트 시 검사).
+    assert F.TAIL_SECTORS == ("teaser", "credit", "end")
+    assert F.HEAD_SECTORS == ("intro", "recap")
 
 
 # ── 전량 하드 탈락 폴백 (2026-09-03 통합 스모크가 잡은 이음새 결함) ──────────
@@ -533,3 +539,45 @@ def test_source_bounds_judgment_is_the_v1_function_not_a_copy():
     got = F.hard_problems(tiny, exception_sectors={}, source_duration_sec=4000.0,
                           speech_intervals=[], min_sec=40.0, max_sec=120.0)
     assert F.CODE_BEYOND_SOURCE in [F.problem_code(r) for r in got]
+
+
+# ── 예외 구역 어휘 (2026-09-03 적대 검증 critical) ──────────────────────────
+
+def test_sector_vocabulary_comes_from_the_grid_not_a_copy():
+    """🛑 여기서 목록을 다시 적었더니 `recap`·`end` 가 빠졌고, 그중 `end` 는 이름 그대로
+    **꼬리**라 하드 게이트에서 조용히 사라졌다 — 예고 오염을 막으려고 만든 게이트가
+    정작 꼬리 하나를 못 보고 있었다(가왕쇼 6화가 그 사고다).
+
+    합집합이 정본과 갈리면 임포트 시점에 죽는다(모듈 상단 AssertionError)."""
+    from app.modules.grid.schemas import EXCEPTION_KEYS
+    assert F.KNOWN_SECTORS is EXCEPTION_KEYS
+    assert set(F.TAIL_SECTORS) | set(F.HEAD_SECTORS) == set(EXCEPTION_KEYS)
+    assert "end" in F.TAIL_SECTORS and "credit" in F.TAIL_SECTORS
+    assert "recap" in F.HEAD_SECTORS
+
+
+def test_end_sector_overlap_is_hard():
+    """`end`(크레딧 이후 꼬리)는 teaser·credit 과 같은 하드다 — 이게 빠져 있었다."""
+    cand = _cand("c01", [(3900, 3960)])
+    got = F.hard_problems(cand, exception_sectors={"end": {"start_sec": 3800.0,
+                                                           "end_sec": 4000.0}},
+                          source_duration_sec=4000.0, speech_intervals=[],
+                          min_sec=40.0, max_sec=120.0)
+    assert [F.problem_code(r) for r in got] == [F.CODE_SECTOR_OVERLAP]
+    # 그리고 부활 불가여야 한다 — 오염은 품질 사유가 아니다
+    _kept, rec = F.run_funnel([cand], **{**BASE, "exception_sectors": {
+        "end": {"start_sec": 3800.0, "end_sec": 4000.0}}})
+    assert rec["kept"] == [] and rec["fallback"]["revivable"] == 0
+
+
+def test_recap_overlap_is_recorded_like_intro_not_hard():
+    """`recap`(지난 줄거리)은 머리 구역 — intro 와 같은 자리에서 기록만 남긴다."""
+    cand = _cand("c01", [(100, 160)])
+    got = F.hard_problems(cand, exception_sectors={"recap": {"start_sec": 90.0,
+                                                             "end_sec": 200.0}},
+                          source_duration_sec=4000.0, speech_intervals=[],
+                          min_sec=40.0, max_sec=120.0)
+    assert F.CODE_SECTOR_OVERLAP not in [F.problem_code(r) for r in got]
+    _kept, rec = F.run_funnel([cand], **{**BASE, "exception_sectors": {
+        "recap": {"start_sec": 90.0, "end_sec": 200.0}}})
+    assert rec["intro_overlap"] and rec["intro_overlap"][0]["sector"] == "recap"
