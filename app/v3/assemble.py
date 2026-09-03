@@ -501,7 +501,9 @@ def _word_speakers(sp: dict, in_span: list[dict]) -> list[str] | None:
 
 def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                    grid_words: list[dict],
-                   mute_windows: list[tuple[float, float]] | None = None) -> list[dict]:
+                   mute_windows: list[tuple[float, float]] | None = None,
+                   cast_names: list[str] | None = None,
+                   name_fix_log: list[dict] | None = None) -> list[dict]:
     """채택 유성 span(뮤트 제외) → 어절 자막 세그먼트(**편집본 좌표** — C6).
 
     단어 소속은 중점 기준(span 재단과 같은 규율). 자막은 원본 오디오 인용에만 —
@@ -541,6 +543,15 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                 in_span = [w for w in grid_words
                            if sp["t_in"] <= (float(w["t0"]) + float(w["t1"])) / 2
                            < sp["t_out"]]
+                # 인명 대조(2026-09-03): whisper 어절이 인물표 이름과 가깝고 모델
+                # 청취(heard_text)에 그 이름이 정확히 있으면 그 이름으로 — 두 증인
+                # 일치 시에만. cast_names 없으면 종전과 동일.
+                if cast_names:
+                    from app.v3.textcheck import fix_span_words
+                    in_span, _fx = fix_span_words(in_span, cast_names,
+                                                  str(sp.get("heard_text") or ""))
+                    if _fx and name_fix_log is not None:
+                        name_fix_log.extend(dict(f, span_id=sid) for f in _fx)
                 lines = _lines_for_span(in_span, sp["t_in"], sp["t_out"])
             speaker = span_speaker(sp)
             color = colors.get(speaker, SPEAKER_DEFAULT_COLOR)

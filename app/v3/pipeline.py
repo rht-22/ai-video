@@ -683,7 +683,7 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
                 shorts_hints=_shorts,
                 measure_fn=_measure_narration, log=log)
         _write_json(story_ckpt, {"fingerprint": fingerprint, "story": story_doc})
-        step("story", elapsed=round(time.time() - t0, 1),
+        step("story", elapsed=round(time.time() - t0, 1), name_arbitrations=_name_arb,
              attempts=len(audit["attempts"]), fallback=audit.get("fallback", False),
              template=story_doc["template"], pieces=audit.get("pieces"),
              budget=story_doc["budget"],
@@ -712,13 +712,18 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
     # 내레이션 창 밖은 원음이 살아 있다 → 그 구간 대사는 자막을 낸다(M15)
     _mw = sorted(w for wins in assemble.narration_windows(story_doc).values()
                  for w in wins)
+    names = [c["character_name"] for c in (research or {}).get("cast_images") or []
+             if c.get("character_name")]
+    _name_arb: list[dict] = []
     segments = assemble.word_subtitles(plan["timeline"], span_index,
-                                       grid.get("words") or [], _mw)
+                                       grid.get("words") or [], _mw,
+                                       cast_names=names, name_fix_log=_name_arb)
+    for f in _name_arb:
+        log(f"  [v3/자막] 인명 대조 교정 {f.get('span_id')} {f['from']!r} → {f['to']!r} "
+            f"(근거: 모델 청취 + 인물표)")
     # ── M9-A/B: 자막 텍스트 신뢰 검사(순수 코드 · LLM 0콜) ────────────────
     from app.v3 import textcheck
     segments, rep_warns = textcheck.drop_repetition(segments)   # B 예방
-    names = [c["character_name"] for c in (research or {}).get("cast_images") or []
-             if c.get("character_name")]
     name_warns = textcheck.check_names(segments, names)          # A 경고
     if fix_names and name_warns:
         segments, name_fixes = textcheck.fix_names(segments, names)

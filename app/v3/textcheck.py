@@ -84,6 +84,63 @@ def check_names(segments: list[dict], names: list[str]) -> list[dict]:
     return out
 
 
+# 인명 뒤에 붙는 조사 — 긴 것부터(2026-09-03). 뗀 뒤 남는 길이가 NAME_MIN_LEN 미만이면 안 뗀다.
+_JOSA = ("에게서", "한테서", "이랑", "에게", "한테", "께서", "으로", "부터", "까지", "처럼",
+         "이야", "이가", "은", "는", "이", "가", "을", "를", "아", "야", "의", "도", "만",
+         "과", "와", "랑", "로", "께")
+
+
+def split_josa(tok: str) -> tuple[str, str]:
+    for j in _JOSA:
+        if tok.endswith(j) and len(tok) - len(j) >= NAME_MIN_LEN:
+            return tok[:-len(j)], j
+    return tok, ""
+
+
+def arbitrate_name(token: str, names: list[str], heard_text: str) -> str | None:
+    """받아쓰기 어절 vs 모델 청취 — **두 증인이 같은 인명을 가리킬 때만** 뒤집는다(순수).
+
+    2026-09-03 실사고(EP01): whisper 는 '임지영이', 모델 청취(heard_text)는 '임재홍, …',
+    인물표에 임재홍. 규칙이 '대사는 받아쓰기가 정본'이라 화면에 임지영이가 나갔다.
+    문장 각색엔 그 규칙이 맞지만 인명은 whisper 가 더 자주 틀린다.
+
+    코드가 하는 건 판단이 아니라 대조다 — ① 인물표에 정확히 있는 이름 ② 모델이 들은
+    문장에 그 이름이 정확히 있고 ③ 받아쓰기 어절(조사 뗀 것)이 그 이름과 가깝다
+    (길이 ±1 · 편집거리 ≤2). 후보가 정확히 하나일 때만 교정, 아니면 None(경고는 다른
+    길). 반환값은 조사를 그대로 붙인 새 어절."""
+    raw = token.strip(_STRIP)
+    if not raw or not heard_text:
+        return None
+    stem, josa = split_josa(raw)
+    if len(stem) < NAME_MIN_LEN:
+        return None
+    exact = set(dict.fromkeys(names or []))
+    if stem in exact:
+        return None
+    cands = []
+    for nm in dict.fromkeys(names or []):
+        if len(nm) < NAME_MIN_LEN or abs(len(nm) - len(stem)) > 1:
+            continue
+        if edit_distance(stem, nm) <= 2 and nm in heard_text:
+            cands.append(nm)
+    if len(cands) != 1:
+        return None
+    return cands[0] + josa
+
+
+def fix_span_words(words: list[dict], names: list[str], heard_text: str
+                   ) -> tuple[list[dict], list[dict]]:
+    """span 의 whisper 단어 목록에 arbitrate_name 을 적용한 사본 + 교정 기록."""
+    out, fixes = [], []
+    for w in words:
+        new = arbitrate_name(str(w.get("text") or ""), names, heard_text)
+        if new and new != w.get("text"):
+            fixes.append({"at": round(float(w.get("t0", 0)), 2), "from": w.get("text"), "to": new})
+            w = dict(w, text=new)
+        out.append(w)
+    return out, fixes
+
+
 def fix_names(segments: list[dict], names: list[str]) -> tuple[list[dict], list[dict]]:
     """A 승격판 — 의심 어절을 사전 값으로 교정한 사본 + 교정 기록. 순수.
 
