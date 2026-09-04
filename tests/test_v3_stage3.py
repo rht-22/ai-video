@@ -530,8 +530,9 @@ def test_multi_narration_places_sequentially():
 
 def test_multi_narration_drops_tail_when_window_runs_out():
     """창이 모자라면 **뒤 문장부터** 버린다 — 앞 문장이 서사에 더 중요하다."""
-    # 창 1.5s — 첫 문장(견적 1.07s) 뒤 남는 0.43s 는 최소 노출(1.0s)에 못 미친다
-    grid2 = _mk_grid([(0.0, 1.5, False, "")])
+    # 창 2.3s — 첫 문장(견적 = 0.2 + 8자/5.0 = 1.8s) 뒤 남는 0.5s 는
+    # 최소 노출(1.0s)에 못 미친다
+    grid2 = _mk_grid([(0.0, 2.3, False, "")])
     s2 = _mk_stage2(grid2, [(0, 0, 3, "m")])
     idx, _ = st.build_span_index(s2, grid2)
     beats = [{"role": "hook", "span_ids": ["sp0000"],
@@ -545,7 +546,8 @@ def test_multi_narration_drops_tail_when_window_runs_out():
 
 def test_multi_narration_uses_leftover_window_as_fit():
     """남은 창이 최소 노출 이상이면 뒤 문장도 fit 으로 넣는다(버리기 전에 살린다)."""
-    grid2 = _mk_grid([(0.0, 2.2, False, "")])
+    # 창 3.0s — 첫 문장 견적 1.8s 뒤 1.2s 가 남아 최소 노출(1.0s)을 넘는다
+    grid2 = _mk_grid([(0.0, 3.0, False, "")])
     s2 = _mk_stage2(grid2, [(0, 0, 3, "m")])
     idx, _ = st.build_span_index(s2, grid2)
     beats = [{"role": "hook", "span_ids": ["sp0000"],
@@ -553,7 +555,7 @@ def test_multi_narration_uses_leftover_window_as_fit():
     cues, dropped = st.plan_narration_slots(beats, idx)
     assert len(cues) == 2 and not dropped
     assert cues[1]["mode"] == "fit"
-    assert cues[1]["source_end_sec"] <= 2.2 + 1e-6
+    assert cues[1]["source_end_sec"] <= 3.0 + 1e-6
 
 
 def test_multi_narration_mute_scope_stays_window_local():
@@ -743,3 +745,59 @@ def test_span_start_times_reads_the_grid():
                              {"id": "bad"}, {"t_in": 3.0}]}
     assert finalize.span_start_times(g) == {"sp0": 1.5, "sp1": 9.0}
     assert finalize.span_start_times(None) == {}
+
+
+# ── 내레이션 견적은 합성기 고정 무음을 센다 (2026-09-04 실측 교정) ──────────
+#
+# 종전 견적은 `자수/7.5` 뿐이었다. 발화 속도로는 맞는 값이지만 ElevenLabs 가 문장
+# 앞뒤에 붙이는 **고정 무음 0.35~0.40초**를 세지 않았다. 견적이 곧 창 길이이고
+# 창이 곧 TTS 의 target 이라, target 은 '발화 시간'인데 실측은 '파일 길이'인
+# 단위 불일치였다 — 실소재 6/6 cue 가 Flash 단축을 탔고 4/6 이 물리 트림돼
+# 말이 잘렸다(docs/v4/REAL-RUN-001.md).
+
+def test_narration_estimate_counts_the_synthesizer_padding():
+    """견적 = 패딩 + 자수/속도. 짧은 문장일수록 패딩 비중이 커서 결정적이다."""
+    n = 8
+    want = st.NARRATION_PAD_SEC + n / st.NARRATION_CPS
+    grid2 = _mk_grid([(0.0, 30.0, False, "")])
+    s2 = _mk_stage2(grid2, [(0, 0, 3, "m")])
+    idx, _ = st.build_span_index(s2, grid2)
+    beats = [{"role": "hook", "span_ids": ["sp0000"],
+              "narration": ["가" * n], "labels": []}]
+    cues, dropped = st.plan_narration_slots(beats, idx)
+    assert not dropped and len(cues) == 1
+    got = cues[0]["source_end_sec"] - cues[0]["source_time_sec"]
+    # 창은 소수점 3자리로 반올림된다(story.py `round(w1, 3)`).
+    assert got == pytest.approx(want, abs=1e-3), f"창 {got} != 견적 {want}"
+    # 패딩을 빼먹으면 실측 대비 이만큼 모자란다 — 1.2초 창에서 30% 가 넘는다.
+    assert got - n / st.NARRATION_CPS == pytest.approx(st.NARRATION_PAD_SEC, abs=1e-3)
+
+
+def test_narration_padding_matches_the_measurement():
+    """상수를 실측 범위에 묶는다 — 근거 없이 움직이면 말이 잘리거나 창이 낭비된다.
+
+    실측 12건(공백제외 7~11자)의 최소제곱은 `자수/5.17`(절편≈0 · RMSE 0.095s)이고,
+    아래 값은 12건 **전부**를 덮는다(초과 0 · 평균 여유 +0.27s).
+
+    ⚠ 발화 구간만 재면 7.4~7.7 자/초다 — 그 값을 여기 쓰면 안 된다. 창이 담아야
+    하는 것은 선행·후행 무음과 어절 사이 쉼까지 든 **파일 길이**다.
+    """
+    # 실측 12건을 그대로 태워 초과가 없는지 본다(상수만 바뀌면 바로 깨진다).
+    obs = [("커피 사온 척 연기했죠", 1.750), ("하지만 선임은 눈치챘죠", 1.933),
+           ("신병을 잡으려는 선임들", 2.038), ("온갖 억지 트집을 잡았죠", 1.907),
+           ("지옥의 압박 질문들이", 1.672), ("신병에게 연달아 쏟아졌죠", 2.090),
+           ("커피 산 척했죠.", 1.254), ("선임은 눈치챘죠.", 1.533),
+           ("신병 잡는 선임.", 1.579), ("지옥의 압박질문.", 1.486),
+           ("억지 트집이었죠.", 1.384), ("신병에게 쏟아짐.", 1.489)]
+    over = []
+    for text, actual in obs:
+        n = len("".join(text.split()))
+        est = max(st.NARRATION_MIN_SEC, st.NARRATION_PAD_SEC + n / st.NARRATION_CPS)
+        if actual > est:
+            over.append((text, round(actual - est, 3)))
+    assert not over, f"견적이 실측을 못 덮는다: {over}"
+    # 반대로 과대해도 곤란하다 — 창이 커지면 좁은 런에 못 들어가 cue 가 밀린다.
+    slack = [max(st.NARRATION_MIN_SEC,
+                 st.NARRATION_PAD_SEC + len("".join(t.split())) / st.NARRATION_CPS) - a
+             for t, a in obs]
+    assert sum(slack) / len(slack) < 0.45, f"평균 여유 {sum(slack)/len(slack):.3f}s 는 과하다"
