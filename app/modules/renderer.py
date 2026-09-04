@@ -640,6 +640,11 @@ class RenderInputs:
     # (center 정렬 포함) 모두 이 값 아래에서 자리를 잡는다. None = 종전 수식 그대로
     # (밴드 하단 + 20 만 본다 — v1 필터 문자열 바이트 동일, 회귀 0).
     work_min_top: int | None = None
+    # 2026-09-04(v3): 제목 줄별 크기가 **이미 폭에 맞춰져** 왔다(finalize.fit_title_sizes — 실제
+    # 폰트 실측). True 면 v1 의 글자수 기반 축소(_scale_font_for_length 표 · 줄 수 기반 0.85/0.70
+    # 축소 · _max_chars_for 재줄바꿈)를 건너뛴다 — 둘이 겹치면 이중 축소(신병4: 74/85 로 맞춘
+    # 제목이 57/76 으로 그려짐). False(기본) = v1 종전 그대로.
+    title_prefit: bool = False
     # 2026-09-03: 소스 fps. 주면 클립을 **프레임 정수 개로 고정**해서 낸다(아래 [3]).
     # concat 이 세그먼트 길이를 소리에 맞추며 프레임을 덧대는 바람에 실제 편집본이
     # 계획보다 길어지고, 계획 좌표로 찍은 뮤트 창·자막·cue·라벨·효과음이 뒤로 갈수록
@@ -717,7 +722,9 @@ def render_short(inputs: RenderInputs) -> list[str]:
         return max(8, int(title_max_width_px / max(1, font_size)))
 
     base_size = inputs.design.title_size
-    wrapped_title = _wrap_text(inputs.title_text, _max_chars_for(base_size), base_size)
+    _prefit = bool(getattr(inputs, "title_prefit", False))
+    wrapped_title = (inputs.title_text if _prefit
+                     else _wrap_text(inputs.title_text, _max_chars_for(base_size), base_size))
     # E8: 시간대별 제목이면 창 밖에서 title_text 는 안 그려진다 — 줄 수 기반 폰트 축소는
     # 전 세그먼트 공통 title_size(디자인 레벨)에 대한 것이므로, 실제로 그려질 세그먼트
     # 중 **가장 줄이 많은 것**을 기준으로 한 번만 정한다(기준선 고정과 같은 이유 —
@@ -731,7 +738,9 @@ def render_short(inputs: RenderInputs) -> list[str]:
     else:
         title_lines = wrapped_title.count("\n") + 1
 
-    if title_lines >= 4:
+    if _prefit:
+        scaled_title_size = base_size          # 줄별 크기가 이미 폭에 맞다 — 줄 수 축소 없음
+    elif title_lines >= 4:
         scaled_title_size = max(24, int(base_size * 0.70))
     elif title_lines == 3:
         scaled_title_size = max(28, int(base_size * 0.85))
@@ -1505,7 +1514,8 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         for visual_idx, (orig_idx, raw_line) in enumerate(lines):
             base_color = custom_colors[orig_idx] if orig_idx < len(custom_colors) else custom_colors[-1]
             base_font_size = title_sizes[orig_idx] if orig_idx < len(title_sizes) else title_sizes[-1]
-            font_size = _scale_font_for_length(base_font_size, len(raw_line))
+            font_size = (base_font_size if getattr(inputs, "title_prefit", False)
+                         else _scale_font_for_length(base_font_size, len(raw_line)))
             box_style = _per_line(title_boxes, orig_idx)
             pad = _box_pad(font_size, box_style)
             style = {

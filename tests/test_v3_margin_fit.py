@@ -219,3 +219,37 @@ def test_fit_title_sizes_measures_with_real_font(tmp_path):
     approx = fit_title_sizes(text, [92, 112])                     # 근사(파일 없음)와 근접
     assert all(abs(a - b) <= 4 for a, b in zip(sizes, approx))     # '?' 등 좁은 글자만큼 차이
     assert fit_title_sizes("짧은 제목\n둘", [92, 112], font_path=str(font)) == [92, 112]
+
+
+def test_title_prefit_skips_v1_length_and_linecount_shrink():
+    # v3 가 폭 실측으로 맞춘 74/85 가 v1 글자수 표(16자→0.77 · 14자→0.90)로 57/76 이 되던 이중 축소
+    from pathlib import Path
+    from app.modules.renderer import RenderInputs, _build_filtergraph
+    from app.modules.story_builder import StoryClip
+
+    def _inputs(**kw):
+        clip = StoryClip(role="hook", start_sec=0.0, end_sec=10.0, subtitle="s",
+                         use_original_audio=True)
+        return RenderInputs(
+            video_path=Path("src.mp4"), clips=[clip], subtitle_path=None,
+            crop_timeline_map={}, title_text="제일 못생긴 선임을 고른 신병\n과연 살아남을 수 있을까?",
+            work_title="신병4", output_path=Path("out.mp4"), canvas_width=1080,
+            canvas_height=1920, top_title_height=250, bottom_label_height=170,
+            design=DesignConfig(aspect_ratio="24:23", video_y=443, title_sizes=[74, 85],
+                                title_size=74), **kw)
+    v1 = _build_filtergraph(_inputs(), 1, 0)
+    assert "fontsize=57:" in v1 and "fontsize=76:" in v1          # 종전(v1) 그대로
+    v3 = _build_filtergraph(_inputs(title_prefit=True), 1, 0)
+    assert "fontsize=74:" in v3 and "fontsize=85:" in v3
+    assert "fontsize=57:" not in v3
+
+
+def test_auxiliary_verb_penalized_at_line_start_but_not_sentence_start():
+    from app.v3.assemble import _lines_for_span, _starts_dependent
+    assert _starts_dependent("봐") and _starts_dependent("줘")
+    ws = [{"t0": i, "t1": i + 1, "text": t}
+          for i, t in enumerate("소개받고 싶은 선임들이 서로 싸울까 봐 소개시켜드리기 싫다에".split())]
+    lines = [l["text"] for l in _lines_for_span(ws, 0.0, 9.0)]
+    assert not any(l.startswith("봐") for l in lines) and "싸울까 봐" in " | ".join(lines)
+    ws2 = [{"t0": 0, "t1": 1, "text": "봐,"}, {"t0": 1, "t1": 2, "text": "이거"}]
+    assert [l["text"] for l in _lines_for_span(ws2, 0.0, 2.0)] == ["봐, 이거"]   # 문장 첫머리 그대로

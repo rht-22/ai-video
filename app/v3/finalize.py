@@ -1021,6 +1021,7 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
         source_fps=plan.get("source_fps"),
         sfx_audio=_all_sfx or None,
         work_min_top=_work_min_top,
+        title_prefit=True,          # 줄별 크기는 위 fit_title_sizes 가 폰트 실측으로 맞췄다
     )
     t0 = time.time()
     render_short(inputs)
