@@ -265,8 +265,13 @@ def fake_proxy(monkeypatch):
 
 def test_unimplemented_steps_end_cleanly_with_a_milestone(synth, tmp_path,
                                                           fake_transcribe, fake_proxy):
+    # ⚠ 2026-09-04(M3): 6~9 가 배선되면서 이 실행은 더 이상 `candidates` 에서 멈추지
+    #   않는다 — 그 단계들은 LLM 호출이라 여기서는 `--stop-after upload` 로 세운다.
+    #   `not_implemented` 경로 자체는 가짜 클라이언트를 든
+    #   `tests/test_v4_pipeline_m3.py::test_pipeline_ends_cleanly_at_the_first_unbuilt_step`
+    #   가 첫 미구현 단계(flesh)로 이어 받는다.
     out = v4p.run_v4(video_path=synth, work_title="합성", outdir=tmp_path / "o",
-                     skip_research=True, log=lambda *a: None)
+                     skip_research=True, stop_after="upload", log=lambda *a: None)
 
     assert fake_proxy["built"] == 1 and fake_proxy["uploaded"] == 1
     up = _entry(out, "upload")
@@ -274,9 +279,9 @@ def test_unimplemented_steps_end_cleanly_with_a_milestone(synth, tmp_path,
     assert (out / "checkpoint_upload.json").exists()
 
     last = _steps(out)[-1]
-    assert last["step"] == "candidates" and last["not_implemented"] == "M3"
+    assert last["step"] == "candidates" and last["skipped"] == "--stop-after upload"
     assert last["remaining"][0] == "candidates" and last["remaining"][-1] == "11:validate"
-    # 미구현이라고 예외로 죽지 않는다 — job 디렉토리를 돌려주고 정상 종료한다
+    # 조용히 끝나지 않는다 — 무엇이 남았는지 남기고 job 디렉토리를 돌려준다
     assert out.is_dir()
 
 
@@ -362,9 +367,12 @@ def test_every_step_is_wired_or_declared_unimplemented():
     """단계 표에 이름을 더했는데 배선이 모르면 KeyError 로 죽는다 — 표와 배선을 묶는다."""
     from app.v4.steps import V4_STEPS
 
-    handled = {"init", "research", "transcribe", "probe", "upload"}
+    # ⚠ 손으로 적던 집합을 배선의 `IMPLEMENTED_STEPS` 로 바꿨다(M3) — 마일스톤이
+    #   올라갈 때마다 이 테스트를 고치게 하면 언젠가 아무도 안 고친다. 두 표가
+    #   서로 어긋나는지는 `app/v4/pipeline._check_step_coverage` 가 임포트 시점에
+    #   보고, `handlers` 와 어긋나는지는 run_v4 가 본다.
     for name in V4_STEPS:
-        assert name in handled or name in v4p.NOT_IMPLEMENTED_MILESTONE, name
+        assert name in v4p.IMPLEMENTED_STEPS or name in v4p.NOT_IMPLEMENTED_MILESTONE, name
 
 
 # ── CLI (계약 §6) ──────────────────────────────────────────────────────────
