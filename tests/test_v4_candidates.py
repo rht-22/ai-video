@@ -778,16 +778,53 @@ def test_default_prompt_is_byte_identical_without_the_gate():
     assert C.ORDER_FREE_CLAUSE not in _order_prompt()
 
 
-def test_gate_adds_the_order_clause_only():
-    """켜면 절이 **덧붙는다** — 본문은 그대로다(프롬프트 동결 규율)."""
+def test_gate_changes_exactly_two_things():
+    """켜면 ① 절이 덧붙고 ② **출력 예시의 조각 순서가 뒤집힌다**. 그 둘뿐이다.
+
+    ②는 처음엔 없었다 — 절만 넣고 예시를 오름차순으로 두었더니 동일 소재 A/B 에서
+    비선형 후보가 **0개**였다(게이트 ON 6/6 · OFF 9/9 시간순). 예시가 규칙보다
+    뒤에 있어 모델이 마지막으로 읽는 탓이다. 그래서 예시도 게이트를 따른다.
+
+    나머지 본문은 한 줄도 안 바뀐다(프롬프트 동결 규율)."""
     off, on = _order_prompt(), _order_prompt(nonlinear=True)
-    assert C.ORDER_FREE_CLAUSE in on
-    assert off != on
-    # 덧붙임이라 off 의 모든 줄이 on 에 그대로 있다.
-    missing = [ln for ln in off.splitlines() if ln and ln not in on.splitlines()]
-    assert not missing, f"본문이 바뀌었다: {missing[:3]}"
+    assert C.ORDER_FREE_CLAUSE in on and off != on
+    off_lines, on_lines = off.splitlines(), on.splitlines()
+    changed = [ln for ln in off_lines if ln and ln not in on_lines]
+    # 사라진 줄은 **예시 두 줄뿐**이어야 한다.
+    assert all("start_sec" in ln for ln in changed), f"본문이 바뀌었다: {changed[:3]}"
+    assert len(changed) == 2, f"예시 밖이 움직였다: {changed}"
 
 
 def test_order_clause_forbids_source_overlap():
     """순서는 열되 **겹침은 막는다** — 같은 화면이 두 번 나가는 것은 별개 사고다."""
     assert "겹치면 안 된다" in C.ORDER_FREE_CLAUSE
+
+
+def test_output_example_order_follows_the_gate():
+    """🛑 **예시가 절보다 강하다** — 2026-09-04 A/B 실측이 가르쳐 준 것이다.
+
+    동일 소재·동일 격자로 A/B 를 돌렸더니 게이트 ON 6/6 · OFF 9/9 가 전부 시간순
+    이었고 비선형 후보는 **0개**였다. 원인은 절(9번)을 켜고도 출력 예시가 오름차순
+    (120.0 → 331.0)이었던 것 — 예시는 규칙 목록보다 681자 뒤, 곧 모델이 마지막으로
+    읽는 것이라 지시와 어긋나면 지시가 진다."""
+    import json as _json
+    k = dict(work_title="작품", transcript="0.0 대사", grid_summary="요약",
+             templates=("recap_dialogue",), target_sec=50.0, max_sec=60.0)
+    for gate, want_sorted in ((False, True), (True, False)):
+        p = C.build_prompt(**k, nonlinear=gate)
+        blob = p[p.index('{"candidates"'):]
+        segs = _json.loads(blob)["candidates"][0]["segments"]
+        order = [s["start_sec"] for s in segs]
+        assert (order == sorted(order)) is want_sorted, \
+            f"nonlinear={gate} 인데 예시 순서가 {order} 다"
+
+
+def test_output_example_renders_as_valid_json():
+    """예시는 값으로 끼워 넣는다 — `{{` 이스케이프가 안 풀려 깨진 적이 있다."""
+    import json as _json
+    k = dict(work_title="작품", transcript="0.0 대사", grid_summary="요약",
+             templates=("recap_dialogue",), target_sec=50.0, max_sec=60.0)
+    for gate in (False, True):
+        p = C.build_prompt(**k, nonlinear=gate)
+        assert "{{" not in p, "이스케이프가 안 풀린 중괄호가 남았다"
+        _json.loads(p[p.index('{"candidates"'):])      # 파싱 실패 = 예시가 깨졌다

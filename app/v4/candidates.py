@@ -265,6 +265,22 @@ def _hints_block(hints: dict | None) -> str:
 # 비선형 편성을 여는 덧붙임 절(게이트 `--nonlinear`). 미지정이면 "" 이라 프롬프트가
 # **종전과 바이트 동일**하다. 기본 프롬프트는 순서를 말하지 않고 출력 예시가 오름차순
 # 이라, 모델이 조각을 늘 소스 시간 순으로 낸다(실측 11/11 후보 · 4/4 edit_plan 단조).
+# 출력 예시의 조각 순서. 🛑 **예시가 절보다 강하다**(2026-09-04 A/B 실측):
+# 비선형 절을 켜고도 예시가 오름차순이면 모델은 예시를 따랐다 — 동일 소재·동일
+# 격자로 A/B 를 돌린 결과 게이트 ON 6/6 · OFF 9/9 가 전부 시간순이었고 비선형
+# 후보는 **0개**였다. 예시는 규칙 목록보다 681자 뒤, 곧 모델이 마지막으로 읽는
+# 것이라 지시와 어긋나면 지시가 진다.
+EXAMPLE_SEGMENTS_LINEAR = (
+    '     {"start_sec": 120.0, "end_sec": 145.5, "quote": "전사에서 그대로 옮긴 대사 한 줄"},\n'
+    '     {"start_sec": 331.0, "end_sec": 348.25, "quote": null}'
+)
+
+# 게이트를 켰을 때의 예시 — **뒤 구간을 먼저** 붙인 모양(결말 선공개형).
+EXAMPLE_SEGMENTS_NONLINEAR = (
+    '     {"start_sec": 331.0, "end_sec": 348.25, "quote": "결말/최고조 대사 — 전사에서 그대로"},\n'
+    '     {"start_sec": 120.0, "end_sec": 145.5, "quote": "그 일이 벌어진 발단 대사"}'
+)
+
 ORDER_FREE_CLAUSE = """9. **조각 배열의 순서가 곧 붙는 순서다** — 소스 시간 순일 필요가 없다. 결말·최고조 대사를 첫 조각으로 앞당기고 그 뒤에 발단을 붙이는 구성을 써도 된다. 다만 ① 조각끼리 소스 구간이 **겹치면 안 된다**(같은 화면이 두 번 나간다) ② 앞당긴 조각이 그 자체로 이해되어야 한다(맥락 없이 이름·지시대명사만 나오는 대사는 훅으로 쓰지 마라).
 """
 
@@ -324,8 +340,7 @@ PROMPT_TEMPLATE = """당신은 쇼츠 편집 후보를 고르는 구성작가다
  {{"id": "c01", "template": "{first_template}", "reason": "선택 사유 한 문장",
    "title_draft": {{"line1": "…", "line2": "…"}},
    "segments": [
-     {{"start_sec": 120.0, "end_sec": 145.5, "quote": "전사에서 그대로 옮긴 대사 한 줄"}},
-     {{"start_sec": 331.0, "end_sec": 348.25, "quote": null}}
+{example_segments}
    ]}}
  ],
  "exception_sector": {{"intro": {{"start_sec": 0.0, "end_sec": 43.0}}, "recap": null,
@@ -351,6 +366,8 @@ def build_prompt(*, work_title: str, transcript: str, grid_summary: str,
         research_block = "\n\n## 작품 배경 (리서치)\n" + research_context.strip()[:2000]
     # 게이트 — 미지정이면 "" 이라 렌더된 프롬프트가 종전과 바이트 동일하다.
     order_block = ORDER_FREE_CLAUSE if nonlinear else ""
+    example_segments = (EXAMPLE_SEGMENTS_NONLINEAR if nonlinear
+                        else EXAMPLE_SEGMENTS_LINEAR)
     sound_block = SOUND_EVENT_CLAUSE if sound_events else ""
     reject_block = ""
     if reject_note and reject_note.strip():
@@ -364,6 +381,7 @@ def build_prompt(*, work_title: str, transcript: str, grid_summary: str,
         target_sec=float(target_sec), max_sec=float(max_sec),
         n_min=int(n_min), n_max=int(n_max), title_max=TITLE_DRAFT_MAX_CHARS,
         order_block=order_block, sound_block=sound_block,
+        example_segments=example_segments,
         reject_block=reject_block, first_template=templates[0])
 
 
