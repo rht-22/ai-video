@@ -784,6 +784,7 @@ def run_v4(*, video_path: Path, work_title: str, outdir: Path,
            max_shorts: int | None = None,
            winner_detail: bool = False,
            nonlinear: bool = False,
+           sound_events: bool = False,
            scene_threshold: float = SCENE_THRESHOLD,
            edit_overrides_path: Path | None = None,
            log=print) -> Path:
@@ -842,7 +843,7 @@ def run_v4(*, video_path: Path, work_title: str, outdir: Path,
     log(f"[v4] job: {job_id} → {output_dir}")
     step("init", job_id=job_id, resumed=resumed, from_step=from_step,
          stop_after=stop_after, max_shorts=max_shorts, winner_detail=winner_detail,
-         nonlinear=bool(nonlinear),
+         nonlinear=bool(nonlinear), sound_events=bool(sound_events),
          scene_threshold=scene_threshold, skip_research=skip_research,
          edit_overrides=str(edit_overrides_path) if edit_overrides_path else None)
 
@@ -1285,7 +1286,7 @@ def run_v4(*, video_path: Path, work_title: str, outdir: Path,
             round(target_sec, 3), round(max_sec, 3),
             # 게이트도 재료다 — 안 실으면 `--nonlinear` 를 켜도 캐시가 옛 후보를
             # 그대로 돌려준다(사람은 켰다고 믿는다). E11 transcribe-backend 규율.
-            bool(nonlinear))
+            bool(nonlinear), bool(sound_events))
         section_fp["candidates"] = fp
         doc = cands_doc()
         use_cache, why = _section_cache_state(doc, cands_ckpt, "candidates",
@@ -1303,7 +1304,7 @@ def run_v4(*, video_path: Path, work_title: str, outdir: Path,
             get_gemini(), video_handle(), work_title=work_title, grid=state["grid"],
             research=state["research"], sample_fps=state["sample_fps"],
             templates=templates, target_sec=target_sec, max_sec=max_sec,
-            nonlinear=nonlinear, log=log)
+            nonlinear=nonlinear, sound_events=sound_events, log=log)
         # 6단계는 파일의 **몸통**을 만든다 — 새 문서를 쓰면 하류 절이 함께 사라진다.
         state["cands_doc"] = {**section, "fingerprint": fp}
         job.write_json(cands_ckpt, state["cands_doc"])

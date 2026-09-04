@@ -56,6 +56,7 @@ from typing import Any
 from app.modules.grid.schemas import EXCEPTION_KEYS, format_ts
 # 반려 상한은 **v3 의 것을 그대로 쓴다**(계약 §2 "재선언 금지"). 격자 스냅 반려 루프와
 # 같은 예산이어야 사람이 '재질의 2회'를 한 가지 뜻으로 읽는다.
+from app.modules.grid import sound_events as sound_events_mod
 from app.v3.seq_analyze import (
     MAX_REASKS,
     heuristic_hints,
@@ -267,6 +268,18 @@ def _hints_block(hints: dict | None) -> str:
 ORDER_FREE_CLAUSE = """9. **조각 배열의 순서가 곧 붙는 순서다** — 소스 시간 순일 필요가 없다. 결말·최고조 대사를 첫 조각으로 앞당기고 그 뒤에 발단을 붙이는 구성을 써도 된다. 다만 ① 조각끼리 소스 구간이 **겹치면 안 된다**(같은 화면이 두 번 나간다) ② 앞당긴 조각이 그 자체로 이해되어야 한다(맥락 없이 이름·지시대명사만 나오는 대사는 훅으로 쓰지 마라).
 """
 
+# 프롬프트에 실을 소리 사건 상한. 33분 실측이 29건이라 넉넉하다 — 넘치면 센 것부터
+# 남기고 자른 건수는 audit `sound_events` 에 남는다(조용한 절단 금지).
+SOUND_EVENTS_MAX = 40
+
+# 모드 [A](현장음 턴)를 여는 덧붙임 절(게이트 `--sound-events`). 미지정이면 "" 이라
+# 프롬프트가 **종전과 바이트 동일**하다. 「티키타카 편집점 지침서」 제3원칙:
+# "대사가 없더라도 강렬한 현장음이 필요한 순간을 포착하여 시청각적 임팩트를 극대화".
+# 재료는 격자 요약 끝의 '대사 없는 소리 사건' 줄이고, 그 목록은 코드가 결정적으로
+# 뽑는다(`grid.sound_events` — 판정은 코드, 선택은 모델).
+SOUND_EVENT_CLAUSE = """10. **대사 없는 소리도 재료다** — 위 '대사 없는 소리 사건' 목록은 전사에 글자가 없지만 소리가 큰 구간이다(타격·웃음·한숨·환호). 그런 구간을 조각으로 써도 된다. 그때 `quote` 는 `null` 이고, 조각 길이는 그 소리가 끝나는 실제 시간까지다(늘리지 마라). 대사와 대사 사이에 이런 조각을 하나 두면 호흡이 생긴다 — 다만 편당 1~2개면 충분하고, 목록에 없는 구간을 소리 사건이라고 지어내지 마라.
+"""
+
 PROMPT_TEMPLATE = """당신은 쇼츠 편집 후보를 고르는 구성작가다. 첨부한 영상 전체를 훑고, 아래 전사·격자 요약을 근거로 **쇼츠 후보 {n_min}~{n_max}개**를 골라라.
 
 이 단계에서 하는 일은 **구간 고르기 하나**다. 내레이션 문장·화면 라벨·효과 문구·최종 제목은 쓰지 않는다 — 뒷단계가 쓴다. 지금 쓰면 출력이 잘려 전부 버려진다.
@@ -305,7 +318,7 @@ PROMPT_TEMPLATE = """당신은 쇼츠 편집 후보를 고르는 구성작가다
 6. **대사 신뢰** — 전사 줄에 `[저확신 …]` 이 붙어 있으면 받아쓰기가 흔들린 구간이라 그 줄을 `quote` 로 쓰지 마라(그 구간을 꼭 쓰려면 같은 조각의 다른 줄을 골라라). 전사에 줄이 없는 시각대는 **대사가 없는 구간**이다 — 그런 조각의 `quote` 는 `null` 이다.
 7. **인트로·지난 줄거리·예고·엔딩 크레딧·방송 종료 화면**을 `exception_sector` 로 함께 신고하라. 없는 항목은 `null`. 예고(teaser)는 화면에 콜라주·장식 프레임, 스태프롤 병행, "다음 이야기" 문구, 본편과 단절된 빠른 몽타주(장소·의상이 컷마다 바뀜)로 알아본다. ⚠ 예고의 **시작은 장식 프레임이 뜨는 순간이 아니라** 본편 서사가 끝난 뒤 예고 소재가 시작되는 **첫 컷**이다. 경계가 불확실하면 **이른 쪽**을 골라라 — 본편에 예고가 새는 것이 예고를 조금 잘라내는 것보다 훨씬 나쁘다.
 8. 후보의 조각은 본편에서 고른다 — 위에서 신고한 인트로·예고·크레딧 구간은 쓰지 마라.
-{order_block}{reject_block}
+{order_block}{sound_block}{reject_block}
 ## 출력 (JSON 만)
 {{"candidates": [
  {{"id": "c01", "template": "{first_template}", "reason": "선택 사유 한 문장",
@@ -323,7 +336,8 @@ def build_prompt(*, work_title: str, transcript: str, grid_summary: str,
                  research_context: str = "", hints: dict | None = None,
                  templates: tuple[str, ...], target_sec: float, max_sec: float,
                  n_min: int = CANDIDATES_MIN, n_max: int = CANDIDATES_MAX,
-                 reject_note: str = "", nonlinear: bool = False) -> str:
+                 reject_note: str = "", nonlinear: bool = False,
+                 sound_events: bool = False) -> str:
     """6단계 프롬프트. 순수 — 같은 인자면 같은 문자열(지문의 전제).
 
     담는 것(계약 §2): ① 절대초로 답하라 ② quote 를 **전사에서 그대로** ③ 서로 다른 아크로
@@ -337,6 +351,7 @@ def build_prompt(*, work_title: str, transcript: str, grid_summary: str,
         research_block = "\n\n## 작품 배경 (리서치)\n" + research_context.strip()[:2000]
     # 게이트 — 미지정이면 "" 이라 렌더된 프롬프트가 종전과 바이트 동일하다.
     order_block = ORDER_FREE_CLAUSE if nonlinear else ""
+    sound_block = SOUND_EVENT_CLAUSE if sound_events else ""
     reject_block = ""
     if reject_note and reject_note.strip():
         reject_block = ("\n## ⚠ 직전 제안 반려 사유 — 전부 고쳐서 다시 내라\n"
@@ -348,7 +363,7 @@ def build_prompt(*, work_title: str, transcript: str, grid_summary: str,
         transcript=transcript, segments_max=SEGMENTS_MAX,
         target_sec=float(target_sec), max_sec=float(max_sec),
         n_min=int(n_min), n_max=int(n_max), title_max=TITLE_DRAFT_MAX_CHARS,
-        order_block=order_block,
+        order_block=order_block, sound_block=sound_block,
         reject_block=reject_block, first_template=templates[0])
 
 
@@ -653,7 +668,8 @@ def run_candidates(gemini: Any, handle: Any, *, work_title: str, grid: dict,
                    templates: tuple[str, ...] = TEMPLATES_DEFAULT,
                    target_sec: float, max_sec: float,
                    n_min: int = CANDIDATES_MIN, n_max: int = CANDIDATES_MAX,
-                   nonlinear: bool = False, log=print) -> tuple[dict, dict]:
+                   nonlinear: bool = False, sound_events: bool = False,
+                   log=print) -> tuple[dict, dict]:
     """1콜(+재질의 ≤MAX_REASKS) → (`checkpoint_candidates` 의 후보 절, audit).
 
     · 영상은 **전체를 한 파트로** 붙인다(조각 첨부는 8단계의 일이다). 표본 fps 는 4단계가
@@ -673,7 +689,11 @@ def run_candidates(gemini: Any, handle: Any, *, work_title: str, grid: dict,
     templates = tuple(templates)
 
     transcript = transcript_block(grid)
-    grid_summary = summarize_grid(grid)
+    # 모드 [A] 재료. 게이트를 안 켜면 목록을 만들지도 넘기지도 않는다 — 요약이
+    # 종전과 바이트 동일해야 프롬프트 지문이 안 움직인다.
+    events = (sound_events_mod.detect_sound_events(grid, limit=SOUND_EVENTS_MAX)
+              if sound_events else [])
+    grid_summary = summarize_grid(grid, sound_events=events or None)
     hints = heuristic_hints(grid)
     research_ctx = _research_context(research)
 
@@ -686,6 +706,7 @@ def run_candidates(gemini: Any, handle: Any, *, work_title: str, grid: dict,
         "hints": hints,
         "n_range": [int(n_min), int(n_max)],
         "nonlinear": bool(nonlinear),
+        "sound_events": len(events),
     }
 
     accepted: list[dict] | None = None
@@ -697,7 +718,8 @@ def run_candidates(gemini: Any, handle: Any, *, work_title: str, grid: dict,
             work_title=work_title, transcript=transcript, grid_summary=grid_summary,
             research_context=research_ctx, hints=hints, templates=templates,
             target_sec=target_sec, max_sec=max_sec, n_min=n_min, n_max=n_max,
-            reject_note=reject_note, nonlinear=nonlinear)
+            reject_note=reject_note, nonlinear=nonlinear,
+            sound_events=bool(sound_events))
         sha = prompt_sha(prompt)
         if attempt == 0:
             base_sha = sha

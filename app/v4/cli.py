@@ -83,6 +83,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="비선형 편성 허용 — 결말·최고조를 첫 조각으로 앞당기는 구성을 "
                         "6단계에 연다. 미지정이면 프롬프트가 종전과 바이트 동일하고 "
                         "후보는 소스 시간 순으로만 온다")
+    p.add_argument("--sound-events", action="store_true",
+                   help="대사 없는 소리 사건(타격·웃음·한숨)을 6단계에 보여준다 — "
+                        "전사에 글자가 없어 지금은 모델이 그 존재를 모른다. "
+                        "미지정이면 프롬프트가 종전과 바이트 동일")
     p.add_argument("--scene-threshold", type=float, default=SCENE_THRESHOLD,
                    help=f"ffmpeg scene score 임계(기본 {SCENE_THRESHOLD})")
     p.add_argument("--edit-overrides", default=None,
@@ -135,6 +139,7 @@ def main(argv: list[str] | None = None) -> int:
                  max_shorts=args.max_shorts,
                  winner_detail=args.winner_detail,
                  nonlinear=args.nonlinear,
+                 sound_events=args.sound_events,
                  scene_threshold=args.scene_threshold,
                  edit_overrides_path=(Path(args.edit_overrides)
                                       if args.edit_overrides else None))
