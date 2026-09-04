@@ -644,3 +644,76 @@ def test_renderer_rejects_a_nonpositive_output_fps(tmp_path, monkeypatch):
         top_title_height=300, bottom_label_height=200, output_fps=-1.0)
     with pytest.raises(ValueError, match="output_fps"):
         R_.render_short(inputs)
+
+
+# ── 조용한 드롭 금지 · 관측 기록 (2026-09-04 실렌더 감사 후속) ──────────────
+#
+# 실측(4편)이 드러낸 것: 렌더러가 0.2초 미만 컷 7개를 버렸는데 stdout WARN 한 줄이
+# 전부라 run_log·validation 어디에도 흔적이 없었고, run_log 는 오히려 **계획** 개수를
+# 적었다. shorts_2 에서는 관등성명 3컷이 사라졌는데 자막 3줄은 화면에 남았다.
+# 그리고 E19-8 이 '전 렌더 공통 관측'으로 못박은 audio_qa 가 v4 경로에만 없었다.
+
+def test_render_short_reports_dropped_clips_when_asked(tmp_path, monkeypatch):
+    """`report` 는 가산이다 — 주면 채우고, 안 주면 종전과 완전히 같다."""
+    from app.modules import renderer as R_
+
+    monkeypatch.setattr(R_.subprocess, "check_call", lambda cmd, **kw: None)
+    monkeypatch.setattr(R_, "_pick_video_encoder", lambda *_a, **_k: "libx264")
+    monkeypatch.setattr(R_, "find_ffmpeg_command", lambda *_a, **_k: "ffmpeg")
+    src = tmp_path / "src.mp4"
+    src.write_bytes(b"\0" * 16)
+    clips = [R_.StoryClip(role="hook", start_sec=0.0, end_sec=3.0, subtitle="",
+                          use_original_audio=True),
+             R_.StoryClip(role="build", start_sec=3.0, end_sec=3.06, subtitle="",
+                          use_original_audio=True),   # 0.06s — 버려진다
+             R_.StoryClip(role="payoff", start_sec=4.0, end_sec=7.0, subtitle="",
+                          use_original_audio=True)]
+
+    def _inputs():
+        return R_.RenderInputs(
+            video_path=src, clips=list(clips), subtitle_path=None,
+            crop_timeline_map={}, title_text="t", work_title="w",
+            output_path=tmp_path / "out.mp4",
+            canvas_width=1080, canvas_height=1920,
+            top_title_height=300, bottom_label_height=200)
+
+    rep: dict = {}
+    R_.render_short(_inputs(), report=rep)
+    assert rep["clips_in"] == 3 and rep["clips_rendered"] == 2
+    assert len(rep["notes"]) == 1 and "0.06s" in rep["notes"][0]
+    # 안 주면 예외 없이 종전과 같다 — v1 호출부는 이 인자를 모른다.
+    R_.render_short(_inputs())
+
+
+def test_finalize_wires_the_render_report_into_its_cost():
+    """finalize 가 렌더 보고를 **받아서 cost 에 싣는지** 배선을 고정한다.
+
+    `render_final` 을 실제로 부르려면 libass 가 있는 ffmpeg·폰트·번인 검출까지
+    전부 필요해서 다른 노드를 깨뜨린다. 그래서 이 레포가 쓰는 배선 가드로 본다
+    (E19-4 블록 위치를 문자열로 고정한 것과 같은 방식). 실동작은 실렌더 실측이
+    확인했다: run_log 4편 전부 clips 15/16·33/38·10/11·2/2 와 버림 사유 7건,
+    audio_qa −14.3/−14.5/−14.8/−13.3 LUFS 가 남았다(docs/v4/REAL-RUN-001.md)."""
+    src = (Path(__file__).resolve().parents[1] / "app" / "v3" / "finalize.py"
+           ).read_text(encoding="utf-8")
+    # ① 렌더러에 보고 그릇을 넘긴다
+    assert "render_short(inputs, report=render_report)" in src
+    # ② cost 의 `clips` 는 **렌더된** 개수이고 계획은 따로 적는다
+    assert '"clips": rendered, "clips_planned": len(clips)' in src
+    # ③ 드롭은 사유까지 durable 기록에 싣는다(조용한 드롭 금지)
+    assert 'cost["clips_dropped"]' in src
+    # ④ E19-8 전 렌더 공통 관측
+    assert "from app.modules.audio_qa import measure_audio_qa" in src
+    assert 'cost["audio_qa"]' in src and 'cost["audio_qa_error"]' in src
+    # ⑤ 자막 회피는 **띠를 못 찾아도** 남는다 — 판정이 돈 것과 안 돈 것은 다르다
+    assert '"subtitle_avoid_burned"' in src
+    assert '"band": dict(_band) if _band else None' in src
+
+
+@pytest.mark.parametrize("out_name,want", [
+    ("shorts.mp4", ""), ("shorts_2.mp4", "_2"), ("shorts_10.mp4", "_10"),
+    ("final_1080x1920.mp4", ""),        # 숫자 꼬리가 아니다 — 접미 없음
+])
+def test_variant_suffix_comes_from_the_final_name(out_name, want):
+    """편별 중간 산출 이름은 최종본 이름에서 파생한다(두 이름이 갈리면 안 된다)."""
+    from app.v3.finalize import _variant_suffix
+    assert _variant_suffix(out_name) == want

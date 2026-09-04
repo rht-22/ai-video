@@ -782,7 +782,8 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
     # 라벨도 재료다 — story 의 라벨만 고치면 타임라인이 그대로라 지문이 안 움직여
     # **옛 라벨이 든 final 이 그대로 납품**된다(적대 리뷰 C2 확정). 개수가 바뀌면
     # plan_labels 의 index 가 통째로 밀려 라벨이 남의 자리에 렌더되기도 한다.
-    label_plan = finalize.plan_labels(story_doc, plan)
+    _span_times = finalize.span_start_times(grid)
+    label_plan = finalize.plan_labels(story_doc, plan, _span_times, log=log)
     fingerprint = hashlib.sha1(json.dumps(
         [[[c["clip_start_sec"], c["clip_end_sec"], c.get("span_ids"),
            c.get("use_original_audio")]
@@ -881,7 +882,7 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
         final_path, cost = finalize.render_final(
             video_path=video_path, plan=plan, style_doc=style_doc,
             segments=segments, resources=resources, story_doc=story_doc,
-            output_dir=output_dir, log=log)
+            output_dir=output_dir, span_times=_span_times, log=log)
         _write_json(output_dir / "render_fingerprint.json",
                     {"fingerprint": render_fp})
         step("render", **cost)

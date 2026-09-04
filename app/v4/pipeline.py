@@ -1926,13 +1926,23 @@ def run_v4(*, video_path: Path, work_title: str, outdir: Path,
         _write_meta(paths["draft"], fp, variant=ep["variant"], id=ep["id"])
         return {"cached": False, "cache_reason": why, "fingerprint": fp, **cost}
 
+    # 라벨 앵커 span 의 원본 시각 — style 과 render 가 **같은 값**을 봐야 한다
+    # (index 정렬). 격자에서 한 번만 뽑아 두 단계가 나눠 쓴다.
+    _span_times: dict[str, float] = {}
+
+    def span_start_times() -> dict[str, float]:
+        if not _span_times:
+            _span_times.update(finalize_mod.span_start_times(state.get("grid")))
+        return _span_times
+
     # ── 11:style 스타일(HIGH · O9) ────────────────────────────────────────
     def _ep_style(ep: dict) -> dict:
         paths = render_mod.render_paths(output_dir, ep["variant"])
         timeline = ep["plan"]["timeline"]
         # 라벨 계획·비트 창은 **렌더와 같은 함수**로 만든다 — Stage 4 가 좌표를 채워
         # 주는 대상이 렌더가 그리는 그 목록이어야 한다(v3 `_run_m4` 와 같은 자리).
-        labels = finalize_mod.plan_labels(ep["story"], ep["plan"])
+        labels = finalize_mod.plan_labels(
+            ep["story"], ep["plan"], span_start_times(), log=log)
         windows = [{"beat": w["beat"], "start": w["start"], "end": w["end"]}
                    for w in stage4_mod.edited_beat_windows(ep["story"], timeline)]
         fp = style_fingerprint(timeline, labels, style_preset, model=model_name)
@@ -1975,7 +1985,7 @@ def run_v4(*, video_path: Path, work_title: str, outdir: Path,
             video_path=video_path, plan=ep["plan"], style_doc=ep["style_doc"],
             segments=ep["segments"], resources=ep["resources"],
             story_doc=ep["story"], output_dir=output_dir, variant=ep["variant"],
-            log=log)
+            span_times=span_start_times(), log=log)
         _write_meta(paths["final"], fp, variant=ep["variant"], id=ep["id"])
         ep["final"] = Path(out_path)
         log(f"  [v4/11:render] {ep['variant']}위 → {Path(out_path).name}")

@@ -186,16 +186,76 @@ def _cycle_color(index: int) -> str:
     return stage4.LABEL_COLOR_CYCLE[index % len(stage4.LABEL_COLOR_CYCLE)]
 
 
-def plan_labels(story_doc: dict, plan: dict) -> list[dict]:
+def span_start_times(grid: dict | None) -> dict[str, float]:
+    """격자 → `{span_id: 원본 절대초 t_in}`. 순수. 없으면 빈 dict.
+
+    `plan_labels` 가 라벨을 **그 앵커 span 이 실제로 뜨는 시각**에 놓기 위한 재료다.
+    격자가 span 시각의 정본이므로 여기서 한 번만 꺼낸다(수식·좌표 복제 금지)."""
+    out: dict[str, float] = {}
+    for sp in (grid or {}).get("span_candidates") or []:
+        sid = sp.get("id")
+        if sid is None:
+            continue
+        try:
+            out[str(sid)] = float(sp["t_in"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def _variant_suffix(out_name: str) -> str:
+    """최종본 이름 → 중간 산출에 붙일 편 접미. 순수.
+
+    `shorts.mp4` → `""` · `shorts_2.mp4` → `"_2"` · `final_1080x1920.mp4` → `""`.
+    최종본 이름이 편의 신원이므로 거기서 파생한다 — variant 번호를 따로 받아
+    다시 적으면 두 이름이 언젠가 갈린다."""
+    stem = str(out_name).rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    tail = stem.rsplit("_", 1)
+    return f"_{tail[1]}" if len(tail) == 2 and tail[1].isdigit() else ""
+
+
+def plan_labels(story_doc: dict, plan: dict,
+                span_times: dict[str, float] | None = None,
+                *, log=None) -> list[dict]:
     """비트 라벨 → 편집본 시각이 붙은 목록(순수). style·render 공용.
 
     M11: 앵커 span 시각에 뜬다(비트 시작 고정 아님). 위치(x·y)는 여기서 정하지
-    않는다 — Stage 4 가 화면을 보고 채우고, 없으면 렌더가 기본값을 쓴다."""
+    않는다 — Stage 4 가 화면을 보고 채우고, 없으면 렌더가 기본값을 쓴다.
+
+    🛑 **`span_times` 를 넘겨야 위 계약이 실제로 지켜진다**(2026-09-04 교정).
+    종전에는 클립 안의 **모든** span_id 를 그 클립의 `clip_start_sec` 하나로 접었다 —
+    독스트링이 약속한 '앵커 span 시각'과 정반대이고, 실측(shorts_4)에서 서로 다른
+    span 에 앵커된 라벨 4개 중 3개가 전부 0.00~4.00 초에 겹쳐 찍혔다. 아직 나오지
+    않은 내용의 라벨이 최대 32.8초 미리 떠서 스포일러가 되고, 겹친 글자는 읽히지도
+    않는다. `span_times` 를 주면 각 span 이 실제로 뜨는 시각을 쓴다.
+
+    ⚠ 안 주면 종전 동작(클립 시작 접기)으로 돌아가되 **조용하지 않다** — `log` 로
+    한 줄 남긴다. 격자가 없는 옛 재개 경로까지 죽이지 않기 위한 폴백이다."""
     offsets = assemble.edited_offsets(plan["timeline"])
+    span_times = span_times or {}
     span_t = {}
+    folded = 0
     for c in plan["timeline"]:
+        c_start = float(c["clip_start_sec"])
+        c_end = float(c["clip_end_sec"])
         for sid in c.get("span_ids") or []:
-            span_t.setdefault(sid, float(c["clip_start_sec"]))
+            if sid in span_t:
+                continue
+            t = span_times.get(str(sid))
+            # 반개구간 [시작, 끝) — `assemble.to_edited_sec(kind="start")` 와 같은
+            # 규약이다. 끝 경계에 정확히 걸친 값을 그대로 넘기면 그 함수가 "어느
+            # 클립에도 없다"로 보고 라벨이 통째로 드롭된다(실측).
+            inside = t is not None and c_start <= float(t) < c_end
+            if not inside:
+                # span 이 클립 밖이거나 시각을 모른다 — 그 클립이 이 span 을 싣고
+                # 있다는 것만 아는 상태라 클립 시작으로 둔다(종전 동작).
+                span_t[sid] = c_start
+                folded += 1
+            else:
+                span_t[sid] = float(t)
+    if folded and log is not None:
+        log(f"  [labels] ⚠ 클립 안 시각을 모르는 앵커 {folded}개 — 클립 시작으로 접었다"
+            f"(라벨이 실제 장면보다 먼저 뜰 수 있다 · 격자를 넘기면 사라진다)")
     out: list[dict] = []
     for b in story_doc.get("beats") or []:
         items = b.get("labels") or ([{"text": b["label"],
@@ -308,6 +368,7 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                  segments: list[dict], resources: dict, story_doc: dict,
                  output_dir: Path, out_name: str = "final_1080x1920.mp4",
                  output_fps: float | None = None,
+                 span_times: dict[str, float] | None = None,
                  log=print) -> tuple[Path, dict]:
     """edit_plan + style + 자막/cue → 1080×1920 최종본. 반환: (경로, 실측)."""
     config = AppConfig()
@@ -369,6 +430,20 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     def _runs(t0: float, t1: float) -> list[tuple[int, int]]:
         return _sr.runs_in_window(_profiles, t0, t1, _geom) if _profiles else []
 
+    # 🛑 회피가 **돌았다는 사실 자체**를 남긴다(2026-09-04). v1 은
+    # app/pipeline.py 의 `subtitle_avoid_burned` 단계로 남기는데 v3/v4 렌더 경로만
+    # stdout 한 줄이 전부였다 — 산출물만 받은 사람은 '이 소재에 번인 자막이 있었나 ·
+    # 회피가 돌았나 · 못 피한 줄이 있나'를 되짚을 길이 없었다. 실측(shorts_4)에서
+    # 자막이 원본 텔롭과 겹쳐 나갔는데 그 진단을 하려고 체크포인트를 직접 열어
+    # 오프라인 재현을 해야 했다. **띠를 못 찾아도 남긴다** — 판정이 돌고도 못 찾은
+    # 것과 아예 안 돈 것은 다른 사건이다(E18-6 이 v1 에서 세운 규율과 같다).
+    avoid_rec: dict = {
+        "band": dict(_band) if _band else None,
+        "profile_frames": len(_profiles or []),
+        "base": {"subtitle": _sub_margin, "tts": _tts_margin},
+        "notes": [],
+    }
+
     if _band:   # 편 내내 같은 자리에 있는 번인 자막 — 전역으로 한 번 올린다
         for _name, _size, _cur in (("자막", design.subtitle_size, _sub_margin),
                                    ("내레이션", design.tts_line_font_size, _tts_margin)):
@@ -379,6 +454,7 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                 title_bottom=_title_bottom, band_top=_geom.top)
             for n in _notes:
                 log(f"  [v3/자막회피] {_name} — {n}")
+                avoid_rec["notes"].append(f"{_name}: {n}")
             if _name == "자막":
                 _sub_margin = int(_new)
             else:
@@ -397,9 +473,15 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
             floor_top=_floor_top)
         if _note:
             log(f"  [v3/자막회피] 내레이션 — {_note}")
+            avoid_rec["notes"].append(f"내레이션(창): {_note}")
 
     # 대사 ASS — C6 세그먼트(편집본 좌표)를 그대로 이벤트로
-    sub_path = output_dir / "v3_subtitles.ass"
+    # 🛑 이름에 **편 접미**를 붙인다(2026-09-04). 종전에는 네 편이 같은 파일 하나를
+    # 돌려 써서 디스크에 남는 것이 마지막 편 것뿐이었다 — 'shorts.mp4 자막이 왜
+    # 저기 있나'를 조사하는 사람이 4위 편 자막을 보게 되고, 편별 재렌더나 병렬화가
+    # 들어오면 서로의 자막을 덮어쓴다. 접미는 최종본 이름에서 파생한다(수식 복제 금지).
+    _sfx = _variant_suffix(out_name)
+    sub_path = output_dir / f"v3_subtitles{_sfx}.ass"
     sub_style = SubtitleStyle(
         font_name=ass_family, font_size=design.subtitle_size,
         primary_color=_style_color(design.subtitle_color or "#FFFFFF"),
@@ -453,7 +535,7 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                  and Path(f.get("path", "")).exists()]
     tts_path = None
     if cue_files:
-        tts_path = output_dir / "v3_tts.ass"
+        tts_path = output_dir / f"v3_tts{_sfx}.ass"
         tts_style = SubtitleStyle(
             font_name=ass_family, font_size=design.tts_line_font_size,
             primary_color=design.tts_line_color, outline=3,
@@ -470,7 +552,9 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     placed = {int(x["index"]): x for x in (style_doc.get("v3_style") or {}).get("labels")
               or [] if isinstance(x, dict) and x.get("index") is not None}
     labels = []
-    for lb in plan_labels(story_doc, plan):
+    # ⚠ 스타일 단계와 **같은 인자**로 불러야 한다 — 두 목록의 index 가 어긋나면
+    # Stage 4 가 정한 좌표가 남의 라벨에 붙는다(v3 적대 리뷰가 잡은 그 결함).
+    for lb in plan_labels(story_doc, plan, span_times, log=log):
         pos = placed.get(lb["index"]) or {}
         labels.append({"text": lb["text"], "start_sec": lb["start_sec"],
                        "end_sec": lb["end_sec"],
@@ -482,7 +566,7 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                        "color": str(pos.get("color") or _cycle_color(lb["index"]))})
     texts_path = None
     if labels:
-        texts_path = output_dir / "v3_labels.ass"
+        texts_path = output_dir / f"v3_labels{_sfx}.ass"
         build_texts_ass(labels, texts_path)
 
     # 적대 리뷰 확정(critical): renderer 는 use_original_audio 를 읽지 않았다 —
@@ -528,10 +612,45 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
         output_fps=output_fps,
     )
     t0 = time.time()
-    render_short(inputs)
+    render_report: dict = {}
+    render_short(inputs, report=render_report)
+    rendered = int(render_report.get("clips_rendered", len(clips)))
     cost = {"elapsed": round(time.time() - t0, 1), "bytes": out_path.stat().st_size,
-            "clips": len(clips), "cues": len(cue_files),
-            "muted_windows": len(inputs.muted_windows or []), "labels": len(labels)}
+            # 🛑 `clips` 는 **실제로 렌더된** 개수다(2026-09-04 교정). 종전에는 계획
+            # 개수를 적어서, 렌더러가 0.2초 미만 컷을 버려도 run_log 는 계획대로
+            # 붙은 것처럼 말했다 — 되짚을 유일한 기록이 틀린 숫자를 말하고 있었다.
+            "clips": rendered, "clips_planned": len(clips),
+            "cues": len(cue_files),
+            "muted_windows": len(inputs.muted_windows or []), "labels": len(labels),
+            "subtitle_avoid_burned": {
+                **avoid_rec,
+                "final": {"subtitle": _sub_margin, "tts": _tts_margin},
+                "moved": {"subtitle": _sub_margin != avoid_rec["base"]["subtitle"],
+                          "tts": _tts_margin != avoid_rec["base"]["tts"]}}}
+    if rendered != len(clips):
+        # 조용한 드롭 금지 — 사유를 건별로 durable 기록에 싣고 크게 로그한다.
+        cost["clips_dropped"] = list(render_report.get("notes") or [])
+        log(f"  [v3/render] ⚠ 계획 {len(clips)}컷 중 {rendered}컷만 렌더됐다 — "
+            f"버려진 컷의 대사는 사라지지만 자막·라벨은 계획 좌표에 그대로 남는다")
+        for n in cost["clips_dropped"]:
+            log(f"  [v3/render] ⚠ {n}")
+
+    # E19-8 — 렌더를 바꾸지 않는다, 재기만 한다(디코드 1회). v1 은 app/pipeline.py
+    # 에서 이미 남기는데 v3/v4 렌더 경로에만 없었다(계약은 '게이트 없음 · 전 렌더
+    # 공통 관측'이다) — ves evaluate 가 읽을 것이 없어 무음 과다·라우드니스 편차가
+    # 대시보드에서 영구히 보이지 않았다.
+    try:
+        from app.modules.audio_qa import measure_audio_qa
+        _qa = measure_audio_qa(out_path)
+    except Exception as exc:                     # 관측 장치가 발행을 막지 않는다
+        _qa = {"error": f"{type(exc).__name__}: {exc}"}
+    if _qa.get("error"):
+        cost["audio_qa_error"] = _qa["error"]
+        log(f"  [audio-qa] 측정 실패(발행은 막지 않는다): {_qa['error']}")
+    else:
+        cost["audio_qa"] = _qa
+        log(f"  [audio-qa] {_qa['lufs_i']} LUFS · LRA {_qa['lra']} · "
+            f"0.3s+ 무음 {_qa['silence_count']}건({_qa['silence_total_sec']}s)")
     log(f"  [v3/render] {out_path.name} — {cost['elapsed']}s · "
         f"{cost['bytes'] // (1024 * 1024)}MB")
     return out_path, cost

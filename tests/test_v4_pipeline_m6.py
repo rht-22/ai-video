@@ -153,11 +153,12 @@ def fake_final(monkeypatch):
     calls: list[dict] = []
 
     def fake(*, video_path, plan, style_doc, segments, resources, story_doc,
-             output_dir, out_name="final_1080x1920.mp4", output_fps=None, log=print):
+             output_dir, out_name="final_1080x1920.mp4", output_fps=None,
+             span_times=None, log=print):
         # ⚠ `output_fps` 를 받아야 한다 — v4 가 O9(30fps)를 이 인자로 강제한다.
         # 대역이 이것을 안 받으면 실패가 "렌더 실패"로 뭉뚱그려져 원인이 안 보인다.
         calls.append({"out_name": out_name, "plan": plan, "style_doc": style_doc,
-                      "output_fps": output_fps,
+                      "output_fps": output_fps, "span_times": span_times,
                       "segments": segments, "resources": resources,
                       "story_doc": story_doc})
         out = Path(output_dir) / out_name
@@ -307,8 +308,18 @@ def test_style_gets_the_same_preset_as_the_band_and_the_render_labels(synth, tmp
     assert all(s["preset"] == stage4.get_style_preset(None) for s in seen)
     plan = json.loads((out / "edit_plan.json").read_text(encoding="utf-8"))
     story = json.loads((out / "checkpoint_story.json").read_text(encoding="utf-8"))
-    expect = finalize_mod.plan_labels(v4p.episode_story_doc(story["variants"][0]), plan)
+    # ⚠ **격자를 같이 넘겨서** 만든다. 라벨은 앵커 span 의 실제 시각에 떠야 하고
+    # (2026-09-04 교정), 스타일 단계와 렌더 단계가 **같은 인자**로 부르지 않으면
+    # 두 목록의 index 가 어긋나 Stage 4 가 정한 좌표가 남의 라벨에 붙는다.
+    grid = json.loads((out / "grid.json").read_text(encoding="utf-8"))
+    span_times = finalize_mod.span_start_times(grid)
+    assert span_times, "격자에 span 시각이 없다 — 이 검사가 무의미해진다"
+    expect = finalize_mod.plan_labels(v4p.episode_story_doc(story["variants"][0]),
+                                      plan, span_times)
     assert seen[0]["labels"] == expect
+    # 접기 폴백이 아니라 진짜 span 시각을 썼는지 — 폴백이면 라벨이 클립 시작에 몰린다.
+    starts = [lb["start_sec"] for lb in expect]
+    assert len(set(starts)) == len(starts), f"라벨이 같은 시각에 몰렸다: {starts}"
     # 확정 스타일 문서는 **감싸지 않고** 그대로 쓴다(현지화 E16·계약 도구가 뿌리를 읽는다)
     doc = json.loads((out / "style.json").read_text(encoding="utf-8"))
     assert doc["schema"] == "v3_style/v1" and "design" in doc and "v3_style" in doc

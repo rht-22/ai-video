@@ -380,6 +380,7 @@ def run_style(gemini: Any, draft_path: Path | str, story_doc: dict, *,
 def render_final(*, video_path: Path | str, plan: dict, style_doc: dict,
                  segments: list[dict], resources: dict, story_doc: dict,
                  output_dir: Path | str, variant: int = 1,
+                 span_times: dict[str, float] | None = None,
                  log=print) -> tuple[Path, dict]:
     """v3 `finalize.render_final` 을 **부른다** — 이 함수가 하는 일은 이름 하나다.
 
@@ -395,7 +396,7 @@ def render_final(*, video_path: Path | str, plan: dict, style_doc: dict,
         video_path=Path(video_path), plan=plan, style_doc=style_doc,
         segments=segments, resources=resources, story_doc=story_doc,
         output_dir=Path(output_dir), out_name=paths["final"].name,
-        output_fps=FINAL_FPS, log=log)
+        output_fps=FINAL_FPS, span_times=span_times, log=log)
 
     geo = proxy_mod.probe_geometry(out_path)
     cost["variant"] = int(variant)

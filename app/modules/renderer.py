@@ -638,7 +638,8 @@ class RenderInputs:
     output_fps: float | None = None
 
 
-def render_short(inputs: RenderInputs) -> list[str]:
+def render_short(inputs: RenderInputs, *,
+                 report: dict | None = None) -> list[str]:
     """
     클립별 입력(-ss/-to -i) + concat filter로 필요한 구간만 처리한 뒤,
     filter_complex로 비디오 합성(배경/텍스트/자막) 및 오디오 믹싱을 수행합니다.
@@ -672,6 +673,17 @@ def render_short(inputs: RenderInputs) -> list[str]:
         )
     if len(clean_clips) != len(inputs.clips):
         print(f"  [WARN] 컷 {len(inputs.clips)}개 중 {len(clean_clips)}개만 렌더합니다")
+        for n in notes:
+            print(f"  [WARN] {n}")
+    # 🛑 걸러낸 컷을 **부르는 쪽에 돌려준다**(2026-09-04). 종전에는 stdout WARN 한
+    # 줄이 전부라 run_log·validation 어디에도 흔적이 없었다 — 실측(shorts_2)에서
+    # 0.2초 미만 컷 5개가 조용히 사라져 대사가 없어졌는데 자막 3줄은 화면에 남았고,
+    # run_log 는 오히려 계획 개수(38)를 적었다. 이 저장소는 조용한 드롭을 금지한다.
+    # `report` 는 가산이다 — 안 주면 종전과 완전히 같다(v1 회귀 0).
+    if report is not None:
+        report["clips_in"] = len(inputs.clips)
+        report["clips_rendered"] = len(clean_clips)
+        report["notes"] = list(notes)
     inputs = replace(inputs, clips=clean_clips)
 
     # 제목 자동 줄바꿈 처리 (캔버스 너비 초과 시)

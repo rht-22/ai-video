@@ -677,3 +677,69 @@ def test_muted_clip_keeps_subtitles_outside_the_narration_window():
     segs = assemble.word_subtitles(tl, span, [], [(100.0, 102.0)])
     # 중점이 창 밖인 줄만 산다 — 첫 줄(중점 101.75)은 뮤트 안이라 빠진다
     assert [s["text"] for s in segs] == ["다섯 여섯"]
+
+
+# ── 라벨은 **앵커 span 시각**에 뜬다 (2026-09-04 실렌더 교정) ────────────────
+#
+# `plan_labels` 는 독스트링에 "M11: 앵커 span 시각에 뜬다(비트 시작 고정 아님)"라고
+# 적어 두고 정반대로 동작했다 — 클립 안의 모든 span_id 를 그 클립의 clip_start_sec
+# 하나로 접었다. 실측(shorts_4)에서 서로 다른 span 에 앵커된 라벨 4개 중 3개가 전부
+# 0.00~4.00 초에 겹쳐 찍혔고, 아직 나오지 않은 내용이 최대 32.8초 미리 떴다.
+
+def _labels_fixture():
+    plan = {"timeline": [
+        {"clip_start_sec": 100.0, "clip_end_sec": 140.0, "span_ids": ["a", "b", "c"]},
+        {"clip_start_sec": 200.0, "clip_end_sec": 220.0, "span_ids": ["d"]},
+    ]}
+    story = {"beats": [{"number": 0, "time": {"start": "00:01:40.000",
+                                              "end": "00:03:40.000"},
+                        "labels": [{"text": "L1", "span_id": "a"},
+                                   {"text": "L2", "span_id": "b"},
+                                   {"text": "L3", "span_id": "c"},
+                                   {"text": "L4", "span_id": "d"}]}]}
+    span_times = {"a": 100.0, "b": 120.0, "c": 135.0, "d": 205.0}
+    return story, plan, span_times
+
+
+def test_labels_land_on_their_own_span_not_the_clip_start():
+    from app.v3 import finalize
+    story, plan, span_times = _labels_fixture()
+    got = [lb["start_sec"] for lb in finalize.plan_labels(story, plan, span_times)]
+    # 편집본 좌표: 클립1 은 100→0 오프셋, 클립2 는 200→40 오프셋.
+    assert got == [0.0, 20.0, 35.0, 45.0]
+    # 서로 겹치지 않는다 — 겹치면 글자가 포개져 둘 다 못 읽는다.
+    wins = [(lb["start_sec"], lb["end_sec"])
+            for lb in finalize.plan_labels(story, plan, span_times)]
+    for (s1, e1), (s2, _) in zip(wins, wins[1:]):
+        assert e1 <= s2 or s2 >= s1, f"{(s1, e1)} 와 {(s2,)} 가 겹친다"
+
+
+def test_labels_without_span_times_fall_back_but_say_so():
+    """격자가 없는 옛 재개 경로를 죽이지 않되, 조용하지는 않다."""
+    from app.v3 import finalize
+    story, plan, _ = _labels_fixture()
+    lines: list[str] = []
+    got = [lb["start_sec"] for lb in finalize.plan_labels(story, plan, None,
+                                                          log=lines.append)]
+    assert got == [0.0, 0.0, 0.0, 40.0]          # 종전 동작 그대로
+    assert any("클립 시작으로 접었다" in ln for ln in lines)
+
+
+def test_span_time_outside_its_clip_is_clamped_into_it():
+    """span 은 클립 경계에 걸칠 수 있다 — 밖의 값을 그대로 쓰면 남의 클립으로 간다."""
+    from app.v3 import finalize
+    story, plan, span_times = _labels_fixture()
+    span_times = dict(span_times, b=90.0, c=500.0)   # 앞으로 벗어남 · 뒤로 벗어남
+    got = [lb["start_sec"] for lb in finalize.plan_labels(story, plan, span_times)]
+    # 밖의 값은 그 클립의 시작으로 접는다 — 그대로 넘기면 to_edited_sec 이
+    # "어느 클립에도 없다"로 보고 라벨을 **통째로 드롭**한다(실측으로 확인).
+    assert got == [0.0, 0.0, 0.0, 45.0]
+    assert len(got) == 4, "밖으로 벗어난 앵커 때문에 라벨이 사라지면 안 된다"
+
+
+def test_span_start_times_reads_the_grid():
+    from app.v3 import finalize
+    g = {"span_candidates": [{"id": "sp0", "t_in": 1.5}, {"id": "sp1", "t_in": 9.0},
+                             {"id": "bad"}, {"t_in": 3.0}]}
+    assert finalize.span_start_times(g) == {"sp0": 1.5, "sp1": 9.0}
+    assert finalize.span_start_times(None) == {}
