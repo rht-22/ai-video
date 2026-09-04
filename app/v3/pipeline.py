@@ -728,7 +728,9 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
                                        grid.get("words") or [], _mw,
                                        cast_names=names, name_fix_log=_name_arb)
     _WHY = {"latin": ("어절", "모델 청취(영문 오인식 → 한글)"),
-            "spelling": ("맞춤법", "모델 청취(초성 동일·모음/받침 차이)")}
+            "spelling": ("맞춤법", "모델 청취(초성 동일·모음/받침 차이)"),
+            "aligned": ("맞춤법", "모델 청취(공백 제거 정렬 · 자모 차이 ≤2~3)"),
+            "merge": ("어절 병합", "모델 청취가 한 어절 — whisper 가 끊은 단어를 합침")}
     for f in _name_arb:
         _what, _why = _WHY.get(f.get("kind") or "", ("인명", "모델 청취 + 인물표"))
         log(f"  [v3/자막] {_what} 대조 교정 {f.get('span_id')} {f['from']!r} → {f['to']!r} "
@@ -1013,7 +1015,8 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
                                             preset=_preset,
                                             windows=win, labels=label_plan,
                                             dialogue=segments, duration=_dur,
-                                            band=band, log=log)
+                                            band=band, timeline=plan["timeline"],
+                                            log=log)
         _write_json(style_ckpt, {"fingerprint": style_fp, "style": style_doc})
         step("style", elapsed=round(time.time() - t0, 1),
              attempts=len(audit["attempts"]), fallback=audit.get("fallback", False),
@@ -1051,7 +1054,7 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
             video_path=video_path, plan=plan, style_doc=style_doc,
             segments=segments, resources=resources, story_doc=story_doc,
             output_dir=output_dir, channel_design=channel_design,
-            muted_gain_db=narration_original_db, log=log)
+            muted_gain_db=narration_original_db, style_preset=style_preset, log=log)
         if channel_design:
             cost["channel_design"] = dict(channel_design)
         if narration_original_db is not None:

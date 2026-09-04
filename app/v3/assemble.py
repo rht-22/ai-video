@@ -356,35 +356,89 @@ def to_edited_sec(source_sec: float,
 
 # ── 어절 자막 ───────────────────────────────────────────────────────────────
 
+# 줄 경계 벌점(2026-09-04) — 길이만 고르게 하면 '여기서도 하실 / 건 아니죠' · '이런 거 잘 안 /
+# 하는데' 처럼 붙어 읽히는 두 어절이 갈린다. 1음절 의존명사·조사류는 앞 어절에, 1음절 부사는
+# 뒤 어절에 붙으므로 그 경계로 줄을 끊는 배치에 벌점을 준다(남는 칸 5~6자 분량).
+LINE_START_PENALTY_WORDS = frozenset("건 거 것 게 수 줄 데 때 뿐 등 중 채 듯 놈 분 편".split())
+LINE_END_PENALTY_WORDS = frozenset("안 못 잘 더 다 또 왜 꼭 참 막 딱 젤 늘 꽤".split())
+LINE_BOUNDARY_PENALTY = 30
+
+
+def _balanced_breaks(lens: list[int], texts: list[str] | None = None) -> list[int]:
+    """어절 표시 길이 목록 → 줄 끝 인덱스(각 줄의 마지막 어절 index) 목록. 순수·결정적.
+
+    한 문장 안에서 줄 길이를 **고르게**(SUB_MAX_CHARS 대비 남는 칸의 제곱합 최소) 나눈다 —
+    그리디(앞부터 채우기)는 '어디다 두고 남의 / 호의를 함부로 쓰레기 / 취급해' 처럼 마지막
+    줄에 꽁다리를 남긴다(2026-09-04 사용자 지적). 제약은 종전과 같다: 줄당 어절
+    ≤ SUB_MAX_WORDS · 표시 길이(공백 포함) ≤ SUB_MAX_CHARS · 단일 초과 어절은 홀로.
+    경계 벌점(LINE_*_PENALTY_WORDS)을 더하고, **동점이면 앞 줄을 길게**(종전 그리디와 같은
+    쪽)로 푼다 — 두 배치가 똑같이 고르면 승인된 종전 모양을 지킨다."""
+    n = len(lens)
+    texts = texts or [""] * n
+    INF = float("inf")
+    best = [INF] * (n + 1)
+    prev = [-1] * (n + 1)
+    best[0] = 0.0
+    for j in range(1, n + 1):
+        for i in range(max(0, j - SUB_MAX_WORDS), j):
+            width = sum(lens[i:j]) + (j - i - 1)
+            if width > SUB_MAX_CHARS and j - i > 1:
+                continue
+            cost = best[i] + max(0, SUB_MAX_CHARS - width) ** 2
+            if i > 0 and texts[i].strip(".,!?…'\"") in LINE_START_PENALTY_WORDS:
+                cost += LINE_BOUNDARY_PENALTY
+            if j < n and texts[j - 1].strip(".,!?…'\"") in LINE_END_PENALTY_WORDS:
+                cost += LINE_BOUNDARY_PENALTY
+            if cost <= best[j]:            # 동점 → i 가 큰 쪽(= 앞 줄이 긴 배치)
+                best[j], prev[j] = cost, i
+    out, j = [], n
+    while j > 0:
+        out.append(j - 1)
+        j = prev[j]
+    return out[::-1]
+
+
 def _lines_for_span(words: list[dict], t_in: float, t_out: float) -> list[dict]:
     """한 유성 span 의 단어들 → 라인 목록(소스 좌표). 순수.
 
-    끊는 곳: 어절 수 SUB_MAX_WORDS · 표시 길이 SUB_MAX_CHARS(공백 포함 — 넘치면
-    그 어절부터 새 라인, 단일 초과 어절은 홀로 간다) · 문장부호로 끝난 어절 뒤."""
-    lines: list[dict] = []
+    끊는 곳: ① 문장 끝 — whisper 어절의 문장부호 **또는** 모델 청취가 문장부호로 끝난 자리
+    (`sent_end` 힌트, textcheck.align_tokens_to_heard — '안녕하세요 / 저희 앞집 이사왔어요').
+    문장 경계는 **소프트**다: 앞뒤 문장을 합쳐도 한 줄(12자·4어절)에 들면 안 끊는다
+    ('대박. 미쳤다.' 가 2자 줄 둘로 깜빡이지 않게) ② 문장 안에서는 `_balanced_breaks`."""
+    toks = [dict(t0=w["t0"], t1=w["t1"], text=str(w.get("text") or "").strip(),
+                 hard=bool(w.get("sent_end")))
+            for w in words if str(w.get("text") or "").strip()]
+    # 문장 덩어리로 자른 뒤, 한 줄에 같이 드는 이웃 덩어리는 다시 합친다
+    chunks: list[list[dict]] = []
     cur: list[dict] = []
-
-    def flush() -> None:
-        if not cur:
-            return
-        text = " ".join(w["text"] for w in cur)
-        start = max(t_in, float(cur[0]["t0"]) - SUB_LEAD_SEC)
-        end = float(cur[-1]["t1"])
-        lines.append({"start": start, "end": end, "text": text})
-
-    for w in words:
-        text = str(w.get("text") or "").strip()
-        if not text:
-            continue
-        joined = " ".join([x["text"] for x in cur] + [text])
-        if cur and (len(cur) >= SUB_MAX_WORDS or len(joined) > SUB_MAX_CHARS):
-            flush()
+    for t in toks:
+        cur.append(t)
+        if t["hard"] or t["text"].endswith(SENTENCE_ENDINGS):
+            chunks.append(cur)
             cur = []
-        cur.append({"t0": w["t0"], "t1": w["t1"], "text": text})
-        if text.endswith(SENTENCE_ENDINGS):
-            flush()
-            cur = []
-    flush()
+    if cur:
+        chunks.append(cur)
+    merged_chunks: list[list[dict]] = []
+    for ch in chunks:
+        if merged_chunks:
+            prev_ch = merged_chunks[-1]
+            joined = " ".join(t["text"] for t in prev_ch + ch)
+            if len(prev_ch) + len(ch) <= SUB_MAX_WORDS and len(joined) <= SUB_MAX_CHARS:
+                merged_chunks[-1] = prev_ch + ch
+                continue
+        merged_chunks.append(ch)
+
+    lines: list[dict] = []
+    for sentence in merged_chunks:
+        ends = _balanced_breaks([len(t["text"]) for t in sentence],
+                                [t["text"] for t in sentence])
+        i0 = 0
+        for e in ends:
+            cur = sentence[i0:e + 1]
+            lines.append({"start": max(t_in, float(cur[0]["t0"]) - SUB_LEAD_SEC),
+                          "end": float(cur[-1]["t1"]),
+                          "text": " ".join(t["text"] for t in cur)})
+            i0 = e + 1
 
     # 최소 노출 보정 — 다음 라인 시작(없으면 span 끝)까지 연장. 라인 시작이 이전 라인
     # 끝보다 이르면 뒤로 민다(겹침 금지 — 팝인 자막은 한 번에 한 줄).

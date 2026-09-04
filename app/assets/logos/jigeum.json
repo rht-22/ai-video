@@ -1,0 +1,29 @@
+{
+  "code": "jigeum",
+  "source_file": "지금불륜이문제가아닙니다_logo_white.png",
+  "method": "alpha",
+  "original_size": [
+    4055,
+    1279
+  ],
+  "ink_bbox": [
+    1,
+    0,
+    4053,
+    1279
+  ],
+  "ink_size": [
+    4052,
+    1279
+  ],
+  "trim_percent_w": 0.1,
+  "trim_percent_h": 0.0,
+  "trim_percent_area": 0.1,
+  "padding": {
+    "left": 1,
+    "right": 2,
+    "top": 0,
+    "bottom": 0
+  },
+  "normalized_at": "2026-09-04T15:53:02"
+}

@@ -40,9 +40,13 @@ def test_fix_span_words_and_word_subtitles_wiring():
     log: list = []
     segs = assemble.word_subtitles(tl, idx, words, None, cast_names=NAMES, name_fix_log=log)
     assert "임재홍이" in " ".join(s["text"] for s in segs) and log[0]["span_id"] == "sp1"
-    # cast_names 없으면 종전 그대로
+    # cast_names 없어도 모델 청취가 있으면 정렬 교정(arbitrate_aligned, 2026-09-04)이
+    # 같은 답을 낸다 — 청취까지 없으면 종전 그대로
     segs0 = assemble.word_subtitles(tl, idx, words, None)
-    assert "임지영이" in " ".join(s["text"] for s in segs0)
+    assert "임재홍이" in " ".join(s["text"] for s in segs0)
+    idx_blind = {"sp1": dict(idx["sp1"], heard_text="")}
+    segs1 = assemble.word_subtitles(tl, idx_blind, words, None)
+    assert "임지영이" in " ".join(s["text"] for s in segs1)
 
 
 def test_pipeline_defines_name_arb_before_use():

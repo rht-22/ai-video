@@ -268,6 +268,13 @@ def build_parser() -> argparse.ArgumentParser:
                         choices=["left", "right"],
                         help="플랫폼 표기 가로 앵커 (기본 left). right 면 영상 오른쪽 상단 — "
                              "platform-x 는 오른쪽 가장자리에서 안쪽으로의 오프셋이 된다")
+    design.add_argument("--design-work-band-offset", type=int, default=None,
+                        help="작품명/로고 블록 윗변을 영상 밴드 하단에서 N px 아래에 둔다(로고 center "
+                             "정렬 대신). 미지정 = 종전(밴드+20 안전선·center)")
+    design.add_argument("--design-platform-placement", type=str, default=None,
+                        choices=["band", "above_work"],
+                        help="플랫폼 표기 자리 (기본 band=영상영역 모서리). above_work 면 작품명/로고 "
+                             "바로 위 한 줄에 이미지(아이콘)와 텍스트를 함께 그린다")
     design.add_argument("--no-reframe", action="store_true",
                         help="얼굴 추종 크롭(리프레이밍) 끄기 — 원본을 가운데 정렬로 넣는다. "
                              "인물이 고정된 인터뷰 소재에 적합하고(확대하면 원본 자막이 잘린다) "
@@ -373,6 +380,8 @@ _CLI_TO_DESIGN_FIELD = {
     "design_platform_font_size": "platform_font_size",
     "design_platform_color": "platform_color",
     "design_platform_align": "platform_align",
+    "design_platform_placement": "platform_placement",
+    "design_work_band_offset": "work_band_offset",
 }
 
 

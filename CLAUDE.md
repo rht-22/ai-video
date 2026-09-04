@@ -2017,3 +2017,156 @@ Flash 축약 → "싸우다 불붙었죠"로 나갔다(26자 문장이 7자로).
   컨테이너를 3.7s 늘려 마지막 프레임이 멈춘 채 소리만 흐르던 실사고 — cue 경로 불변).
 - 회귀 가드: `tests/test_v3_story_flow.py`(41건 — 검증기·구간/구멍 분할·점프·화면 id·
   후보 순서·재사용 금지·프로브 검증/스냅·산출 계약·벨트 100%·legacy 무변경).
+
+## V3 자막 스택 · 밴드 상대 위치 · 정렬 교정 · 로고 등록 (2026-09-04, 지금불륜 EP01 검수)
+
+지금불륜이문제가아닙니다 EP01 v3 실런(bb71cb7d) 검수에서 나온 사용자 지시 3건.
+
+### 자막은 무조건 작품명보다 위 — 작품명이 같이 내려간다 (`finalize.stack_work_below_text`)
+
+- 실사고: 8004195 의 `fit_margin_below_band`(가왕쇼 7화 대응)가 recap 프리셋 자막(밴드
+  안쪽 의도 518)을 밴드 아래로 밀어(→281) 자막 아랫변 1639 가 작품명(1497~1553) **밑**으로
+  들어갔다. 두 요소를 따로 계산하고 관계는 "⚠ 근접" 메모만 남기던 구조.
+- 밴드 아래를 스택 하나로 잡는다: 자막·내레이션 블록 아랫변 + 20px(`WORK_GAP_BELOW_VIDEO`)
+  = 작품명 윗변 하한(`work_min_top`). 캔버스 하단 20px 안에 못 들면 작품명을 한계에 붙이고
+  자막·내레이션 margin 을 **올려서** 지킨다(밴드 안쪽 허용 · ⚠ 기록). 우선순위:
+  자막 > 작품명(하드) · 작품명 캔버스 안(하드) · 자막이 밴드 아래(소프트).
+- `RenderInputs.work_min_top`(additive · None = v1 바이트 동일): 렌더러 `_safe_work_top =
+  max(밴드+20, work_min_top)`. 로고 center 정렬이 이 값 아래 남은 공간의 중앙에 앉으므로
+  텍스트·로고 모두 같이 내려간다. `estimate_work_height`·`estimate_work_top(min_top=)` 가
+  렌더러와 같은 수식.
+- 대사 자막의 밴드-아래 클램프는 **한 줄 블록** 기준(v3 대사는 늘 한 줄 — 두 줄로 재면 75px 과잉).
+- run_log render `text_stack` {subtitle_margin_v, tts_margin_v, work_top, work_min_top, capped}.
+
+### 프리셋 margin 은 밴드 상대 (`finalize.preset_relative_margin`)
+
+- 지시: "대사도 내레이션도 영상 위에 얹혀도 된다 — 원격(v1) 위치 참고". v1 은 대사를 밴드
+  하단 10px 위(`_compute_subtitle_margin_v`), TTS 를 밴드 하단 델타 앵커 — 둘 다 **밴드 안쪽**.
+  recap 프리셋 518/580 도 24:23·443 밴드 하단 75/137px 위의 안쪽 값이다.
+- 채널이 `subtitle_y_margin`/`tts_y_margin` 을 **명시하지 않았으면** 프리셋 값을 프리셋 자신의
+  밴드(`stage4.get_style_preset(style_preset)` 기하) 대비 거리 유지로 옮긴다 — 밴드가 같으면
+  값도 같다(어제 런과 ASS 동일 · 회귀 0). 밴드 아래 클램프(`fit_margin_below_band`)는 **채널
+  명시 절대 margin 에만** — 가왕쇼 7화(tts 550 vs video_y 500) 케이스는 그대로 잡힌다.
+  `render_final(style_preset=)` 인자가 그래서 생겼다.
+
+### 정렬 기반 맞춤법 교정 (`textcheck.align_tokens_to_heard` · `arbitrate_aligned`)
+
+- 실측: 쇼츠 자막 35줄 중 오타 5줄(청년녀 중이구나·들이러·이삿덕이요·빙그레샹·호요를) —
+  **전부 whisper 것이고 Stage 2 청취는 6/6 정답**인데 `arbitrate_spelling` 은 1건만 잡았다.
+  어절 1:1 대조라 띄어쓰기가 다르면 후보 자체가 없고, 초성이 다르면 제외(ㄴ/ㅇ·ㅇ/ㄹ 오인식).
+- 공백을 뗀 두 문자열을 `difflib` 로 글자 정렬 → whisper 어절마다 대응 청취 조각(같은
+  길이 · 연속 · **청취 어절 경계에서 시작**). 뒤집는 조건: 2음절+ · 지시어 아님(`ALIGNED_STOPWORDS`)
+  · 자모 차이 ≤2(2음절)/≤3(3음절+) · 음절당 ≤2 · 마지막 음절만 다르면 **초성만**(모음·종성은
+  어미·조사 각색 — 버려/버렸 · 방이/방에) · prob < 0.90. 구두점은 whisper 것.
+- 드라이런(잡 4편 1,532 span 6,312 어절): 규칙 조이기 전 181 → 95 적중, **멀쩡한 어절 깨짐 0**
+  (남은 애매는 구요→고요·이뻐→예뻐 류 표기 정규화). 각 규칙의 근거 사례가 docstring 에 있다.
+  fix_span_words 순서: name → latin → spelling → aligned(kind="aligned").
+- 회귀 가드: `tests/test_v3_aligned_token.py`(12건) · `test_v3_name_arbitration` 갱신
+  (청취가 있으면 인물표 없이도 같은 답).
+
+### 작품 로고·플랫폼 로고 등록 절차
+
+- 작품 로고: 원본 PNG 를 `app/assets/logos/_raw/` 에 **작품명(job work_title, 공백 없음)으로
+  시작하는 파일명**으로 두고 `scripts/normalize_logo.py --code <코드> --input …` 1회 —
+  `<코드>.json` 의 `source_file` 접두 일치로 `resolve_work_logo` 가 찾는다(흰색판 우선,
+  `_color` 차순위). 지금불륜 = `jigeum.png`(4052×1279 → 620×194 contain).
+- 플랫폼 표기(권리사 로고): `app/assets/logos/<이름>.png` 에 두고 채널 design
+  `platform_image: <이름>`(`--design-platform-image`) — 밴드 왼쪽 상단(24,24) 기본 150×80
+  contain. 쿠팡플레이 `coupangplay_logo.png`(876×191 → 150×32) 는 **진회색 워드마크**라
+  어두운 장면에서 안 보였다(실렌더 확인) → 아래 above_work 자리로 해결.
+
+### 플랫폼 표기 자리 `platform_placement` (2026-09-04, 사용자 지시 · 참고 쇼츠)
+
+- 값: `band`(기본 = 종전 영상영역 모서리) · `above_work` = **작품명/로고 바로 위 한 줄**에
+  아이콘(`platform_image`)과 텍스트(`platform_text`)를 **함께** 그린다(band 는 이미지 우선
+  하나만). 지금불륜: `--design-platform-placement above_work --design-platform-image
+  coupangplay_icon --design-platform-text "지금 쿠팡플레이에서 시청하세요"` — 아이콘 54×56 ·
+  흰 글자 40px · 작품 로고 위 16px.
+- 기하는 `renderer.platform_line_geometry` 한 곳(줄 높이 = 폰트×1.4, 아이콘은 줄 높이
+  정사각 contain). 작품명 상한(`_safe_work_top`)을 줄+여백만큼 내리므로 로고 center 정렬도
+  그 아래 남은 공간의 중앙에 앉는다. 텍스트 폭은 제목 둥근 박스와 같은 Pillow 실측으로
+  아이콘+글자 묶음을 가로 중앙에 둔다.
+- v3 자막 스택은 `finalize.platform_line_block` 으로 같은 높이를 예약한다 —
+  `estimate_work_top` 은 **블록 윗변**(줄 윗변), `estimate_work_height` 는 줄+작품명.
+  `band`·미지정이면 필터 문자열 종전과 바이트 동일(회귀 가드).
+- CLI 는 v1(`app.cli`)·v3 둘 다 `--design-platform-placement`(choices band|above_work) —
+  어휘 대조 테스트가 둘을 묶는다. ⚠ ves 어댑터 `CHANNEL_DESIGN_FLAGS`·`V3_DESIGN_KEYS` 에
+  `platform_placement` 를 더해야 채널 design 으로 실린다(엔진 전 노드 배포 뒤 — 구 노드는
+  argparse 즉사).
+- 회귀 가드: `tests/test_v3_channel_design.py` 의 above_work 절(3건).
+
+### 작품명/로고 블록의 밴드 기준 오프셋 `work_band_offset` (2026-09-04, 사용자 요청)
+
+- 제목이 '밴드 위 20px' 인 것과 같은 규약으로, 블록(above_work 플랫폼 줄 + 작품명/로고)
+  **윗변 = 밴드 하단 + N px**. 지정하면 로고 `work_image_align=center` 를 버리고 그 자리에
+  붙인다. 미지정 = 종전(밴드+20 안전선 · center) — 필터 문자열 바이트 동일.
+  자막 스택(`work_min_top`)·캔버스 하단 클램프는 그대로 위에서 작동한다.
+- CLI 는 v1·v3 둘 다 `--design-work-band-offset`(int). ⚠ ves 어댑터 어휘 추가 필요
+  (`platform_placement` 와 같은 롤아웃). 지금불륜 비교본(20/40/60/90)은 사용자 판단 대기.
+- 회귀 가드: `tests/test_v3_margin_fit.py` 의 work_band_offset 절(2건).
+
+### whisper 가 끊은 단어 병합 (`textcheck.merge_split_words`)
+
+- 실사고: '청남여중이구나' 를 whisper 가 '청년녀 / 중이구나' 로 끊어, 교정 뒤에도 줄이
+  "어머, 너도 청남여" / "중이구나." 로 갈라졌다(라인 분할은 어절 단위). 정렬이 '앞 조각 끝이
+  청취 어절 경계가 아니고 뒤 조각이 이어짐'을 알려주므로, **둘 중 하나가 이번 대조로 교정된
+  쌍만** 한 어절로 합친다(시각 앞 t0~뒤 t1 · prob 최소). 단순 띄어쓰기 불일치('안 계시더라구요'
+  vs '안계시더라고요')는 whisper 편 — 모델의 붙여쓰기 오류를 들여오지 않는다.
+  드라이런 4편: 병합 3(청남여 2 · whisper 깨진 span 1). 기록 kind="merge".
+- 반대 방향(whisper 가 두 단어를 한 어절로 붙인 '이삿덕이요'↔'이사 떡이요')은 나누지 않는다 —
+  글자별 시각이 없어 근사 분할이 된다(필요하면 별건).
+
+### 자막 줄 나눔 — 문장 힌트 · 앞 음절 복원 · 균형 분할 (2026-09-04, 같은 검수 후속)
+
+사용자 지적 4건('안녕하세요 저희 앞집 / 이사왔어요' · '한 정성도' · '부담이거든요 이런 /
+빙그레썅' · '어디다 두고 남의 / 호의를 함부로 쓰레기 / 취급해 …')을 세 갈래로 풀었다.
+`assemble._lines_for_span` 은 v3 전용(v1 `merge_subtitle_segments` 무변경).
+
+- **문장 힌트**(`align_tokens_to_heard` 의 `sent_end`): 모델 청취 어절이 `.?!…` 로 끝나고
+  whisper 어절이 그 어절 끝에 대응하면 줄 끊기 힌트만 단다(화면 글자는 안 바뀐다 — 마침표를
+  더 찍지 않는다). **소프트**다: 앞뒤 문장을 합쳐도 12자·4어절에 들면 안 끊는다('대박.
+  미쳤다.' 가 2자 줄 둘로 깜빡이는 것 방지). whisper 자체 문장부호도 같은 규칙.
+- **앞 음절 복원**(`recover_missing_prefix`): 정렬이 같은 청취 어절 안에서 조각 바로 앞에
+  **어느 whisper 어절에도 대응하지 않는** 한 음절을 찾고 조각이 어절 끝까지 가면 붙인다
+  ('한'→'과한', prob<0.90). 앞 whisper 어절이 그 글자에 대응하면(안+계시더라구요 ↔
+  안계시더라고요) 띄어쓰기 차이라 안 붙인다. 기록 kind="prefix".
+- **균형 분할**(`_balanced_breaks`): 문장 안에서 남는 칸 제곱합 최소(그리디는 꽁다리를
+  남긴다). 경계 벌점 30 — 1음절 의존명사·조사류(`LINE_START_PENALTY_WORDS` 건·거·것·수…)로
+  줄이 **시작**하거나 1음절 부사(`LINE_END_PENALTY_WORDS` 안·못·잘·더…)로 줄이 **끝나는**
+  배치. 동점이면 앞 줄이 긴 쪽(종전 그리디)으로. 제약(12자·4어절·단일 초과 어절 홀로)은 불변.
+  실측(EP01 쇼츠 18 span): '이쪽 동네 / 사람들은 이런 거 / 잘 안 하는데' ·
+  '어디다 두고 남의 / 호의를 함부로 / 쓰레기 취급해 / 그러니까 말이야'.
+- ⚠ `test_subtitle_line_rules` 의 기대값이 그리디 10/5 에서 균형 7/8 로 바뀌었다(의도된 변경).
+- 회귀 가드: `tests/test_v3_aligned_token.py` 의 힌트·복원·균형 절(4건).
+
+### 라벨 앵커 + 프로브 (2026-09-04, '(영혼 탈곡됨)' 실사고)
+
+`stage4.label_events`·`resolve_label_anchor`·`probe_labels`·`_default_label_probe` ·
+`LABEL_PROBE_PROMPT` · pipeline `run_style(timeline=)`.
+
+- 실사고: Stage 4 가 6fps 초안을 보고 절대초로 적은 라벨 49.4~51.0 이 다음 컷의 **웃는 아이**
+  얼굴 위에 떴다. 겨냥한 순간(「민서야 타!」 직후 아이가 굳는 정적 49.33~49.93)은 직전
+  watch_trim 이 잘라냈고, 모델은 대사 타임라인을 받고도 반대 감정의 얼굴에 얹었다.
+  원인 둘: 긴 영상에서 절대초를 세는 오차 + 문구-화면 의미 대조 부재.
+- **앵커(거친 층)**: 프롬프트가 이벤트 표를 준다 — `L<n>` 대사 줄(자막 세그먼트 순번) ·
+  `G<n>` 그 대사 직후 정적(≥0.3s, 다음 줄 또는 클립 끝까지) · `C<k>` 컷 시작. 모델은
+  `anchor`+`offset_sec`(−1~2)+`duration_sec`(0.6~2.5)로 답하고 코드가 시각을 표에서 뽑는다
+  (933 방어 규율). **앵커 이벤트가 속한 클립 안으로 클램프** — 오프셋이 컷을 넘어도 다음
+  장면으로 새지 않는다. 사라진 이벤트(트림된 정적)엔 붙을 수 없다. 모델이 절대초도 냈고
+  앵커값과 1.5s 넘게 갈리면 드롭(이벤트를 잘못 짚은 신호). 앵커 없는 항목은 절대초 폴백 + 기록.
+  `timeline` 을 안 주면(구 호출) 프롬프트·검증 종전과 동일.
+- **프로브(정밀 층)**: 앵커된 라벨마다 창(앵커 −1.0~+3.0, 클립 안, ≥0.8s)을 draft 에서
+  480p·10fps 로 잘라 Flash 에 "이 라벨이 맞는 표정이 있나(fit) · 시작 시각은?" 을 묻는다
+  (`refine._cut_probe_clip`·`_call_probe` 재사용, 편당 상한 3). fit=false → 드롭+기록,
+  맞으면 시작을 그 순간으로(클립 안 클램프, 길이 유지). 호출 실패·창 밖 답·예산 초과 →
+  앵커값 유지 + 기록. 클립은 `<job>/label_probes/`, 결과는 라벨 `probe` 키와
+  run_log style `audit.label_probes` 에.
+- 요금 실측: Stage 4 본 호출 31k 토큰(66초·6fps·LOW ≈ 프레임당 66), 프로브 1회 ≈ 4k.
+  전체 10fps 로 보는 안(≈49k)보다 싸고, 절대초 오차는 fps 로 안 줄어든다.
+- 실측(같은 편 재실행): 라벨 2개 전부 앵커(L27·L30) → 프로브 fit=true, 이동 +0.05/0.0s.
+  「대박 미쳤다」에 붙은 문구가 '(영혼 탈곡됨)' 에서 '(팝콘각)' 으로 — 앵커 표가 "이 대사에
+  대한 반응"임을 강제하자 문구가 화면과 맞아졌다.
+- ⚠ `_clip_at` 은 반개구간 [start, end) — 컷 경계 시각(4.0)이 앞 클립 [0,4] 에 잡히던
+  부동소수 결함을 테스트가 못박는다.
+- 회귀 가드: `tests/test_v3_label_anchor.py`(8건 — 이벤트 표·앵커 해석/클램프·불일치 드롭·
+  절대초 폴백·프로브 이동/드롭/유지/예산·프롬프트·run_style 배선).

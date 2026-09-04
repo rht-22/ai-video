@@ -635,6 +635,11 @@ class RenderInputs:
     # 남는다). 이때 cue 덕킹(×0.5)은 뮤트 창 **밖**에서만 걸어 두 감쇠가 겹쳐 쌓이지
     # 않게 한다 — None 이면 0×0.5=0 이라 필터 문자열 종전과 바이트 동일(회귀 0).
     muted_gain_db: float | None = None
+    # 2026-09-04(사용자 지시 "자막은 무조건 작품명보다 위"): 작품명/로고 **윗변 하한**(px).
+    # v3 finalize 가 자막·내레이션 블록 아랫변 + 여백으로 계산해 넘긴다 — 텍스트·로고
+    # (center 정렬 포함) 모두 이 값 아래에서 자리를 잡는다. None = 종전 수식 그대로
+    # (밴드 하단 + 20 만 본다 — v1 필터 문자열 바이트 동일, 회귀 0).
+    work_min_top: int | None = None
     # 2026-09-03: 소스 fps. 주면 클립을 **프레임 정수 개로 고정**해서 낸다(아래 [3]).
     # concat 이 세그먼트 길이를 소리에 맞추며 프레임을 덧대는 바람에 실제 편집본이
     # 계획보다 길어지고, 계획 좌표로 찍은 뮤트 창·자막·cue·라벨·효과음이 뒤로 갈수록
@@ -1010,6 +1015,31 @@ def _parse_drawtext_color(color: str) -> tuple[int, int, int, int]:
     r, g, b = rgb[:3]
     a = rgb[3] if len(rgb) == 4 else 255
     return (r, g, b, int(round(a * alpha)))
+
+
+PF_LINE_GAP = 16   # 작품명 위 플랫폼 줄과 작품명/로고 사이 여백(px)
+
+
+def platform_line_geometry(design) -> dict:
+    """작품명 위 플랫폼 줄(platform_placement=above_work)의 기하 — 순수·결정적.
+    font_size = platform_font_size · line_h = font_size×1.4(작품명 텍스트와 같은 추정) ·
+    아이콘은 line_h 정사각 박스에 contain(실측 크기, 못 읽으면 정사각). v3 finalize 의
+    자막 스택(`platform_line_block`)이 같은 함수로 예약 높이를 잰다."""
+    fs = int(getattr(design, "platform_font_size", 40) or 40)
+    line_h = int(fs * 1.4)
+    icon_w = icon_h = 0
+    img = getattr(design, "platform_image", None)
+    if img:
+        icon_w = icon_h = line_h
+        try:
+            nw, nh = _probe_video_dims(Path(str(img)).resolve())
+            if nw > 0 and nh > 0:
+                sc = min(line_h / nw, line_h / nh)
+                icon_w = max(2, int(nw * sc) // 2 * 2)
+                icon_h = max(2, int(nh * sc) // 2 * 2)
+        except Exception:
+            pass
+    return {"font_size": fs, "line_h": line_h, "icon_w": icon_w, "icon_h": icon_h}
 
 
 def _measure_title_text_width(text: str, font_path: str, font_size: int) -> int:
@@ -1647,7 +1677,9 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     # 바꿔도 표기가 영상을 따라간다. 이미지·텍스트 중 이미지 우선(둘 다 준 경우).
     _pf_img = getattr(d, 'platform_image', None)
     _pf_txt = getattr(d, 'platform_text', None)
-    if _pf_img or _pf_txt:
+    _pf_above_work = (getattr(d, 'platform_placement', 'band') == "above_work"
+                      and bool(_pf_img or _pf_txt))
+    if (_pf_img or _pf_txt) and not _pf_above_work:
         pf_off = getattr(d, 'platform_x', 24)          # 앵커 쪽 모서리에서의 오프셋
         pf_right = getattr(d, 'platform_align', 'left') == "right"
         # E10: 앵커는 캔버스가 아니라 **밴드 모서리** — video_width 로 밴드가 좁아져도
@@ -1705,8 +1737,22 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     # - 비디오 하단 + 20px 여백 아래로 자동 푸시
     # - 사용자가 더 아래(큰 y)를 명시했으면 존중
     # - 캔버스 하단을 벗어나면 (H - 추정 로고높이 - 여백) 으로 끌어올림
-    _gap_below_video = 20
+    # work_band_offset(2026-09-04): 블록 윗변 = 밴드 하단 + N — 제목의 '밴드 위 20px' 과 같은
+    # 규약. 지정하면 로고 center 정렬 대신 그 자리에 붙인다. None = 종전(20 · center).
+    _work_off = getattr(d, "work_band_offset", None)
+    _gap_below_video = int(_work_off) if _work_off is not None else 20
     _safe_work_top = overlay_y + scaled_h + _gap_below_video
+    # 자막 스택 하한(work_min_top, 2026-09-04) — 자막·내레이션 블록보다 위로는 못 올라간다.
+    # None 이면 종전과 동일. 로고 center 정렬도 이 값을 밴드 상단으로 삼아 남은 공간의
+    # 중앙에 앉으므로 "자막이 내려가면 작품명도 같이 내려간다".
+    _work_min_top = getattr(inputs, "work_min_top", None)
+    if _work_min_top is not None:
+        _safe_work_top = max(_safe_work_top, int(_work_min_top))
+    # 작품명 **위** 플랫폼 줄(platform_placement=above_work, 2026-09-04) — 아이콘+텍스트 한 줄을
+    # 작품명/로고 바로 위에 두므로 그만큼 작품명 상한을 내린다. 줄 자체는 작품명 y 확정 뒤 그린다.
+    _pf_geo = platform_line_geometry(d) if _pf_above_work else None
+    if _pf_geo:
+        _safe_work_top += _pf_geo["line_h"] + PF_LINE_GAP
     work_y_final = max(d.work_title_y, _safe_work_top)
     if work_type == "image" and work_value:
         logo_w = getattr(d, 'work_image_width', 350)
@@ -1733,7 +1779,7 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
 
         # 정렬: top=영상 하단에 붙임(종전) · center=영상 하단~캔버스 하단 밴드의 세로 중앙.
         # center 는 로고 높이가 달라져도 균형이 유지돼 작품별로 y 를 다시 찾지 않아도 된다.
-        if getattr(d, 'work_image_align', 'top') == "center":
+        if getattr(d, 'work_image_align', 'top') == "center" and _work_off is None:
             work_y_final = _safe_work_top + (H - 20 - _safe_work_top - logo_h_final) // 2
         if work_y_final + logo_h_final > H - 20:
             work_y_final = H - logo_h_final - 20
@@ -1755,6 +1801,35 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
             work_y_final = max(_safe_work_top, H - _estimated_text_h - 20)
         escaped_val = _escape_text_for_drawtext(raw_work)
         filters.append(f"{last_v_label}drawtext=expansion=none:fontfile='{font_arg}':text='{escaped_val}':fontcolor={d.work_color}:fontsize={d.work_font_size}:x=(w-text_w)/2:y={work_y_final}{work_label}")
+    if _pf_geo:
+        # 줄 윗변 = 작품명 윗변 − 여백 − 줄 높이. 아이콘과 텍스트를 한 묶음으로 가로 중앙 정렬 —
+        # 텍스트 폭은 같은 TTF 를 Pillow 로 잰다(제목 둥근 박스와 같은 신뢰).
+        _pf_line_y = work_y_final - PF_LINE_GAP - _pf_geo["line_h"]
+        _pf_text_w = (_measure_title_text_width(str(_pf_txt), actual_font, _pf_geo["font_size"])
+                      if _pf_txt else 0)
+        _pf_gap_x = _pf_geo["font_size"] // 2 if (_pf_img and _pf_txt) else 0
+        _pf_group_w = _pf_geo["icon_w"] + _pf_gap_x + _pf_text_w
+        _pf_x0 = max(0, (W - _pf_group_w) // 2)
+        _pf_prev = work_label
+        if _pf_img and _pf_geo["icon_w"] > 0:
+            _pfi = str(Path(_pf_img).resolve()).replace("\\", "/").replace(":", "\\:")
+            _icon_y = _pf_line_y + (_pf_geo["line_h"] - _pf_geo["icon_h"]) // 2
+            filters.append(
+                f"movie='{_pfi}',scale={_pf_geo['icon_w']}:{_pf_geo['icon_h']}[pfi];"
+                f"{_pf_prev}[pfi]overlay={_pf_x0}:{_icon_y}[with_pfi]")
+            _pf_prev = "[with_pfi]"
+        if _pf_txt:
+            _pf_esc = _escape_text_for_drawtext(str(_pf_txt))
+            filters.append(
+                f"{_pf_prev}drawtext=expansion=none:fontfile='{font_arg}':text='{_pf_esc}':"
+                f"fontcolor={getattr(d, 'platform_color', 'white')}:"
+                f"fontsize={_pf_geo['font_size']}:"
+                f"x={_pf_x0 + _pf_geo['icon_w'] + _pf_gap_x}:"
+                f"y={_pf_line_y}+({_pf_geo['line_h']}-text_h)/2[with_pft]")
+            _pf_prev = "[with_pft]"
+        print(f"  [Platform] 작품명 위 줄 — 아이콘 {_pf_geo['icon_w']}x{_pf_geo['icon_h']} · "
+              f"텍스트 {_pf_text_w}px @ y={_pf_line_y} (작품명 {work_y_final})")
+        work_label = _pf_prev
 
 
     # [6.5] 편집실 이미지 오버레이(edit_overrides/v3 images, F-408)

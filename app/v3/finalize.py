@@ -113,14 +113,15 @@ def design_from_style(design: dict) -> DesignConfig:
     for k in ("title_font", "subtitle_font"):
         if design.get(k):
             up[k] = str(design[k])
-    for k in ("title_y", "work_title_y", "work_font_size"):
+    for k in ("title_y", "work_title_y", "work_font_size", "work_band_offset"):
         if design.get(k) is not None:
             up[k] = int(design[k])
     if design.get("tts_width") is not None:
         up["tts_width"] = float(design["tts_width"])
     if design.get("face_tracking") is not None:
         up["enable_reframe"] = bool(design["face_tracking"])
-    for k in ("platform_image", "platform_text", "platform_color", "platform_align"):
+    for k in ("platform_image", "platform_text", "platform_color", "platform_align",
+              "platform_placement"):
         if design.get(k):
             up[k] = str(design[k])
     for k in ("platform_x", "platform_y", "platform_image_width",
@@ -278,14 +279,27 @@ SUB_GAP_PX = 12                   # 원본 자막과 우리 자막 사이 최소
 WORK_GAP_BELOW_VIDEO = 20         # renderer 의 _gap_below_video 와 같은 값(로고 안전선)
 
 
-def estimate_work_top(design, *, band_bottom: int, canvas_height: int = 1920) -> int:
-    """하단 작품명/로고의 **윗변 y** 추정 — renderer 의 로고 배치 수식을 그대로 따른다
-    (safe_top = 밴드 하단+20 · contain 박스 · center 정렬 · 캔버스 하단 클램프). 순수.
-    로고 PNG 크기를 못 읽으면 박스 높이로 본다(보수적 = 더 위)."""
-    H = int(canvas_height)
-    safe_top = int(band_bottom) + WORK_GAP_BELOW_VIDEO
+def platform_line_block(design) -> int:
+    """작품명 **위** 플랫폼 표기 줄이 차지하는 높이(줄 + 여백, px) — renderer 의
+    `platform_line_geometry` 와 같은 수식. above_work 가 아니거나 표기가 없으면 0. 순수."""
+    from app.modules.renderer import PF_LINE_GAP, platform_line_geometry
+    if getattr(design, "platform_placement", "band") != "above_work":
+        return 0
+    if not (getattr(design, "platform_image", None) or getattr(design, "platform_text", None)):
+        return 0
+    return platform_line_geometry(design)["line_h"] + PF_LINE_GAP
+
+
+def estimate_work_height(design) -> int:
+    """하단 작품명/로고 **블록** 높이(px) 추정 — renderer 와 같은 수식(텍스트 = 폰트×1.4,
+    로고 = contain 박스 실측) + 작품명 위 플랫폼 줄(above_work). 로고 PNG 크기를 못 읽으면
+    박스 높이(보수적 = 더 큼). 순수."""
+    return _work_item_height(design) + platform_line_block(design)
+
+
+def _work_item_height(design) -> int:
     if getattr(design, "work_type", "text") != "image" or not getattr(design, "work_value", None):
-        return max(int(getattr(design, "work_title_y", 1400)), safe_top)
+        return int(int(getattr(design, "work_font_size", 40)) * 1.4)
     box_w = int(getattr(design, "work_image_width", 350) or 350)
     box_h = getattr(design, "work_image_height", None)
     try:
@@ -294,15 +308,89 @@ def estimate_work_top(design, *, band_bottom: int, canvas_height: int = 1920) ->
             nat_w, nat_h = im.size
         _bh = int(box_h) if box_h else int(nat_h * (box_w / nat_w))
         sc = min(box_w / nat_w, _bh / nat_h)
-        logo_h = max(2, int(nat_h * sc) // 2 * 2)
+        return max(2, int(nat_h * sc) // 2 * 2)
     except Exception:  # noqa: BLE001 — 실측 실패 = 박스 높이(보수적)
-        logo_h = int(box_h) if box_h else max(60, int(box_w * 0.5))
+        return int(box_h) if box_h else max(60, int(box_w * 0.5))
+
+
+def estimate_work_top(design, *, band_bottom: int, canvas_height: int = 1920,
+                      min_top: int | None = None) -> int:
+    """하단 작품명/로고의 **윗변 y** 추정 — renderer 의 로고 배치 수식을 그대로 따른다
+    (safe_top = max(밴드 하단+20, min_top) · contain 박스 · center 정렬 · 캔버스 하단
+    클램프). min_top 은 renderer 의 work_min_top 과 같은 뜻(자막 스택 하한). 순수."""
+    H = int(canvas_height)
+    _off = getattr(design, "work_band_offset", None)
+    safe_top = int(band_bottom) + (int(_off) if _off is not None else WORK_GAP_BELOW_VIDEO)
+    if min_top is not None:
+        safe_top = max(safe_top, int(min_top))
+    # above_work 플랫폼 줄은 작품명 위에 붙는다 — 반환값은 **블록 윗변**(줄이 있으면 줄의 윗변)
+    blk = platform_line_block(design)
+    safe_top += blk
+    if getattr(design, "work_type", "text") != "image" or not getattr(design, "work_value", None):
+        y = max(int(getattr(design, "work_title_y", 1400)), safe_top)
+        th = _work_item_height(design)
+        if y + th > H - 20:
+            y = max(safe_top, H - th - 20)
+        return y - blk
+    logo_h = _work_item_height(design)
     y = safe_top
-    if getattr(design, "work_image_align", "top") == "center":
+    if getattr(design, "work_image_align", "top") == "center" and _off is None:
         y = safe_top + (H - 20 - safe_top - logo_h) // 2
     if y + logo_h > H - 20:
         y = H - logo_h - 20
-    return max(safe_top, y)
+    return max(safe_top, y) - blk
+
+
+def stack_work_below_text(*, sub_margin: int, tts_margin: int, work_top: int,
+                          work_height: int, canvas_height: int = 1920,
+                          gap: int = WORK_GAP_BELOW_VIDEO) -> tuple[int, int, int | None, list[str]]:
+    """밴드 아래 스택 — 자막·내레이션 블록 **아래**에 작품명/로고가 오게 한다. 순수.
+
+    2026-09-04 사용자 지시: "무조건 자막이 작품명보다 위 — 이런 경우엔 작품명도 같이
+    내려가야 한다". 실사고(지금불륜 EP01 bb71cb7d): recap 프리셋 자막을 밴드 아래로
+    내리자(fit_margin_below_band) 자막 아랫변 1639 가 작품명(1497~1553) 밑으로 들어갔다.
+
+    우선순위: ① 자막 > 작품명(하드) ② 작품명이 캔버스 하단 20px 안(하드 — renderer 클램프)
+    ③ 자막이 밴드 아래(소프트). 반환 (sub_margin, tts_margin, work_min_top, notes):
+      - work_min_top = 두 블록 아랫변 최댓값 + gap(20 — 렌더러 로고 안전선과 같은 값,
+        12 는 실렌더에서 내레이션과 작품명이 붙어 보였다). 작품명의 자연 위치(work_top)가 이미
+        그 아래면 None(렌더 무변경).
+      - 작품명 높이를 더해 캔버스 안에 못 들면 작품명을 하단 한계에 붙이고 자막·내레이션
+        margin 을 **올려서**(블록 아랫변 ≤ 작품명 윗변 − gap) ①을 지킨다 — 자막이 밴드
+        안쪽으로 되돌아가더라도 작품명 위라는 규칙은 깨지지 않는다(⚠ 기록)."""
+    H = int(canvas_height)
+    sub_m, tts_m = int(sub_margin), int(tts_margin)
+    notes: list[str] = []
+    text_bottom = max(H - sub_m, H - tts_m)
+    required = text_bottom + int(gap)
+    if required <= int(work_top):
+        return sub_m, tts_m, None, notes
+    limit = H - 20 - int(work_height)
+    if required <= limit:
+        notes.append(f"작품명 윗변 {int(work_top)} → {required} (자막 아랫변 {text_bottom} + {gap})")
+        return sub_m, tts_m, required, notes
+    # 못 들어간다 — 작품명은 하단 한계, 자막은 그 위로 올린다(밴드 안쪽 허용)
+    new_top = max(limit, int(work_top))
+    max_bottom = new_top - int(gap)
+    if H - sub_m > max_bottom:
+        notes.append(f"⚠ 자막 margin_v {sub_m} → {H - max_bottom} (작품명 하단 한계 {new_top} 위로 올림 — 밴드 안쪽)")
+        sub_m = H - max_bottom
+    if H - tts_m > max_bottom:
+        notes.append(f"⚠ 내레이션 margin_v {tts_m} → {H - max_bottom} (작품명 하단 한계 {new_top} 위로 올림 — 밴드 안쪽)")
+        tts_m = H - max_bottom
+    notes.append(f"작품명 윗변 {int(work_top)} → {new_top} (캔버스 하단 한계)")
+    return sub_m, tts_m, (new_top if new_top > int(work_top) else None), notes
+
+
+def preset_relative_margin(margin_v: int, *, ref_band_bottom: int, band_bottom: int) -> int:
+    """프리셋 절대 margin_v 를 **밴드 하단으로부터의 거리 유지**로 옮긴다. 순수.
+
+    2026-09-04 사용자 지시: "대사도 내레이션도 영상 위에 얹혀도 된다 — 원격(v1) 위치를
+    참고". v1 은 대사 자막을 밴드 하단 10px 위(`_compute_subtitle_margin_v`), TTS 를 밴드
+    하단 델타 앵커(`_compute_tts_margin_v`)로 둔다 — 둘 다 **밴드 안쪽**이다. v3 프리셋의
+    절대값도 프리셋 자신의 밴드에 맞춘 값(recap 518/580 = 24:23·443 밴드 하단 75/137px 위)
+    이라, 채널이 밴드만 바꿔도 그 거리를 유지해 따라간다. 밴드가 같으면 값도 같다(회귀 0)."""
+    return max(1, int(margin_v) - (int(band_bottom) - int(ref_band_bottom)))
 
 
 def fit_margin_below_band(margin_v: int, *, canvas_height: int, band_bottom: int,
@@ -528,12 +616,15 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                  output_dir: Path, out_name: str = "final_1080x1920.mp4",
                  channel_design: dict | None = None,
                  muted_gain_db: float | None = None,
+                 style_preset: str | None = None,
                  log=print) -> tuple[Path, dict]:
     """edit_plan + style + 자막/cue → 1080×1920 최종본. 반환: (경로, 실측).
 
     channel_design: 채널이 CLI(--design-*)로 준 키(어댑터 어휘). Stage 4 가 정한
     디자인보다 **위** — 채널 정체성·권리사 표기는 AI 연출이 아니라 계약이다.
-    muted_gain_db: 내레이션 덮개 구간의 원본 볼륨(dB). None = 종전 완전 무음."""
+    muted_gain_db: 내레이션 덮개 구간의 원본 볼륨(dB). None = 종전 완전 무음.
+    style_preset: 채널 스타일 프리셋 이름(미지정 = recap) — 자막·내레이션 기준 위치의
+    **참조 밴드**(프리셋 자신의 밴드)를 재는 데 쓴다(preset_relative_margin)."""
     config = AppConfig()
     if channel_design:
         log(f"  [v3/render] 채널 design 적용 {sorted(channel_design)}")
@@ -592,15 +683,35 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                               canvas_height=config.canvas_height)
     _title_bottom = _sr.estimate_title_bottom(
         design, _geom, line_count=_sr.estimate_title_line_count(_title_text))
+    _cd = channel_design or {}
+    # 자막·내레이션 기준 위치 — 채널이 절대 margin 을 **명시**하지 않았으면 프리셋 값을 밴드
+    # 상대로 옮겨 쓴다(밴드 안쪽 · v1 과 같은 자리). 명시했으면 그 값 그대로 + 아래 밴드 클램프.
+    # 실사고(지금불륜 EP01 bb71cb7d): 클램프가 프리셋 값(밴드 안쪽 의도)에 걸려 자막을
+    # 밴드 밖 캔버스 바닥(518→281)까지 내렸고 작품명 밑으로 들어갔다.
+    _ref_geom = _sr.band_geometry(design_from_style(stage4.get_style_preset(style_preset)),
+                                  canvas_width=config.canvas_width,
+                                  canvas_height=config.canvas_height)
+    _sub_from_channel = _cd.get("subtitle_y_margin") is not None
+    _tts_from_channel = _cd.get("tts_y_margin") is not None
     _sub_margin = int(design.subtitle_y_margin)
     _tts_margin = int(design.tts_line_y_margin)
+    if not _sub_from_channel:
+        _sub_margin = preset_relative_margin(_sub_margin, ref_band_bottom=_ref_geom.bottom,
+                                             band_bottom=_geom.bottom)
+    if not _tts_from_channel:
+        _tts_margin = preset_relative_margin(_tts_margin, ref_band_bottom=_ref_geom.bottom,
+                                             band_bottom=_geom.bottom)
+    if _geom.bottom != _ref_geom.bottom:
+        log(f"  [v3/자막배치] 프리셋 밴드 하단 {_ref_geom.bottom} → 이 편 {_geom.bottom} — "
+            f"자막 margin_v {_sub_margin}{'(채널 명시)' if _sub_from_channel else ''} · "
+            f"내레이션 {_tts_margin}{'(채널 명시)' if _tts_from_channel else ''}")
     _sub_h = _sr.estimate_subtitle_height(design.subtitle_size)
     _floor_top = _title_bottom + SUB_GAP_PX
-    # 밴드 아래로 내리기(2026-09-04) — 채널 margin 이 밴드 위치와 안 맞으면 두 줄 블록이
-    # 영상에 얹힌다. 번인 회피(아래 블록)는 이 값 위에서 **올리기만** 하므로 순서가 이렇다.
+    # 밴드 아래로 내리기(2026-09-04) — **채널이 명시한 절대 margin** 이 밴드 위치와 안 맞으면
+    # 두 줄 블록이 영상에 얹힌다(가왕쇼 7화: tts 550 vs video_y 500). 프리셋·상대 앵커 값은
+    # 밴드 안쪽이 의도라 안 건다. 번인 회피(아래 블록)는 이 값 위에서 **올리기만** 한다.
     _work_top = estimate_work_top(design, band_bottom=_geom.bottom,
                                   canvas_height=config.canvas_height)
-    _cd = channel_design or {}
     _sub_off = _cd.get("subtitle_band_offset")
     _tts_off = _cd.get("tts_band_offset")
     if _sub_off is not None:          # 대사 어절 자막은 v3 에서 늘 한 줄(12자)
@@ -616,13 +727,17 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     _tts_base = _tts_margin
     for _name, _size, _cur in (("자막", design.subtitle_size, _sub_margin),
                                ("내레이션", design.tts_line_font_size, _tts_margin)):
-        if (_name == "자막" and _sub_off is not None) or (_name == "내레이션" and _tts_off is not None):
-            continue                  # 상대 앵커가 정한 자리 — 절대값 클램프는 안 건다
+        if _name == "자막" and (_sub_off is not None or not _sub_from_channel):
+            continue                  # 상대 앵커·프리셋(밴드 안쪽 의도) — 절대값 클램프는 안 건다
+        if _name == "내레이션" and (_tts_off is not None or not _tts_from_channel):
+            continue
+        # 대사 어절 자막은 v3 에서 늘 한 줄(12자) — 두 줄 블록으로 재면 75px 을 더 내린다
+        _blk = _sr.estimate_subtitle_height(_size, lines=1 if _name == "자막" else 2)
         _new, _note = fit_margin_below_band(
             _cur, canvas_height=config.canvas_height, band_bottom=_geom.bottom,
-            block_height=_sr.estimate_subtitle_height(_size), work_top=_work_top)
-        if _note:
-            log(f"  [v3/자막배치] {_name} — {_note}")
+            block_height=_blk, work_top=_work_top)
+        if _note:   # 로고 근접 ⚠ 는 아래 자막 스택이 작품명을 내려서 푼다 — 여기선 안 찍는다
+            log(f"  [v3/자막배치] {_name} — {_note.split(' ⚠')[0]}")
         if _name == "자막":
             _sub_margin = int(_new)
         else:
@@ -659,6 +774,19 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
             floor_top=_floor_top)
         if _note:
             log(f"  [v3/자막회피] 내레이션 — {_note}")
+
+    # 자막 스택(2026-09-04) — 자막·내레이션 블록 아래에 작품명/로고. 두 트랙의 최종
+    # margin(밴드 아래 내리기·번인 회피 올리기가 끝난 값)이 정해진 이 지점에서 한 번.
+    # 줄별 보정(_line_margins · tts_cue_margins lift)은 전부 **올리기만** 하므로 여기
+    # 값의 아랫변이 두 트랙의 최저점이다.
+    _sub_margin, _tts_margin, _work_min_top, _stack_notes = stack_work_below_text(
+        sub_margin=_sub_margin, tts_margin=_tts_margin, work_top=_work_top,
+        work_height=estimate_work_height(design), canvas_height=config.canvas_height)
+    for _n in _stack_notes:
+        log(f"  [v3/자막배치] 작품명 — {_n}")
+    _work_top_final = estimate_work_top(design, band_bottom=_geom.bottom,
+                                        canvas_height=config.canvas_height,
+                                        min_top=_work_min_top)
 
     # 대사 ASS — C6 세그먼트(편집본 좌표)를 그대로 이벤트로
     sub_path = output_dir / "v3_subtitles.ass"
@@ -871,13 +999,19 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
         muted_gain_db=muted_gain_db,
         source_fps=plan.get("source_fps"),
         sfx_audio=_all_sfx or None,
+        work_min_top=_work_min_top,
     )
     t0 = time.time()
     render_short(inputs)
     cost = {"elapsed": round(time.time() - t0, 1), "bytes": out_path.stat().st_size,
             "clips": len(clips), "cues": len(cue_files),
             "muted_windows": len(inputs.muted_windows or []), "labels": len(labels),
-            "subject_anchor_clips": len(crop_map)}
+            "subject_anchor_clips": len(crop_map),
+            "text_stack": {"subtitle_margin_v": int(_sub_margin),
+                           "tts_margin_v": int(_tts_margin),
+                           "work_top": int(_work_top_final),
+                           "work_min_top": _work_min_top,
+                           "capped": any(n.startswith("⚠") for n in _stack_notes)}}
     log(f"  [v3/render] {out_path.name} — {cost['elapsed']}s · "
         f"{cost['bytes'] // (1024 * 1024)}MB")
     return out_path, cost

@@ -233,12 +233,151 @@ def arbitrate_spelling(token: str, heard_text: str, *, prob: float | None = None
     return cands.pop() if len(cands) == 1 else None
 
 
+# ── 정렬 기반 맞춤법 교정 (2026-09-04, 지금불륜 EP01 실사고 후속) ──────────────
+# arbitrate_spelling 은 어절 1:1 대조라 whisper 와 모델의 **띄어쓰기가 다르면 후보 자체가
+# 없고**(이삿덕이요 ↔ 이사 떡이요 · 청년녀 중이구나 ↔ 청남여중이구나 · 빙그레샹 ↔ 빙그레 썅),
+# 초성이 다르면 제외라(들이러 ↔ 드리러 ㅇ/ㄹ · 청년녀 ↔ 청남여 ㄴ/ㅇ) 쇼츠 자막 오타 6건 중
+# 1건만 잡았다 — 모델 청취는 6/6 정답이었다. 공백을 뗀 두 문자열을 글자 단위로 정렬해
+# whisper 어절에 대응하는 청취 조각을 찾고, **음절 수가 같고 자모 차이가 작을 때만** 뒤집는다.
+
+ALIGNED_MAX_PROB = 0.90        # spelling(0.85)보다 조금 넓다 — 들이러·무실하잖아가 0.87
+ALIGNED_MAX_JAMO = 2           # 2음절 어절의 자모 차이 상한(초·중·종 단위) — 드라이런 1,532span:
+                               # 3 이상은 각색이 대부분(왔다→어디 3 · 치면→취미 3 · 이제→내가 4)
+ALIGNED_MAX_JAMO_LONG = 3      # 3음절 이상은 3 까지(청년녀→청남여 · 개첩한→개차반 · 하연아→하여간)
+ALIGNED_MAX_JAMO_PER_SYL = 2   # 한 음절이 통째로 바뀌면(3) 다른 말이다
+# 지시어·대명사·감탄사는 각색(다른 말로 바꿔 말함)과 오인식을 구분할 수 없다 — 드라이런
+# 오작동이 전부 이 부류였다(여기→이거 · 이건→그건 · 저기→여기 · 이게→이거 · 니가→네가).
+ALIGNED_STOPWORDS = frozenset({
+    "이거", "이게", "이건", "그거", "그게", "그건", "저거", "저게", "저건",
+    "여기", "저기", "거기", "아니", "아이", "니가", "네가", "내가", "우리", "어디",
+})
+
+
+def _jamo(c: str) -> tuple[int, int, int] | None:
+    o = ord(c)
+    if not 0xAC00 <= o <= 0xD7A3:
+        return None
+    o -= 0xAC00
+    return (o // 588, (o % 588) // 28, o % 28)
+
+
+def _jamo_diff(a: str, b: str) -> tuple[int, bool]:
+    """같은 길이 두 한글 문자열의 자모 차이 개수와 '모음 차이 포함' 여부. 순수."""
+    n, vowel = 0, False
+    for x, y in zip(a, b):
+        jx, jy = _jamo(x), _jamo(y)
+        if jx is None or jy is None:
+            return 99, True
+        for k in range(3):
+            if jx[k] != jy[k]:
+                n += 1
+                if k == 1:
+                    vowel = True
+    return n, vowel
+
+
+def align_tokens_to_heard(tokens: list[str], heard_text: str) -> list[dict | None]:
+    """whisper 어절 목록 ↔ 모델 청취 문장을 **공백 제거 문자열**로 정렬해 어절마다 대응
+    정보를 돌려준다(대응이 없거나 길이가 다르면 None). 순수.
+      piece     대응 청취 조각(같은 길이·연속)
+      at_start  조각 시작이 청취 어절 경계인가
+      at_end    조각 끝이 청취 어절 경계인가
+      sent_end  at_end 이고 그 청취 어절이 문장부호(.?!…)로 끝나는가 — 줄 끊기 힌트
+      prefix    같은 청취 어절 안에서 조각 **바로 앞**의, whisper 어절 어디에도 대응하지 않는
+                글자들(whisper 가 빠뜨린 음절 — '한' ↔ '과한' 의 '과'). 없으면 ""
+    """
+    import difflib
+    toks = [t.strip(_STRIP) for t in tokens]
+    W = "".join(toks)
+    raw_hw = [h for h in heard_text.split() if h.strip(_STRIP)]
+    hw = [h.strip(_STRIP) for h in raw_hw]
+    H = "".join(hw)
+    if not W or not H:
+        return [None] * len(tokens)
+    starts, tok_of, sent_end_at = set(), [], set()
+    pos = 0
+    for k, h in enumerate(hw):
+        starts.add(pos)
+        tok_of.extend([k] * len(h))
+        if any(c in ".?!…" for c in raw_hw[k][len(raw_hw[k].rstrip(_STRIP)):]):
+            sent_end_at.add(pos + len(h) - 1)
+        pos += len(h)
+    ends = {b - 1 for b in starts if b > 0} | {len(H) - 1}   # 각 청취 어절의 마지막 글자 인덱스
+    tok_start = {}
+    for i, k in enumerate(tok_of):
+        tok_start.setdefault(k, i)
+    # W 의 각 글자 → H 의 글자 인덱스(equal 은 1:1, replace 는 같은 길이일 때만 1:1)
+    wmap: list[int | None] = [None] * len(W)
+    sm = difflib.SequenceMatcher(None, W, H, autojunk=False)
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal" or (tag == "replace" and i2 - i1 == j2 - j1):
+            for k in range(i2 - i1):
+                wmap[i1 + k] = j1 + k
+    hmapped = {j for j in wmap if j is not None}
+    out: list[dict | None] = []
+    pos = 0
+    for t in toks:
+        idx = [wmap[pos + k] for k in range(len(t))]
+        pos += len(t)
+        if not t or any(i is None for i in idx):
+            out.append(None)
+            continue
+        if any(idx[k + 1] != idx[k] + 1 for k in range(len(idx) - 1)):
+            out.append(None)      # 사이에 청취 쪽 삽입 — 한 조각이 아니다
+            continue
+        j0, j1 = idx[0], idx[-1]
+        pre = ""
+        ts = tok_start[tok_of[j0]]
+        if j0 > ts and all(j not in hmapped for j in range(ts, j0)):
+            pre = H[ts:j0]
+        out.append({"piece": H[j0:j1 + 1], "at_start": j0 in starts, "at_end": j1 in ends,
+                    "sent_end": j1 in ends and j1 in sent_end_at, "prefix": pre})
+    return out
+
+
+def arbitrate_aligned(token: str, piece: dict | None, *,
+                      prob: float | None = None) -> str | None:
+    """정렬로 찾은 청취 조각으로 whisper 어절을 뒤집을지 판정. 순수.
+      ① 둘 다 한글 · 2음절 이상 · 음절 수 같음(정렬이 보장) · 다름 · 지시어 아님
+      ② 조각 시작이 청취 어절 경계(청취 어절 **가운데**에서 시작하는 조각은 whisper 가
+         띄어쓰기를 다르게 끊은 것 — '가운이 보니까' ↔ '가운 입으니까' 의 '으니까')
+      ③ 자모 차이 합 ≤ 2(2음절) / ≤ 3(3음절+), 음절당 ≤ 2
+      ④ 마지막 음절만 다르면 **초성 차이만** 허용(로컴→로펌) — 모음·종성이 다르면 어미·조사
+         각색으로 본다(신발이/신발을 · 버려/버렸 · 찍으시게/찍으시겠 · 가운이/가운입).
+      ⑤ whisper prob < ALIGNED_MAX_PROB
+    구두점은 whisper 것을 그대로 남긴다(타이밍·문장부호는 받아쓰기 것)."""
+    raw = token.strip(_STRIP)
+    if not raw or not piece:
+        return None
+    heard_piece, at_start = piece["piece"], piece["at_start"]
+    if raw == heard_piece or len(raw) < 2 or raw in ALIGNED_STOPWORDS or not at_start:
+        return None
+    if not (_is_hangul(raw) and _is_hangul(heard_piece)) or len(raw) != len(heard_piece):
+        return None
+    if prob is not None and float(prob) >= ALIGNED_MAX_PROB:
+        return None
+    n, _ = _jamo_diff(raw, heard_piece)
+    if not 1 <= n <= (ALIGNED_MAX_JAMO_LONG if len(raw) >= 3 else ALIGNED_MAX_JAMO):
+        return None
+    diff = [i for i in range(len(raw)) if raw[i] != heard_piece[i]]
+    if any(_jamo_diff(raw[i], heard_piece[i])[0] > ALIGNED_MAX_JAMO_PER_SYL for i in diff):
+        return None
+    if diff == [len(raw) - 1]:
+        jx, jy = _jamo(raw[-1]), _jamo(heard_piece[-1])
+        if jx is None or jy is None or jx[1:] != jy[1:]:
+            return None           # 초성만 다를 때만(로컴→로펌) — 모음·종성은 어미·조사 각색
+    head = token[:len(token) - len(token.lstrip(_STRIP))]
+    tail = token[len(token.rstrip(_STRIP)):]
+    return head + heard_piece + tail
+
+
 def fix_span_words(words: list[dict], names: list[str], heard_text: str
                    ) -> tuple[list[dict], list[dict]]:
     """span 의 whisper 단어 목록에 arbitrate_name(인명) → arbitrate_latin(영문 오인식) →
     arbitrate_spelling(맞춤법)을 적용한 사본 + 교정 기록(인명 외는 kind 표시).
     names 가 비어도 latin·spelling 대조는 돈다."""
     out, fixes = [], []
+    pieces = align_tokens_to_heard([str(w.get("text") or "") for w in words], heard_text)
     for i, w in enumerate(words):
         text = str(w.get("text") or "")
         new, kind = arbitrate_name(text, names, heard_text), "name"
@@ -250,14 +389,82 @@ def fix_span_words(words: list[dict], names: list[str], heard_text: str
             ), "latin"
         if not new:
             new, kind = arbitrate_spelling(text, heard_text, prob=w.get("prob")), "spelling"
+        if not new:
+            new, kind = arbitrate_aligned(text, pieces[i], prob=w.get("prob")), "aligned"
         if new and new != w.get("text"):
             rec = {"at": round(float(w.get("t0", 0)), 2), "from": w.get("text"), "to": new}
             if kind != "name":                  # 인명 기록 모양은 종전 그대로(additive)
                 rec["kind"] = kind
             fixes.append(rec)
-            w = dict(w, text=new)
+            w = dict(w, text=new, _fixed=True)
+        pre = recover_missing_prefix(str(w.get("text") or ""), pieces[i], prob=w.get("prob"))
+        if pre:
+            fixes.append({"at": round(float(w.get("t0", 0)), 2), "from": w.get("text"),
+                          "to": pre, "kind": "prefix"})
+            w = dict(w, text=pre, _fixed=True)
+        if pieces[i] and pieces[i].get("sent_end") and not str(w.get("text") or "").rstrip().endswith(tuple(".?!…")):
+            w = dict(w, sent_end=True)          # 줄 끊기 힌트(화면 글자는 안 바뀐다)
         out.append(w)
+    out, merged = merge_split_words(out, pieces)
+    fixes.extend(merged)
+    for w in out:
+        w.pop("_fixed", None)
     return out, fixes
+
+
+def recover_missing_prefix(token: str, piece: dict | None, *, prob: float | None = None
+                           ) -> str | None:
+    """whisper 가 어절 **앞 음절을 빠뜨린** 경우 모델 청취로 되살린다(순수). 2026-09-04
+    실사고: whisper '한 정성도 좀'(prob 0.58) ↔ 청취 '과한 정성도 좀'.
+    조건: ① 정렬이 같은 청취 어절 안에서 조각 바로 앞에 **어느 whisper 어절에도 대응하지
+    않는** 한 음절(prefix)을 찾았다 — 앞 whisper 어절이 그 글자에 대응하면(안+계시더라구요 ↔
+    안계시더라고요) 띄어쓰기 차이지 누락이 아니다 ② 조각이 그 청취 어절 끝까지 간다(어절 =
+    prefix + 조각) ③ 둘 다 한글 ④ whisper prob < ALIGNED_MAX_PROB. 구두점은 whisper 것."""
+    if not piece or not piece.get("prefix") or not piece.get("at_end"):
+        return None
+    pre = str(piece["prefix"])
+    raw = token.strip(_STRIP)
+    if len(pre) != 1 or not _is_hangul(pre) or not raw or not _is_hangul(raw):
+        return None
+    if prob is not None and float(prob) >= ALIGNED_MAX_PROB:
+        return None
+    head = token[:len(token) - len(token.lstrip(_STRIP))]
+    return head + pre + token[len(head):]
+
+
+def merge_split_words(words: list[dict], pieces: list) -> tuple[list[dict], list[dict]]:
+    """whisper 가 **한 단어를 두 어절로 끊었고** 모델 청취는 한 어절인 쌍을 합친다(순수·사본).
+    2026-09-04 실사고: 청취 '청남여중이구나' ↔ whisper '청년녀 / 중이구나' — 교정은 됐지만
+    줄이 '어머, 너도 청남여' / '중이구나.' 로 갈라졌다(라인 분할이 어절 단위라).
+
+    조건(전부): ① 앞 어절 조각의 끝이 청취 어절 경계가 **아니고** 뒤 어절 조각이 그 자리에서
+    이어진다(= 모델은 한 어절) ② 둘 다 한글이고 앞 어절에 구두점이 없다 ③ 둘 중 하나는
+    이번 대조로 **교정된** 어절(오인식이 확인된 자리에서만 — 모델과 whisper 의 단순 띄어쓰기
+    불일치('안 계시더라구요' vs '안계시더라고요')는 whisper 편). 시각은 앞 t0 ~ 뒤 t1,
+    prob 는 둘 중 작은 값."""
+    out: list[dict] = []
+    merged: list[dict] = []
+    i = 0
+    while i < len(words):
+        w = words[i]
+        if i + 1 < len(words):
+            a, b = pieces[i] if i < len(pieces) else None, pieces[i + 1] if i + 1 < len(pieces) else None
+            nxt = words[i + 1]
+            ta, tb = str(w.get("text") or ""), str(nxt.get("text") or "")
+            if (a and b and not a["at_end"] and not b["at_start"]
+                    and _is_hangul(ta) and _is_hangul(tb.rstrip(_STRIP))
+                    and (w.get("_fixed") or nxt.get("_fixed"))):
+                mw = dict(w, text=ta + tb, t1=nxt.get("t1", w.get("t1")),
+                          prob=min(float(w.get("prob") or 1.0), float(nxt.get("prob") or 1.0)),
+                          _fixed=True)
+                merged.append({"at": round(float(w.get("t0", 0)), 2),
+                               "from": f"{ta} {tb}", "to": ta + tb, "kind": "merge"})
+                out.append(mw)
+                i += 2
+                continue
+        out.append(w)
+        i += 1
+    return out, merged
 
 
 def fix_names(segments: list[dict], names: list[str]) -> tuple[list[dict], list[dict]]:

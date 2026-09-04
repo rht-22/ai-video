@@ -90,6 +90,10 @@ class DesignConfig:
 
     # 작품명 및 이미지 설정
     work_title_y: int = 1400
+    # 작품명/로고 블록 윗변 = 영상 밴드 하단 + N px (2026-09-04, 사용자 요청 — 제목이 밴드 위
+    # 20px 에 걸리는 것과 같은 규약). None = 종전(밴드+20 안전선 · 로고는 center 정렬).
+    # 지정하면 로고도 center 를 버리고 그 자리에 윗변을 붙인다.
+    work_band_offset: int | None = None
     work_font_size: int = 40
     work_color: str = "#FF69B4"
     work_letter_spacing: bool = True
@@ -123,6 +127,11 @@ class DesignConfig:
     # 가로 앵커 — left=왼쪽 상단(기본), right=오른쪽 상단. platform_x 는 앵커 쪽 모서리에서의
     # 오프셋이 된다(right 면 오른쪽 가장자리에서 안쪽으로 platform_x px).
     platform_align: str = "left"
+    # 자리(2026-09-04, 지금불륜 검수): band=영상영역 모서리(종전) · above_work=**작품명/로고
+    # 바로 위** 한 줄. above_work 는 이미지(아이콘)와 텍스트를 **함께** 그린다("▶ 지금
+    # 쿠팡플레이에서 시청하세요") — 밴드 모서리의 회색 워드마크가 어두운 장면에서 안 보여
+    # 사용자가 참고 쇼츠(작품 로고 위 아이콘+흰 글자)를 들어 정한 자리.
+    platform_placement: str = "band"
 
     overlay_image_path: str | None = None # 필요 시 이미지 경로
 

@@ -135,6 +135,19 @@ LABEL_TEXT_MAX = 12            # 괄호 제외 자수 — 길면 화면을 가�
 # 등장 효과 — 렌더러(build_texts_ass/_text_fx_tags)가 이미 굽는 어휘. 기본은 pop
 # ("띠용" 오버슈트 30%→110%→100%, 220ms). 미지정이 none 이면 라벨이 그냥 튀어나온다.
 LABEL_FX = ("pop", "glow", "shake", "none")
+# 라벨 앵커 + 프로브(2026-09-04, 지금불륜 EP01 '(영혼 탈곡됨)' 실사고 — 모델이 6fps 초안을
+# 보고 절대초로 적은 시각이 다른 아이의 웃는 얼굴 위에 앉았다). 시각은 절대초가 아니라
+# **편집본 이벤트**(대사 줄 L·대사 직후 정적 G·컷 시작 C)에 앵커하고 코드가 이벤트 표에서
+# 뽑는다(933 방어 규율) — 사라진 이벤트엔 못 붙는다. 그 뒤 앵커 창을 잘라 10fps 로 다시
+# 보며 표정이 시작하는 프레임을 잡는다(덮개 프로브와 같은 기계 · refine._call_probe).
+LABEL_ANCHOR_OFFSET_RANGE = (-1.0, 2.0)   # 앵커 시작 기준 오프셋(초) 허용 범위
+LABEL_ANCHOR_TOLERANCE_SEC = 1.5          # 앵커 해석값과 모델 절대초가 이 이상 갈리면 드롭
+LABEL_GAP_MIN_SEC = 0.3                   # 이보다 짧은 대사 사이는 정적 이벤트로 안 센다
+LABEL_DEFAULT_DUR_SEC = 1.5
+LABEL_PROBE_PRE_SEC = 1.0                 # 프로브 창 = 앵커 시각 −1.0 ~ +3.0 (클립 안으로)
+LABEL_PROBE_POST_SEC = 3.0
+LABEL_PROBE_MIN_WIN_SEC = 0.8             # 창이 이보다 짧으면 프로브 생략(앵커값 유지)
+LABEL_PROBE_BUDGET = 3                    # 편당 Flash 프로브 상한(= LABEL_MAX_COUNT)
 CROP_ANCHORS = ("left", "center", "right")
 
 
@@ -205,6 +218,185 @@ def render_draft(video_path: Path, timeline: list[dict], out_path: Path,
     return cost
 
 
+def edited_clip_windows(timeline: list[dict]) -> list[dict]:
+    """타임라인 → 편집본 좌표 클립 창 [{clip, start, end}] (hold_sec 포함). 순수."""
+    out, t = [], 0.0
+    for k, c in enumerate(timeline or []):
+        dur = float(c["clip_end_sec"]) - float(c["clip_start_sec"]) + float(c.get("hold_sec") or 0.0)
+        out.append({"clip": k, "start": round(t, 3), "end": round(t + dur, 3)})
+        t += dur
+    return out
+
+
+def _clip_at(t: float, clips: list[dict]) -> dict | None:
+    """편집본 시각 t 가 속한 클립 — **반개구간** [start, end). 경계 시각(컷 시작 = 앞 클립 끝)은
+    뒤 클립이다(부동소수 여유 1e-6 — 4.0 이 [0,4] 에 잡히던 실측 결함)."""
+    return next((c for c in clips if c["start"] - 1e-6 <= t < c["end"] - 1e-6), None)
+
+
+def label_events(dialogue: list[dict] | None, timeline: list[dict] | None) -> list[dict]:
+    """라벨 앵커 어휘 — 편집본 좌표 이벤트 표. 순수·결정적.
+      L<n>  대사 줄 n(자막 세그먼트 순번) — start~end
+      G<n>  대사 줄 n 직후 정적 — 줄 끝 ~ 다음 줄 시작(또는 그 클립 끝), ≥ LABEL_GAP_MIN_SEC
+      C<k>  클립 k 시작 — 클립 창 전체
+    대사 없는 구간의 라벨은 G 나 C 에 앵커한다 — 라벨을 못 다는 자리는 없다."""
+    clips = edited_clip_windows(timeline or [])
+    ev: list[dict] = []
+    segs = [sg for sg in (dialogue or []) if sg.get("start_sec") is not None]
+    for n, sg in enumerate(segs):
+        s0, s1 = float(sg["start_sec"]), float(sg["end_sec"])
+        ev.append({"id": f"L{n}", "kind": "line", "start": round(s0, 3), "end": round(s1, 3),
+                   "text": str(sg.get("text") or "")})
+        nxt = float(segs[n + 1]["start_sec"]) if n + 1 < len(segs) else None
+        _c = _clip_at(s1 - 1e-3, clips)          # 줄 끝이 컷 경계면 그 줄이 속한(앞) 클립
+        clip_end = _c["end"] if _c else None
+        g1 = min(x for x in (nxt, clip_end) if x is not None) if (nxt is not None or clip_end is not None) else None
+        if g1 is not None and g1 - s1 >= LABEL_GAP_MIN_SEC:
+            ev.append({"id": f"G{n}", "kind": "gap", "start": round(s1, 3), "end": round(g1, 3),
+                       "text": f"「{sg.get('text')}」 직후 정적"})
+    for c in clips:
+        ev.append({"id": f"C{c['clip']}", "kind": "clip", "start": c["start"], "end": c["end"],
+                   "text": ""})
+    return ev
+
+
+def label_events_block(events: list[dict]) -> tuple[str, str]:
+    """프롬프트 블록 (대사+정적 줄, 컷 경계 줄). 순수."""
+    lines, cuts = [], []
+    for e in events:
+        if e["kind"] == "line":
+            lines.append(f"- {e['id']} {e['start']:.1f}~{e['end']:.1f}s 「{e['text']}」")
+        elif e["kind"] == "gap":
+            lines.append(f"    · {e['id']} 정적 {e['start']:.1f}~{e['end']:.1f}s")
+        else:
+            cuts.append(f"{e['id']} {e['start']:.1f}~{e['end']:.1f}s")
+    return ("\n".join(lines) or "- (대사 없음)"), (" · ".join(cuts) or "(없음)")
+
+
+def resolve_label_anchor(item: dict, events: list[dict], clips: list[dict]
+                         ) -> tuple[float | None, float | None, str | None, str | None]:
+    """앵커 → (start, end, anchor_id, 사유). 순수.
+    start = 이벤트 시작 + offset(범위 클램프) → 그 시각이 속한 **클립 안**으로 클램프(라벨이 컷을
+    넘어 다음 장면 얼굴 위에 남지 않게) · end = start + duration(0.6~2.5) ≤ 클립 끝.
+    모델이 절대초도 함께 냈고 앵커 해석값과 LABEL_ANCHOR_TOLERANCE_SEC 이상 갈리면 사유를
+    돌려준다(이벤트를 잘못 짚었다는 신호 — 드롭)."""
+    aid = str(item.get("anchor") or "").strip().upper()
+    ev = next((e for e in events if e["id"] == aid), None)
+    if ev is None:
+        return None, None, aid or None, f"앵커 {aid!r} 이 이벤트 표에 없다" if aid else "앵커 없음"
+    try:
+        off = float(item.get("offset_sec") or 0.0)
+    except (TypeError, ValueError):
+        off = 0.0
+    if not math.isfinite(off):
+        off = 0.0
+    off = min(max(off, LABEL_ANCHOR_OFFSET_RANGE[0]), LABEL_ANCHOR_OFFSET_RANGE[1])
+    try:
+        dur = float(item.get("duration_sec") or LABEL_DEFAULT_DUR_SEC)
+    except (TypeError, ValueError):
+        dur = LABEL_DEFAULT_DUR_SEC
+    if not math.isfinite(dur):
+        dur = LABEL_DEFAULT_DUR_SEC
+    dur = min(max(dur, LABEL_MIN_DUR_SEC), LABEL_MAX_DUR_SEC)
+    start = ev["start"] + off
+    # 가두는 클립은 **앵커 이벤트가 속한** 클립이다 — 오프셋이 컷을 넘어도 다음 장면으로
+    # 새지 않는다(이번 사고의 절반: 다음 컷의 다른 얼굴 위에 남은 라벨)
+    if ev["kind"] == "clip":
+        clip = next((c for c in clips if f"C{c['clip']}" == ev["id"]), None)
+    else:
+        clip = _clip_at(ev["start"], clips)
+    if clip is None:
+        clip = _clip_at(start, clips)
+    if clip is not None:
+        start = min(max(start, clip["start"]), max(clip["start"], clip["end"] - LABEL_MIN_DUR_SEC))
+        end = min(start + dur, clip["end"])
+    else:
+        end = start + dur
+    if end - start < LABEL_MIN_DUR_SEC:
+        end = start + LABEL_MIN_DUR_SEC
+    why = None
+    try:
+        abs_s = float(item["start_sec"]) if item.get("start_sec") is not None else None
+    except (TypeError, ValueError):
+        abs_s = None
+    if abs_s is not None and abs(abs_s - start) > LABEL_ANCHOR_TOLERANCE_SEC:
+        why = f"앵커 {aid}({start:.1f}s) 와 절대초 {abs_s:.1f}s 가 {abs(abs_s - start):.1f}s 갈림"
+    return round(start, 3), round(end, 3), aid, why
+
+
+LABEL_PROBE_PROMPT = """당신은 쇼츠 편집자다. 첨부한 클립은 편집본의 {t0}~{t1}초 구간(클립 안 0초 = 편집본 {t0}초)이다.
+이 자리에 괄호 라벨 {text} 를 띄우려 한다. 라벨은 화면에 대한 반응이다 — 표정이 꺾이는 순간, 인물 정체, 눈에 띄는 행동.
+{context}
+질문:
+1. 이 클립 안에 이 라벨이 **맞는** 표정·행동이 있는가? 인물의 감정이 라벨과 반대이거나(웃는 얼굴에 '충격') 그런 순간이 없으면 fit=false.
+2. 있다면 그 표정·행동이 **시작하는** 시각(클립 안 초, 0~{length:.1f})은? 라벨은 그 순간부터 {dur:.1f}초 뜬다.
+## 출력 (JSON 만)
+{{"fit": true, "start_sec": 0.8, "reason": "한 문장"}}"""
+
+
+def probe_labels(labels: list[dict], clips: list[dict], *, ask, log=print,
+                 budget: int = LABEL_PROBE_BUDGET) -> tuple[list[dict], list[dict]]:
+    """앵커된 라벨마다 창(앵커 −1.0 ~ +3.0, 클립 안)을 잘라 Flash 에 묻는다 — ask(t0, t1, label)
+    → {fit, start_sec, reason} | None. fit=false 는 드롭(문구가 화면과 안 맞음), 맞으면 시작을
+    그 순간으로 옮기고(클립 안 클램프) 길이는 유지. 호출 실패·예산 초과는 앵커값 유지 + 기록.
+    순수(ask 가 유일한 부수효과) — 라벨 dict 는 사본."""
+    out, audit = [], []
+    calls = 0
+    for lb in labels:
+        s0, s1 = float(lb["start_sec"]), float(lb["end_sec"])
+        dur = s1 - s0
+        clip = _clip_at(s0, clips)
+        lo = max(s0 - LABEL_PROBE_PRE_SEC, clip["start"] if clip else 0.0)
+        hi = min(s0 + LABEL_PROBE_POST_SEC, clip["end"] if clip else s0 + LABEL_PROBE_POST_SEC)
+        rec = {"text": lb["text"], "anchor": lb.get("anchor"), "window": [round(lo, 3), round(hi, 3)],
+               "before": [round(s0, 3), round(s1, 3)]}
+        if hi - lo < LABEL_PROBE_MIN_WIN_SEC:
+            rec["result"] = "창이 짧아 생략"
+            audit.append(rec); out.append(dict(lb)); continue
+        if calls >= budget:
+            rec["result"] = f"예산 {budget} 초과 — 미검사"
+            audit.append(rec); out.append(dict(lb)); continue
+        calls += 1
+        try:
+            resp = ask(lo, hi, lb)
+        except Exception as e:  # noqa: BLE001 — 프로브 실패는 앵커값 유지(조용한 실패 아님)
+            resp = None
+            rec["error"] = str(e)[:160]
+        if not isinstance(resp, dict):
+            rec["result"] = "응답 없음 — 앵커값 유지"
+            log(f"  [v3/label-probe] ⚠ {lb['text']} 프로브 실패 — 앵커값 유지")
+            audit.append(rec); out.append(dict(lb)); continue
+        rec["reason"] = str(resp.get("reason") or "")[:160]
+        if resp.get("fit") is False:
+            rec["result"] = "불일치 — 드롭"
+            log(f"  [v3/label-probe] {lb['text']} 화면과 불일치 → 드롭 ({rec['reason'][:60]})")
+            audit.append(rec); continue
+        try:
+            rel = float(resp.get("start_sec"))
+        except (TypeError, ValueError):
+            rec["result"] = "start_sec 없음 — 앵커값 유지"
+            audit.append(rec); out.append(dict(lb)); continue
+        if not math.isfinite(rel) or rel < -0.05 or rel > (hi - lo) + 0.05:
+            rec["result"] = f"start_sec {rel} 창 밖 — 앵커값 유지"
+            audit.append(rec); out.append(dict(lb)); continue
+        new_s = lo + max(0.0, rel)
+        if clip is not None:
+            new_s = min(new_s, max(clip["start"], clip["end"] - LABEL_MIN_DUR_SEC))
+        new_e = new_s + dur
+        if clip is not None:
+            new_e = min(new_e, clip["end"])
+        if new_e - new_s < LABEL_MIN_DUR_SEC:
+            new_e = new_s + LABEL_MIN_DUR_SEC
+        rec["after"] = [round(new_s, 3), round(new_e, 3)]
+        rec["result"] = f"이동 {new_s - s0:+.2f}s" if abs(new_s - s0) > 0.05 else "유지(±0.05s)"
+        log(f"  [v3/label-probe] {lb['text']} {s0:.2f} → {new_s:.2f}s ({rec['result']}) · {rec['reason'][:60]}")
+        audit.append(rec)
+        out.append(dict(lb, start_sec=round(new_s, 3), end_sec=round(new_e, 3),
+                        probe={"window": rec["window"], "raw": round(rel, 2),
+                               "moved": round(new_s - s0, 3), "reason": rec["reason"]}))
+    return out, audit
+
+
 def edited_beat_windows(story_doc: dict, timeline: list[dict]) -> list[dict]:
     """비트별 편집본 시간 창 — 프레임 샘플 시각의 근거(순수).
 
@@ -256,7 +448,9 @@ def validate_style_response(resp: Any, n_beats: int,
                             band: tuple[float, float] | None = None,
                             labels: list[dict] | None = None,
                             preset: dict | None = None,
-                            duration: float | None = None) \
+                            duration: float | None = None,
+                            events: list[dict] | None = None,
+                            clips: list[dict] | None = None) \
         -> tuple[dict | None, list[str], list[str]]:
     """모델 응답 → (정규화 스타일 | None, 반려 사유, 노트). 순수.
 
@@ -340,11 +534,25 @@ def validate_style_response(resp: Any, n_beats: int,
         if len(text) - 2 > LABEL_TEXT_MAX:
             notes.append(f"라벨 {len(text) - 2}자 — {LABEL_TEXT_MAX}자 초과 드롭: {text!r}")
             continue
-        try:
-            t0, t1 = float(item["start_sec"]), float(item["end_sec"])
-        except (KeyError, TypeError, ValueError):
-            notes.append(f"라벨 {text!r} 시각 없음/형식 오류 — 드롭")
-            continue
+        anchor_id = None
+        anchored = False
+        if events is not None and item.get("anchor"):
+            a_s, a_e, anchor_id, why = resolve_label_anchor(item, events, clips or [])
+            if a_s is not None and why is None:
+                t0, t1, anchored = a_s, a_e, True
+            elif a_s is not None:
+                notes.append(f"라벨 {text!r} {why} — 드롭")
+                continue
+            else:
+                notes.append(f"라벨 {text!r} {why} — 절대초로 폴백")
+        if not anchored:
+            if events is not None and not item.get("anchor"):
+                notes.append(f"라벨 {text!r} 앵커 없음 — 절대초로 폴백")
+            try:
+                t0, t1 = float(item["start_sec"]), float(item["end_sec"])
+            except (KeyError, TypeError, ValueError):
+                notes.append(f"라벨 {text!r} 시각 없음/형식 오류 — 드롭")
+                continue
         if not (math.isfinite(t0) and math.isfinite(t1)) or t1 <= t0:
             notes.append(f"라벨 {text!r} 시각 역전/비정상 — 드롭")
             continue
@@ -383,10 +591,13 @@ def validate_style_response(resp: Any, n_beats: int,
         fx = str(item.get("fx") or "pop").strip().lower()
         if fx not in LABEL_FX:
             fx = "pop"
-        authored_out.append({"text": text,
-                             "start_sec": round(t0, 3), "end_sec": round(t1, 3),
-                             "x": round(cx, 3), "y": round(cy, 3),
-                             "rotate": round(cr, 1), "color": color, "fx": fx})
+        entry = {"text": text,
+                 "start_sec": round(t0, 3), "end_sec": round(t1, 3),
+                 "x": round(cx, 3), "y": round(cy, 3),
+                 "rotate": round(cr, 1), "color": color, "fx": fx}
+        if anchored:
+            entry["anchor"] = anchor_id           # additive — 감사 기록("라벨 ← 이벤트")
+        authored_out.append(entry)
     label_items = remaining          # 남은 것은 구(index) 경로 — 하위호환
 
     by_index = {int(lb["index"]): lb for lb in labels or [] if "index" in lb}
@@ -491,13 +702,16 @@ STYLE_PROMPT = """당신은 쇼츠 아트디렉터다. 첨부한 영상은 리�
 ## 비트 구성 (영상 내 시각 — 편집본 좌표)
 {beats_block}
 
-## 대사 타임라인 (시각은 이 영상 기준 — 화면과 대조하라)
+## 대사 타임라인 (시각은 이 영상 기준 — 화면과 대조하라. L=대사 줄, G=그 대사 직후 정적)
 {dialogue_block}
+
+## 컷(클립) 경계 (C=컷 시작 — 대사 없는 장면의 앵커)
+{cuts_block}
 
 ## 판단 기준
 0. **라벨 작성 + 배치** — 초안을 보고 괄호 라벨 **0~3개를 직접 써라**(문구·시각·위치 전부 네 몫이다). 라벨은 화면에 대한 반응이다 — 표정이 꺾이는 순간, 정체를 알려야 할 인물, 눈에 띄는 행동. **없으면 안 써도 된다(0개가 정상일 수 있다).**
    - `text`: 괄호 심리·행동·정체 강조, 괄호 제외 12자 이내. **이 편의 화면·대사에서 뽑아라** — 특히 값진 것은 ① 인물 정체(작품을 모르는 시청자가 누군지 그 자리에서 알게) ② 심리가 꺾이는 순간 ③ 눈에 띄는 행동. 페이오프(핵심 대답·반전) 순간에는 얹지 마라 — 웃기는 것은 대사 자신이다.
-   - `start_sec`·`end_sec`: 이 영상(편집본) 기준. **그 표정·행동이 실제로 보이는 순간**에 맞춰라 — 0.6~2.5초면 충분하다(길게 띄우지 않는다).
+   - **시각은 절대초가 아니라 앵커로 적어라.** `anchor` = 위 표의 이벤트 id 하나(L=그 대사 줄, G=그 대사 직후 정적, C=컷 시작 — 대사 없는 장면). 리액션 라벨은 보통 그 대사 **직후 정적(G)** 이나 다음 컷 시작(C)이다. `offset_sec`(-1.0~2.0): 앵커 시작에서 표정·행동이 보이기까지의 지연. `duration_sec`: 0.6~2.5(길게 띄우지 않는다). 코드가 앵커 시각을 표에서 뽑아 그 컷 안으로 가둔 뒤 그 창을 다시 보며 프레임을 맞춘다 — 절대초를 세지 마라. 표에 없는 순간엔 라벨을 달 수 없다.
    - **종류별 배치.** ⓐ **인물 지목 라벨**(호칭·직업·정체·이름)은 **그 인물 바로 옆**: 머리 위나 어깨 옆, 얼굴을 가리지 않는 **가장 가까운** 여백(화면 반대편에 두면 여러 명 중 누구를 가리키는지 모른다). ⓑ 심리·행동·훈수 라벨은 빈 곳으로.
    - `x`·`y`(0~1 비율): (ⓑ 기준) 인물 얼굴·방송 자체 자막·자막 밴드를 **피해서** 빈 곳에. 세로는 영상 밴드({band_lo:.2f}~{band_hi:.2f}) 안. 인물이 왼쪽이면 오른쪽 여백, 오른쪽이면 왼쪽 — 가운데(0.5)는 양쪽이 다 막혔을 때만. 긴 라벨일수록 가장자리 금지(잘리면 코드가 안쪽으로 당긴다). ⓐ 는 이 규칙의 예외다 — 인물을 따라가되 얼굴·자막은 가리지 않는다.
    - `rotate`(-8~8°, 시계방향 +): 감정이 튀는 라벨만 살짝(3~6°). 차분한 라벨은 0.
@@ -512,7 +726,7 @@ STYLE_PROMPT = """당신은 쇼츠 아트디렉터다. 첨부한 영상은 리�
 ## 출력 (JSON 만)
 {{"design": {{"subtitle_color": "#FFFFFF"}},
  "beats": [{{"number": 0, "crop": "center", "pop": "soft", "sfx": null}}],
- "labels": [{{"text": "(…)", "start_sec": 12.3, "end_sec": 14.0, "x": 0.72, "y": 0.36, "rotate": -4, "color": "yellow", "fx": "pop"}}],
+ "labels": [{{"text": "(…)", "anchor": "G7", "offset_sec": 0.2, "duration_sec": 1.5, "x": 0.72, "y": 0.36, "rotate": -4, "color": "yellow", "fx": "pop"}}],
  "notes": "판단 근거 한두 문장"}}"""
 
 
@@ -520,7 +734,8 @@ def build_style_prompt(preset: dict, story_doc: dict, reject_note: str = "",
                        dialogue: list[dict] | None = None,
                        windows: list[dict] | None = None,
                        labels: list[dict] | None = None,
-                       band: tuple[float, float] = (0.231, 0.769)) -> str:
+                       band: tuple[float, float] = (0.231, 0.769),
+                       events: list[dict] | None = None) -> str:
     if windows:
         # draft 는 편집본 좌표 — 원본 절대초(b.time)를 보여주면 영상 속 시각과 어긋난다
         by_beat = {w["beat"]: w for w in windows}
@@ -537,11 +752,15 @@ def build_style_prompt(preset: dict, story_doc: dict, reject_note: str = "",
     reject_block = ""
     if reject_note:
         reject_block = f"\n## ⚠ 직전 제안 반려 — 고쳐서 다시\n{reject_note}\n"
-    dialogue_block = "\n".join(
-        f"- {float(sg['start_sec']):.1f}~{float(sg['end_sec']):.1f}s 「{sg['text']}」"
-        for sg in dialogue or []) or "- (대사 없음)"
+    if events is not None:
+        dialogue_block, cuts_block = label_events_block(events)
+    else:
+        dialogue_block = "\n".join(
+            f"- {float(sg['start_sec']):.1f}~{float(sg['end_sec']):.1f}s 「{sg['text']}」"
+            for sg in dialogue or []) or "- (대사 없음)"
+        cuts_block = "(없음 — 타임라인 미제공)"
     return STYLE_PROMPT.format(
-        dialogue_block=dialogue_block,
+        dialogue_block=dialogue_block, cuts_block=cuts_block,
         preset_block=json.dumps(preset, ensure_ascii=False, indent=1),
         beats_block=beats_block,
         band_lo=band[0] + LABEL_BAND_MARGIN, band_hi=band[1] - LABEL_BAND_MARGIN,
@@ -589,14 +808,39 @@ def _call_style_model(gemini, draft_path: Path, prompt: str) -> dict:
         raise ValueError(f"응답 JSON 파싱 실패: {e} — 앞 200자: {text[:200]!r}") from e
 
 
+def _default_label_probe(gemini, draft_path: Path, *, log=print):
+    """draft(편집본 좌표)를 창으로 잘라 Flash 에 묻는 ask(t0, t1, label). refine 의 프로브
+    기계 재사용(480p·10fps 재단 · 6fps 표본 · JSON 응답)."""
+    from app.modules.ffmpeg_utils import find_ffmpeg_command
+    from app.v3.refine import _call_probe, _cut_probe_clip
+    ffmpeg = find_ffmpeg_command("ffmpeg")
+    out_dir = Path(draft_path).parent / "label_probes"
+
+    def ask(t0: float, t1: float, lb: dict) -> dict | None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        clip = out_dir / f"label_{int(round(t0 * 100)):06d}.mp4"
+        _cut_probe_clip(ffmpeg, Path(draft_path), t0, t1, clip)
+        ctx = f"앵커: {lb.get('anchor')} · 라벨 창(편집본): {lb['start_sec']:.1f}~{lb['end_sec']:.1f}s"
+        prompt = LABEL_PROBE_PROMPT.format(
+            t0=f"{t0:.1f}", t1=f"{t1:.1f}", text=lb["text"], context=ctx,
+            length=t1 - t0, dur=float(lb["end_sec"]) - float(lb["start_sec"]))
+        return _call_probe(gemini, clip, prompt)
+    return ask
+
+
 def run_style(gemini, draft_path: Path, story_doc: dict, *,
               preset: dict | None = None, windows: list[dict] | None = None,
               labels: list[dict] | None = None,
               dialogue: list[dict] | None = None,
               duration: float | None = None,
               band: tuple[float, float] | None = None,
+              timeline: list[dict] | None = None,
+              probe_ask=None,
               log=print) -> tuple[dict, dict]:
-    """Stage 4 실행 → (style 문서, 감사 기록). 소진 시 프리셋 폴백 — 렌더는 항상 간다."""
+    """Stage 4 실행 → (style 문서, 감사 기록). 소진 시 프리셋 폴백 — 렌더는 항상 간다.
+    timeline 을 주면 라벨은 **앵커 어휘**(label_events)로 받고 앵커된 라벨은 프로브로 프레임을
+    맞춘다(probe_ask 미지정 = draft 를 잘라 Flash 에 묻는 기본 구현 · None 이 아닌 가짜를 주면
+    테스트). timeline 이 없으면 종전(절대초) 그대로."""
     preset = dict(preset if preset is not None else RECAP_PRESET)
     if band is None:
         # 유도 없는 매직 넘버를 두면 밴드를 안 넘기는 호출부가 조용히 검정 밴드를
@@ -606,12 +850,16 @@ def run_style(gemini, draft_path: Path, story_doc: dict, *,
     n_beats = len(story_doc.get("beats") or [])
     audit: dict[str, Any] = {"attempts": [], "input": "draft_video",
                              "sample_fps": STYLE_SAMPLE_FPS}
+    events = label_events(dialogue, timeline) if timeline is not None else None
+    clips = edited_clip_windows(timeline) if timeline is not None else None
+    if events is not None:
+        audit["label_events"] = len(events)
     styled: dict | None = None
     reject_note = ""
     for attempt in range(1 + MAX_REASKS):
         prompt = build_style_prompt(preset, story_doc, reject_note,
                                     dialogue=dialogue, windows=windows,
-                                    labels=labels, band=band)
+                                    labels=labels, band=band, events=events)
         log(f"  [v3/style] Flash vision 요청 (시도 {attempt + 1}/{1 + MAX_REASKS}, "
             f"draft {STYLE_SAMPLE_FPS:g}fps 표본)")
         t0 = time.time()
@@ -621,7 +869,7 @@ def run_style(gemini, draft_path: Path, story_doc: dict, *,
             resp = _call_style_model(gemini, draft_path, prompt)
             styled, problems, notes = validate_style_response(
                 resp, n_beats, band=band, labels=labels, preset=preset,
-                duration=duration)
+                duration=duration, events=events, clips=clips)
         except ValueError as e:
             styled, problems = None, [f"응답 오류: {e}"]
         audit["attempts"].append({"attempt": attempt + 1,
@@ -636,6 +884,16 @@ def run_style(gemini, draft_path: Path, story_doc: dict, *,
         styled = {"design": {}, "beats": [], "labels": [],
                   "notes": "재질의 소진 — 프리셋 폴백"}
         audit["fallback"] = True
+
+    # ── 라벨 프로브 — 앵커된 라벨만(절대초 폴백 라벨은 그대로) ──
+    _labels = list(styled.get("labels") or [])
+    if clips is not None and any(lb.get("anchor") for lb in _labels):
+        ask = probe_ask or _default_label_probe(gemini, draft_path, log=log)
+        anchored = [lb for lb in _labels if lb.get("anchor")]
+        others = [lb for lb in _labels if not lb.get("anchor")]
+        probed, paudit = probe_labels(anchored, clips, ask=ask, log=log)
+        styled["labels"] = probed + others
+        audit["label_probes"] = paudit
 
     design = {**preset, **styled["design"]}
     doc = {

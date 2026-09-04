@@ -110,6 +110,8 @@ CHANNEL_DESIGN_ARGS: dict[str, dict] = {
     "platform_image_width": dict(type=int), "platform_image_height": dict(type=int),
     "platform_font_size": dict(type=int), "platform_color": dict(type=str),
     "platform_align": dict(type=str, choices=["left", "right"]),
+    "platform_placement": dict(type=str, choices=["band", "above_work"]),
+    "work_band_offset": dict(type=int),
     # v3 전용(2026-09-04) — 자막 블록 윗변을 '밴드 하단 + N px' 에 거는 상대 앵커.
     # 화면비·video_y 가 바뀌어도 채널이 margin 을 다시 잡지 않는다(음수 = 밴드 안쪽).
     "subtitle_band_offset": dict(type=int), "tts_band_offset": dict(type=int),

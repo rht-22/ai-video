@@ -352,9 +352,11 @@ def test_subtitle_line_rules():
         {"t0": 3.4, "t1": 4.3, "text": "맘에안들어"},   # 12자 초과 지점에서 분할
     ]
     lines = assemble._lines_for_span(words, 0.0, 5.0)
-    assert lines[0]["text"] == "웬만하면 이런 부탁"       # 12자 규칙(공백 포함)
+    # 2026-09-04 균형 분할: 문장 '웬만하면 이런 부탁 안하는데.'(16자)는 그리디 10/5 대신
+    # 남는 칸 제곱합이 작은 7/8 — 12자 규칙(공백 포함)은 그대로다
+    assert lines[0]["text"] == "웬만하면 이런"
     assert lines[0]["start"] == pytest.approx(0.45)        # −0.05 선행
-    assert lines[1]["text"] == "안하는데."
+    assert lines[1]["text"] == "부탁 안하는데."
     assert lines[2]["text"] == "하나같이 맘에안들어"
     # 최소 노출 0.35 — 라인 겹침 없음
     for a, b in zip(lines, lines[1:]):

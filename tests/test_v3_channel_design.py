@@ -124,3 +124,41 @@ def test_platform_text_reaches_filtergraph():
     assert "text='티빙'" in fg and "[with_pf]" in fg
     assert "[with_pf]" not in _build_filtergraph(
         _inputs(design_from_style({"aspect_ratio": "13:9"})), 1, 0)
+
+
+# ── 작품명 위 플랫폼 줄(platform_placement=above_work, 2026-09-04) ──
+
+def test_platform_above_work_draws_icon_and_text_above_work_title(tmp_path):
+    from PIL import Image
+    icon = tmp_path / "icon.png"
+    Image.new("RGBA", (174, 175)).save(icon)
+    d = design_from_style({"aspect_ratio": "24:23", "video_y": 443,
+                           "platform_image": str(icon),
+                           "platform_text": "지금 쿠팡플레이에서 시청하세요",
+                           "platform_placement": "above_work"})
+    fg = _build_filtergraph(_inputs(d), 1, 0)
+    assert "[with_pf]" not in fg                       # 밴드 모서리 표기는 안 그린다
+    assert "[pfi]overlay=" in fg and "[with_pfi]" in fg    # 아이콘
+    assert "text='지금 쿠팡플레이에서 시청하세요'" in fg and "[with_pft]" in fg
+    # 작품명(텍스트 40px → 줄 56)이 줄(56)+여백(16)만큼 내려간다: 1497 → 1569
+    assert ":y=1569[with_work]" in fg
+    assert "y=1497+(56-text_h)/2[with_pft]" in fg       # 줄 윗변 = 작품명 − 16 − 56
+
+
+def test_platform_band_default_is_unchanged_by_new_key():
+    a = _build_filtergraph(_inputs(design_from_style({"aspect_ratio": "13:9", "platform_text": "티빙"})), 1, 0)
+    b = _build_filtergraph(_inputs(design_from_style({"aspect_ratio": "13:9", "platform_text": "티빙",
+                                                      "platform_placement": "band"})), 1, 0)
+    assert a == b and "[with_pf]" in a and "[with_pft]" not in a
+
+
+def test_finalize_reserves_platform_line_in_work_block():
+    from app.v3.finalize import estimate_work_height, estimate_work_top, platform_line_block
+    base = design_from_style({"aspect_ratio": "24:23", "video_y": 443})
+    above = design_from_style({"aspect_ratio": "24:23", "video_y": 443, "platform_text": "x",
+                               "platform_placement": "above_work"})
+    assert platform_line_block(base) == 0 and platform_line_block(above) == 56 + 16
+    assert estimate_work_height(above) == estimate_work_height(base) + 72
+    # 블록 윗변은 그대로 밴드+20(줄이 그 자리를 차지) — 작품명 자체는 72px 아래
+    assert estimate_work_top(base, band_bottom=1477) == 1497
+    assert estimate_work_top(above, band_bottom=1477) == 1497
