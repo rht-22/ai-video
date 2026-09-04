@@ -220,19 +220,39 @@ def resolve_work_logo(work_title: str, app_root: Path | None = None) -> Path | N
     return min(hits)[2] if hits else None
 
 
-def fit_title_sizes(title_text: str, sizes: list[int]) -> list[int]:
+def fit_title_sizes(title_text: str, sizes: list[int], font_path: str | None = None) -> list[int]:
     """제목 줄별 크기를 폭 980px 안으로 줄인다. 순수.
 
     렌더러의 자동 줄바꿈은 **1줄 크기**로만 폭을 재서(renderer `_max_chars_for(
     base_size)`) 2줄이 더 크면 그 줄이 화면 밖으로 잘린다 — 템플릿 크기(92/112)를
     그대로 넣자 프레임 QC 가 4프레임 전부에서 잡았다. 템플릿 자신의 계약이
-    max_width_px 980 이므로 여기서 줄마다 맞춘다(렌더러는 무변경 — 공용이다)."""
+    max_width_px 980 이므로 여기서 줄마다 맞춘다(렌더러는 무변경 — 공용이다).
+
+    font_path 가 실제 TTF 면 **그 폰트로 Pillow 실측**(renderer `_measure_title_text_width`
+    와 같은 신뢰)해 폭에 맞는 최대 크기를 이분 탐색한다 — 채널이 제목 폰트를 바꿔도(잘난체
+    고딕 등) 글자폭 근사(TITLE_CHAR_W)가 폰트와 어긋나지 않게(2026-09-04). 파일이 아니면
+    종전 근사(한글 1em · 공백 0.3em — Jalnan·JalnanGothic 둘 다 실측 일치)."""
+    from app.modules.renderer import _measure_title_text_width
     lines = [ln for ln in str(title_text).split("\n") if ln.strip()]
     out = list(sizes)
+    measurable = bool(font_path) and Path(str(font_path)).is_file()
     for i, size in enumerate(sizes):
         if i >= len(lines):
             continue
         ln = lines[i].strip()
+        if measurable:
+            lo, hi = 40, int(size)
+            if _measure_title_text_width(ln, str(font_path), hi) <= TITLE_MAX_WIDTH:
+                out[i] = hi
+                continue
+            while lo < hi:                 # 폭 ≤ 980 인 최대 크기
+                mid = (lo + hi + 1) // 2
+                if _measure_title_text_width(ln, str(font_path), mid) <= TITLE_MAX_WIDTH:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            out[i] = lo
+            continue
         units = sum(TITLE_SPACE_W if ch.isspace() else TITLE_CHAR_W for ch in ln)
         if units > 0:
             out[i] = max(40, min(int(size), int(TITLE_MAX_WIDTH / units)))
@@ -670,7 +690,8 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                                  work_image_align="center")
     # 제목 줄별 크기를 이 편의 실제 글자수로 맞춘다
     _title_text = (plan.get("layout") or {}).get("top_title") or ""
-    _fitted = fit_title_sizes(_title_text, list(design.title_sizes))
+    _fitted = fit_title_sizes(_title_text, list(design.title_sizes),
+                              font_path=str(design.title_font))   # 경로화된 제목 폰트로 실측
     if _fitted != list(design.title_sizes):
         log(f"  [v3/render] 제목 크기 폭 맞춤 {design.title_sizes} → {_fitted}")
         design = _dc.replace(design, title_sizes=_fitted, title_size=_fitted[0])

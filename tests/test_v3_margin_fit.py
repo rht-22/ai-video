@@ -203,3 +203,19 @@ def test_renderer_work_band_offset_moves_text_work_title():
                                                 work_band_offset=60)), 1, 0)
     assert ":y=1497[with_work]" in a and ":y=1537[with_work]" in b
     assert b.replace(":y=1537[with_work]", ":y=1497[with_work]") == a
+
+
+def test_fit_title_sizes_measures_with_real_font(tmp_path):
+    # 실제 TTF 가 있으면 Pillow 실측으로 980px 에 맞는 최대 크기를 찾는다(잘난체 고딕 채널 대응)
+    from pathlib import Path as _P
+    from app.modules.renderer import _measure_title_text_width
+    from app.v3.finalize import TITLE_MAX_WIDTH, fit_title_sizes
+    font = _P("app/assets/fonts/JalnanGothic.ttf").resolve()
+    text = "제일 못생긴 선임을 고른 신병\n과연 살아남을 수 있을까?"
+    sizes = fit_title_sizes(text, [92, 112], font_path=str(font))
+    for ln, sz in zip(text.split("\n"), sizes):
+        assert _measure_title_text_width(ln, str(font), sz) <= TITLE_MAX_WIDTH
+        assert _measure_title_text_width(ln, str(font), sz + 1) > TITLE_MAX_WIDTH or sz in (92, 112)
+    approx = fit_title_sizes(text, [92, 112])                     # 근사(파일 없음)와 근접
+    assert all(abs(a - b) <= 4 for a, b in zip(sizes, approx))     # '?' 등 좁은 글자만큼 차이
+    assert fit_title_sizes("짧은 제목\n둘", [92, 112], font_path=str(font)) == [92, 112]

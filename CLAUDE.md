@@ -2185,3 +2185,11 @@ Flash 축약 → "싸우다 불붙었죠"로 나갔다(26자 문장이 7자로).
 - **줄 시작 벌점 확장**(`assemble._starts_dependent`): 1음절 의존명사뿐 아니라 **의존명사+조사**
   결합형(시에·때는·수가·것을…)도 줄 첫 어절이면 벌점 — '35도를 넘은 / 시에 오침을'.
 - 회귀 가드: `test_v3_aligned_token`(+2) · `test_v3_stage2`(+1).
+- **제목 폰트 기준 크기 맞춤**(`finalize.fit_title_sizes(font_path=)`): v1 은 `_max_chars_for`
+  (폭 960 ÷ 폰트 크기 = 줄당 글자수)로 줄바꿈·축소하고, v3 는 줄별 크기를 폭 980 에 맞춘다.
+  종전 근사(한글 1em·공백 0.3em)는 Jalnan 실측값이라 폰트를 바꾸면 어긋날 수 있어 **경로화된
+  제목 폰트로 Pillow 실측**(이분 탐색)한다. Jalnan·JalnanGothic 은 폭이 동일(1em/0.28em)해
+  이 편은 [74, 85] 로 같고, '?' 같은 좁은 글자만큼 근사보다 2~3px 크게 잡힌다.
+- 채널 제목 스타일(사용자 지시): `--design-title-font JalnanGothic --design-title-color #FFFFFF
+  --design-title-color2 #B7FF4A`(1줄 흰 · 2줄 연두). ⚠ 제목 색·폰트는 style 지문에 들어가
+  `--from-step render` 여도 Stage 4(라벨)가 다시 돈다 — 신병4 재렌더에서 라벨이 1→2개로 바뀜.
