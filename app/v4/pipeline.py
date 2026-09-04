@@ -1491,7 +1491,10 @@ def run_v4(*, video_path: Path, work_title: str, outdir: Path,
                                      grid=state["grid"])
         window_pairs = [[w.start_sec, w.end_sec] for w in windows]
         fp = job.fingerprint(
+            # 리서치도 재료다 — 작품 배경·인물 사전이 프롬프트에 실린다(화자 이름을
+            # 맞히는 것이 이 호출의 절반이다). 빼면 리서치가 바뀌어도 옛 화자가 남는다.
             "v4_detail/v1", section_fp["approve"], state["grid_fingerprint"],
+            state["research_fingerprint"],
             window_pairs, detail_mod.DETAIL_SAMPLE_FPS,
             detail_mod.DETAIL_WINDOW_MAX_SEC, detail_mod.DETAIL_MAX_OUTPUT_TOKENS,
             cand_mod.prompt_sha(detail_mod.DETAIL_PROMPT), model_name)

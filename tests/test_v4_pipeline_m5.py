@@ -62,7 +62,10 @@ def _cand(cid: str, template: str, spans: list[tuple[float, float]]) -> dict:
 CANDIDATE_SPANS: list[tuple[str, str, list[tuple[float, float]]]] = [
     ("c01", "recap_dialogue", [(10.0, 55.0)]),
     ("c02", "highlight", [(55.0, 100.0)]),
-    ("c03", "conflict_payoff", [(100.0, 145.0)]),
+    # ⚠ 조각 **둘**이다. `conflict_payoff` 는 turn·payoff 두 역할을 요구하는데
+    #   비트는 조각 하나당 하나라(`bridge.to_beats`), 조각이 하나면 그 편은 10단계에서
+    #   영원히 반려당한다(보고서 notes — 6단계가 막아야 할 조합이다).
+    ("c03", "conflict_payoff", [(100.0, 122.0), (126.0, 145.0)]),
     ("c04", "chemi_observe", [(145.0, 190.0)]),
     # 조각 2개 = 비트 2개. 살붙이기가 비트를 두 개 받는 편이 하나는 있어야 라벨 앵커
     # 이동·클립 분할이 실제로 돈다(합집합 IoU 는 전부 0.5 미만이라 7단계 dedup 밖이다).
@@ -693,3 +696,27 @@ def test_detail_windows_carry_the_snap_slack():
 
     with pytest.raises(ValueError, match="시각을 읽을 수 없다"):
         v4p.detail_windows_for([{"start_sec": "가"}], source_duration_sec=100.0)
+
+
+def test_detail_windows_settle_on_span_boundaries():
+    """🛑 실측 크래시의 회귀 가드.
+
+    창 안 span 은 **중점 규칙**으로 정해지는데(`spans_for_chunk`) 그 규칙은 경계에 걸친
+    span 을 창 안으로 넣는다. 그런데 `detail.span_table` 은 창 밖 시각을 만나면 크게
+    실패한다 — 합성 소재 실행에서 `t_in 117.0 ∉ [118.0, 145.0]` 로 실제로 죽었다.
+    조각 경계는 모델이 부른 임의의 초라 이 충돌은 정상 입력에서 난다."""
+    grid = {"source": {"duration_sec": 100.0},
+            "span_candidates": [
+                {"id": "sp0000", "t_in": 0.0, "t_out": 30.0, "is_audio": False},
+                {"id": "sp0001", "t_in": 30.0, "t_out": 34.0, "is_audio": True},
+                {"id": "sp0002", "t_in": 34.0, "t_out": 48.0, "is_audio": True},
+                {"id": "sp0003", "t_in": 48.0, "t_out": 100.0, "is_audio": False}]}
+    # 창 [31, 45] → 중점이 안에 드는 span 은 sp0001(32)·sp0002(41) 둘. 정착하면 [30, 48].
+    got = v4p.detail_windows_for([{"start_sec": 33.0, "end_sec": 43.0}],
+                                 source_duration_sec=100.0, grid=grid, max_sec=180.0)
+    assert [(w.start_sec, w.end_sec) for w in got] == [(30.0, 48.0)]
+
+    for w in got:
+        # 정착한 창으로는 표를 만들 수 있다(= 크래시가 안 난다)
+        spans = detail_mod.spans_for_chunk(grid, w.start_sec, w.end_sec)
+        assert detail_mod.span_table(spans, w)
