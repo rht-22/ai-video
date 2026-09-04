@@ -556,10 +556,12 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                 # 인명 대조(2026-09-03): whisper 어절이 인물표 이름과 가깝고 모델
                 # 청취(heard_text)에 그 이름이 정확히 있으면 그 이름으로 — 두 증인
                 # 일치 시에만. cast_names 없으면 종전과 동일.
-                if cast_names:
+                # 2026-09-04: 영문 약어 오인식('RC가'←'날씨가')도 같은 대조를 탄다 —
+                # 인물표가 없어도 모델 청취가 있으면 돈다(cast_names 는 인명 절에만).
+                _heard = str(sp.get("heard_text") or "")
+                if cast_names or _heard:
                     from app.v3.textcheck import fix_span_words
-                    in_span, _fx = fix_span_words(in_span, cast_names,
-                                                  str(sp.get("heard_text") or ""))
+                    in_span, _fx = fix_span_words(in_span, cast_names or [], _heard)
                     if _fx and name_fix_log is not None:
                         name_fix_log.extend(dict(f, span_id=sid) for f in _fx)
                 lines = _lines_for_span(in_span, sp["t_in"], sp["t_out"])

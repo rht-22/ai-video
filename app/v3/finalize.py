@@ -107,7 +107,51 @@ def design_from_style(design: dict) -> DesignConfig:
         up["tts_line_y_margin"] = int(design["tts_y_margin"])
     if design.get("work_color"):
         up["work_color"] = str(design["work_color"])
+    # ── 채널 프리셋 주입(2026-09-04, 사용자 지시) — 어댑터 CHANNEL_DESIGN_FLAGS 어휘 중
+    # v3 가 받는 키(ves V3_DESIGN_KEYS 와 1:1). 폰트는 이름 그대로(render_final 이
+    # get_font_path 로 경로화), 플랫폼 표기는 DesignConfig 필드명이 어휘와 같다.
+    for k in ("title_font", "subtitle_font"):
+        if design.get(k):
+            up[k] = str(design[k])
+    for k in ("title_y", "work_title_y", "work_font_size"):
+        if design.get(k) is not None:
+            up[k] = int(design[k])
+    if design.get("tts_width") is not None:
+        up["tts_width"] = float(design["tts_width"])
+    if design.get("face_tracking") is not None:
+        up["enable_reframe"] = bool(design["face_tracking"])
+    for k in ("platform_image", "platform_text", "platform_color", "platform_align"):
+        if design.get(k):
+            up[k] = str(design[k])
+    for k in ("platform_x", "platform_y", "platform_image_width",
+              "platform_image_height", "platform_font_size"):
+        if design.get(k) is not None:
+            up[k] = int(design[k])
     return dataclasses.replace(base, **up)
+
+
+# 채널 design 키 중 Stage 4 프리셋(프롬프트·밴드 기하)에도 들어가야 하는 것 —
+# STYLE_ALLOWED 어휘 + 밴드 위치. 나머지(폰트·플랫폼·작품명 위치·크롭)는 AI 가
+# 볼 이유가 없어 렌더에서만 얹는다.
+CHANNEL_PRESET_KEYS = frozenset({
+    "title_color", "title_color2", "title_size", "title_size2",
+    "subtitle_color", "subtitle_size", "subtitle_y_margin",
+    "tts_color", "tts_size", "tts_y_margin", "work_color", "aspect_ratio",
+    "video_y", "video_width",
+})
+
+
+def merge_channel_preset(preset: dict, channel_design: dict | None) -> dict:
+    """채널 명시 키가 프리셋 기본값을 덮는다(v1 규율: 채널 명시 > AI > 기본값). 순수.
+    channel_design 이 비면 프리셋 **그 객체**를 돌려준다(캐시 지문 불변 = 회귀 0)."""
+    picked = {k: v for k, v in (channel_design or {}).items() if k in CHANNEL_PRESET_KEYS}
+    return {**preset, **picked} if picked else preset
+
+
+def channel_design_over_ai(style_design: dict, channel_design: dict | None) -> dict:
+    """렌더 직전 병합 — Stage 4 확정 디자인 위에 채널 design 을 **전량** 얹는다.
+    AI diff 가 채널이 못박은 값을 뒤집으면 안 된다(E15 우선순위 표). 순수."""
+    return {**(style_design or {}), **(channel_design or {})}
 
 
 def video_band_ratio(design, *, canvas_height: int = 1920) -> tuple[float, float]:
@@ -231,6 +275,88 @@ def plan_labels(story_doc: dict, plan: dict) -> list[dict]:
 
 
 SUB_GAP_PX = 12                   # 원본 자막과 우리 자막 사이 최소 여백
+WORK_GAP_BELOW_VIDEO = 20         # renderer 의 _gap_below_video 와 같은 값(로고 안전선)
+
+
+def estimate_work_top(design, *, band_bottom: int, canvas_height: int = 1920) -> int:
+    """하단 작품명/로고의 **윗변 y** 추정 — renderer 의 로고 배치 수식을 그대로 따른다
+    (safe_top = 밴드 하단+20 · contain 박스 · center 정렬 · 캔버스 하단 클램프). 순수.
+    로고 PNG 크기를 못 읽으면 박스 높이로 본다(보수적 = 더 위)."""
+    H = int(canvas_height)
+    safe_top = int(band_bottom) + WORK_GAP_BELOW_VIDEO
+    if getattr(design, "work_type", "text") != "image" or not getattr(design, "work_value", None):
+        return max(int(getattr(design, "work_title_y", 1400)), safe_top)
+    box_w = int(getattr(design, "work_image_width", 350) or 350)
+    box_h = getattr(design, "work_image_height", None)
+    try:
+        from PIL import Image
+        with Image.open(str(design.work_value)) as im:
+            nat_w, nat_h = im.size
+        _bh = int(box_h) if box_h else int(nat_h * (box_w / nat_w))
+        sc = min(box_w / nat_w, _bh / nat_h)
+        logo_h = max(2, int(nat_h * sc) // 2 * 2)
+    except Exception:  # noqa: BLE001 — 실측 실패 = 박스 높이(보수적)
+        logo_h = int(box_h) if box_h else max(60, int(box_w * 0.5))
+    y = safe_top
+    if getattr(design, "work_image_align", "top") == "center":
+        y = safe_top + (H - 20 - safe_top - logo_h) // 2
+    if y + logo_h > H - 20:
+        y = H - logo_h - 20
+    return max(safe_top, y)
+
+
+def fit_margin_below_band(margin_v: int, *, canvas_height: int, band_bottom: int,
+                          block_height: int, work_top: int | None = None,
+                          gap: int = SUB_GAP_PX) -> tuple[int, str | None]:
+    """자막 블록(최대 줄 수 기준)이 영상 밴드 **아래**에 오도록 margin_v 를 내린다. 순수.
+
+    2026-09-04 실사고(가왕쇼 7화): 채널 tts_y_margin 550 은 video_y 440 에 손으로 맞춘
+    값이라 밴드를 500 으로 내리자 두 줄 내레이션 윗줄이 밴드에 25px 겹쳤다. 값을 채널이
+    다시 잡게 하지 않고, 밴드 기하에서 상한을 재서 **내리기만** 한다(이미 아래면 불변).
+    로고 윗변(work_top)을 주면 블록 아랫변이 그 위 gap 안에 드는지 확인해 메모만 남긴다
+    — 둘 다 못 지키면 영상 겹침 회피가 우선이다(영상 위 글자가 더 나쁘다)."""
+    H = int(canvas_height)
+    cur = int(margin_v)
+    max_margin = H - int(band_bottom) - int(gap) - int(block_height)
+    note = None
+    new = cur
+    if cur > max_margin:
+        new = max(1, max_margin)
+        overlap = (H - cur - int(block_height)) - int(band_bottom)
+        note = f"margin_v {cur} → {new} (두 줄 블록 윗변이 밴드 하단 {band_bottom} 에 {-overlap}px 겹침)"
+    if work_top is not None and (H - new) > int(work_top) - int(gap):
+        note = (note or f"margin_v {cur} 유지") + \
+            f" ⚠ 블록 아랫변 {H - new} 이 작품명/로고 윗변 {work_top} 에 근접 — 로고와 겹칠 수 있음"
+    return new, note
+
+
+def band_anchored_margin(*, band_bottom: int, offset: int, lines: int, font_size: int,
+                         canvas_height: int = 1920) -> int:
+    """밴드 기준 상대 배치(2026-09-04) — 자막 블록 **윗변**을 `밴드 하단 + offset` 에 건다.
+    offset 은 px(음수 = 밴드 안쪽). 채널 키 subtitle_band_offset·tts_band_offset 의 정의.
+    ASS 는 하단 앵커라 줄 수만큼 내려 margin_v 로 환산한다. 순수.
+
+    왜 상대값인가: 절대 margin(subtitle_y_margin 등)은 화면비·video_y 마다 손으로 다시
+    잡아야 한다(13:9·440 에 맞춘 550 이 500 에서 겹친 실사고). v1 E10 이 같은 이유로
+    tts margin 을 '밴드 하단으로부터의 델타 앵커'로 정의했다 — v3 는 그걸 키로 연다."""
+    from app.modules.subtitle_region import estimate_subtitle_height
+    blk = estimate_subtitle_height(int(font_size), lines=max(1, int(lines)))
+    return max(1, int(canvas_height) - (int(band_bottom) + int(offset) + blk))
+
+
+def tts_cue_margins(captions: list[str], *, band_bottom: int, offset: int, font_size: int,
+                    width: float | None, canvas_height: int = 1920, lift: int = 0) -> list[int]:
+    """cue 별 margin_v — 그 cue 가 실제로 몇 줄로 접히는지(ASS 조립과 **같은 함수**로
+    센다) 보고 윗변을 밴드 아래 같은 자리에 건다. 한 줄 cue 가 두 줄 자리 아래로 처지지
+    않게 하는 것이 목적. lift = 번인 회피가 전역 margin 을 올린 만큼(px) — 줄별에도 같이."""
+    from app.modules.subtitle import _lay_out_for_ass
+    out = []
+    for cap in captions:
+        n = _lay_out_for_ass(str(cap), width=width).count("\\N") + 1
+        out.append(band_anchored_margin(band_bottom=band_bottom, offset=offset, lines=n,
+                                        font_size=font_size, canvas_height=canvas_height)
+                   + max(0, int(lift)))
+    return out
 
 
 def cover_mute_windows(timeline: list[dict],
@@ -400,10 +526,22 @@ def subject_crop_map(timeline: list[dict], *, video_path: Path,
 def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                  segments: list[dict], resources: dict, story_doc: dict,
                  output_dir: Path, out_name: str = "final_1080x1920.mp4",
+                 channel_design: dict | None = None,
+                 muted_gain_db: float | None = None,
                  log=print) -> tuple[Path, dict]:
-    """edit_plan + style + 자막/cue → 1080×1920 최종본. 반환: (경로, 실측)."""
+    """edit_plan + style + 자막/cue → 1080×1920 최종본. 반환: (경로, 실측).
+
+    channel_design: 채널이 CLI(--design-*)로 준 키(어댑터 어휘). Stage 4 가 정한
+    디자인보다 **위** — 채널 정체성·권리사 표기는 AI 연출이 아니라 계약이다.
+    muted_gain_db: 내레이션 덮개 구간의 원본 볼륨(dB). None = 종전 완전 무음."""
     config = AppConfig()
-    design = design_from_style(style_doc.get("design") or {})
+    if channel_design:
+        log(f"  [v3/render] 채널 design 적용 {sorted(channel_design)}")
+    design = design_from_style(
+        channel_design_over_ai(style_doc.get("design") or {}, channel_design))
+    if design.platform_text or design.platform_image:
+        log(f"  [v3/render] 플랫폼 표기 "
+            f"{design.platform_image or design.platform_text!r} ({design.platform_align})")
     # 폰트 이원화(M4 스모크 프레임 실측 2건의 교훈):
     #   drawtext(제목·작품명) = **파일 경로** — 이름만 주면 fontconfig 폴백으로 한글
     #     글리프가 없어 두부(□)가 된다.
@@ -458,6 +596,37 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     _tts_margin = int(design.tts_line_y_margin)
     _sub_h = _sr.estimate_subtitle_height(design.subtitle_size)
     _floor_top = _title_bottom + SUB_GAP_PX
+    # 밴드 아래로 내리기(2026-09-04) — 채널 margin 이 밴드 위치와 안 맞으면 두 줄 블록이
+    # 영상에 얹힌다. 번인 회피(아래 블록)는 이 값 위에서 **올리기만** 하므로 순서가 이렇다.
+    _work_top = estimate_work_top(design, band_bottom=_geom.bottom,
+                                  canvas_height=config.canvas_height)
+    _cd = channel_design or {}
+    _sub_off = _cd.get("subtitle_band_offset")
+    _tts_off = _cd.get("tts_band_offset")
+    if _sub_off is not None:          # 대사 어절 자막은 v3 에서 늘 한 줄(12자)
+        _sub_margin = band_anchored_margin(band_bottom=_geom.bottom, offset=int(_sub_off),
+                                           lines=1, font_size=design.subtitle_size,
+                                           canvas_height=config.canvas_height)
+        log(f"  [v3/자막배치] 자막 — 밴드 하단 {_geom.bottom} + {_sub_off}px 앵커 → margin_v {_sub_margin}")
+    if _tts_off is not None:          # 전역값은 두 줄 기준(번인 회피·구 소비자용), 줄별은 아래
+        _tts_margin = band_anchored_margin(band_bottom=_geom.bottom, offset=int(_tts_off),
+                                           lines=2, font_size=design.tts_line_font_size,
+                                           canvas_height=config.canvas_height)
+        log(f"  [v3/자막배치] 내레이션 — 밴드 하단 {_geom.bottom} + {_tts_off}px 앵커 → margin_v {_tts_margin}(2줄 기준)")
+    _tts_base = _tts_margin
+    for _name, _size, _cur in (("자막", design.subtitle_size, _sub_margin),
+                               ("내레이션", design.tts_line_font_size, _tts_margin)):
+        if (_name == "자막" and _sub_off is not None) or (_name == "내레이션" and _tts_off is not None):
+            continue                  # 상대 앵커가 정한 자리 — 절대값 클램프는 안 건다
+        _new, _note = fit_margin_below_band(
+            _cur, canvas_height=config.canvas_height, band_bottom=_geom.bottom,
+            block_height=_sr.estimate_subtitle_height(_size), work_top=_work_top)
+        if _note:
+            log(f"  [v3/자막배치] {_name} — {_note}")
+        if _name == "자막":
+            _sub_margin = int(_new)
+        else:
+            _tts_margin = int(_new)
 
     def _runs(t0: float, t1: float) -> list[tuple[int, int]]:
         return _sr.runs_in_window(_profiles, t0, t1, _geom) if _profiles else []
@@ -551,11 +720,25 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
             font_name=ass_family, font_size=design.tts_line_font_size,
             primary_color=design.tts_line_color, outline=3,
             margin_v=_tts_margin)
-        build_tts_ass(
-            [SpeechSegment(start_sec=float(f["cue"]["start_sec"]),
-                           end_sec=float(f["cue"]["end_sec"]),
-                           text=narration_caption(str(f["cue"]["text"]))) for f in cue_files],
-            tts_path, tts_style)
+        _caps = [narration_caption(str(f["cue"]["text"])) for f in cue_files]
+        if _tts_off is not None:
+            # 줄별 y — 한 줄 cue 도 두 줄 cue 도 윗변이 밴드 아래 같은 자리. 번인 회피가
+            # 전역값을 올렸으면 그만큼 같이 올린다(lift). style.y 통로는 E18-2 와 동일.
+            _pm = tts_cue_margins(_caps, band_bottom=_geom.bottom, offset=int(_tts_off),
+                                  font_size=design.tts_line_font_size,
+                                  width=getattr(design, "tts_width", None),
+                                  canvas_height=config.canvas_height,
+                                  lift=max(0, _tts_margin - _tts_base))
+            _tts_segs = [SimpleNamespace(start_sec=float(f["cue"]["start_sec"]),
+                                         end_sec=float(f["cue"]["end_sec"]), text=c,
+                                         style={"y": 1.0 - m / config.canvas_height})
+                         for f, c, m in zip(cue_files, _caps, _pm)]
+            log(f"  [v3/자막배치] 내레이션 줄별 margin_v {sorted(set(_pm))} (cue {len(_pm)}개)")
+        else:
+            _tts_segs = [SpeechSegment(start_sec=float(f["cue"]["start_sec"]),
+                                       end_sec=float(f["cue"]["end_sec"]), text=c)
+                         for f, c in zip(cue_files, _caps)]
+        build_tts_ass(_tts_segs, tts_path, tts_style)
 
     # 괄호 라벨 — 편집실 자유 텍스트 레이어 재사용(비트 창 전체에 표시)
     # 라벨 — 계획은 공용(plan_labels), 위치는 Stage 4 가 화면을 보고 정한 값을 쓴다
@@ -608,9 +791,15 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     audio_mix = plan.get("audio_mix") or {}
     # 얼굴 크롭은 여전히 범위 외(발주서) — 이 맵은 무성 인서트의 **피사체 앵커**만
     # 싣는다(subject_crop_map 독스트링 참조). 앵커 없는 판은 빈 dict = 종전 그대로.
-    crop_map = subject_crop_map(plan["timeline"], video_path=Path(video_path),
-                                aspect_ratio=design.aspect_ratio,
-                                output_dir=output_dir, log=log)
+    # 채널 face_tracking:false(--no-reframe) 는 v3 에서 피사체 앵커 크롭까지 끈다 —
+    # v1 과 같은 뜻('원본을 가운데 정렬로 넣는다'). 기본 True = 종전 그대로.
+    if getattr(design, "enable_reframe", True):
+        crop_map = subject_crop_map(plan["timeline"], video_path=Path(video_path),
+                                    aspect_ratio=design.aspect_ratio,
+                                    output_dir=output_dir, log=log)
+    else:
+        crop_map = {}
+        log("  [v3/render] 채널 face_tracking=false — 피사체 앵커 크롭 끔(중앙)")
     # 내레이션 시작 효과음 — cue 와 같은 믹스 경로(E19-5 sfx_audio)를 탄다.
     # 번들에 narration_manifest.json 이 없으면 빈 리스트라 RenderInputs 도 필터그래프도
     # 종전과 완전히 같다. 자리는 cue_files 가 확정된 뒤(존재하는 파일만 남은 목록) —
@@ -679,6 +868,7 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
         tts_audio_gain_db=int(audio_mix.get("tts_gain_db", -3)),
         text_subtitle_path=texts_path,
         muted_windows=muted_windows or None,
+        muted_gain_db=muted_gain_db,
         source_fps=plan.get("source_fps"),
         sfx_audio=_all_sfx or None,
     )

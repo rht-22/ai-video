@@ -15,4 +15,4 @@ def test_strips_commas_and_final_period_only():
 def test_tts_ass_uses_caption_text():
     import pathlib
     src = pathlib.Path("app/v3/finalize.py").read_text(encoding="utf-8")
-    assert 'text=narration_caption(str(f["cue"]["text"]))' in src
+    assert 'narration_caption(str(f["cue"]["text"])) for f in cue_files' in src

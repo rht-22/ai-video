@@ -128,14 +128,133 @@ def arbitrate_name(token: str, names: list[str], heard_text: str) -> str | None:
     return cands[0] + josa
 
 
+import re as _re
+
+_LATIN_STEM = _re.compile(r"^[A-Za-z]{2,}$")
+_ANY_LATIN = _re.compile(r"[A-Za-z]")
+
+
+def _is_hangul(s: str) -> bool:
+    return bool(s) and all(0xAC00 <= ord(c) <= 0xD7A3 for c in s)
+
+
+def _split_josa_any(tok: str) -> tuple[str, str]:
+    """조사 분리 — 어간 길이 제한 없음(영문 약어는 2자가 흔하다: RC·OK)."""
+    for j in _JOSA:
+        if tok.endswith(j) and len(tok) - len(j) >= 1:
+            return tok[:-len(j)], j
+    return tok, ""
+
+
+def arbitrate_latin(token: str, heard_text: str, *, prev_word: str | None = None,
+                    next_word: str | None = None) -> str | None:
+    """받아쓰기가 **영문 약어**로 적은 어절 vs 모델 청취 — 한글로 되돌린다(순수).
+
+    2026-09-04 실사고(가왕쇼 7화): whisper '또 RC가 이렇게 너무 더운데', 모델 청취
+    '날씨가 이렇게 너무 더운데'(prob 0.676). 인명 대조는 인물표만 봐서 못 잡았고
+    각색 방어(전사 복원)가 whisper 를 정본으로 되살려 화면에 'RC가' 가 나갔다.
+
+    두 증인 규율 그대로 — ① 받아쓰기 어간이 라틴 문자만(2자+) ② 모델 청취에는 라틴
+    문자가 **하나도 없고**(모델도 영문으로 들었으면 진짜 영문이다 — 그대로) ③ 청취
+    문장에서 같은 조사로 끝나는 한글 어절이 **앞뒤 이웃 어절 일치**로 자리가 잡힐 때
+    (동률·무일치면 None). 반환값은 조사가 붙은 새 어절."""
+    raw = token.strip(_STRIP)
+    if not raw or not heard_text or _ANY_LATIN.search(heard_text):
+        return None
+    stem, josa = _split_josa_any(raw)
+    if not _LATIN_STEM.match(stem):
+        return None
+    heard = [h.strip(_STRIP) for h in heard_text.split()]
+    heard = [h for h in heard if h]
+
+    def _n(x: str | None) -> str:
+        return (x or "").strip(_STRIP)
+
+    cands: list[tuple[int, str]] = []
+    for j, h in enumerate(heard):
+        if josa and not h.endswith(josa):
+            continue
+        hs = h[:-len(josa)] if josa else h
+        if not _is_hangul(hs):
+            continue
+        score = 0
+        if prev_word and j > 0 and _n(heard[j - 1]) == _n(prev_word):
+            score += 1
+        if next_word and j + 1 < len(heard) and _n(heard[j + 1]) == _n(next_word):
+            score += 1
+        if score:
+            cands.append((score, h))
+    if not cands:
+        return None
+    best = max(sc for sc, _ in cands)
+    top = [h for sc, h in cands if sc == best]
+    return top[0] if len(top) == 1 else None
+
+
+SPELLING_MAX_PROB = 0.85   # whisper 가 이 이상 확신한 어절은 안 건드린다
+SPELLING_MIN_BODY = 3      # 공통 몸통 3음절+ — 2음절 기능어('이거/이게')는 각색과 구분 불가
+
+
+def arbitrate_spelling(token: str, heard_text: str, *, prob: float | None = None
+                       ) -> str | None:
+    """받아쓰기 **맞춤법 오인식** vs 모델 청취 — 초성이 같고 모음·받침만 흔들린 어절을
+    모델 표기로 되돌린다(순수). 2026-09-04 가왕쇼 7화: whisper '때양볕이라서'(0.64),
+    모델 청취 '뙤약볕이라'. 사전으로는 못 푼다(다음엔 꿍치다·힐끔힐끔·밀당이 빠진다).
+
+    인명 대조(initials)와 같은 통찰 — 한국어 오인식은 자음이 유지되고 모음·받침이
+    흔들린다. LLM 은 철자를 알고 whisper 는 소리만 안다. 규칙(두 편 4,190어절 드라이런):
+      ① 둘 다 한글 · 공통 몸통 ≥3음절 · 초성열 동일
+      ② 모음/받침 차이 1~2음절, **몸통 마지막 음절 제외** — 마지막 음절 차이는
+         어미·조사·시제(벗어주시고/벗어주실, 신발이/신발을, 나오는데/나왔는데)라
+         각색이지 오인식이 아니다. 이 조건이 오작동 12/34 를 0 으로 만들었다.
+      ③ whisper prob < SPELLING_MAX_PROB · 청취 문장 안 후보가 정확히 하나
+    whisper 의 꼬리(어미 '이라서')는 그대로 두고 몸통만 바꾼다 — 타이밍·문법은
+    받아쓰기 것이다. 실측 적중 20건 중 명백히 옳음 18 · 무해한 애매 2 · 깨짐 0."""
+    raw = token.strip(_STRIP)
+    if not raw or not heard_text or not _is_hangul(raw):
+        return None
+    if prob is not None and float(prob) >= SPELLING_MAX_PROB:
+        return None
+    heard = [h.strip(_STRIP) for h in heard_text.split()]
+    heard = [h for h in heard if h]
+    if raw in heard:
+        return None
+    cands: set[str] = set()
+    for h in heard:
+        if not _is_hangul(h):
+            continue
+        L = min(len(raw), len(h))
+        if L < SPELLING_MIN_BODY or initials(raw[:L]) != initials(h[:L]):
+            continue
+        diff = [i for i in range(L) if raw[i] != h[i]]
+        if not 1 <= len(diff) <= 2 or diff[-1] >= L - 1:
+            continue
+        cands.add(h[:L] + raw[L:])
+    return cands.pop() if len(cands) == 1 else None
+
+
 def fix_span_words(words: list[dict], names: list[str], heard_text: str
                    ) -> tuple[list[dict], list[dict]]:
-    """span 의 whisper 단어 목록에 arbitrate_name 을 적용한 사본 + 교정 기록."""
+    """span 의 whisper 단어 목록에 arbitrate_name(인명) → arbitrate_latin(영문 오인식) →
+    arbitrate_spelling(맞춤법)을 적용한 사본 + 교정 기록(인명 외는 kind 표시).
+    names 가 비어도 latin·spelling 대조는 돈다."""
     out, fixes = [], []
-    for w in words:
-        new = arbitrate_name(str(w.get("text") or ""), names, heard_text)
+    for i, w in enumerate(words):
+        text = str(w.get("text") or "")
+        new, kind = arbitrate_name(text, names, heard_text), "name"
+        if not new:
+            new, kind = arbitrate_latin(
+                text, heard_text,
+                prev_word=str(words[i - 1].get("text") or "") if i > 0 else None,
+                next_word=str(words[i + 1].get("text") or "") if i + 1 < len(words) else None,
+            ), "latin"
+        if not new:
+            new, kind = arbitrate_spelling(text, heard_text, prob=w.get("prob")), "spelling"
         if new and new != w.get("text"):
-            fixes.append({"at": round(float(w.get("t0", 0)), 2), "from": w.get("text"), "to": new})
+            rec = {"at": round(float(w.get("t0", 0)), 2), "from": w.get("text"), "to": new}
+            if kind != "name":                  # 인명 기록 모양은 종전 그대로(additive)
+                rec["kind"] = kind
+            fixes.append(rec)
             w = dict(w, text=new)
         out.append(w)
     return out, fixes

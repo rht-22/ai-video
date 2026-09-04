@@ -18,6 +18,12 @@ from app.modules.ffmpeg_utils import ensure_ffmpeg_supported
 from app.v3.scenecut import SCENE_THRESHOLD
 
 
+# 내레이션 덮개 구간 원본 볼륨 기본값(dB). 2026-09-04 사용자가 -6/-10/-14/-20 비교본을
+# 듣고 -20 → -14 로 정정(2026-09-04 두 번째 청취). 종전(완전 무음 volume=0)은 이제 기본이 아니다 — 렌더러 기본(None=무음)은
+# v1 회귀 0 을 위해 그대로고, v3 CLI 만 이 값을 넣는다.
+NARRATION_ORIGINAL_DB = -14.0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="create_shorts_v3",
@@ -67,11 +73,66 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--story-flow", default="legacy", choices=["legacy", "human"],
                    help="Stage 3 편성기: human = 주제→씬→대사→내레이션(즉시 합성)→덮개"
                         "(그 자리 재관찰) 체인. legacy = 종전 단일 프롬프트")
+    # 채널 design 주입(2026-09-04, 사용자 지시) — 어댑터 CHANNEL_DESIGN_FLAGS 어휘 중
+    # v3 가 받는 키(ves V3_DESIGN_KEYS 와 1:1). 값은 Stage 4 프리셋 기본값을 덮고 최종
+    # 렌더 디자인 위에 얹는다(채널 명시 > AI > 기본값). 미지정 = 종전과 동일.
+    ch = p.add_argument_group("channel design (--design-*)")
+    for key, kw in CHANNEL_DESIGN_ARGS.items():
+        ch.add_argument(f"--design-{key.replace('_', '-')}", default=None, **kw)
+    ch.add_argument("--no-reframe", action="store_true",
+                    help="채널 face_tracking:false — 피사체 앵커 크롭을 끄고 중앙 고정")
+    p.add_argument("--narration-original-db", type=float, default=NARRATION_ORIGINAL_DB,
+                   help="내레이션 덮개 구간의 원본 볼륨(dB, 음수). 기본 -14 — 2026-09-04 "
+                        "사용자 청취 선택(-6/-10/-14/-20 비교본). 완전 무음(종전)은 "
+                        "-99 처럼 아주 낮은 값을 준다")
     p.add_argument("--style-tone", default=None,
                    help="채널 톤 프로파일 이름(app/data/style_tones/<이름>.json) — "
                         "Stage 3 스토리 프롬프트에 내레이션 말투·제목 톤·훅 규칙 절을 "
                         "덧붙인다. 미지정 = 프롬프트 종전과 동일")
     return p
+
+
+# 채널 design 키 → argparse kwargs. 키 이름이 곧 어댑터(ves CHANNEL_DESIGN_FLAGS) 어휘이고
+# 플래그는 `--design-<키의 _ → ->`. v1 app.cli 의 같은 플래그와 타입이 같아야 한다
+# (tests/test_v3_channel_design 이 대조). platform_image 는 get_logo_path 로 경로화.
+CHANNEL_DESIGN_ARGS: dict[str, dict] = {
+    "title_y": dict(type=int), "video_y": dict(type=int), "video_width": dict(type=int),
+    "title_font": dict(type=str), "title_size": dict(type=int), "title_size2": dict(type=int),
+    "title_color": dict(type=str), "title_color2": dict(type=str),
+    "subtitle_font": dict(type=str), "subtitle_size": dict(type=int),
+    "subtitle_color": dict(type=str), "subtitle_y_margin": dict(type=int),
+    "tts_color": dict(type=str), "tts_size": dict(type=int), "tts_y_margin": dict(type=int),
+    "tts_width": dict(type=float),
+    "work_title_y": dict(type=int), "work_font_size": dict(type=int), "work_color": dict(type=str),
+    "aspect_ratio": dict(type=str),
+    "platform_image": dict(type=str), "platform_text": dict(type=str),
+    "platform_x": dict(type=int), "platform_y": dict(type=int),
+    "platform_image_width": dict(type=int), "platform_image_height": dict(type=int),
+    "platform_font_size": dict(type=int), "platform_color": dict(type=str),
+    "platform_align": dict(type=str, choices=["left", "right"]),
+    # v3 전용(2026-09-04) — 자막 블록 윗변을 '밴드 하단 + N px' 에 거는 상대 앵커.
+    # 화면비·video_y 가 바뀌어도 채널이 margin 을 다시 잡지 않는다(음수 = 밴드 안쪽).
+    "subtitle_band_offset": dict(type=int), "tts_band_offset": dict(type=int),
+}
+V3_ONLY_DESIGN_KEYS = frozenset({"subtitle_band_offset", "tts_band_offset"})
+
+
+def channel_design_from_args(args: argparse.Namespace) -> dict:
+    """--design-* → 채널 design dict(어댑터 어휘 그대로). **준 키만** 싣는다(빈 dict =
+    종전과 동일). 순수 — 테스트 대상. 로고 이름은 v1 과 같은 규약(get_logo_path)으로
+    assets/logos 절대경로가 된다 — 없는 파일은 렌더 앞에서 즉시 실패."""
+    out: dict = {}
+    for key in CHANNEL_DESIGN_ARGS:
+        v = getattr(args, f"design_{key}", None)
+        if v is not None:
+            out[key] = v
+    if out.get("platform_image"):
+        from app.config import get_logo_path
+        out["platform_image"] = get_logo_path(
+            out["platform_image"], Path(__file__).resolve().parent.parent)
+    if getattr(args, "no_reframe", False):
+        out["face_tracking"] = False
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -107,6 +168,10 @@ def main(argv: list[str] | None = None) -> int:
         args.fix_names = True
         print("  [v3] --story-flow human → 인명 교정(--fix-names) 기본 켬")
 
+    channel_design = channel_design_from_args(args)
+    if channel_design:
+        print(f"  [v3] 채널 design 주입: {channel_design}")
+
     from app.v3.pipeline import run_v3
     out = run_v3(video_path=video, work_title=args.work_title,
                  outdir=Path(args.outdir), srt_path=srt, episode=args.episode,
@@ -126,6 +191,8 @@ def main(argv: list[str] | None = None) -> int:
                      if args.story_templates else None),
                  style_preset=args.style_preset, style_tone=args.style_tone,
                  story_flow=args.story_flow,
+                 channel_design=channel_design or None,
+                 narration_original_db=args.narration_original_db,
                  scene_threshold=args.scene_threshold)
     print(f"[v3] 완료 → {out}")
     return 0

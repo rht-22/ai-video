@@ -630,6 +630,11 @@ class RenderInputs:
     # 트랙([acat])에만 volume=0 을 걸어 cue 오디오는 그대로 산다. None/빈 목록 =
     # 필터 종전과 완전히 동일(v1 회귀 0 — sfx_audio 와 같은 additive 규약).
     muted_windows: list[tuple[float, float]] | None = None
+    # 2026-09-04(사용자 요청): 뮤트 창의 원본 볼륨 — None = 종전 volume=0(완전 무음).
+    # dB 음수(예: -12)를 주면 그 창에서 원본을 **줄이기만** 한다(내레이션 밑에 현장음이
+    # 남는다). 이때 cue 덕킹(×0.5)은 뮤트 창 **밖**에서만 걸어 두 감쇠가 겹쳐 쌓이지
+    # 않게 한다 — None 이면 0×0.5=0 이라 필터 문자열 종전과 바이트 동일(회귀 0).
+    muted_gain_db: float | None = None
     # 2026-09-03: 소스 fps. 주면 클립을 **프레임 정수 개로 고정**해서 낸다(아래 [3]).
     # concat 이 세그먼트 길이를 소리에 맞추며 프레임을 덧대는 바람에 실제 편집본이
     # 계획보다 길어지고, 계획 좌표로 찍은 뮤트 창·자막·cue·라벨·효과음이 뒤로 갈수록
@@ -1976,9 +1981,12 @@ def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, num_cue_inpu
     _mw = [(float(a) / speed, float(b) / speed)
            for a, b in (getattr(inputs, "muted_windows", None) or []) if b > a]
     _mute = ""
+    _mute_expr = ""
+    _mute_gain = getattr(inputs, "muted_gain_db", None)
     if _mw:
         _mute_expr = "+".join(f"between(t,{s:.3f},{e:.3f})" for s, e in _mw)
-        _mute = f"volume=enable='{_mute_expr}':volume=0,"
+        _mute_vol = "0" if _mute_gain is None else f"{float(_mute_gain):g}dB"
+        _mute = f"volume=enable='{_mute_expr}':volume={_mute_vol},"
 
     # E19-5: SFX 는 cue 와 같은 믹스 경로(입력 + volume dB + adelay + amix)를 탄다.
     # 다만 원본 오디오를 **덕킹하지 않는다**(짧은 스팅에 덕킹을 걸면 원음이 펌핑한다).
@@ -2002,6 +2010,9 @@ def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, num_cue_inpu
         duck_expr = "+".join(
             f"between(t,{s:.3f},{e:.3f})" for s, e in duck_ranges
         )
+        if _mute_expr and _mute_gain is not None:
+            # 뮤트 창을 볼륨 감쇠로 쓸 때만: 그 창 안에서는 덕킹을 겹치지 않는다
+            duck_expr = f"({duck_expr})*not({_mute_expr})"
         original_vol = (
             f"[acat]{_tempo}{_mute}volume=enable='{duck_expr}':volume=0.5,"
             f"volume={inputs.original_audio_gain_db}dB[orig_vol]"

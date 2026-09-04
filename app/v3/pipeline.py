@@ -113,8 +113,14 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
            story_templates: tuple[str, ...] | None = None,
            style_preset: str | None = None, style_tone: str | None = None,
            story_flow: str = "legacy",
+           channel_design: dict | None = None,
+           narration_original_db: float | None = None,
            scene_threshold: float = SCENE_THRESHOLD, log=print) -> Path:
     """v3 실행(M1 grid·Stage1 + M2 chunk_split·Stage2) → output_dir 반환.
+    channel_design: 채널 design 키(`--design-*` 어댑터 어휘) — Stage 4 프리셋 기본값을
+    덮고(밴드·색·크기) 최종 렌더 디자인 위에 전량 얹는다. style·render 지문에 들어가
+    값이 바뀌면 재구성된다. narration_original_db: 내레이션 덮개 구간 원본 볼륨(dB,
+    None = 종전 완전 무음).
     실패해도 run_log 는 남긴다(finally). max_chunks 는 스모크용 — 계획 앞에서부터
     N 개만 재단·분석하고 나머지는 매니페스트에 file=null 로 남는다(커버리지 표기)."""
     if from_step is not None and from_step not in V3_STEPS:
@@ -429,6 +435,8 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
         else:
             _run_m4(output_dir=output_dir, video_path=Path(video_path),
                     grid=grid, from_step=from_step, style_preset=style_preset,
+                    channel_design=channel_design,
+                    narration_original_db=narration_original_db,
                     get_gemini=get_gemini, step=step, log=log)
         return output_dir
     finally:
@@ -719,9 +727,12 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
     segments = assemble.word_subtitles(plan["timeline"], span_index,
                                        grid.get("words") or [], _mw,
                                        cast_names=names, name_fix_log=_name_arb)
+    _WHY = {"latin": ("어절", "모델 청취(영문 오인식 → 한글)"),
+            "spelling": ("맞춤법", "모델 청취(초성 동일·모음/받침 차이)")}
     for f in _name_arb:
-        log(f"  [v3/자막] 인명 대조 교정 {f.get('span_id')} {f['from']!r} → {f['to']!r} "
-            f"(근거: 모델 청취 + 인물표)")
+        _what, _why = _WHY.get(f.get("kind") or "", ("인명", "모델 청취 + 인물표"))
+        log(f"  [v3/자막] {_what} 대조 교정 {f.get('span_id')} {f['from']!r} → {f['to']!r} "
+            f"(근거: {_why})")
     # 자막 단계 기록(2026-09-03) — story 기록은 자막 생성보다 앞서 찍히므로 여기 따로 남긴다
     step("subtitles", lines=len(segments), name_arbitrations=_name_arb)
     # ── M9-A/B: 자막 텍스트 신뢰 검사(순수 코드 · LLM 0콜) ────────────────
@@ -830,7 +841,9 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
 
 def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
             from_step: str | None, get_gemini, step, log,
-            style_preset: str | None = None) -> None:
+            style_preset: str | None = None,
+            channel_design: dict | None = None,
+            narration_original_db: float | None = None) -> None:
     """M4 — 2-pass 렌더 + validate 확장 (발주서 v3-m4).
 
     draft/최종 렌더는 산출 파일 존재로 캐시(--from-step 으로 재구성). style 은
@@ -965,9 +978,18 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
     # ── style (12) — 상류 지문 규율 ───────────────────────────────────────
     style_ckpt = output_dir / "checkpoint_style.json"
     style_doc = None
+    # 채널 프리셋 키가 있으면 style 지문에 섞는다 — 채널 색·밴드가 바뀌었는데 옛
+    # 플랜이 재적용되면 안 된다. 없으면 종전 지문 그대로(기존 잡 캐시 유지).
+    _preset = finalize.merge_channel_preset(stage4.get_style_preset(style_preset),
+                                            channel_design)
+    _chan_preset = {k: v for k, v in (channel_design or {}).items()
+                    if k in finalize.CHANNEL_PRESET_KEYS}
+    style_fp = fingerprint if not _chan_preset else hashlib.sha1(json.dumps(
+        [fingerprint, _chan_preset], sort_keys=True,
+        ensure_ascii=False).encode()).hexdigest()[:16]
     if style_ckpt.exists() and from_step not in ("draft_render", "style"):
         cached = _read_json(style_ckpt)
-        if cached.get("fingerprint") == fingerprint:
+        if cached.get("fingerprint") == style_fp:
             style_doc = cached.get("style")
             log("  [v3/style] 캐시 로드")
         else:
@@ -983,7 +1005,6 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
         # 바꾸면 validate 가 확정 design 으로 다시 재서 클램프한다(리뷰 C1).
         # 프리셋은 채널 선택(--style-preset · 미지정 = recap 그대로) — 밴드 기하와
         # run_style 이 **같은 프리셋**을 봐야 한다(어긋나면 라벨이 검정 밴드를 뚫는다).
-        _preset = stage4.get_style_preset(style_preset)
         band = finalize.video_band_ratio(finalize.design_from_style(_preset))
         # M16: 라벨은 Stage 4 가 초안을 보며 직접 쓴다 — 대사 타임라인(편집본
         # 좌표)과 영상 길이를 준다. label_plan 은 구 체크포인트 호환용으로만 남긴다.
@@ -993,7 +1014,7 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
                                             windows=win, labels=label_plan,
                                             dialogue=segments, duration=_dur,
                                             band=band, log=log)
-        _write_json(style_ckpt, {"fingerprint": fingerprint, "style": style_doc})
+        _write_json(style_ckpt, {"fingerprint": style_fp, "style": style_doc})
         step("style", elapsed=round(time.time() - t0, 1),
              attempts=len(audit["attempts"]), fallback=audit.get("fallback", False),
              diff_keys=audit.get("diff_keys"), audit_attempts=audit["attempts"])
@@ -1005,7 +1026,13 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
     final_path = output_dir / "final_1080x1920.mp4"
     # 렌더 지문 = 상류 지문 + **확정 스타일** — 라벨 좌표·색·crop/pop 이 바뀌었는데
     # 캐시가 옛 화면을 내보내면 안 된다(리뷰 C2)
-    render_fp = hashlib.sha1(json.dumps([fingerprint, style_doc], sort_keys=True,
+    # + 채널 design·덮개 볼륨 — 없으면 종전 지문과 같다(회귀 0)
+    _fp_parts = [fingerprint, style_doc]
+    if channel_design:
+        _fp_parts.append(channel_design)
+    if narration_original_db is not None:
+        _fp_parts.append({"narration_original_db": narration_original_db})
+    render_fp = hashlib.sha1(json.dumps(_fp_parts, sort_keys=True,
                                         ensure_ascii=False).encode()).hexdigest()[:16]
     if final_path.exists() and _sidecar_ok("render_fingerprint.json", render_fp) \
             and from_step not in ("draft_render", "style", "render"):
@@ -1023,7 +1050,12 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
         final_path, cost = finalize.render_final(
             video_path=video_path, plan=plan, style_doc=style_doc,
             segments=segments, resources=resources, story_doc=story_doc,
-            output_dir=output_dir, log=log)
+            output_dir=output_dir, channel_design=channel_design,
+            muted_gain_db=narration_original_db, log=log)
+        if channel_design:
+            cost["channel_design"] = dict(channel_design)
+        if narration_original_db is not None:
+            cost["narration_original_db"] = narration_original_db
         _write_json(output_dir / "render_fingerprint.json",
                     {"fingerprint": render_fp})
         step("render", **cost)
