@@ -65,7 +65,12 @@ def _cand(cid: str, template: str, spans: list[tuple[float, float]]) -> dict:
 CANDIDATE_SPANS: list[tuple[str, str, list[tuple[float, float]]]] = [
     ("c01", "recap_dialogue", [(10.0, 55.0)]),
     ("c02", "highlight", [(55.0, 100.0)]),
-    ("c03", "conflict_payoff", [(100.0, 145.0)]),
+    # ⚠ conflict_payoff 는 역할 둘(turn·payoff)을 요구하고 **조각 하나가 비트 하나**라
+    # 조각도 최소 2개여야 한다(2026-09-04 실소재 라운드가 잡은 규칙).
+    # **3개**로 나눈 이유: 아래 `_fail_two_part_candidate` 가 c05 를 **파트 수 2** 로
+    # 식별하므로 c03 도 2개면 둘 다 걸린다. 합집합은 거의 그대로라 위 손계산 IoU 는
+    # 유지된다(45s → 43s · 임계 0.5 대비 여유 충분).
+    ("c03", "conflict_payoff", [(100.0, 115.0), (116.0, 130.0), (131.0, 145.0)]),
     ("c04", "chemi_observe", [(145.0, 190.0)]),
     ("c05", "recap_dialogue", [(20.0, 42.0), (120.0, 143.0)]),   # 조각 2개 = 이음새 1개
 ]
@@ -77,10 +82,11 @@ CANDIDATES_JSON = json.dumps({
 }, ensure_ascii=False)
 
 # 6c 가 전량 드롭하는 판 — 조각이 길이 하한(40초)에 한참 못 미친다.
+# ⚠ 조각 **수**는 원판을 지킨다. 5초로 줄이되 개수를 1개로 접으면 conflict_payoff 가
+# 6단계 필수 역할 검사에 먼저 걸려 이 테스트가 재려는 9단계까지 못 간다.
 TINY_JSON = json.dumps({
-    "candidates": [_cand(cid, tpl, [(a, a + 5.0)])
-                   for cid, tpl, (a, _b) in
-                   [(c, t, s[0]) for c, t, s in CANDIDATE_SPANS]],
+    "candidates": [_cand(cid, tpl, [(a, a + 5.0) for a, _b in spans])
+                   for cid, tpl, spans in CANDIDATE_SPANS],
     "exception_sector": {"intro": None, "recap": None, "teaser": None,
                          "credit": None, "end": None},
 }, ensure_ascii=False)

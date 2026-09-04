@@ -211,6 +211,15 @@ def transcript_block(grid: dict, *, max_chars: int | None = None) -> str:
 
 # ── 프롬프트 ────────────────────────────────────────────────────────────────
 
+def _required_roles(template: Any) -> tuple[str, ...]:
+    """그 템플릿이 요구하는 비트 역할. 정본은 v3 레지스트리다(재선언 금지). 순수.
+
+    모르는 이름이면 빈 튜플 — 템플릿 화이트리스트 검사가 이미 그 사유를 낸다.
+    여기서 또 실패시키면 사유가 둘로 갈려 사람이 무엇을 고칠지 모른다."""
+    spec = STORY_TEMPLATE_SPECS.get(template) if isinstance(template, str) else None
+    return tuple((spec or {}).get("required_roles") or ())
+
+
 def _template_block(templates: tuple[str, ...]) -> str:
     """허용 템플릿의 설명 — 모르는 이름은 **즉시 실패**(조용히 빼면 모델은 그 템플릿을
     설명 없이 고르게 되고, 검증기는 통과시킨다)."""
@@ -226,6 +235,16 @@ def _template_block(templates: tuple[str, ...]) -> str:
                 f"템플릿 {name!r} 의 설명이 없다 — `STORY_TEMPLATE_SPECS[…]['desc']` 나 "
                 f"`TEMPLATE_BRIEFS` 에 한 줄을 적어라(설명 없는 이름을 프롬프트에 실으면 "
                 f"모델이 그 템플릿을 짐작으로 쓴다)")
+        need = _required_roles(name)
+        # 역할이 하나뿐이면 어떤 후보든 이미 만족한다(조각은 최소 1개다) — 자명한 문구를
+        # 프롬프트에 넣으면 진짜 제약이 묻힌다.
+        if len(need) >= 2:
+            # 🛑 검증기만 좁히면 모델은 거절당할 값을 계속 낸다(E17-1 교훈 — 그때도
+            # 프롬프트를 함께 고쳐야 했다). 조각 하나가 비트 하나이므로 필수 역할 수가
+            # 곧 **최소 조각 수**다. 2026-09-04 실소재 라운드에서 조각 1개짜리
+            # conflict_payoff 후보가 10단계까지 가서 3콜을 태우고 죽었다.
+            desc = (f"{desc}\n  ⚠ 이 템플릿은 역할 {', '.join(need)} 이(가) 반드시 있어야 "
+                    f"하고 **조각 하나가 역할 하나**다 — 조각을 최소 {len(need)}개로 나눠라.")
         lines.append(desc)
     return "\n".join(lines)
 
@@ -425,6 +444,19 @@ def _validate_candidate(raw: Any, *, where: str, templates: tuple[str, ...],
     segments, seg_problems = _validate_segments(
         raw.get("segments"), where=where, source_duration_sec=source_duration_sec)
     problems.extend(seg_problems)
+
+    # 🛑 **조각 수 < 템플릿 필수 역할 수 = 구조적으로 불가능한 후보다.**
+    # 다리는 조각 하나를 비트 하나로 옮기므로(`bridge.to_beats`), 조각이 1개면 비트도
+    # 1개이고 `conflict_payoff` 처럼 역할 둘(turn·payoff)을 요구하는 템플릿은 절대
+    # 만족할 수 없다. 10단계가 그걸 반려하는데 거기서 걸리면 **편당 3콜을 태우고 편을
+    # 잃는다** — 2026-09-04 실소재 라운드에서 실제로 c01 이 그렇게 죽었다.
+    # 여기서 걸면 값이 0 이고, 모델이 재질의에서 조각을 더 낼 수 있다.
+    need = _required_roles(template)
+    if need and segments is not None and len(segments) < len(need):
+        problems.append(
+            f"{where}: 템플릿 {template!r} 는 역할 {sorted(need)} 를 요구하는데 조각이 "
+            f"{len(segments)}개다 — 조각 하나가 비트 하나이므로 최소 {len(need)}개로 "
+            f"나누거나 다른 템플릿을 고르라")
     if problems:
         return None, problems
 

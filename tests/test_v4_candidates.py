@@ -707,3 +707,50 @@ def test_candidates_are_readable_by_verify():
         grid_times=[100.0, 125.0])
     assert record["kept"], record
     assert len(kept) + len(record["dropped"]) == len(section["candidates"])
+
+
+# ── 템플릿 필수 역할 ↔ 조각 수 (2026-09-04 실소재 라운드가 잡았다) ──────────
+
+def test_candidate_with_fewer_segments_than_required_roles_is_dropped():
+    """🛑 조각 하나가 비트 하나다(`bridge.to_beats`). 그래서 조각 수가 템플릿의 필수
+    역할 수보다 적으면 **구조적으로 만족 불가능**한 후보다.
+
+    실소재 라운드(신병4 EPK)에서 조각 1개짜리 `conflict_payoff`(turn·payoff 필요)가
+    6단계를 통과해 10단계까지 갔고, 거기서 재질의 2회를 소진하고 **편을 잃었다**.
+    여기서 걸면 값이 0 이고 모델이 재질의에서 조각을 더 낼 수 있다."""
+    from app.v3.story import STORY_TEMPLATE_SPECS
+    tmpls = tuple(STORY_TEMPLATE_SPECS)
+
+    def one(template: str, n: int):
+        cand = {"id": "c01", "template": template, "reason": "사유",
+                "title_draft": {"line1": "가", "line2": "나"},
+                "segments": [{"start_sec": 10 + i * 60, "end_sec": 50 + i * 60,
+                              "quote": None} for i in range(n)]}
+        return C._validate_candidate(cand, where="후보1", templates=tmpls,
+                                     source_duration_sec=2000.0)
+
+    got, probs = one("conflict_payoff", 1)          # turn·payoff 둘을 요구한다
+    assert got is None
+    assert any("역할" in p and "조각이 1개" in p for p in probs), probs
+    assert one("conflict_payoff", 2)[0] is not None  # 둘이면 통과
+
+    # 역할이 하나뿐인 템플릿은 조각 1개로도 성립한다(오탐 금지)
+    for t in ("recap_dialogue", "chemi_observe", "highlight"):
+        assert one(t, 1)[0] is not None, t
+
+
+def test_required_roles_comes_from_the_v3_registry():
+    """정본은 v3 레지스트리다 — 여기서 다시 적으면 템플릿이 늘 때 한쪽만 고쳐진다."""
+    from app.v3.story import STORY_TEMPLATE_SPECS
+    for name, spec in STORY_TEMPLATE_SPECS.items():
+        assert C._required_roles(name) == tuple(spec.get("required_roles") or ())
+    assert C._required_roles("없는템플릿") == ()      # 사유가 둘로 갈리지 않게 빈 튜플
+    assert C._required_roles(None) == ()
+
+
+def test_prompt_tells_the_model_the_minimum_segment_count():
+    """검증기만 좁히면 모델은 거절당할 값을 계속 낸다(E17-1 교훈).
+    역할이 둘 이상인 템플릿에만 붙인다 — 자명한 문구는 진짜 제약을 묻는다."""
+    block = C._template_block(("recap_dialogue", "conflict_payoff"))
+    assert "최소 2개로 나눠라" in block                 # conflict_payoff
+    assert "최소 1개로 나눠라" not in block             # recap_dialogue 는 자명하다
