@@ -311,6 +311,12 @@ def _story(out: Path) -> dict:
 def _run(synth, outdir, **kw):
     kw.setdefault("skip_research", True)
     kw.setdefault("log", lambda *a: None)
+    # 🛑 **10a 까지만 돈다.** 이 파일의 관심은 10·10a 이고, M6 가 11단계(편집 재료~
+    # 렌더)를 배선한 뒤로는 여기서 멈추지 않으면 그 다섯 조각까지 함께 돈다 — 이
+    # 파일의 가짜 클라이언트는 스타일 호출(영상 업로드·재시도 설정)을 흉내 내지
+    # 않으므로 11 이 그 자리에서 죽는다. 11 의 배선 가드는
+    # `tests/test_v4_pipeline_m6.py` 다(거기 가짜가 그 호출까지 덮는다).
+    kw.setdefault("stop_after", "detail")
     return v4p.run_v4(video_path=synth, work_title="합성", outdir=outdir, **kw)
 
 
@@ -577,18 +583,26 @@ def test_step_tables_stay_in_sync():
     assert {"flesh", "detail"} <= v4p.IMPLEMENTED_STEPS
     assert "flesh" not in v4p.NOT_IMPLEMENTED_MILESTONE
     assert "detail" not in v4p.NOT_IMPLEMENTED_MILESTONE
-    assert set(v4p.NOT_IMPLEMENTED_MILESTONE) == {
-        "11:resources", "11:draft", "11:style", "11:render", "11:validate"}
+    # M6 이 11단계 다섯 조각을 배선하면서 미구현 표는 **비었다**(그 사실이 곧
+    # "단계 표가 전부 배선됐다"이고, `_check_step_coverage` 가 임포트 시점에 본다).
+    assert v4p.NOT_IMPLEMENTED_MILESTONE == {}
+    assert {"11:resources", "11:draft", "11:style", "11:render",
+            "11:validate"} <= v4p.IMPLEMENTED_STEPS
     # 10·10a 는 `checkpoint_candidates.json` 의 절을 쓰지 않는다(자기 파일을 쓴다).
     assert "flesh" not in v4p.STEP_SECTIONS and "detail" not in v4p.STEP_SECTIONS
 
 
-def test_pipeline_now_stops_at_eleven(synth, tmp_path, fake_transcribe, fake_proxy,
-                                      gem, no_boundary_calls):
+def test_stop_after_detail_leaves_eleven_unrun(synth, tmp_path, fake_transcribe,
+                                              fake_proxy, gem, no_boundary_calls):
+    """`--stop-after detail` 은 11단계를 **기록을 남기고** 건너뛴다(조용한 스킵 금지).
+
+    ⚠ M6 이전에는 같은 자리가 `not_implemented` 였다 — 이제 11 은 배선돼 있고, 이
+    파일이 거기까지 돌지 않는 것은 `--stop-after` 때문이다(`_run` 의 기본값)."""
     out = _run(synth, tmp_path / "o", max_shorts=1)
     entry = _entry(out, "11:resources")
-    assert entry["not_implemented"] == "M6"
+    assert entry["skipped"] == "--stop-after detail"
     assert entry["remaining"][0] == "11:resources"
+    assert not (out / "edit_plan.json").exists()
 
 
 def test_ast_guards_still_pass_on_the_m5_wiring():

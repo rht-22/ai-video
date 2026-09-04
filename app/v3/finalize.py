@@ -307,6 +307,7 @@ def detect_burned_subtitles(video_path: Path, clips: list, design, output_dir: P
 def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                  segments: list[dict], resources: dict, story_doc: dict,
                  output_dir: Path, out_name: str = "final_1080x1920.mp4",
+                 output_fps: float | None = None,
                  log=print) -> tuple[Path, dict]:
     """edit_plan + style + 자막/cue → 1080×1920 최종본. 반환: (경로, 실측)."""
     config = AppConfig()
@@ -522,6 +523,9 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
         tts_audio_gain_db=int(audio_mix.get("tts_gain_db", -3)),
         text_subtitle_path=texts_path,
         muted_windows=muted_windows or None,
+        # V4-M7: 출력 fps 고정(운영자 결정 O9 = 30). None(기본) = 렌더러 argv 가
+        # 종전과 바이트 동일 — v3 자신의 호출은 안 넘기므로 v3 산출도 안 움직인다.
+        output_fps=output_fps,
     )
     t0 = time.time()
     render_short(inputs)

@@ -1,10 +1,12 @@
-"""pipeline v4 배선 — 1~9단계 실구현 + 10~11 자리.
+"""pipeline v4 배선 — 1~11단계 전 구간(여기서 실제 mp4 가 나온다).
 
-계약 `docs/v4/M2-interfaces.md` §1·§2(1~5) · `docs/v4/M3-interfaces.md` §5(6~9).
+계약 `docs/v4/M2-interfaces.md` §1·§2(1~5) · `docs/v4/M3-interfaces.md` §5(6~9) ·
+`docs/v4/M5-interfaces.md` §4(10·10a) · `docs/v4/M6-interfaces.md` §6(11 다섯 조각).
 
     1 init → 2 research → 3 자막 전사 → 4 probe(눈금·표본 fps) → 5 업로드(720p/30fps)
     → 6 후보 편성 → 6b 경계 정밀 → 6c 구간 검증 → 7 깔때기 → 8 시각 플래그 → 9 승인
-    → [10a 정밀 청취(선택)] → 10 살붙이기 … 11:validate     (11 은 M6~M7 — 자리만)
+    → [10a 정밀 청취(선택)] → 10 살붙이기
+    → **승인 편마다** 11:resources → 11:draft → 11:style → 11:render → 11:validate
 
 ⚠ **표 순서와 자료 흐름이 어긋나는 자리가 하나 있다.** 단계 표(`steps.V4_STEPS`)는
 `flesh`(10) 다음이 `detail`(10a)인데, 실제로는 10a 산출을 10 이 **먹는다**(계약 §4:
@@ -49,6 +51,15 @@ v3 배선(`app/v3/pipeline.py:102~440`)이 원본이고, **그 배선이 남긴 
                                  몸통(6) + boundary(6b) + verify(6c) + funnel·rank(7)
                                  + flags(8) + approval(9)
     <제목>_16k.wav               전사·arousal 용 오디오
+    edit_plan.json               11:resources — 편집 계획(C1). 1위는 v1 이름 그대로이고
+    subtitle_segments.json       2위↓ 는 `_{n}` 접미다(현지화·편집실이 1위를 읽는다)
+    checkpoint_resources.json    · tts_cue_{i}.mp3 (2위↓ tts_{n}_cue_{i}.mp3)
+    draft_720.mp4                11:draft — 스타일 판정용 중립 캔버스(O9: 720p/30fps)
+    style.json                   11:style — 확정 연출(v3 Stage 4 어휘 그대로).
+                                 ⚠ `checkpoint_style.json` 이 **아니다** — 그 이름은
+                                 E15 어휘 전용이고 모양이 다르다(render.py STYLE_STEM 🛑)
+    shorts.mp4                   11:render — **최종본**(현지화 `RENDER_OUTPUT` 이름)
+    validation.json              11:validate — 벨트 판정(hard_fail 이면 그 편만 실패)
 
 ⚠ **6~9 의 절 규약**: 각 단계는 `STEP_SECTIONS` 가 정한 **자기 절만** 쓰고, 자기보다
 하류인 절은 **버린다**(`_purge_after`). 지문만으로도 하류는 어차피 재계산되지만, 새
@@ -56,6 +67,11 @@ v3 배선(`app/v3/pipeline.py:102~440`)이 원본이고, **그 배선이 남긴 
 6b 는 예외적으로 top 의 `exception_sectors` 를 **덮지 않고** 자기 절에 정정본을 둔다 —
 덮으면 6b 재실행이 이미 옮긴 경계를 중심으로 ±60 창을 잡아 원판정을 잃는다.
 읽는 곳은 `sector_source()` 하나다.
+
+11 단계의 다섯 조각은 **승인 편마다** 돈다(계약 §6). 그래서 배선 규율이 하나 더
+붙는다: **편별 증분** — 한 편이 실패해도 나머지 편의 산출은 남고, 실패한 편은 그 뒤
+조각을 건너뛴다. 승인 편이 **전부** 실패하면 그때는 크게 죽는다(조용한 결번이 이
+레포에서 가장 나쁜 실패다 · 9단계 `no_publishable` 과 같은 규율).
 
 ⚠ **`input` 키는 계약이다** — `app/replay/exception_score.py:137` 이
 `run_log["input"]["video_path"]` 의 파일명으로 레이블을 매칭한다. 빼먹으면 채점기가
@@ -99,6 +115,8 @@ from app.modules.media_probe import MediaInfo, probe_media
 from app.modules.speech import extract_audio_from_video
 from app.modules.subtitle import parse_subtitle
 from app.v3 import assemble as assemble_mod
+from app.v3 import finalize as finalize_mod
+from app.v3 import stage4 as stage4_mod
 from app.v4 import approve, fps as fps_mod
 from app.v4 import (
     boundary as boundary_mod,
@@ -108,6 +126,8 @@ from app.v4 import (
     flags as flags_mod,
     flesh as flesh_mod,
     funnel as funnel_mod,
+    render as render_mod,
+    resources as resources_mod,
     verify as verify_mod,
 )
 from app.v4.steps import STEP_ORDER, V4_STEPS, parse_from_step, should_run, step_label
@@ -119,7 +139,7 @@ from app.v4.steps import STEP_ORDER, V4_STEPS, parse_from_step, should_run, step
 # v3 는 마일스톤마다 이름을 바꿨고(v3_m1 → v3_m3) 그래서 읽는 쪽이 접두 일치를 하거나
 # 편마다 다른 값을 만나야 했다. 진행 상황은 **별도 키**로 남긴다.
 PIPELINE_NAME = "v4"
-PIPELINE_MILESTONE = "M5"      # 이 판이 어디까지 지었나(감사용 — 분기 근거가 아니다)
+PIPELINE_MILESTONE = "M6"      # 이 판이 어디까지 지었나(감사용 — 분기 근거가 아니다)
 
 # v4 모델 정책 — v3 와 같은 자(2026-08-31 A/B 실측: 전 호출 Flash 3.7 로 저하 없음).
 # 공유 모듈 기본값은 건드리지 않고 **진입점에서만** 덮는다(병행 구축 규약). env 로
@@ -140,10 +160,10 @@ TEXT_TOKENS_PER_CHAR = 1.5
 # 6~11 단계가 아직 없다는 사실과 **언제 생기는지**를 함께 남긴다. 계약 §7 이
 # "전부 M3~M7" 이라 했고, 어느 마일스톤인지는 M1 계약 §5 의 ABSORB 표(그 단계가
 # 부르기 시작하는 함수의 마일스톤)에서 왔다. 배선을 짓는 마일스톤이 자기 줄을 지운다.
-NOT_IMPLEMENTED_MILESTONE: dict[str, str] = {
-    "11:resources": "M6", "11:draft": "M6",
-    "11:style": "M7", "11:render": "M7", "11:validate": "M7",
-}
+# 🛑 **비었다 = 단계 표가 전부 배선됐다.** 남겨 두는 이유는 다음 단계를 더하는 사람이
+# 갈 곳이기 때문이다 — `V4_STEPS` 에 이름만 더하면 `_check_step_coverage` 가 임포트
+# 시점에 죽고, 그때 여기에 마일스톤을 적거나 handler 를 짓게 된다(조용한 누락 금지).
+NOT_IMPLEMENTED_MILESTONE: dict[str, str] = {}
 
 # 실제로 배선된 단계. `run_v4` 안의 `handlers` 와 **같은 집합**이어야 하고 그 사실을
 # 배선이 스스로 확인한다(아래) — 표를 두 곳에 적으면 언젠가 갈린다(독스트링 ①).
@@ -152,6 +172,7 @@ IMPLEMENTED_STEPS: frozenset[str] = frozenset({
     "init", "research", "transcribe", "probe", "upload",
     "candidates", "boundary", "verify", "funnel", "flags", "approve",
     "flesh", "detail",
+    "11:resources", "11:draft", "11:style", "11:render", "11:validate",
 })
 
 
@@ -635,6 +656,124 @@ def story_checkpoint_doc(docs: list[dict], span_index: dict[str, dict], *,
     }
 
 
+# ── 11 단계 순수 변환기·지문 ─────────────────────────────────────────────────
+# 배선 안에 두지 않는 이유는 10·10a 변환기와 같다 — **테스트가 값으로 고정할 수 있어야**
+# 한다. 특히 지문은 틀려도 소리가 안 난다: 재료를 빠뜨리면 낡은 산출이 조용히 재사용되고
+# (v3 적대 리뷰가 잡은 "옛 라벨이 든 final 이 그대로 납품"이 그 형태다), 반대로 실행마다
+# 달라지는 값을 넣으면 매 실행 요금이 다시 나간다.
+
+# `checkpoint_story.json` 의 variants[k] 에서 11단계가 읽는 열쇠. v1 열쇠(`clips`·
+# `title_text`·`score`·`tts_cues`)는 **뺀다** — 같은 재료에서 파생된 사본이고, 11단계가
+# 부르는 v3 함수들이 읽는 것은 `title`·`beats`·`narration_cues` 다. 사본까지 지문에
+# 실으면 7단계 점수만 바뀌어도 TTS 합성 요금이 다시 나간다.
+EPISODE_STORY_KEYS: tuple[str, ...] = (
+    "schema", "candidate_id", "template", "reason", "title", "beats",
+    "narration_cues", "narration_dropped", "segments", "span_ids", "budget",
+    "description", "hashtags")
+# 없으면 크게 실패하는 것 — 이 넷이 없으면 편집 계획·자막·cue 를 만들 수 없다.
+EPISODE_STORY_REQUIRED: tuple[str, ...] = ("candidate_id", "title", "beats",
+                                           "narration_cues")
+
+
+def episode_story_doc(variant: dict) -> dict:
+    """`checkpoint_story.json` 의 variants[k] → 11단계가 읽는 story 문서. 순수.
+
+    ⚠ 없는 열쇠는 **채우지 않는다**(빈 값으로 메우면 그 편이 자막·내레이션 없이
+    조용히 렌더된다). 필수 넷이 빠지면 그 자리에서 크게 실패한다 — 10단계가 낸 문서가
+    아니거나 v1·v3 가 남긴 같은 이름의 파일이라는 뜻이다.
+    """
+    if not isinstance(variant, dict):
+        raise TypeError(f"variants 항목이 객체가 아니다: {type(variant).__name__}")
+    missing = [k for k in EPISODE_STORY_REQUIRED if k not in variant]
+    if missing:
+        raise RuntimeError(
+            f"`checkpoint_story.json` 의 편에 {missing} 이 없다 — 10단계(살붙이기)가 "
+            "낸 문서가 아니다. `--from-step flesh` 로 다시 만들어라.")
+    return {k: variant[k] for k in EPISODE_STORY_KEYS if k in variant}
+
+
+def timeline_signature(timeline: list[dict]) -> list[list]:
+    """지문 재료용 타임라인 축약 — v3 `pipeline._run_m4:787~789` 와 같은 네 값. 순수.
+
+    🛑 `subtitle`(라벨 문구)·`role` 은 **넣지 않는다.** 초벌 화면을 바꾸는 것은 컷
+    경계·span 구성·뮤트 여부이고, 라벨 문구는 style 지문의 다른 재료(`label_plan`)가
+    이미 들고 있다. 여기에 문구를 넣으면 사람이 자막 한 글자를 고칠 때마다 초벌
+    720p 재인코딩이 다시 돈다.
+    """
+    out: list[list] = []
+    for c in timeline:
+        out.append([round(float(c["clip_start_sec"]), 3),
+                    round(float(c["clip_end_sec"]), 3),
+                    list(c.get("span_ids") or []),
+                    bool(c.get("use_original_audio", True))])
+    return out
+
+
+def resources_fingerprint(story_doc: dict, span_ids: Any, name_dict: list[str],
+                          grid_fingerprint: str | None) -> str:
+    """11:resources 캐시 지문. 계약 §6 의 세 재료 + 격자 지문. 순수.
+
+    계약은 `[story_doc, span_ids, 정정 사전]` 이라고 못박는다(정정 사전 =
+    `textcheck.check_names`·`fix_names` 가 쓰는 인명 목록 — 그것이 바뀌면 자막 글자가
+    바뀐다). **격자 지문을 하나 더 넣는 것**은 계약의 상위집합이고 이유가 있다: span
+    **id** 는 그대로인데 격자가 다시 만들어져 그 id 의 시각이 달라질 수 있다(재단
+    상수·장면 임계 변경). 그러면 같은 지문으로 다른 컷의 자막·cue 가 재사용된다.
+    """
+    return job.fingerprint("v4_resources/v1", story_doc, span_ids,
+                           sorted(name_dict or []), grid_fingerprint,
+                           resources_mod.CUE_VOICE, resources_mod.CUE_SPEED)
+
+
+def draft_fingerprint(timeline: list[dict]) -> str:
+    """11:draft 캐시 지문. 계약 §6 은 `[timeline]` — 거기에 **초벌 기하**를 더한다. 순수.
+
+    기하(720p/30fps·crf)는 그 파일이 무엇인가 그 자체다(운영자 결정 O9). O9 를
+    되돌리면 화면이 달라지고, 스타일은 **그 화면을 보고** 판정한다 — 지문에 없으면
+    480p 시절 초벌 위에서 새 판정이 내려진다.
+    """
+    return job.fingerprint("v4_draft/v1", timeline_signature(timeline),
+                           render_mod.DRAFT_HEIGHT, render_mod.DRAFT_FPS,
+                           render_mod.DRAFT_CRF)
+
+
+def style_fingerprint(timeline: list[dict], label_plan: list[dict], preset: dict, *,
+                      model: str) -> str:
+    """11:style 캐시 지문 — 계약 §6 `sha1(timeline + label_plan + 프리셋)`. 순수.
+
+    🛑 **편집실이 고치는 필드는 재료가 아니다**(계약 §6 의 🛑 · E15 규율). 편집실
+    라운드에서 스타일을 다시 호출하면 사람이 승인한 화면이 라운드마다 달라진다.
+    v3 가 그 사고를 냈고(CLAUDE.md E15 "재개는 재호출 없이 그대로 재적용"), 그래서
+    여기 재료에는 사람이 고치는 것 — 제목(`layout.top_title`)·자막 문구
+    (`subtitle_segments`)·design 오버라이드 — 이 **하나도 없다**. 반대로 컷
+    (`timeline`)이 바뀌면 화면이 달라지므로 다시 물어야 하고, 라벨 계획은 Stage 4 가
+    좌표를 정해 주는 대상이라 개수·문구가 바뀌면 다시 물어야 한다(v3 적대 리뷰 C2:
+    "story 의 라벨만 고치면 지문이 안 움직여 옛 라벨이 든 final 이 납품됐다").
+
+    호출 자체의 손잡이(모델·표본 fps·해상도·프롬프트)도 재료다 — O9 를 되돌리면
+    같은 화면을 다른 눈으로 본 판정이라 캐시가 유효하지 않다.
+    """
+    return job.fingerprint(
+        "v4_style/v1", timeline_signature(timeline), label_plan, preset, model,
+        render_mod.STYLE_MEDIA_RESOLUTION, render_mod.STYLE_SAMPLE_FPS,
+        render_mod.STYLE_MAX_OUTPUT_TOKENS,
+        cand_mod.prompt_sha(stage4_mod.STYLE_PROMPT))
+
+
+def render_fingerprint(style_fp: str, style_doc: dict, resources_fp: str) -> str:
+    """11:render 캐시 지문 — 계약 §6 `[style 지문, 확정 style_doc]` + 재료 지문. 순수.
+
+    확정 `style_doc` 을 통째로 넣는 이유는 v3 적대 리뷰가 잡은 그 결함이다: 라벨
+    좌표·색·crop/pop 이 바뀌었는데 파일이 존재한다고 옛 최종본을 납품했다.
+
+    **재료 지문을 더한 것**은 계약의 상위집합이다. 최종본은 자막(`segments`)과 cue
+    오디오(`resources`)도 굽는데, 그 둘은 style 지문의 재료가 아니다(일부러 뺐다 —
+    윗 함수의 🛑). 내레이션 문구만 고친 편은 컷도 라벨도 그대로라 style 지문이 안
+    움직인다 — 그때 이 재료가 없으면 **옛 소리가 든 최종본이 그대로 나간다**.
+    """
+    return job.fingerprint("v4_render/v1", style_fp, style_doc, resources_fp,
+                           render_mod.FINAL_NAME)
+
+
 # ── 배선 ────────────────────────────────────────────────────────────────────
 
 def run_v4(*, video_path: Path, work_title: str, outdir: Path,
@@ -649,8 +788,9 @@ def run_v4(*, video_path: Path, work_title: str, outdir: Path,
            log=print) -> Path:
     """v4 전 단계 배선. 반환은 job 디렉토리(계약 §1).
 
-    1~10단계는 실제로 돌고, 11 은 `not_implemented` 를 남기고 **정상 종료**한다
-    (조용히 건너뛰지 않는다 — 무엇이 남았는지 stdout·run_log 양쪽에 적는다).
+    1~10단계는 편 전체에 한 번, 11단계의 다섯 조각은 **승인 편마다** 돈다. 편별
+    격리가 계약이다(§6) — 한 편이 실패해도 나머지 편의 산출은 남고, 실패한 편은 그
+    뒤 조각을 건너뛴다. 승인 편이 **전부** 실패하면 크게 죽는다(조용한 결번 금지).
 
     `winner_detail` 이 10a(정밀 청취)의 유일한 스위치다 — 기본은 꺼짐(기획서 §9 N1:
     "끄고 시작, A/B 뒤"). 🛑 꺼져 있으면 **화자를 아무 데서도 얻지 못한다**(계약 §0 의
@@ -718,7 +858,10 @@ def run_v4(*, video_path: Path, work_title: str, outdir: Path,
                              # flesh 입구에서 당겨 돈다 — `detail_done` 이 그 사실을
                              # 들고 있어 기록이 한 번만 남는다.
                              "detail": None, "detail_done": False,
-                             "detail_fingerprint": None}
+                             "detail_fingerprint": None,
+                             # 11 은 승인 편마다 돈다 — 다섯 조각이 이 목록을 함께
+                             # 들고 다닌다(계획·자막·재료·초벌·스타일·최종).
+                             "episodes": None, "span_index": None}
 
     gemini: Any = None
 
@@ -1633,6 +1776,260 @@ def run_v4(*, video_path: Path, work_title: str, outdir: Path,
         log(f"  [v4/flesh] checkpoint_story.json — variants "
             f"{len(story_doc['variants'])}편 · 화자 {len(speakers)}명")
 
+    # ── 11 승인 편마다: 편집 재료 → 초벌 → 스타일 → 최종 → 검증 ───────────
+    # 계약 §6. 다섯 조각이 **편마다** 돌고, 각자 자기 지문으로 캐시를 다시 본다.
+    #
+    # 🛑 프리셋은 여기 한 곳에서 만든다 — 밴드 기하(라벨이 검정 밴드를 뚫지 않게)와
+    #   `run_style` 이 **같은 프리셋**을 봐야 한다(v3 `_run_m4` 주석). 채널별 프리셋
+    #   선택 손잡이(v3 `--style-preset`)는 v4 에 아직 없다(M7 잔여) — 없는 플래그를
+    #   흉내 내지 않고 v3 기본(RECAP)을 그대로 쓴다.
+    style_preset = stage4_mod.get_style_preset(None)
+
+    def cast_names() -> list[str]:
+        """인명 사전 — 자막 오인식 교정(11:resources)·검증이 쓰는 그 목록(계약 §1)."""
+        return [c["character_name"]
+                for c in (state["research"] or {}).get("cast_images") or []
+                if c.get("character_name")]
+
+    def span_index() -> dict[str, dict]:
+        """클립 묶기·자막·검증이 공유하는 span 색인. **다리는 한 곳이다**(계약 §4).
+
+        10단계가 같은 함수·같은 재료(격자 + 10a 산출)로 만든 것과 같은 값이다. 캐시로
+        10단계를 건너뛴 재개(`--from-step 11:resources`)에서도 여기서 다시 만든다 —
+        순수 함수라 결과가 같고, `bridge.build_span_index` 가 격자 불일치를 크게
+        실패시킨다(stale 캐시 방어).
+        """
+        if state["span_index"] is None:
+            idx, _order = bridge_mod.build_span_index(state["grid"],
+                                                      detail=_ensure_detail())
+            state["span_index"] = idx
+        return state["span_index"]
+
+    def episodes() -> list[dict]:
+        """승인 편 목록(**순위 순** · 1위부터). 정본은 `checkpoint_story.json` 이다.
+
+        ⚠ 순서가 곧 산출 번호다(`shorts.mp4` · `shorts_2.mp4`) — 9단계 승인 순서를
+        10단계가 그대로 실었으므로 여기서 다시 정렬하지 않는다.
+        """
+        if state["episodes"] is None:
+            doc = job.read_json(story_ckpt)
+            eps: list[dict] = []
+            for i, v in enumerate(doc.get("variants") or [], start=1):
+                eps.append({"variant": i, "id": v.get("candidate_id"),
+                            "story": episode_story_doc(v), "failed": None})
+            if not eps:
+                raise RuntimeError(NO_APPROVED_MESSAGE)
+            state["episodes"] = eps
+        return state["episodes"]
+
+    def per_episode(name: str, work: Callable[[dict], dict]) -> None:
+        """승인 편마다 `work(ep)` — **편별 격리** + 단계당 기록 한 줄(계약 §6).
+
+        · 한 편이 실패하면 그 편만 표시하고 다음 편으로 간다. 실패한 편은 그 뒤
+          조각을 건너뛴다(재료 없이 렌더하면 더 나쁜 것이 나온다).
+        · **전부 실패하면 크게 죽는다** — 조용한 결번이 이 레포에서 가장 나쁜
+          실패다(9단계 `no_publishable` 과 같은 규율).
+        · 기록은 단계마다 한 줄이고 편별 내역은 그 안의 `episodes` 배열이다. 편마다
+          `step()` 을 부르면 같은 단계가 여러 줄 남아 감사가 거짓말을 한다(10a 가
+          `detail_done` 으로 피한 그 문제와 같다).
+        """
+        eps = episodes()
+        t0 = time.time()
+        rows: list[dict] = []
+        for ep in eps:
+            head = {"variant": ep["variant"], "id": ep["id"]}
+            if ep["failed"]:
+                rows.append({**head, "skipped": f"앞 단계 실패({ep['failed']['step']})"})
+                continue
+            try:
+                rows.append({**head, **work(ep)})
+            except Exception as e:  # noqa: BLE001 — 편별 격리가 계약이다(§6)
+                ep["failed"] = {"step": name, "type": type(e).__name__,
+                                "message": str(e)[:300]}
+                rows.append({**head, "error": f"{type(e).__name__}: {str(e)[:300]}"})
+                log(f"  [v4/{name}] ✖ {ep['variant']}위({ep['id']}) 실패 — "
+                    f"{type(e).__name__}: {e}")
+        alive = [ep for ep in eps if ep["failed"] is None]
+        step(name, elapsed=round(time.time() - t0, 1), of=len(eps), ok=len(alive),
+             failed=len(eps) - len(alive), episodes=rows)
+        if not alive:
+            raise RuntimeError(
+                f"{step_label(name)} — 승인 {len(eps)}편이 전부 실패했다"
+                "(조용한 결번 금지).\n  "
+                + "\n  ".join(f"{ep['variant']}위 {ep['id']}: "
+                             f"{ep['failed']['step']} — {ep['failed']['type']}: "
+                             f"{ep['failed']['message']}" for ep in eps))
+
+    # ── 11:resources 편집 재료 ────────────────────────────────────────────
+    def _ep_resources(ep: dict) -> dict:
+        paths = resources_mod.resource_paths(output_dir, ep["variant"])
+        fp = resources_fingerprint(ep["story"], ep["story"].get("span_ids"),
+                                   cast_names(), state["grid_fingerprint"])
+        ep["resources_fp"] = fp
+        use_cache, why = _cache_state(paths["checkpoint_resources"], fp,
+                                      _invalidated("11:resources"),
+                                      # 세 파일 다 **v1 과 같은 이름**이다 — 남의
+                                      # 산출을 '존재하니 쓴다'로 집어 들면 v4 가 짓지도
+                                      # 않은 자막·오디오로 발행한다.
+                                      require_fingerprint=True)
+        if use_cache and not all(p.exists() for p in paths.values()):
+            use_cache, why = False, f"{why} → 산출 파일이 빠졌다(다시 만든다)"
+        if use_cache:
+            # 🛑 계획은 **디스크 것이 정본**이다. 순수 함수라 다시 지어도 같은 값이지만,
+            #   편집실 수정(M7)이 얹히면 디스크 쪽만 그 수정을 들고 있다 — 그때 메모리
+            #   사본을 쓰면 사람이 고친 컷이 조용히 사라진다.
+            ep["plan"] = job.read_json(paths["edit_plan"])
+            ep["segments"] = job.read_json(paths["subtitle_segments"])
+            ep["resources"] = job.read_json(paths["checkpoint_resources"])
+            # 받은 계획이 **이 격자에서 나온 것인지** 여기서 다시 본다(resources 규율 2:
+            # 조립할 때와 재료로 받을 때 양쪽에서 벨트를 건다).
+            belt = assemble_mod.verify_edit_plan(ep["plan"], state["grid"])
+            if belt["pct"] is not None and belt["pct"] < 100.0:
+                raise AssertionError(f"캐시된 edit_plan 의 시각 정합 벨트 위반: {belt}")
+            log(f"  [v4/11:resources] {ep['variant']}위 캐시 로드({why}) — "
+                f"자막 {len(ep['segments'])}줄")
+            return {"cached": True, "cache_reason": why, "fingerprint": fp,
+                    "clips": len(ep["plan"]["timeline"]),
+                    "segments": len(ep["segments"]),
+                    "cues": len(ep["resources"].get("tts_cue_files") or []),
+                    "time_alignment": belt}
+
+        plan, belt = resources_mod.build_edit_plan(
+            ep["story"], span_index(), state["grid"],
+            video_path=str(video_path), work_title=work_title)
+        ep["plan"] = plan
+        resources, segments, audit = resources_mod.build_resources(
+            ep["story"], span_index=span_index(), grid=state["grid"], plan=plan,
+            research=state["research"], gemini=get_gemini(),
+            output_dir=output_dir, variant=ep["variant"], log=log)
+        _write_meta(paths["checkpoint_resources"], fp, variant=ep["variant"],
+                    id=ep["id"])
+        ep["segments"], ep["resources"] = segments, resources
+        return {"cached": False, "cache_reason": why, "fingerprint": fp,
+                "clips": len(plan["timeline"]), "segments": len(segments),
+                "cues": len(resources["tts_cue_files"]),
+                "time_alignment": belt, "audit": audit}
+
+    # ── 11:draft 초벌(720p/30fps · O9) ────────────────────────────────────
+    def _ep_draft(ep: dict) -> dict:
+        paths = render_mod.render_paths(output_dir, ep["variant"])
+        fp = draft_fingerprint(ep["plan"]["timeline"])
+        ep["draft"] = paths["draft"]
+        use_cache, why = _cache_state(paths["draft"], fp, _invalidated("11:draft"),
+                                      require_fingerprint=True)
+        if use_cache:
+            log(f"  [v4/11:draft] {ep['variant']}위 캐시 재사용({why}) — "
+                f"{paths['draft'].name}")
+            return {"cached": True, "cache_reason": why, "fingerprint": fp}
+        cost = render_mod.render_draft(video_path, ep["plan"]["timeline"],
+                                       paths["draft"], log=log)
+        _write_meta(paths["draft"], fp, variant=ep["variant"], id=ep["id"])
+        return {"cached": False, "cache_reason": why, "fingerprint": fp, **cost}
+
+    # ── 11:style 스타일(HIGH · O9) ────────────────────────────────────────
+    def _ep_style(ep: dict) -> dict:
+        paths = render_mod.render_paths(output_dir, ep["variant"])
+        timeline = ep["plan"]["timeline"]
+        # 라벨 계획·비트 창은 **렌더와 같은 함수**로 만든다 — Stage 4 가 좌표를 채워
+        # 주는 대상이 렌더가 그리는 그 목록이어야 한다(v3 `_run_m4` 와 같은 자리).
+        labels = finalize_mod.plan_labels(ep["story"], ep["plan"])
+        windows = [{"beat": w["beat"], "start": w["start"], "end": w["end"]}
+                   for w in stage4_mod.edited_beat_windows(ep["story"], timeline)]
+        fp = style_fingerprint(timeline, labels, style_preset, model=model_name)
+        ep["style_fp"] = fp
+        use_cache, why = _cache_state(paths["style"], fp, _invalidated("11:style"),
+                                      require_fingerprint=True)
+        if use_cache:
+            # E15 재개 계약 — 승인된 화면은 재렌더마다 달라지지 않는다(재호출 없음).
+            ep["style_doc"] = job.read_json(paths["style"])
+            log(f"  [v4/11:style] {ep['variant']}위 캐시 로드({why}) — 재호출 없음")
+            return {"cached": True, "cache_reason": why, "fingerprint": fp,
+                    "labels": len(labels)}
+        doc, audit = render_mod.run_style(
+            get_gemini(), ep["draft"], ep["story"], preset=style_preset,
+            windows=windows, labels=labels, log=log)
+        # 🛑 파일에는 **스타일 문서 그대로** 쓴다(v3 는 `{fingerprint, style}` 로 감쌌다).
+        #   현지화 E16 과 계약 대조 도구가 이 파일의 뿌리에서 키를 찾는다 — 감싸면
+        #   아무도 안 죽고 JP 판 연출 문구가 한국어로 남는다. 지문은 사이드카에.
+        job.write_json(paths["style"], doc)
+        _write_meta(paths["style"], fp, variant=ep["variant"], id=ep["id"])
+        ep["style_doc"] = doc
+        return {"cached": False, "cache_reason": why, "fingerprint": fp,
+                "labels": len(labels), "diff_keys": audit.get("diff_keys"),
+                "fallback": bool(audit.get("fallback")),
+                "reasks_used": audit.get("reasks_used"), "audit": audit}
+
+    # ── 11:render 최종본 ──────────────────────────────────────────────────
+    def _ep_render(ep: dict) -> dict:
+        paths = render_mod.render_paths(output_dir, ep["variant"])
+        fp = render_fingerprint(ep["style_fp"], ep["style_doc"], ep["resources_fp"])
+        ep["final"] = paths["final"]
+        use_cache, why = _cache_state(paths["final"], fp, _invalidated("11:render"),
+                                      require_fingerprint=True)
+        if use_cache:
+            log(f"  [v4/11:render] {ep['variant']}위 캐시 재사용({why}) — "
+                f"{paths['final'].name}")
+            return {"cached": True, "cache_reason": why, "fingerprint": fp,
+                    "final": paths["final"].name}
+        out_path, cost = render_mod.render_final(
+            video_path=video_path, plan=ep["plan"], style_doc=ep["style_doc"],
+            segments=ep["segments"], resources=ep["resources"],
+            story_doc=ep["story"], output_dir=output_dir, variant=ep["variant"],
+            log=log)
+        _write_meta(paths["final"], fp, variant=ep["variant"], id=ep["id"])
+        ep["final"] = Path(out_path)
+        log(f"  [v4/11:render] {ep['variant']}위 → {Path(out_path).name}")
+        return {"cached": False, "cache_reason": why, "fingerprint": fp,
+                "final": Path(out_path).name, **cost}
+
+    # ── 11:validate 검증 ──────────────────────────────────────────────────
+    def _ep_validate(ep: dict) -> dict:
+        paths = render_mod.render_paths(output_dir, ep["variant"])
+        # 예고·인트로 구역은 **7단계가 본 그 값**을 쓴다(6b 정정본이 있으면 그것) —
+        # 후보를 거른 기준과 유입을 재는 기준이 갈리면 벨트가 다른 것을 잰다.
+        sectors, sectors_from = sector_source()
+        doc = render_mod.run_validate(
+            plan=ep["plan"], grid=state["grid"],
+            candidates_doc={"exception_sectors": sectors},
+            span_index=span_index(), segments=ep["segments"],
+            resources=ep["resources"], final_path=ep.get("final"),
+            tmp_dir=output_dir / f"validate_tmp{render_mod.variant_suffix(ep['variant'])}",
+            cast_names=cast_names(), gemini=get_gemini(), log=log)
+        # 검증은 **산출이 아니라 판정**이라 캐시하지 않는다(v3 규약 그대로) — 재개마다
+        # 다시 잰다. 비싼 것은 프레임 QC 한 콜뿐이고, 낡은 판정을 재사용하면 그 편이
+        # 통과했는지 아무도 확신할 수 없다.
+        job.write_json(paths["validation"], doc)
+        row = {"cached": False, "hard_fail": doc["hard_fail"],
+               "warnings": doc["warnings_total"], "sectors_from": sectors_from,
+               "snap_pct": doc["snap_belt"]["pct"],
+               "tts_violations": len(doc["tts_conflicts"]["violations"]),
+               "exception_violations": len(doc["exception_ingress"]["violations"])}
+        if doc["hard_fail"]:
+            # 계약 §4 — **그 편만** 실패로 기록하고 다음 편으로 간다. 예외로 올리면
+            # 한 편의 벨트 위반이 나머지 편의 산출까지 못 만들게 한다.
+            ep["failed"] = {"step": "11:validate", "type": "hard_fail",
+                            "message": f"tts {len(doc['tts_conflicts']['violations'])}건 · "
+                                       f"예고유입 {len(doc['exception_ingress']['violations'])}건 · "
+                                       f"스냅 {doc['snap_belt']['pct']}%"}
+            log(f"  [v4/11:validate] 🛑 {ep['variant']}위({ep['id']}) hard_fail — "
+                f"{paths['validation'].name} 참조")
+        return row
+
+    def _step_ep_resources() -> None:
+        per_episode("11:resources", _ep_resources)
+
+    def _step_ep_draft() -> None:
+        per_episode("11:draft", _ep_draft)
+
+    def _step_ep_style() -> None:
+        per_episode("11:style", _ep_style)
+
+    def _step_ep_render() -> None:
+        per_episode("11:render", _ep_render)
+
+    def _step_ep_validate() -> None:
+        per_episode("11:validate", _ep_validate)
+
     handlers: dict[str, Callable[[], None]] = {
         "research": _step_research,
         "transcribe": _step_transcribe,
@@ -1646,6 +2043,11 @@ def run_v4(*, video_path: Path, work_title: str, outdir: Path,
         "approve": _step_approve,
         "flesh": _step_flesh,
         "detail": _step_detail_slot,
+        "11:resources": _step_ep_resources,
+        "11:draft": _step_ep_draft,
+        "11:style": _step_ep_style,
+        "11:render": _step_ep_render,
+        "11:validate": _step_ep_validate,
     }
     # 표와 배선을 묶는다 — `IMPLEMENTED_STEPS` 만 고치고 handler 를 빠뜨리면 그 단계가
     # 조용히 `KeyError` 로 죽거나(미구현 표에도 없으니) 엉뚱하게 정상 종료한다.

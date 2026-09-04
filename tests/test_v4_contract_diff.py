@@ -67,6 +67,10 @@ def good_docs() -> dict:
             ],
             "video_speed": 1.0,
         },
+        # v4 가 실제로 쓰는 연출 문서(v3 Stage 4 어휘) — `checkpoint_style.json` 과
+        # 이름도 모양도 다른 별개 파일이다.
+        "style.json": {"design": {"aspect_ratio": "1:1", "subtitle_size": 58},
+                       "beats": [], "labels": [], "diff": {}, "notes": ""},
         "checkpoint_style.json": {
             "schema": "style_plan/v1",
             "texts": [{"text": "쿵!", "source_time_sec": 42.0}],
@@ -449,3 +453,20 @@ def test_numbered_sibling_is_checked(tmp_path):
     assert not res["ok"]
     row = next(f for f in res["files"] if f["file"] == "edit_plan_2.json")
     assert [v["key"] for v in row["violations"]] == ["layout.bottom_label"]
+
+
+def test_style_json_and_checkpoint_style_are_different_contracts():
+    """한 이름에 두 모양을 얹지 않는다 — 두 파일은 서로의 키를 받지 않는다.
+
+    v4 연출은 v3 Stage 4 어휘(`design`…)이고 E15 어휘(`schema`·`texts`…)가 아니다.
+    이 둘이 같은 표를 공유하면, 모양이 다른 문서가 계약 이름으로 나가는 그 사고가
+    도구를 통과한다(실제로 M7 에서 그렇게 나갈 뻔했고 이 도구가 잡았다)."""
+    v3_shape = {"design": {}, "beats": [], "labels": [], "notes": ""}
+    e15_shape = {"schema": "style_plan/v1"}
+    assert M.check_document("style.json", v3_shape)["status"] == "ok"
+    assert M.check_document("checkpoint_style.json", e15_shape)["status"] == "ok"
+    # 서로 바꿔 넣으면 잡힌다 — 이것이 이 분리의 존재 이유다.
+    assert M.check_document("checkpoint_style.json", v3_shape)["status"] == "violation"
+    assert M.check_document("style.json", e15_shape)["status"] == "violation"
+    # 2위 편도 같은 계약을 탄다(승인 편이 여럿이다 — O7).
+    assert M.contract_keys_for("style_2.json") == M.CONTRACTS["style.json"]

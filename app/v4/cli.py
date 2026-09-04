@@ -1,4 +1,4 @@
-"""pipeline v4 CLI — 계약 `docs/v4/M2-interfaces.md` §6.
+"""pipeline v4 CLI — 계약 `docs/v4/M2-interfaces.md` §6(+ M6 §6 의 11 하위 단계).
 
     python -m app.v4 --video <원본.mp4> --work-title <작품명> \\
         [--srt 자막.srt] [--episode N] [--outdir outputs] [--job-id <재개>] \\
@@ -52,7 +52,7 @@ def _step_help() -> str:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="create_shorts_v4",
-        description="pipeline v4 (M5: 1~10단계 — 격자·후보·승인·살붙이기) — 병행 신규")
+        description="pipeline v4 (1~11단계 — 격자·후보·승인·살붙이기·렌더) — 병행 신규")
     p.add_argument("--video", required=True, help="원본 영상 경로")
     p.add_argument("--work-title", required=True, help="작품명(job 디렉토리 접두)")
     p.add_argument("--srt", default=None,
@@ -63,6 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--job-id", default=None, help="기존 job 재개")
     p.add_argument("--from-step", default=None,
                    help="캐시를 무시하고 이 단계부터 재구성 — " + _step_help())
+    # ⚠ 11 은 하위 다섯 조각이라 `--stop-after 11:draft` 처럼 **조각 단위로** 멈춘다
+    #   (별칭 `11` 은 그 첫 조각 `11:resources` 를 가리킨다 — steps.STEP_ALIASES).
     p.add_argument("--stop-after", default=None,
                    help="이 단계까지만 돌고 정상 종료 — " + _step_help())
     p.add_argument("--max-shorts", type=int, default=None,

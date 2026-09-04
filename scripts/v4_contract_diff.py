@@ -153,6 +153,19 @@ CONTRACTS: dict[str, tuple[str, ...]] = {
         "?title_segments[].text",
     ),
 
+    # v3/v4 Stage 4 연출 문서. ⚠ 위 `checkpoint_style.json` 과 **다른 파일이고 다른
+    # 어휘다** — 그 이름은 E15(texts·title_fixed·title_segments)의 것이고, 이쪽은
+    # v3 Stage 4 어휘(design·beats·labels·diff·notes)다. 한 이름에 두 모양을 얹지
+    # 않으려고 파일을 나눴다(app/v4/render.py STYLE_STEM 🛑). v4 잡에는 이 파일이
+    # 있고 `checkpoint_style.json` 은 없다 — 그래서 현지화 E16 은 연출을 안 켠
+    # 채널과 똑같이 지나간다(정직한 부재).
+    "style.json": (
+        # app/v3/finalize.py:312 design_from_style(style_doc.get("design") or {}) —
+        # 없으면 조용히 빈 dict 가 되어 채널 프리셋이 통째로 증발한다(전 편이
+        # 엔진 기본 디자인으로 나간다). 렌더가 화면을 그리는 유일한 재료다.
+        "design",
+    ),
+
     # 정본 격자. 6c 검증·편집실 스냅·assemble 이 같은 눈금을 본다.
     "grid.json": (
         # app/modules/grid/timegrid.py:154~161 grid_snap_times — 하드(KeyError).
@@ -193,7 +206,7 @@ _ROOT_LIST_PREFIX = "[]"
 # 2위 이하가 1위와 다른 모양이면 그 편만 조용히 깨지므로 **같은 계약으로 함께 본다**.
 # ⚠ v3 훅 변형 `edit_plan_variant_{k}.json` 은 숫자 접미가 아니라 여기 안 걸린다
 #   (loader 와 같은 판별 — 그건 승인 편이 아니다).
-NUMBERED_SIBLINGS = ("edit_plan.json", "checkpoint_style.json")
+NUMBERED_SIBLINGS = ("edit_plan.json", "checkpoint_style.json", "style.json")
 
 
 def contract_keys_for(name: str) -> tuple[str, ...] | None:
