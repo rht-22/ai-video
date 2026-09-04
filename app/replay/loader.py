@@ -8,7 +8,8 @@
      <archive>/bundles/<run_id>/    — 2차 자료(선택): subtitle_segments.json ·
                                        checkpoint_gemini.json · checkpoint_silence_cut.json
 ② job 디렉토리 레이아웃 (엔진 산출 그대로 — v3 산출 디렉토리도 이 모양):
-     <root>/<job_dir>/edit_plan.json (+ checkpoint_story.json · run_log.json ·
+     <root>/<job_dir>/edit_plan.json (+ edit_plan_{n}.json — v4 승인 2위 이하 ·
+                                        checkpoint_story.json · run_log.json ·
                                         subtitle_segments.json · checkpoint_gemini.json …)
      <root> 자체가 job 디렉토리 하나여도 된다(edit_plan.json 직접 보유).
 
@@ -75,6 +76,8 @@ def _record_from_snapshot(path: Path, bundles_dir: Path) -> dict:
         "timeline": ep.get("timeline") or [],
         "config": ((rl.get("provenance") or {}).get("config") or {}).get("app") or {},
         "human_edited": bool(row.get("human_edited")),
+        "pipeline": _pipeline_marker(rl),
+        "approved_rank": 1,
     }
     bd = bundles_dir / str(run_id)
     if bd.is_dir():
@@ -82,6 +85,57 @@ def _record_from_snapshot(path: Path, bundles_dir: Path) -> dict:
         if bundle:
             rec["bundle"] = bundle
     return rec
+
+
+def _pipeline_marker(rl: dict) -> str:
+    """run_log 의 파이프라인 마커 — v1 은 없고(""), v3·v4 는 자기 이름을 싣는다.
+
+    §3 분포를 파이프라인별로 쪼개 보려면 이 값이 있어야 한다. 없는 편(v1)은 빈
+    문자열이라 종전 집계와 같은 자리에 남는다(회귀 0)."""
+    return str(rl.get("pipeline") or "")
+
+
+def _v4_variant_clips(cs: dict, rank: int) -> list[dict]:
+    """v4 승인 rank(1-based)의 원안 구간 — checkpoint_story.variants[rank-1].clips.
+
+    v4 는 결함 게이트를 통과한 편을 전부 낸다. 그 편들의 원안은 v1 모양
+    `variants[]` 에 그대로 실린다(계약 표 — v1 render 재개가 읽는 모양). 1위는
+    하위 호환 키 `clips` 와 같은 것이라 여기서도 같은 값이 나온다."""
+    vs = cs.get("variants")
+    if isinstance(vs, list) and 1 <= rank <= len(vs):
+        v = vs[rank - 1]
+        if isinstance(v, dict):
+            return v.get("clips") or []
+    return []
+
+
+def _v4_approved_records(d: Path, base: dict, cs: dict) -> list[dict]:
+    """v4 승인 2위 이하(`edit_plan_{n}.json`) → 추가 기록. additive.
+
+    한 job 에 최종본이 여럿인 것이 v4 의 성질이다(1위 `edit_plan.json` = base,
+    2위↓ `edit_plan_2.json`…). 이걸 안 읽으면 분포 집계가 1위만 세어 승인 편수를
+    과소 보고한다 — v3 편이 "집계 0"으로 빠졌던 것과 같은 부류의 구멍이다.
+
+    ⚠ 숫자 접미만 본다. v3 훅 변형은 `edit_plan_variant_{k}.json` 이라 여기 걸리지
+    않는다(그건 본편 불변의 훅 교체이고 승인 편이 아니다)."""
+    out: list[dict] = []
+    for f in sorted(d.glob("edit_plan_*.json")):
+        stem = f.stem[len("edit_plan_"):]
+        if not stem.isdigit():
+            continue
+        try:
+            ep = _read_json(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(ep, dict):
+            continue
+        rank = int(stem)
+        out.append({**base,
+                    "key": f"{base['key']}#{rank}",
+                    "approved_rank": rank,
+                    "story_clips": _v4_variant_clips(cs, rank) or base.get("story_clips") or [],
+                    "timeline": ep.get("timeline") or []})
+    return out
 
 
 def _v3_story_clips(cs: dict) -> list[dict]:
@@ -105,7 +159,8 @@ def _v3_story_clips(cs: dict) -> list[dict]:
     return out
 
 
-def _record_from_jobdir(d: Path) -> dict | None:
+def _record_from_jobdir(d: Path) -> tuple[dict, dict] | None:
+    """job 디렉토리 → (1위 기록, checkpoint_story). cs 는 v4 승인 편 확장에 쓰인다."""
     ep_path = d / "edit_plan.json"
     if not ep_path.exists():
         return None
@@ -134,11 +189,13 @@ def _record_from_jobdir(d: Path) -> dict | None:
         "timeline": (ep.get("timeline") or []) if isinstance(ep, dict) else [],
         "config": ((rl.get("provenance") or {}).get("config") or {}).get("app") or {},
         "human_edited": (d / "edit_overrides.json").exists(),
+        "pipeline": _pipeline_marker(rl),
+        "approved_rank": 1,
     }
     bundle = _bundle_from_dir(d)
     if bundle:
         rec["bundle"] = bundle
-    return rec
+    return rec, cs
 
 
 def load_archive(root: str | Path) -> dict:
@@ -174,18 +231,24 @@ def load_archive(root: str | Path) -> dict:
             d for d in root.iterdir() if d.is_dir())
         for d in candidates:
             try:
-                rec = _record_from_jobdir(d)
+                got = _record_from_jobdir(d)
             except (json.JSONDecodeError, OSError, TypeError, ValueError) as e:
                 broken.append(f"{d.name}: {type(e).__name__}: {e}")
                 continue
-            if rec is not None:
+            if got is not None:
+                rec, _cs = got
                 records.append(rec)
+                # v4 는 승인 편을 전부 낸다 — 2위 이하도 같은 집계에 넣는다
+                records.extend(_v4_approved_records(d, rec, _cs))
         if not records and not broken:
             # v3 초기 마일스톤(M1)의 job 디렉토리는 grid.json/run_log.json 만 있고
             # edit_plan.json 이 아직 없다 — 레이아웃은 인식하되 기록 0건으로 로드한다
             # (M2+ 에서 edit_plan 이 생기면 그대로 기록이 붙는다).
+            # v4 는 후보 깔때기까지 돌고 편성이 실패하면 edit_plan 이 없다 —
+            # checkpoint_candidates.json 이 그 편의 존재 증거다(레이아웃은 인식).
             v3_markers = any(
                 (d / "run_log.json").exists() or (d / "grid.json").exists()
+                or (d / "checkpoint_candidates.json").exists()
                 for d in candidates)
             if not v3_markers:
                 raise FileNotFoundError(

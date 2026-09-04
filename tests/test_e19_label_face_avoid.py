@@ -194,6 +194,30 @@ def test_glow_ass_tags(tmp_path):
     assert ass.count("3246FF") >= 2                       # 글자색 = 테두리색(발광)
 
 
+def test_glow_outline_cannot_swallow_the_glyphs(tmp_path):
+    """🛑 발광 외곽선은 **글자와 같은 색**이라 두꺼우면 자획 사이를 자기 색으로 메운다.
+
+    2026-09-04 실렌더 사고: 비율 0.12 는 fs56 에서 bord7 이고, 실제 발행본
+    (shorts_4 0~4초)의 '(끝없는 금기)'가 판독 불가능한 주황 덩어리로 나갔다.
+    윗 테스트(`test_glow_ass_tags`)는 태그 **존재**만 봐서 이것을 못 잡았다 —
+    화면이 깨지는 것은 태그가 있느냐가 아니라 **값이 얼마냐**의 문제였다.
+
+    검정 외곽선(pop·shake)은 같은 bord7 에서도 멀쩡하다(색이 달라 경계가 남는다).
+    그래서 상한은 glow 에만 건다."""
+    import re
+    sizes = [40, 56, 72, 100, 140]
+    p = tmp_path / "texts.ass"
+    build_texts_ass([{"text": "(끝없는 금기)", "x": 0.5, "y": 0.4, "size": sz,
+                      "color": "#FFB637", "fx": "glow",
+                      "start_sec": float(i), "end_sec": float(i) + 1.0}
+                     for i, sz in enumerate(sizes)], p)
+    bords = [int(m) for m in re.findall(r"\\bord(\d+)", p.read_text(encoding="utf-8-sig"))]
+    assert len(bords) == len(sizes)
+    for sz, b in zip(sizes, bords):
+        # 실렌더로 확인한 안전선 — fs 의 5% 를 넘으면 자획이 붙기 시작한다.
+        assert b <= max(1, round(sz * 0.05)), f"fs{sz} 의 발광 외곽선 {b}px 는 글자를 삼킨다"
+
+
 def test_non_glow_has_no_blur(tmp_path):
     p = tmp_path / "texts.ass"
     build_texts_ass([{"text": "쿵", "x": 0.5, "y": 0.4, "size": 60,

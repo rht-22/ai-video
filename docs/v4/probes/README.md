@@ -11,6 +11,10 @@ v4 기획서(`../v4-pipeline-plan.md`) §2 A~H 의 "확정" 표시는 전부 이
   이미 만료된 임시 id 라 무해하다.
 - ⚠ **countTokens 를 쓰지 마라** — 멀티파트 영상을 3.8배 과소 계산한다(`mrcheck2.py` 가 그 증거).
   과금은 반드시 `usageMetadata` 로.
+- ⚠ **`tokens/` 는 `count_tokens` 단위, 나머지는 `usageMetadata` 단위다** — 두 산식이
+  다르다(71/32 vs 66/25 · 비율 0.883). 섞어 인용하지 마라: **상한 초과 400 판정은
+  count 쪽**, **과금·예산 집계는 usage 쪽**이다(CLAUDE.md 「산식은 둘이고 쓰는 자리가
+  다르다」). `tokens/` 는 2026-09-03 에 `scripts/gemini_tokens_probe/` 에서 옮겨 왔다.
 
 | 스크립트 | 답한 질문 | 기획서 절 |
 |---|---|---|
@@ -26,6 +30,9 @@ v4 기획서(`../v4-pipeline-plan.md`) §2 A~H 의 "확정" 표시는 전부 이
 | `agent_proxy_res/` | (에이전트) 프록시 480p/720p/1080p × 기본/HIGH · 비용(신병4 10분) · 실소재(가왕쇼) | §2-G |
 | `results/latency_*.json` | (에이전트) 600s·2400s 프록시 fps 별 지연 5회 반복 → 회귀 `8.05 + 75.7×(토큰/1M)` | §2-F |
 | `results/parallel_probe.json` | (검수 반박자) 시각 플래그 8콜 병렬 실측 | 검수 보고 |
+| `tokens/measure.py` | 60초 보정본 fps·media_resolution 별 **count_tokens** → 프레임당 71 · 오디오 32 | CLAUDE.md fps 계약 |
+| `tokens/long.py` | 3시간 실물 업로드 → 길이 하드 상한 없음 · fps 0.85 성공 / 1.0 은 400 | CLAUDE.md fps 계약 |
+| `tokens/res.py` | 해상도별 토큰 동일성 재확인 | §2-G |
 
 소재 mp4/png 는 크기 때문에 커밋하지 않았다 — 스크립트가 다시 만든다(합성) 또는 레포 `outputs_ab/` 의
 프록시를 쓴다(실소재). `seam_equiv.py` 의 `src.mp4` 는

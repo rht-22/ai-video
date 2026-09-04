@@ -630,9 +630,16 @@ class RenderInputs:
     # 트랙([acat])에만 volume=0 을 걸어 cue 오디오는 그대로 산다. None/빈 목록 =
     # 필터 종전과 완전히 동일(v1 회귀 0 — sfx_audio 와 같은 additive 규약).
     muted_windows: list[tuple[float, float]] | None = None
+    # V4-M7(2026-09-03): 출력 프레임 레이트 고정. **argv 에 `-r` 이 없어서** 출력 fps 는
+    # 소재를 그대로 따라갔다 — 24fps 소재는 24fps 쇼츠가 나온다. v4 운영자 결정 O9 는
+    # 최종본을 30fps 로 못박으므로 그 값을 실을 자리가 필요하다. None(기본) = argv 가
+    # **종전과 바이트 동일**이다(v1 전 채널 회귀 0 — muted_windows·sfx_audio 와 같은
+    # 가산 규약). ⚠ 기본값을 30 으로 바꾸면 맥미니 6대의 모든 채널 출력이 함께 움직인다.
+    output_fps: float | None = None
 
 
-def render_short(inputs: RenderInputs) -> list[str]:
+def render_short(inputs: RenderInputs, *,
+                 report: dict | None = None) -> list[str]:
     """
     클립별 입력(-ss/-to -i) + concat filter로 필요한 구간만 처리한 뒤,
     filter_complex로 비디오 합성(배경/텍스트/자막) 및 오디오 믹싱을 수행합니다.
@@ -666,6 +673,17 @@ def render_short(inputs: RenderInputs) -> list[str]:
         )
     if len(clean_clips) != len(inputs.clips):
         print(f"  [WARN] 컷 {len(inputs.clips)}개 중 {len(clean_clips)}개만 렌더합니다")
+        for n in notes:
+            print(f"  [WARN] {n}")
+    # 🛑 걸러낸 컷을 **부르는 쪽에 돌려준다**(2026-09-04). 종전에는 stdout WARN 한
+    # 줄이 전부라 run_log·validation 어디에도 흔적이 없었다 — 실측(shorts_2)에서
+    # 0.2초 미만 컷 5개가 조용히 사라져 대사가 없어졌는데 자막 3줄은 화면에 남았고,
+    # run_log 는 오히려 계획 개수(38)를 적었다. 이 저장소는 조용한 드롭을 금지한다.
+    # `report` 는 가산이다 — 안 주면 종전과 완전히 같다(v1 회귀 0).
+    if report is not None:
+        report["clips_in"] = len(inputs.clips)
+        report["clips_rendered"] = len(clean_clips)
+        report["notes"] = list(notes)
     inputs = replace(inputs, clips=clean_clips)
 
     # 제목 자동 줄바꿈 처리 (캔버스 너비 초과 시)
@@ -817,6 +835,12 @@ def render_short(inputs: RenderInputs) -> list[str]:
     # hwaccel_candidates: list[str | None] = [None]
     hwaccel_candidates = ["d3d11va", "cuda", None] if inputs.enable_hwaccel else [None]
 
+    # getattr — v1 의 옛 호출자가 만든 RenderInputs 에도 이 필드가 있지만,
+    # 다른 데이터클래스를 넘기는 테스트 더블까지 죽이지 않는다.
+    _out_fps = getattr(inputs, "output_fps", None)
+    if _out_fps is not None and not (float(_out_fps) > 0):
+        raise ValueError(f"output_fps 는 0 보다 커야 한다: {_out_fps!r}")
+
     for video_encoder in candidates:
         encoder_args = _video_encoder_args(video_encoder, inputs.render_preset)
         for hwaccel in hwaccel_candidates:
@@ -825,6 +849,10 @@ def render_short(inputs: RenderInputs) -> list[str]:
                 *_build_input_args(hwaccel),
                 "-filter_complex_script", str(filter_path),
                 "-map", "[vout]", "-map", "[aout]",
+                # 출력 fps 고정 — 지정했을 때만 실린다(미지정이면 이 자리가 통째로
+                # 비어 argv 가 종전과 같다). 출력단 `-r` 이라 프레임을 버리거나
+                # 복제해 CFR 로 맞춘다(필터그래프는 안 건드린다).
+                *(["-r", f"{float(_out_fps):g}"] if _out_fps else []),
                 "-c:v", video_encoder, *encoder_args,
                 "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "192k",

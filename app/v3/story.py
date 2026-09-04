@@ -73,7 +73,25 @@ STORY_TEMPLATE_SPECS: dict[str, dict] = {
 STORY_TARGET_SEC = 53.0      # recap 템플릿 기준(레퍼런스 53s) — 채널 노브
 STORY_MAX_SEC = 60.0         # 쇼츠 상한 아래 여유 — 초과분은 예산 다듬기가 던다
 PIECES_MIN, PIECES_MAX = 6, 8   # 편성 조각 수 지향(합격 기준 분포 — soft)
-NARRATION_CPS = 7.5          # 내레이션 자수/초(공백 제외)
+# 🛑 견적이 재는 것은 **합성 파일의 길이**다(발화 시간이 아니다). 이 값이 곧 창이고
+# 창이 곧 TTS 의 target 이라, 파일이 창을 넘으면 Flash 단축을 부르고 그래도 안 맞으면
+# 물리 트림으로 **말을 자른다**. 2026-09-04 실측 전까지 이 상수는 발화 속도(7.5)여서
+# 실소재 6/6 cue 가 전부 단축을 탔고(9~11자 → 6~7자, 문장이 조각이 됐다) 4/6 이
+# 트림돼 마지막 음절이 잘렸다(docs/v4/REAL-RUN-001.md).
+#
+# 실측 12건(ElevenLabs ko_female · eleven_multilingual_v2 · EL_SPEED normal ·
+# 공백 제외 7~11자 · 원문 6건은 실합성, 단축본 6건은 트림 전 기록):
+#   · 발화 구간만 재면 7.4~7.7 자/초다(silencedetect −45dB 로 분해) — 7.5 는 그 값이었다.
+#   · 그러나 **파일**에는 선행 무음 0.11~0.16 + 후행 무음 0.20~0.25 + 어절 사이 쉼이
+#     함께 들어간다. 12건 최소제곱: dur ≈ 자수/5.17 (절편 ≈ 0 · RMSE 0.095s).
+#   · 아래 값(0.2 + 자수/5.0)은 12건 **전부**를 덮는다(초과 0 · 평균 여유 +0.27s).
+#
+# ⚠ 값을 바꾸면 창 길이가 바뀌어 슬롯 선택(`free(r)[1] >= est`)까지 달라진다 —
+#   견적이 크면 좁은 런에 못 들어가 cue 가 다른 자리로 가거나 드랍된다.
+# ⚠ 합성 백엔드·목소리·속도를 바꾸면 다시 재야 한다. 표본은 7~11자뿐이라 긴 문장은
+#   외삽이다(프롬프트 규칙 4 의 상한 16자에서 3.4s 를 예측한다).
+NARRATION_CPS = 5.0          # 합성 **파일** 자수/초(공백 제외) — 실측 5.17 에 여유
+NARRATION_PAD_SEC = 0.2      # 문장 길이와 무관한 고정 여유(선행 무음·문장부호 꼬리)
 NARRATION_MIN_SEC = 1.0      # 이보다 작은 슬롯은 슬롯이 아니다
 AROUSAL_TIEBREAK_MAX = 0.5   # §9-B: arousal 은 보조지표 — importance 동점 근처에서만
 MUTE_MAX_IMPORTANCE = 3      # ⓑ: 이 이하 유성 span 만 뮤트 후보(ⓒ: ≥4 는 절대 불가)
@@ -311,7 +329,11 @@ def plan_narration_slots(beats: list[dict], span_index: dict[str, dict]) \
         placed_muted: list[str] = []
         cursor = 0.0
         for ti, text in enumerate(texts):
-            est = max(NARRATION_MIN_SEC, len("".join(text.split())) / NARRATION_CPS)
+            # 견적은 **합성 결과 파일 길이**를 재는 것이다 — 발화 시간만 재면 창이
+            # 늘 모자란다(위 NARRATION_PAD_SEC 실측). 창(`w1`)이 곧 TTS 의 target 이
+            # 되므로 여기서 패딩을 세지 않으면 target 과 실측의 단위가 서로 다르다.
+            est = max(NARRATION_MIN_SEC,
+                      NARRATION_PAD_SEC + len("".join(text.split())) / NARRATION_CPS)
 
             def runs(allow_mute: bool) -> list[list[str]]:
                 """덮을 수 있는 span 의 **소스 연속** 런 — grid 인덱스 인접이어도 0.5s

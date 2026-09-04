@@ -417,10 +417,12 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
                                get_gemini=get_gemini, step=step, log=log)
 
         # ── M5(C4): 편집실 edit_overrides 반영 — M3 산출 위에, M4 앞에 ─────
+        editor_design: dict | None = None
         if edit_overrides_path is not None:
-            _apply_edit_overrides(output_dir=output_dir,
-                                  overrides_path=Path(edit_overrides_path),
-                                  grid=grid, step=step, log=log)
+            _ov = _apply_edit_overrides(output_dir=output_dir,
+                                        overrides_path=Path(edit_overrides_path),
+                                        grid=grid, step=step, log=log)
+            editor_design = (_ov or {}).get("design") or None
             # 사람 수정이 timeline 을 움직였으니 draft·style·렌더는 재구성이 맞다
             from_step = "draft_render"
 
@@ -434,6 +436,7 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
         else:
             _run_m4(output_dir=output_dir, video_path=Path(video_path),
                     grid=grid, from_step=from_step, style_preset=style_preset,
+                    editor_design=editor_design,
                     get_gemini=get_gemini, step=step, log=log)
         return output_dir
     finally:
@@ -755,7 +758,8 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
 
 def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
             from_step: str | None, get_gemini, step, log,
-            style_preset: str | None = None) -> None:
+            style_preset: str | None = None,
+            editor_design: dict | None = None) -> None:
     """M4 — 2-pass 렌더 + validate 확장 (발주서 v3-m4).
 
     draft/최종 렌더는 산출 파일 존재로 캐시(--from-step 으로 재구성). style 은
@@ -763,6 +767,7 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
     import hashlib
 
     from app.v3 import finalize, stage4
+    from app.v3 import overrides as stage4_overrides
 
     plan = _read_json(output_dir / "edit_plan.json")
     story_ckpt = _read_json(output_dir / "checkpoint_story.json")
@@ -777,7 +782,8 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
     # 라벨도 재료다 — story 의 라벨만 고치면 타임라인이 그대로라 지문이 안 움직여
     # **옛 라벨이 든 final 이 그대로 납품**된다(적대 리뷰 C2 확정). 개수가 바뀌면
     # plan_labels 의 index 가 통째로 밀려 라벨이 남의 자리에 렌더되기도 한다.
-    label_plan = finalize.plan_labels(story_doc, plan)
+    _span_times = finalize.span_start_times(grid)
+    label_plan = finalize.plan_labels(story_doc, plan, _span_times, log=log)
     fingerprint = hashlib.sha1(json.dumps(
         [[[c["clip_start_sec"], c["clip_end_sec"], c.get("span_ids"),
            c.get("use_original_audio")]
@@ -846,6 +852,20 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
              attempts=len(audit["attempts"]), fallback=audit.get("fallback", False),
              diff_keys=audit.get("diff_keys"), audit_attempts=audit["attempts"])
         log(f"  [v3/style] 완료 — 프리셋 diff {len(style_doc.get('diff') or {})}키")
+    # ── 사람이 정한 design 을 **마지막 층**으로 (2026-09-03 선행 수정) ────
+    # 체크포인트에는 AI 플랜만 남기고 사람 층은 매 실행 다시 얹는다 — 그래야
+    # 재개·재렌더에서 사람 값이 AI 재호출 결과에 덮이지 않는다(E15 규율).
+    # 종전에는 이 값이 apply_overrides_to_plan 에서 통째로 사라졌다.
+    if editor_design:
+        style_doc, _drec = stage4_overrides.apply_design_to_style(
+            editor_design, style_doc)
+        step("edit_design", **_drec)
+        if _drec["ignored"]:
+            log(f"  [v3/style] ⚠ 편집실 design 중 화면에 닿지 않는 키 "
+                f"{_drec['ignored']} — 무시(조용한 무시 아님 · run_log 기록)")
+        if _drec["applied"]:
+            log(f"  [v3/style] 편집실 design {_drec['applied']} 적용 "
+                "— AI 연출 위 마지막 층")
     _write_json(output_dir / "style.json", style_doc)
 
     # ── render (13) — 캐시는 지문 사이드카로만 유효(파일 존재만 보면 낡은
@@ -862,7 +882,7 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
         final_path, cost = finalize.render_final(
             video_path=video_path, plan=plan, style_doc=style_doc,
             segments=segments, resources=resources, story_doc=story_doc,
-            output_dir=output_dir, log=log)
+            output_dir=output_dir, span_times=_span_times, log=log)
         _write_json(output_dir / "render_fingerprint.json",
                     {"fingerprint": render_fp})
         step("render", **cost)
@@ -894,7 +914,7 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
 
 
 def _apply_edit_overrides(*, output_dir: Path, overrides_path: Path, grid: dict,
-                          step, log) -> None:
+                          step, log) -> dict | None:
     """C4 — 편집실 수정 JSON 을 v3 산출 위에 정착시킨다(발주서 v3-m5 §B).
 
     계약 검증은 기존 모듈 재사용(같은 JSON 은 v1/v3 어디서든 같은 이유로 거절).
@@ -905,7 +925,7 @@ def _apply_edit_overrides(*, output_dir: Path, overrides_path: Path, grid: dict,
     ov = load_edit_overrides(overrides_path)
     if not ov:
         log("  [v3/overrides] 파일이 비어 있다 — 건너뜀")
-        return
+        return None
     plan = _read_json(output_dir / "edit_plan.json")
     segments = _read_json(output_dir / "subtitle_segments.json") \
         if (output_dir / "subtitle_segments.json").exists() else []
@@ -920,8 +940,12 @@ def _apply_edit_overrides(*, output_dir: Path, overrides_path: Path, grid: dict,
     if record["unhandled"]:
         log(f"  [v3/overrides] ⚠ 미처리 키 {record['unhandled']} — run_log 기록"
             "(후속 마일스톤 재료, 조용한 무시 아님)")
+    if record["deferred"]:
+        log(f"  [v3/overrides] 이월 {record['deferred']}")
     log(f"  [v3/overrides] 적용 {record['applied']} · 스냅 보정 "
         f"{len(record['snap_log'])}건 · cue 드랍 {len(record['cues_dropped'])}건")
+    # design 은 style 확정 뒤에 얹힌다 — 호출부(run_v3)가 _run_m4 로 넘긴다.
+    return ov
 
 
 def _run_hook_variants(*, output_dir: Path, video_path: Path, work_title: str,

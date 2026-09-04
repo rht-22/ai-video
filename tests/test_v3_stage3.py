@@ -530,8 +530,9 @@ def test_multi_narration_places_sequentially():
 
 def test_multi_narration_drops_tail_when_window_runs_out():
     """창이 모자라면 **뒤 문장부터** 버린다 — 앞 문장이 서사에 더 중요하다."""
-    # 창 1.5s — 첫 문장(견적 1.07s) 뒤 남는 0.43s 는 최소 노출(1.0s)에 못 미친다
-    grid2 = _mk_grid([(0.0, 1.5, False, "")])
+    # 창 2.3s — 첫 문장(견적 = 0.2 + 8자/5.0 = 1.8s) 뒤 남는 0.5s 는
+    # 최소 노출(1.0s)에 못 미친다
+    grid2 = _mk_grid([(0.0, 2.3, False, "")])
     s2 = _mk_stage2(grid2, [(0, 0, 3, "m")])
     idx, _ = st.build_span_index(s2, grid2)
     beats = [{"role": "hook", "span_ids": ["sp0000"],
@@ -545,7 +546,8 @@ def test_multi_narration_drops_tail_when_window_runs_out():
 
 def test_multi_narration_uses_leftover_window_as_fit():
     """남은 창이 최소 노출 이상이면 뒤 문장도 fit 으로 넣는다(버리기 전에 살린다)."""
-    grid2 = _mk_grid([(0.0, 2.2, False, "")])
+    # 창 3.0s — 첫 문장 견적 1.8s 뒤 1.2s 가 남아 최소 노출(1.0s)을 넘는다
+    grid2 = _mk_grid([(0.0, 3.0, False, "")])
     s2 = _mk_stage2(grid2, [(0, 0, 3, "m")])
     idx, _ = st.build_span_index(s2, grid2)
     beats = [{"role": "hook", "span_ids": ["sp0000"],
@@ -553,7 +555,7 @@ def test_multi_narration_uses_leftover_window_as_fit():
     cues, dropped = st.plan_narration_slots(beats, idx)
     assert len(cues) == 2 and not dropped
     assert cues[1]["mode"] == "fit"
-    assert cues[1]["source_end_sec"] <= 2.2 + 1e-6
+    assert cues[1]["source_end_sec"] <= 3.0 + 1e-6
 
 
 def test_multi_narration_mute_scope_stays_window_local():
@@ -677,3 +679,125 @@ def test_muted_clip_keeps_subtitles_outside_the_narration_window():
     segs = assemble.word_subtitles(tl, span, [], [(100.0, 102.0)])
     # 중점이 창 밖인 줄만 산다 — 첫 줄(중점 101.75)은 뮤트 안이라 빠진다
     assert [s["text"] for s in segs] == ["다섯 여섯"]
+
+
+# ── 라벨은 **앵커 span 시각**에 뜬다 (2026-09-04 실렌더 교정) ────────────────
+#
+# `plan_labels` 는 독스트링에 "M11: 앵커 span 시각에 뜬다(비트 시작 고정 아님)"라고
+# 적어 두고 정반대로 동작했다 — 클립 안의 모든 span_id 를 그 클립의 clip_start_sec
+# 하나로 접었다. 실측(shorts_4)에서 서로 다른 span 에 앵커된 라벨 4개 중 3개가 전부
+# 0.00~4.00 초에 겹쳐 찍혔고, 아직 나오지 않은 내용이 최대 32.8초 미리 떴다.
+
+def _labels_fixture():
+    plan = {"timeline": [
+        {"clip_start_sec": 100.0, "clip_end_sec": 140.0, "span_ids": ["a", "b", "c"]},
+        {"clip_start_sec": 200.0, "clip_end_sec": 220.0, "span_ids": ["d"]},
+    ]}
+    story = {"beats": [{"number": 0, "time": {"start": "00:01:40.000",
+                                              "end": "00:03:40.000"},
+                        "labels": [{"text": "L1", "span_id": "a"},
+                                   {"text": "L2", "span_id": "b"},
+                                   {"text": "L3", "span_id": "c"},
+                                   {"text": "L4", "span_id": "d"}]}]}
+    span_times = {"a": 100.0, "b": 120.0, "c": 135.0, "d": 205.0}
+    return story, plan, span_times
+
+
+def test_labels_land_on_their_own_span_not_the_clip_start():
+    from app.v3 import finalize
+    story, plan, span_times = _labels_fixture()
+    got = [lb["start_sec"] for lb in finalize.plan_labels(story, plan, span_times)]
+    # 편집본 좌표: 클립1 은 100→0 오프셋, 클립2 는 200→40 오프셋.
+    assert got == [0.0, 20.0, 35.0, 45.0]
+    # 서로 겹치지 않는다 — 겹치면 글자가 포개져 둘 다 못 읽는다.
+    wins = [(lb["start_sec"], lb["end_sec"])
+            for lb in finalize.plan_labels(story, plan, span_times)]
+    for (s1, e1), (s2, _) in zip(wins, wins[1:]):
+        assert e1 <= s2 or s2 >= s1, f"{(s1, e1)} 와 {(s2,)} 가 겹친다"
+
+
+def test_labels_without_span_times_fall_back_but_say_so():
+    """격자가 없는 옛 재개 경로를 죽이지 않되, 조용하지는 않다."""
+    from app.v3 import finalize
+    story, plan, _ = _labels_fixture()
+    lines: list[str] = []
+    got = [lb["start_sec"] for lb in finalize.plan_labels(story, plan, None,
+                                                          log=lines.append)]
+    assert got == [0.0, 0.0, 0.0, 40.0]          # 종전 동작 그대로
+    assert any("클립 시작으로 접었다" in ln for ln in lines)
+
+
+def test_span_time_outside_its_clip_is_clamped_into_it():
+    """span 은 클립 경계에 걸칠 수 있다 — 밖의 값을 그대로 쓰면 남의 클립으로 간다."""
+    from app.v3 import finalize
+    story, plan, span_times = _labels_fixture()
+    span_times = dict(span_times, b=90.0, c=500.0)   # 앞으로 벗어남 · 뒤로 벗어남
+    got = [lb["start_sec"] for lb in finalize.plan_labels(story, plan, span_times)]
+    # 밖의 값은 그 클립의 시작으로 접는다 — 그대로 넘기면 to_edited_sec 이
+    # "어느 클립에도 없다"로 보고 라벨을 **통째로 드롭**한다(실측으로 확인).
+    assert got == [0.0, 0.0, 0.0, 45.0]
+    assert len(got) == 4, "밖으로 벗어난 앵커 때문에 라벨이 사라지면 안 된다"
+
+
+def test_span_start_times_reads_the_grid():
+    from app.v3 import finalize
+    g = {"span_candidates": [{"id": "sp0", "t_in": 1.5}, {"id": "sp1", "t_in": 9.0},
+                             {"id": "bad"}, {"t_in": 3.0}]}
+    assert finalize.span_start_times(g) == {"sp0": 1.5, "sp1": 9.0}
+    assert finalize.span_start_times(None) == {}
+
+
+# ── 내레이션 견적은 합성기 고정 무음을 센다 (2026-09-04 실측 교정) ──────────
+#
+# 종전 견적은 `자수/7.5` 뿐이었다. 발화 속도로는 맞는 값이지만 ElevenLabs 가 문장
+# 앞뒤에 붙이는 **고정 무음 0.35~0.40초**를 세지 않았다. 견적이 곧 창 길이이고
+# 창이 곧 TTS 의 target 이라, target 은 '발화 시간'인데 실측은 '파일 길이'인
+# 단위 불일치였다 — 실소재 6/6 cue 가 Flash 단축을 탔고 4/6 이 물리 트림돼
+# 말이 잘렸다(docs/v4/REAL-RUN-001.md).
+
+def test_narration_estimate_counts_the_synthesizer_padding():
+    """견적 = 패딩 + 자수/속도. 짧은 문장일수록 패딩 비중이 커서 결정적이다."""
+    n = 8
+    want = st.NARRATION_PAD_SEC + n / st.NARRATION_CPS
+    grid2 = _mk_grid([(0.0, 30.0, False, "")])
+    s2 = _mk_stage2(grid2, [(0, 0, 3, "m")])
+    idx, _ = st.build_span_index(s2, grid2)
+    beats = [{"role": "hook", "span_ids": ["sp0000"],
+              "narration": ["가" * n], "labels": []}]
+    cues, dropped = st.plan_narration_slots(beats, idx)
+    assert not dropped and len(cues) == 1
+    got = cues[0]["source_end_sec"] - cues[0]["source_time_sec"]
+    # 창은 소수점 3자리로 반올림된다(story.py `round(w1, 3)`).
+    assert got == pytest.approx(want, abs=1e-3), f"창 {got} != 견적 {want}"
+    # 패딩을 빼먹으면 실측 대비 이만큼 모자란다 — 1.2초 창에서 30% 가 넘는다.
+    assert got - n / st.NARRATION_CPS == pytest.approx(st.NARRATION_PAD_SEC, abs=1e-3)
+
+
+def test_narration_padding_matches_the_measurement():
+    """상수를 실측 범위에 묶는다 — 근거 없이 움직이면 말이 잘리거나 창이 낭비된다.
+
+    실측 12건(공백제외 7~11자)의 최소제곱은 `자수/5.17`(절편≈0 · RMSE 0.095s)이고,
+    아래 값은 12건 **전부**를 덮는다(초과 0 · 평균 여유 +0.27s).
+
+    ⚠ 발화 구간만 재면 7.4~7.7 자/초다 — 그 값을 여기 쓰면 안 된다. 창이 담아야
+    하는 것은 선행·후행 무음과 어절 사이 쉼까지 든 **파일 길이**다.
+    """
+    # 실측 12건을 그대로 태워 초과가 없는지 본다(상수만 바뀌면 바로 깨진다).
+    obs = [("커피 사온 척 연기했죠", 1.750), ("하지만 선임은 눈치챘죠", 1.933),
+           ("신병을 잡으려는 선임들", 2.038), ("온갖 억지 트집을 잡았죠", 1.907),
+           ("지옥의 압박 질문들이", 1.672), ("신병에게 연달아 쏟아졌죠", 2.090),
+           ("커피 산 척했죠.", 1.254), ("선임은 눈치챘죠.", 1.533),
+           ("신병 잡는 선임.", 1.579), ("지옥의 압박질문.", 1.486),
+           ("억지 트집이었죠.", 1.384), ("신병에게 쏟아짐.", 1.489)]
+    over = []
+    for text, actual in obs:
+        n = len("".join(text.split()))
+        est = max(st.NARRATION_MIN_SEC, st.NARRATION_PAD_SEC + n / st.NARRATION_CPS)
+        if actual > est:
+            over.append((text, round(actual - est, 3)))
+    assert not over, f"견적이 실측을 못 덮는다: {over}"
+    # 반대로 과대해도 곤란하다 — 창이 커지면 좁은 런에 못 들어가 cue 가 밀린다.
+    slack = [max(st.NARRATION_MIN_SEC,
+                 st.NARRATION_PAD_SEC + len("".join(t.split())) / st.NARRATION_CPS) - a
+             for t, a in obs]
+    assert sum(slack) / len(slack) < 0.45, f"평균 여유 {sum(slack)/len(slack):.3f}s 는 과하다"

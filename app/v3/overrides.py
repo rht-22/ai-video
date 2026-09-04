@@ -25,6 +25,45 @@ from app.v3 import assemble
 
 HANDLED_KEYS = ("schema", "clips", "title", "subtitles", "design")
 
+# 편집실 design 오버라이드가 **실제로 화면에 닿는** 키 — `finalize.design_from_style`
+# 이 읽는 집합과 1:1 이다. 여기만 넓히면 렌더가 안 읽어 조용히 무시되고, 저쪽만
+# 넓히면 이 관문이 막아 역시 무시된다. 둘을 함께 고치는 것이 계약이다.
+# ⚠ `title_bold(2)` 는 **의도적으로 빠져 있다** — 제목 굵게는 E21 로 닫혔고
+# `design_from_style` 도 title_bolds 를 조립하지 않는다. 여기 넣으면 그쪽에서
+# 조용히 사라지므로, 대신 `ignored` 로 크게 남긴다.
+DESIGN_KEYS = (
+    "aspect_ratio", "video_y", "video_width",
+    "work_image_width", "work_image_height", "work_image_align",
+    "title_color", "title_color2", "title_size", "title_size2",
+    "subtitle_color", "subtitle_size", "subtitle_y_margin",
+    "tts_color", "tts_size", "tts_y_margin", "work_color",
+)
+
+
+def apply_design_to_style(design_ov: dict, style_doc: dict) -> tuple[dict, dict]:
+    """편집실 design 을 확정 style_doc 위에 **마지막 층**으로 얹는다 → (새 doc, 기록).
+
+    🛑 왜 이 함수가 따로 있나(2026-09-03 선행 수정). `HANDLED_KEYS` 는 `design` 을
+    처리한다고 적어 놨지만 `apply_overrides_to_plan` 은 그 키를 **한 번도 읽지
+    않았다** — 함수가 style_doc 을 인자로 받지도 않는다. 그래서 편집실이 보낸
+    design 은 unhandled 기록조차 없이(HANDLED 목록에 있으니) 통째로 사라졌다.
+    v4 는 이 경로로 채널·편집실 디자인을 받으므로 착수 전에 막아 둔다.
+
+    자리는 **style 이 확정된 뒤**다(파이프라인 `_run_m4`). 체크포인트에는 AI 플랜만
+    남고 사람 층은 매 실행 다시 얹힌다 — E15 재개 계약("사람 값은 재호출 결과 위에
+    마지막으로")과 같은 모양이고, 렌더 지문이 확정 style 로 계산되므로 design 을
+    고치면 최종본 캐시가 자동으로 폐기된다.
+
+    순수 — 넘겨받은 dict 를 건드리지 않고 사본을 돌려준다."""
+    known = {k: v for k, v in (design_ov or {}).items() if k in DESIGN_KEYS}
+    ignored = sorted(k for k in (design_ov or {}) if k not in DESIGN_KEYS)
+    if not known:
+        return style_doc, {"applied": [], "ignored": ignored}
+    new_doc = {**style_doc, "design": {**(style_doc.get("design") or {}), **known},
+               # additive — 이 키가 사람 것인지 AI 것인지 나중에 되짚을 근거
+               "editor_design": sorted(known)}
+    return new_doc, {"applied": sorted(known), "ignored": ignored}
+
 
 def snap_to_span_edges(sec: float, edges: list[float]) -> tuple[float, float]:
     """최근접 span 경계로 정착 → (스냅 시각, 오차). 동률은 이른 쪽(결정성)."""
@@ -62,10 +101,14 @@ def apply_overrides_to_plan(ov: dict, plan: dict, grid: dict,
 
     순수 — 파일 입출력 없음. resources 의 cue 는 source_time_sec 신원으로 승계."""
     record: dict[str, Any] = {"applied": [], "unhandled": [], "snap_log": [],
-                              "cues_dropped": []}
+                              "cues_dropped": [], "deferred": []}
     for k in ov:
         if k not in HANDLED_KEYS:
             record["unhandled"].append(k)
+    # design 은 이 함수가 아니라 style 확정 뒤에 얹힌다(`apply_design_to_style`).
+    # 여기서 "applied" 로 적으면 거짓이 되고, 아무것도 안 적으면 조용한 무시가 된다.
+    if ov.get("design"):
+        record["deferred"].append("design → style 단계에서 적용")
 
     new_plan = {**plan, "timeline": [dict(c) for c in plan.get("timeline") or []]}
 

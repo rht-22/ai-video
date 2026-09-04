@@ -1078,10 +1078,18 @@ def build_texts_ass(texts: list[dict], output_path: Path, *, speed: float = 1.0)
         outline_color, bord_ratio = _TEXT_STROKE_BORDER.get(stroke, _TEXT_STROKE_BORDER["dark"])
         bord = max(1, int(round(size * bord_ratio))) if bord_ratio else 0
         if fx == "glow":
-            # E19-4 괄호형 라벨 발광 — 외곽선을 글자 **자기 색**으로 두껍게 + \blur 로 번짐.
+            # E19-4 괄호형 라벨 발광 — 외곽선을 글자 **자기 색**으로 두르고 \blur 로 번짐.
             # stroke 지정은 glow 가 대체한다(발광과 검정 외곽선은 양립하지 않는다).
+            #
+            # 🛑 비율 0.12 → 0.04 (2026-09-04 실렌더 교정). 외곽선이 글자와 **같은 색**
+            # 이라 두께가 그대로 자획 사이·속공간을 자기 색으로 메운다 — 0.12 면 fs56 에
+            # bord7 이고, 실측 프레임에서 '(끝없는 금기)'가 판독 불가능한 주황 덩어리로
+            # 구워져 나갔다(shorts_4 0~4초). 검정 외곽선(pop·shake)이 같은 bord7 에서
+            # 멀쩡한 것은 색이 달라 자획 경계가 남기 때문이고, 같은 색일 때는 그 여지가
+            # 없다. fs 40·56·72·100·140 실렌더로 0.04 가 다섯 크기 전부에서 읽히면서
+            # 발광 후광도 유지하는 것을 확인했다.
             outline_color = _hex_to_ass_color(str(t.get('color') or '#FFFFFF'))
-            bord = max(2, int(round(size * 0.12)))
+            bord = max(1, int(round(size * 0.04)))
         tags = [f"\\an5\\pos({px},{py})", f"\\fn{to_font_family(str(t.get('font') or 'Jalnan'))}",
                 f"\\fs{size}", f"\\1c{_hex_to_ass_color(str(t.get('color') or '#FFFFFF'))}",
                 f"\\3c{outline_color}", f"\\bord{bord}", "\\shad0"]

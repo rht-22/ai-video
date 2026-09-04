@@ -141,8 +141,13 @@ def build_scan_proxy(video_path: Path, out_path: Path, *, log=print) -> Path:
 
 # ── 격자 요약 · 휴리스틱 힌트 ───────────────────────────────────────────────
 
-def summarize_grid(grid: dict) -> str:
-    """Pro 프롬프트에 실을 격자 요약 — 경계 어휘(장면 전환)와 발화 분포."""
+def summarize_grid(grid: dict, *, sound_events: list[dict] | None = None) -> str:
+    """Pro 프롬프트에 실을 격자 요약 — 경계 어휘(장면 전환)와 발화 분포.
+
+    `sound_events` 는 가산이다(2026-09-04). 넘기지 않으면 **반환 문자열이 종전과
+    바이트 동일**하다 — v3 Stage 1 과 게이트를 안 켠 v4 실행이 여기 온다.
+    넘기면 '대사 없는 소리 사건' 줄이 끝에 붙는다: 전사에는 한 글자도 없는 소리
+    (문 쾅·웃음·한숨)를 모델이 볼 수 있는 유일한 통로다."""
     dur = float(grid["source"]["duration_sec"])
     spans = grid["span_candidates"]
     voiced = [s for s in spans if s["is_audio"]]
@@ -174,6 +179,13 @@ def summarize_grid(grid: dict) -> str:
     lines.append(f"장면 전환 {len(grid['scene_cuts'])}개 — 경계는 반드시 아래 시각(초) "
                  "중 하나 근처(±2초)로 제안하라:")
     lines.append(", ".join(f"{t:.1f}" for t in cuts))
+    if sound_events:
+        lines.append(f"대사 없는 소리 사건 {len(sound_events)}개 — 전사에 글자가 없는 "
+                     "구간인데 소리가 크다(타격·웃음·한숨·환호). 괄호 안은 그 편 "
+                     "말소리 대비 크기(dB):")
+        lines.append(", ".join(
+            f"{e['start_sec']:.1f}~{e['end_sec']:.1f}(+{e['over_db']:.0f})"
+            for e in sound_events))
     return "\n".join(lines)
 
 
