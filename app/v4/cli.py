@@ -3,7 +3,8 @@
     python -m app.v4 --video <원본.mp4> --work-title <작품명> \\
         [--srt 자막.srt] [--episode N] [--outdir outputs] [--job-id <재개>] \\
         [--from-step <단계>] [--stop-after <단계>] [--max-shorts 1..8] \\
-        [--skip-research] [--scene-threshold 0.3] [--edit-overrides <json>]
+        [--winner-detail] [--skip-research] [--scene-threshold 0.3] \\
+        [--edit-overrides <json>]
 
 받는 키 집합을 여기서 못박는다 — **모르는 플래그는 argparse 가 거절**한다(기획서 §6).
 오케스트레이터가 v1·v3 시절 플래그를 그대로 넘기면 조용히 무시되는 대신 즉시 죽는다.
@@ -51,7 +52,7 @@ def _step_help() -> str:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="create_shorts_v4",
-        description="pipeline v4 (M2: 1~5단계 — 격자·표본 fps·업로드) — 병행 신규")
+        description="pipeline v4 (M5: 1~10단계 — 격자·후보·승인·살붙이기) — 병행 신규")
     p.add_argument("--video", required=True, help="원본 영상 경로")
     p.add_argument("--work-title", required=True, help="작품명(job 디렉토리 접두)")
     p.add_argument("--srt", default=None,
@@ -68,6 +69,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"승인 편수 상한(1~{MAX_SHORTS_LIMIT} · 기본 {MAX_SHORTS_DEFAULT}) "
                         "— 범위 밖은 즉시 실패(조용한 클램프 금지)")
     p.add_argument("--skip-research", action="store_true")
+    # 10a 정밀 청취. **기본 꺼짐**(기획서 §9 N1: "끄고 시작, A/B 뒤").
+    # 🛑 꺼져 있으면 화자를 어디서도 못 얻는다 — 자막이 전 줄 흰색으로 나간다
+    #   (M5 계약 §0: whisper 전사에 화자가 없고 v4 는 청크 상세 분석을 없앴다).
+    #   그 사실은 파이프라인이 stdout·run_log 양쪽에 남긴다.
+    p.add_argument("--winner-detail", action="store_true",
+                   help="10a 정밀 청취 — 승인 편 구간만 3fps 로 다시 듣는다"
+                        "(화자·깨진 전사 보정). 미지정이면 화자별 자막색이 없다")
     p.add_argument("--scene-threshold", type=float, default=SCENE_THRESHOLD,
                    help=f"ffmpeg scene score 임계(기본 {SCENE_THRESHOLD})")
     p.add_argument("--edit-overrides", default=None,
@@ -118,6 +126,7 @@ def main(argv: list[str] | None = None) -> int:
                  job_id=args.job_id, from_step=from_step, stop_after=stop_after,
                  skip_research=args.skip_research,
                  max_shorts=args.max_shorts,
+                 winner_detail=args.winner_detail,
                  scene_threshold=args.scene_threshold,
                  edit_overrides_path=(Path(args.edit_overrides)
                                       if args.edit_overrides else None))

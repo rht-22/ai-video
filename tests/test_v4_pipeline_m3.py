@@ -288,6 +288,11 @@ def _meta(out: Path) -> dict:
 def _run(synth, outdir, **kw):
     kw.setdefault("skip_research", True)
     kw.setdefault("log", lambda *a: None)
+    # ⚠ 이 파일의 관심은 **6~9** 다(모듈 독스트링). M5 가 10·10a 를 배선하면서 파이프라인이
+    #   그 뒤로도 흐르게 됐으므로 여기서 멈춘다 — 안 멈추면 이 파일의 가짜 라우터가
+    #   살붙이기 프롬프트를 모른다고 죽고, 6~9 의 회귀가 10 의 픽스처 문제로 가려진다.
+    #   10·10a 배선은 `tests/test_v4_pipeline_m5.py` 가 본다.
+    kw.setdefault("stop_after", "approve")
     return v4p.run_v4(video_path=synth, work_title="합성", outdir=outdir, **kw)
 
 
@@ -562,13 +567,17 @@ def test_stop_after_candidates_stops_before_the_probe_call(
     assert stop["remaining"][0] == "boundary" and stop["remaining"][-1] == "11:validate"
 
 
-def test_pipeline_ends_cleanly_at_the_first_unbuilt_step(
+def test_pipeline_ends_cleanly_at_the_step_after_nine(
         synth, tmp_path, fake_transcribe, fake_proxy, gem, no_boundary_calls):
-    """9단계까지 흐르고 **10(살붙이기)** 에서 이름과 마일스톤을 남기고 정상 종료한다."""
+    """9단계까지 흐르고 그 다음 단계 이름·남은 목록을 남기고 정상 종료한다.
+
+    ⚠ M5 가 10·10a 를 지으면서 **미구현 경계가 `11:resources`(M6)로 옮겨졌다.** 이 파일의
+    `_run` 은 6~9 가 관심사라 `--stop-after approve` 로 멈추므로 여기서 보는 것은 멈춤
+    기록의 모양이고, 미구현 경계 자체는 `tests/test_v4_pipeline_m5.py` 가 본다."""
     out = _run(synth, tmp_path / "o")
 
     last = _run_log(out)["steps"][-1]
-    assert last["step"] == "flesh" and last["not_implemented"] == "M5"
+    assert last["step"] == "flesh" and last["skipped"] == "--stop-after approve"
     assert last["remaining"][0] == "flesh" and last["remaining"][-1] == "11:validate"
     assert out.is_dir()
 
