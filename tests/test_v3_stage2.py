@@ -584,3 +584,14 @@ def test_subject_pos_kept_invalid_dropped_absent_no_key():
     meanings = ca.assemble_chunk_meanings(norm, spans)
     assert meanings[0]["spans"][1]["subject_pos"] == "right"    # 문서까지 승계
     assert "subject_pos" not in meanings[0]["spans"][0]
+
+
+def test_drop_failed_chunks_keeps_successes_only():
+    # --retry-failed-chunks(2026-09-04): 실패 기록(meanings 없음)만 캐시에서 빼 재분석한다
+    from app.v3.pipeline import drop_failed_chunks
+    done = {"s0c0": {"meanings": [{"number": 0}], "audit": {}},
+            "s1c0": {"meanings": None, "audit": {"failed": "반려 소진"}},
+            "s1c1": {"meanings": [], "audit": {"failed": "예외"}}}
+    keep, retry = drop_failed_chunks(done)
+    assert list(keep) == ["s0c0"] and retry == ["s1c0", "s1c1"]
+    assert drop_failed_chunks({}) == ({}, [])

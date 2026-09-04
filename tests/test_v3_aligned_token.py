@@ -153,3 +153,21 @@ def test_soft_sentence_hint_merges_short_neighbors_and_boundary_penalties():
                ("잘", 0.9), ("안", 0.9), ("하는데", 0.9))
     assert [l["text"] for l in _lines_for_span(words, 0.0, 5.0)] == \
         ["이쪽 동네", "사람들은 이런 거", "잘 안 하는데"]
+
+
+def test_last_syllable_noun_misrecognition_allowed_when_not_eomi():
+    # 행정법(0.79) ↔ 행정반 — 마지막 음절이 어미·조사가 아니면 자모 ≤2 로 뒤집는다
+    assert _fix(_w(("행정법", 0.79), ("온도계를", 0.9)), "행정반 온도계를 확인,") == ["행정반", None]
+    # 어미·조사 음절이면 종전대로 초성만 — 버려/버렸 · 방이/방에 는 그대로
+    assert _fix(_w(("버려.", 0.31)), "버렸...") == [None]
+    assert _fix(_w(("방이", 0.80)), "방에") == [None]
+
+
+def test_dependent_noun_with_josa_penalized_at_line_start():
+    from app.v3.assemble import _lines_for_span, _starts_dependent
+    assert _starts_dependent("시에") and _starts_dependent("때는") and _starts_dependent("것을")
+    assert not _starts_dependent("시간") and not _starts_dependent("수영")
+    words = _w(("35도를", 0.9), ("넘은", 0.9), ("시에", 0.9), ("오침을", 0.9), ("실시하도록", 0.9),
+               ("하겠다.", 0.9))
+    lines = [l["text"] for l in _lines_for_span(words, 0.0, 6.0)]
+    assert "넘은 시에" in " | ".join(lines) and not any(l.startswith("시에") for l in lines)

@@ -103,6 +103,7 @@ def _character_index_slot(output_dir: Path, proxy_path: Path,
 def run_v3(*, video_path: Path, work_title: str, outdir: Path,
            srt_path: Path | None = None, episode: int | None = None,
            job_id: str | None = None, from_step: str | None = None,
+           retry_failed_chunks: bool = False,
            skip_research: bool = False, skip_seq_analyze: bool = False,
            skip_stage2: bool = False, skip_stage3: bool = False,
            skip_stage4: bool = False, edit_overrides_path: Path | None = None,
@@ -391,6 +392,7 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
             _run_m2(output_dir=output_dir, video_path=Path(video_path),
                     stage1_path=stage1_path, grid=grid, research=research,
                     from_step=from_step, max_chunks=max_chunks,
+                    retry_failed=retry_failed_chunks,
                     get_gemini=get_gemini, step=step, log=log)
 
         # ── M3: Stage 3 story → edit_plan·자막·TTS cue ────────────────────
@@ -447,9 +449,15 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
         _write_json(output_dir / "run_log.json", run_log)
 
 
+def drop_failed_chunks(done: dict) -> tuple[dict, list[str]]:
+    """청크 캐시에서 실패 기록(meanings 없음)만 뺀 사본과 그 키 목록. 순수."""
+    keep = {k: v for k, v in done.items() if (v or {}).get("meanings")}
+    return keep, sorted(k for k in done if k not in keep)
+
+
 def _run_m2(*, output_dir: Path, video_path: Path, stage1_path: Path, grid: dict,
             research: dict | None, from_step: str | None, max_chunks: int | None,
-            get_gemini, step, log) -> None:
+            get_gemini, step, log, retry_failed: bool = False) -> None:
     """chunk_split + Stage 2 — run_v3 본체에서 분리(단계 블록이 길어져서).
 
     청크별 결과는 checkpoint_chunk_analyze.json 에 **증분 저장**된다 — Pro 호출이
@@ -497,6 +505,14 @@ def _run_m2(*, output_dir: Path, video_path: Path, stage1_path: Path, grid: dict
             done = cached.get("chunks") or {}
             if done:
                 log(f"  [v3/stage2] 청크 캐시 {len(done)}건 로드")
+            if retry_failed:
+                # 실패 청크만 캐시에서 빼서 아래 루프가 다시 분석한다(성공 청크 재과금 없음).
+                # 2026-09-04 신병4 EP1: s1c0 이 출력 절단으로 3회 소진 — 전부 재실행은 Pro 6회 낭비
+                done, retry_keys = drop_failed_chunks(done)
+                if retry_keys:
+                    log(f"  [v3/stage2] 실패 청크 재시도(--retry-failed-chunks): {', '.join(retry_keys)}")
+                else:
+                    log("  [v3/stage2] --retry-failed-chunks: 실패 청크 없음 — 캐시 그대로")
         elif cached:
             log("  [v3/stage2] ⚠ 상류(stage1/grid) 변경 감지 — 청크 캐시 폐기")
 

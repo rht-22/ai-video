@@ -359,9 +359,23 @@ def to_edited_sec(source_sec: float,
 # 줄 경계 벌점(2026-09-04) — 길이만 고르게 하면 '여기서도 하실 / 건 아니죠' · '이런 거 잘 안 /
 # 하는데' 처럼 붙어 읽히는 두 어절이 갈린다. 1음절 의존명사·조사류는 앞 어절에, 1음절 부사는
 # 뒤 어절에 붙으므로 그 경계로 줄을 끊는 배치에 벌점을 준다(남는 칸 5~6자 분량).
-LINE_START_PENALTY_WORDS = frozenset("건 거 것 게 수 줄 데 때 뿐 등 중 채 듯 놈 분 편".split())
+LINE_START_PENALTY_WORDS = frozenset("건 거 것 게 수 줄 데 때 뿐 등 중 채 듯 놈 분 편 시".split())
+LINE_START_PENALTY_JOSA = ("이", "가", "을", "를", "은", "는", "에", "에는", "에도", "도", "의", "로",
+                           "으로", "만", "야", "지", "요", "죠", "다", "까", "만큼", "처럼", "부터",
+                           "까지", "이야", "이지", "이라", "이다", "이면", "이고")
 LINE_END_PENALTY_WORDS = frozenset("안 못 잘 더 다 또 왜 꼭 참 막 딱 젤 늘 꽤".split())
 LINE_BOUNDARY_PENALTY = 30
+
+
+def _starts_dependent(tok: str) -> bool:
+    """줄 첫 어절이 '의존명사(+조사)' 인가 — '건'·'거' 뿐 아니라 '시에'·'때는'·'수가'·'것을'
+    (2026-09-04 신병4: '35도를 넘은 / 시에 오침을'). 순수."""
+    t = tok.strip(".,!?…'\"")
+    if not t:
+        return False
+    if t in LINE_START_PENALTY_WORDS:
+        return True
+    return t[0] in LINE_START_PENALTY_WORDS and t[1:] in LINE_START_PENALTY_JOSA
 
 
 def _balanced_breaks(lens: list[int], texts: list[str] | None = None) -> list[int]:
@@ -385,7 +399,7 @@ def _balanced_breaks(lens: list[int], texts: list[str] | None = None) -> list[in
             if width > SUB_MAX_CHARS and j - i > 1:
                 continue
             cost = best[i] + max(0, SUB_MAX_CHARS - width) ** 2
-            if i > 0 and texts[i].strip(".,!?…'\"") in LINE_START_PENALTY_WORDS:
+            if i > 0 and _starts_dependent(texts[i]):
                 cost += LINE_BOUNDARY_PENALTY
             if j < n and texts[j - 1].strip(".,!?…'\"") in LINE_END_PENALTY_WORDS:
                 cost += LINE_BOUNDARY_PENALTY

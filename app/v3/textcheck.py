@@ -247,9 +247,18 @@ ALIGNED_MAX_JAMO_LONG = 3      # 3음절 이상은 3 까지(청년녀→청남�
 ALIGNED_MAX_JAMO_PER_SYL = 2   # 한 음절이 통째로 바뀌면(3) 다른 말이다
 # 지시어·대명사·감탄사는 각색(다른 말로 바꿔 말함)과 오인식을 구분할 수 없다 — 드라이런
 # 오작동이 전부 이 부류였다(여기→이거 · 이건→그건 · 저기→여기 · 이게→이거 · 니가→네가).
+# 마지막 음절만 다를 때 '어미·조사 각색'으로 보는 음절 — whisper 쪽이든 청취 쪽이든 이 집합에
+# 들면 초성 변화만 허용한다(버려/버렸 · 방이/방에 · 찍으시게/겠 · 신발이/을). 둘 다 밖이면
+# 명사의 오인식이라 자모 ≤2 를 전부 허용한다(행정법→행정반 · 2026-09-04 신병4 실측 누락).
+JOSA_EOMI_SYLLABLES = frozenset(
+    "이 가 을 를 은 는 에 의 도 로 와 과 랑 고 서 게 겠 요 죠 다 니 지 까 네 며 데 면 려 렸 셔 져 "
+    "라 야 어 아 오 든 던 걸 건 거 것 만 뿐 임 함 음 됨".split())
 ALIGNED_STOPWORDS = frozenset({
     "이거", "이게", "이건", "그거", "그게", "그건", "저거", "저게", "저건",
     "여기", "저기", "거기", "아니", "아이", "니가", "네가", "내가", "우리", "어디",
+    # 시간 지시어·감탄사 — 규칙 완화(어미 아닌 마지막 음절) 드라이런에서 이제→이따 · 아유→아주 가
+    # 걸렸다. 둘 다 뜻이 다른 말이라 각색과 구분 불가.
+    "이제", "이따", "지금", "아까", "아유", "아우", "아휴",
 })
 
 
@@ -342,8 +351,9 @@ def arbitrate_aligned(token: str, piece: dict | None, *,
       ② 조각 시작이 청취 어절 경계(청취 어절 **가운데**에서 시작하는 조각은 whisper 가
          띄어쓰기를 다르게 끊은 것 — '가운이 보니까' ↔ '가운 입으니까' 의 '으니까')
       ③ 자모 차이 합 ≤ 2(2음절) / ≤ 3(3음절+), 음절당 ≤ 2
-      ④ 마지막 음절만 다르면 **초성 차이만** 허용(로컴→로펌) — 모음·종성이 다르면 어미·조사
-         각색으로 본다(신발이/신발을 · 버려/버렸 · 찍으시게/찍으시겠 · 가운이/가운입).
+      ④ 마지막 음절만 다르고 그 음절(어느 쪽이든)이 어미·조사 음절(JOSA_EOMI_SYLLABLES)이면
+         **초성 차이만** 허용(로컴→로펌) — 모음·종성 차이는 각색(신발이/을 · 버려/버렸 ·
+         찍으시게/겠 · 가운이/입). 둘 다 어미·조사가 아니면 명사 오인식(행정법→행정반) — ③만 본다.
       ⑤ whisper prob < ALIGNED_MAX_PROB
     구두점은 whisper 것을 그대로 남긴다(타이밍·문장부호는 받아쓰기 것)."""
     raw = token.strip(_STRIP)
@@ -362,7 +372,8 @@ def arbitrate_aligned(token: str, piece: dict | None, *,
     diff = [i for i in range(len(raw)) if raw[i] != heard_piece[i]]
     if any(_jamo_diff(raw[i], heard_piece[i])[0] > ALIGNED_MAX_JAMO_PER_SYL for i in diff):
         return None
-    if diff == [len(raw) - 1]:
+    if diff == [len(raw) - 1] and (raw[-1] in JOSA_EOMI_SYLLABLES
+                                   or heard_piece[-1] in JOSA_EOMI_SYLLABLES):
         jx, jy = _jamo(raw[-1]), _jamo(heard_piece[-1])
         if jx is None or jy is None or jx[1:] != jy[1:]:
             return None           # 초성만 다를 때만(로컴→로펌) — 모음·종성은 어미·조사 각색

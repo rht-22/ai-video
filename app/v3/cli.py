@@ -42,6 +42,9 @@ def build_parser() -> argparse.ArgumentParser:
                             "story", "resources",
                             "draft_render", "style", "render", "validate"],
                    help="캐시를 무시하고 이 단계부터 재구성")
+    p.add_argument("--retry-failed-chunks", action="store_true",
+                   help="Stage 2 에서 실패로 기록된 청크만 다시 분석(성공 청크 캐시는 유지 — "
+                        "--from-step chunk_analyze 는 전부 재실행). stage2 가 바뀌면 story 부터 재구성된다")
     p.add_argument("--skip-research", action="store_true")
     p.add_argument("--skip-seq-analyze", action="store_true",
                    help="Stage 1(Pro 호출) 없이 grid 까지만")
@@ -178,6 +181,7 @@ def main(argv: list[str] | None = None) -> int:
     out = run_v3(video_path=video, work_title=args.work_title,
                  outdir=Path(args.outdir), srt_path=srt, episode=args.episode,
                  job_id=args.job_id, from_step=args.from_step,
+                 retry_failed_chunks=args.retry_failed_chunks,
                  skip_research=args.skip_research,
                  skip_seq_analyze=args.skip_seq_analyze,
                  skip_stage2=args.skip_stage2, skip_stage3=args.skip_stage3,
