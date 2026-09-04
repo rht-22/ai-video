@@ -374,7 +374,10 @@ def test_story_checkpoint_passes_the_contract_tool(synth, tmp_path, fake_transcr
     assert not [f for f in result["files"] if f["status"] == "unreadable"]
     bad = {f["file"]: [v["where"] for v in f["violations"]]
            for f in result["files"] if f["status"] == "violation"}
-    assert bad == {"checkpoint_candidates.json": ["approved"]}, bad
+    # 위반 0 이 합격선이다 — 종전에는 `approved` 위반을 기대값으로 박아 뒀는데,
+    # 그건 계약 표가 키 자리(`approval.approved`)를 틀리게 적은 것이지 잡의
+    # 결함이 아니었다. 아는 위반을 기대값에 박으면 도구가 그 자리에서 눈을 감는다.
+    assert bad == {}, bad
 
 
 def test_localization_can_rewrite_every_variant_title(synth, tmp_path, fake_transcribe,

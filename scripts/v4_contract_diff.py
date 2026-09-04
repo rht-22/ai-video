@@ -145,7 +145,10 @@ CONTRACTS: dict[str, tuple[str, ...]] = {
     # E15 AI 연출. **파일 자체가 선택**이다(style_compose 를 안 켠 채널엔 없다 → skipped).
     "checkpoint_style.json": (
         # app/modules/style_compose.py:397~399 — 스키마가 다르면 StylePlanError 로 크게 실패.
-        "schema",
+        # 🛑 **값까지** 본다. 있기만 보던 때, v4 의 `schema="v3_style/v1"` 문서가 이
+        # 이름으로 통과했다(실측 2026-09-04) — E16 이 조용히 no-op 할 파일이 합격
+        # 도장을 받았다. 이름이 같아도 신원이 다르면 다른 문서다.
+        "schema=style_plan/v1",
         # app/localize/style_texts.py:57(style_plan_strings) → apply_style_translation.
         # 목록 자체는 선택이지만(연출에 효과 텍스트가 없을 수 있다), **있으면** 항목마다
         # text 가 있어야 한다 — 없으면 그 자리가 빈 문자열로 번역돼 화면에서 글자가 사라진다.
@@ -160,6 +163,9 @@ CONTRACTS: dict[str, tuple[str, ...]] = {
     # 있고 `checkpoint_style.json` 은 없다 — 그래서 현지화 E16 은 연출을 안 켠
     # 채널과 똑같이 지나간다(정직한 부재).
     "style.json": (
+        # 반대 방향도 못박는다 — E15 문서가 이 이름으로 오면 `design` 이 없어 걸리고,
+        # 걸리기 전에 신원에서 먼저 걸린다.
+        "schema=v3_style/v1",
         # app/v3/finalize.py:312 design_from_style(style_doc.get("design") or {}) —
         # 없으면 조용히 빈 dict 가 되어 채널 프리셋이 통째로 증발한다(전 편이
         # 엔진 기본 디자인으로 나간다). 렌더가 화면을 그리는 유일한 재료다.
@@ -192,9 +198,12 @@ CONTRACTS: dict[str, tuple[str, ...]] = {
         # app/v4/verify.py:111~119 _parse_span — 읽을 수 없으면 그 조각을 드롭한다.
         "candidates[].segments[].start_sec",
         "candidates[].segments[].end_sec",
-        # app/v4/approve.py:approve() 반환의 정본 키 — 순위 순 승인 id 목록이고
-        # `shorts_{n}.mp4` 번호가 이 순서다(§6 바깥 계약).
-        "approved",
+        # 순위 순 승인 id 목록 — `shorts_{n}.mp4` 번호가 이 순서다(§6 바깥 계약).
+        # ⚠ 자리는 **`approval` 절 안**이다. 파이프라인은 단계마다 절을 두고
+        # (boundary·verify·funnel·flags·approval) 그 안에 산출을 담는다 — 최상위
+        # `approved` 로 적었던 첫 판은 실잡에서 위반으로 떴고, 틀린 것은 파일이
+        # 아니라 이 표였다.
+        "approval.approved",
     ),
 }
 
@@ -228,8 +237,28 @@ def contract_keys_for(name: str) -> tuple[str, ...] | None:
 
 # ── 키 경로 파서 (순수) ─────────────────────────────────────────────────────
 
+def split_expected(path: str) -> tuple[str, str | None]:
+    """`키=값` → (키, 기대값). 값이 없으면 (키, None). 순수.
+
+    🛑 **이 문법이 있는 이유**(2026-09-04 실측): 계약 표가 `schema` 를 '있는가'로만
+    보던 시절, v4 의 연출 문서(`schema="v3_style/v1"`)를 E15 계약 이름
+    `checkpoint_style.json` 에 넣었더니 도구가 **통과시켰다** — 키는 있고 나머지
+    E15 목록은 선택이라 하나도 안 걸렸다. 그대로였다면 현지화 E16 이 조용히
+    no-op 하는 파일이 계약 합격 도장을 받고 나갔다. 이름이 같아도 **신원이 다르면**
+    다른 문서다. 그 신원을 확인하는 자리가 여기다."""
+    raw = str(path)
+    if "=" not in raw:
+        return raw, None
+    key, _, want = raw.partition("=")
+    if not key or not want:
+        raise ValueError(f"`키=값` 의 양쪽이 다 있어야 한다: {path!r}")
+    if "=" in want:
+        raise ValueError(f"기대값에 '=' 를 또 쓸 수 없다: {path!r}")
+    return key, want
+
+
 def parse_key_path(path: str) -> tuple[bool, tuple[tuple[str, str], ...]]:
-    """키 경로 → (선택 컨테이너인가, 스텝 목록).
+    """키 경로 → (선택 컨테이너인가, 스텝 목록). `=값` 꼬리는 여기서 떼고 본다.
 
     스텝은 두 종류다:
       ("field", 이름)  — 객체에서 그 이름을 꺼낸다
@@ -239,7 +268,7 @@ def parse_key_path(path: str) -> tuple[bool, tuple[tuple[str, str], ...]]:
     문법 위반은 즉시 실패한다 — 계약 표의 오타가 조용히 '검사 안 함'이 되면
     이 도구가 있는 이유가 사라진다.
     """
-    raw = str(path)
+    raw, _want = split_expected(path)
     optional = raw.startswith("?")
     if optional:
         raw = raw[1:]
@@ -286,8 +315,32 @@ def check_key(doc: Any, path: str) -> dict:
     verdict, where = _walk(doc, steps, "")
     if optional and verdict == "container_absent":
         verdict, where = "ok", ""
-    return {"key": path, "verdict": verdict, "where": where,
-            "ok": verdict == "ok", "optional": optional}
+    _key, want = split_expected(path)
+    got = None
+    if verdict == "ok" and want is not None:
+        # 값 대조는 **통과한 뒤**에만 한다 — 키가 없는 것과 값이 다른 것은 다른
+        # 사건이고, 사람이 고칠 곳도 다르다.
+        got = _value_at(doc, steps)
+        if str(got) != want:
+            verdict, where = "value_mismatch", _key.lstrip("?")
+    out = {"key": path, "verdict": verdict, "where": where,
+           "ok": verdict == "ok", "optional": optional}
+    if want is not None:
+        out["expected"], out["got"] = want, got
+    return out
+
+
+def _value_at(node: Any, steps: tuple[tuple[str, str], ...]) -> Any:
+    """스텝을 따라 내려가 값 하나를 꺼낸다. `_walk` 가 ok 를 준 뒤에만 부른다.
+
+    목록 스텝(`each`)이 섞인 경로는 값이 여럿이라 대조 대상이 아니다 — 그런 표는
+    문법 검사에서 막는다(아래 `CONTRACTS` 검증)."""
+    cur = node
+    for kind, name in steps:
+        if kind != "field":
+            raise ValueError("목록 스텝이 있는 경로에는 기대값을 붙일 수 없다")
+        cur = cur[name]
+    return cur
 
 
 def _walk(node: Any, steps: tuple[tuple[str, str], ...], trail: str) -> tuple[str, str]:

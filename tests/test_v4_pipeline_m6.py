@@ -329,7 +329,11 @@ def test_contract_diff_tool_passes_the_finished_job(synth, tmp_path, wired):
     result = check_job(docs, present=present, unreadable=unreadable, job=str(out))
     bad = {f["file"]: [v["where"] for v in f["violations"]]
            for f in result["files"] if f["status"] == "violation"}
-    assert bad == {"checkpoint_candidates.json": ["approved"]}, bad
+    # 위반 0 이 합격선이다. 종전에는 여기 `checkpoint_candidates.json: [approved]`
+    # 를 **기대값으로 박아 뒀는데**, 그것은 계약 표가 키 자리를 틀리게 적은 것이지
+    # 잡의 결함이 아니었다(실잡 대조로 드러났다). 아는 위반을 기대값에 박으면
+    # 도구가 그 자리에서 영구히 눈을 감는다.
+    assert bad == {}, bad
     assert not [f for f in result["files"] if f["status"] == "unreadable"]
     # 2위 편의 형제 파일도 같은 계약으로 본다(도구가 숫자 접미를 함께 읽는다)
     checked = {f["file"] for f in result["files"] if f["status"] == "ok"}

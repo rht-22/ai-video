@@ -69,8 +69,10 @@ def good_docs() -> dict:
         },
         # v4 가 실제로 쓰는 연출 문서(v3 Stage 4 어휘) — `checkpoint_style.json` 과
         # 이름도 모양도 다른 별개 파일이다.
-        "style.json": {"design": {"aspect_ratio": "1:1", "subtitle_size": 58},
-                       "beats": [], "labels": [], "diff": {}, "notes": ""},
+        "style.json": {"schema": "v3_style/v1",
+                       "design": {"aspect_ratio": "1:1", "subtitle_size": 58},
+                       "diff": {},
+                       "v3_style": {"beats": [], "labels": [], "notes": ""}},
         "checkpoint_style.json": {
             "schema": "style_plan/v1",
             "texts": [{"text": "쿵!", "source_time_sec": 42.0}],
@@ -95,7 +97,8 @@ def good_docs() -> dict:
                 {"id": "c01", "segments": [{"start_sec": 10.0, "end_sec": 55.0,
                                             "quote": "대사"}]},
             ],
-            "approved": ["c01"],
+            # 승인은 `approval` 절 안이다 — 파이프라인이 단계마다 절을 두는 규약.
+            "approval": {"approved": ["c01"]},
         },
     }
 
@@ -461,7 +464,8 @@ def test_style_json_and_checkpoint_style_are_different_contracts():
     v4 연출은 v3 Stage 4 어휘(`design`…)이고 E15 어휘(`schema`·`texts`…)가 아니다.
     이 둘이 같은 표를 공유하면, 모양이 다른 문서가 계약 이름으로 나가는 그 사고가
     도구를 통과한다(실제로 M7 에서 그렇게 나갈 뻔했고 이 도구가 잡았다)."""
-    v3_shape = {"design": {}, "beats": [], "labels": [], "notes": ""}
+    v3_shape = {"schema": "v3_style/v1", "design": {}, "diff": {},
+                "v3_style": {"beats": [], "labels": [], "notes": ""}}
     e15_shape = {"schema": "style_plan/v1"}
     assert M.check_document("style.json", v3_shape)["status"] == "ok"
     assert M.check_document("checkpoint_style.json", e15_shape)["status"] == "ok"
@@ -470,3 +474,63 @@ def test_style_json_and_checkpoint_style_are_different_contracts():
     assert M.check_document("style.json", e15_shape)["status"] == "violation"
     # 2위 편도 같은 계약을 탄다(승인 편이 여럿이다 — O7).
     assert M.contract_keys_for("style_2.json") == M.CONTRACTS["style.json"]
+
+
+# ── 값 대조(`키=값`) — 이름이 같아도 신원이 다르면 다른 문서다 ──────────────
+#
+# 이 절은 실측이 만든 것이다(2026-09-04). 계약 표가 `schema` 를 '있는가'로만 보던
+# 동안, v4 의 진짜 연출 문서(`schema="v3_style/v1"` · design·diff·v3_style)를 E15
+# 계약 이름 `checkpoint_style.json` 에 넣었더니 도구가 **통과**시켰다 — 키는 있고
+# E15 목록은 전부 선택이라 하나도 안 걸렸다. 현지화 E16 이 읽을 것이 없어 조용히
+# no-op 할 파일이 합격 도장을 받는 상태였다.
+
+def test_split_expected_reads_the_value_tail():
+    assert M.split_expected("schema") == ("schema", None)
+    assert M.split_expected("schema=style_plan/v1") == ("schema", "style_plan/v1")
+    assert M.split_expected("?texts[].text") == ("?texts[].text", None)
+
+
+@pytest.mark.parametrize("bad", ["schema=", "=v1", "a=b=c"])
+def test_split_expected_rejects_garbage(bad):
+    with pytest.raises(ValueError):
+        M.split_expected(bad)
+
+
+def test_value_mismatch_is_its_own_verdict():
+    """키 없음과 값 다름은 다른 사건이다 — 사람이 고칠 곳이 다르다."""
+    assert M.check_key({"schema": "style_plan/v1"}, "schema=style_plan/v1")["ok"]
+    r = M.check_key({"schema": "v3_style/v1"}, "schema=style_plan/v1")
+    assert r["verdict"] == "value_mismatch"
+    assert (r["expected"], r["got"]) == ("style_plan/v1", "v3_style/v1")
+    assert M.check_key({}, "schema=style_plan/v1")["verdict"] == "missing"
+
+
+def test_the_real_v4_style_doc_is_rejected_by_the_e15_contract():
+    """회귀 가드 — 실측이 통과시켰던 그 문서를 그대로 다시 넣는다.
+
+    이것이 통과하면 v4 연출 문서를 `checkpoint_style.json` 으로 내보내도 도구가
+    눈감는다. 그 상태가 정확히 현지화가 조용히 죽는 조건이다."""
+    real_v4_style = {"schema": "v3_style/v1",
+                     "design": {"aspect_ratio": "24:23", "video_y": 443},
+                     "diff": {},
+                     "v3_style": {"beats": [], "labels": [], "notes": ""}}
+    assert M.check_document("style.json", real_v4_style)["status"] == "ok"
+    bad = M.check_document("checkpoint_style.json", real_v4_style)
+    assert bad["status"] == "violation"
+    assert [v["verdict"] for v in bad["violations"]] == ["value_mismatch"]
+
+
+def test_every_contract_with_a_value_tail_is_a_plain_field_path():
+    """목록을 지나는 경로에는 값이 여럿이라 기대값을 못 붙인다 — 표 자체를 막는다.
+
+    이 가드가 없으면 `?texts[].text=쿵!` 같은 표가 조용히 들어와 `_value_at` 이
+    실행 중에 죽는다(도구가 잡을 것을 도구가 죽으며 못 잡는다)."""
+    for name, keys in M.CONTRACTS.items():
+        for k in keys:
+            _key, want = M.split_expected(k)
+            if want is None:
+                continue
+            optional, steps = M.parse_key_path(k)
+            assert not optional, f"{name}:{k} — 선택 컨테이너에 기대값은 뜻이 없다"
+            assert all(kind == "field" for kind, _ in steps), \
+                f"{name}:{k} — 목록을 지나는 경로에는 기대값을 붙일 수 없다"
