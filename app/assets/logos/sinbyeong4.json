@@ -1,0 +1,29 @@
+{
+  "code": "sinbyeong4",
+  "source_file": "신병4_logo_white.png",
+  "method": "alpha",
+  "original_size": [
+    3508,
+    2480
+  ],
+  "ink_bbox": [
+    708,
+    742,
+    2801,
+    1738
+  ],
+  "ink_size": [
+    2093,
+    996
+  ],
+  "trim_percent_w": 40.3,
+  "trim_percent_h": 59.8,
+  "trim_percent_area": 76.0,
+  "padding": {
+    "left": 708,
+    "right": 707,
+    "top": 742,
+    "bottom": 742
+  },
+  "normalized_at": "2026-09-04T18:34:52"
+}
