@@ -144,14 +144,27 @@ def _field(item: Any, *names: str, default: Any = None) -> Any:
     return default
 
 
-def _segments_of(cand: Any) -> list[SimpleNamespace]:
-    """후보 → 시각순 조각 목록(사본). 넘겨받은 dict 는 건드리지 않는다."""
+def _raw_segments_of(cand: Any) -> list[SimpleNamespace]:
+    """후보 → **편집 순서 그대로**의 조각 목록(사본). 정렬하지 않는다.
+
+    조각 배열의 순서가 곧 붙는 순서다(8단계 `flags.candidate_clips` 가 같은 규약을
+    명시한다). 소스 시간과 다를 수 있으므로 — 결말을 앞으로 빼는 편성 — '첫 화면'을
+    묻는 신호는 반드시 이쪽을 봐야 한다."""
     raw = _field(cand, "segments", default=None) or []
-    out = [SimpleNamespace(start_sec=_num(_field(s, "start_sec", "start")),
-                           end_sec=_num(_field(s, "end_sec", "end")),
-                           quote=_field(s, "quote", "text"))
-           for s in raw]
-    return sorted(out, key=lambda s: (s.start_sec, s.end_sec))
+    return [SimpleNamespace(start_sec=_num(_field(s, "start_sec", "start")),
+                            end_sec=_num(_field(s, "end_sec", "end")),
+                            quote=_field(s, "quote", "text"))
+            for s in raw]
+
+
+def _segments_of(cand: Any) -> list[SimpleNamespace]:
+    """후보 → **시각순** 조각 목록(사본). 넘겨받은 dict 는 건드리지 않는다.
+
+    ⚠ 정렬본이다. 소스 분포를 재는 신호(커버리지·정적·응집도·문장 절단)는 순서와
+    무관하므로 이쪽이 맞지만, **'첫 조각'을 묻는 신호는 `_raw_segments_of`** 를
+    써야 한다(2026-09-04: `lead_in_sec` 이 여기를 보고 있어서, 비선형 편성에서
+    훅이 아니라 소스상 가장 이른 조각의 서론을 재고 있었다)."""
+    return sorted(_raw_segments_of(cand), key=lambda s: (s.start_sec, s.end_sec))
 
 
 def _normalize_intervals(speech_intervals: Any) -> list[SimpleNamespace] | None:
@@ -432,8 +445,12 @@ def soft_signals(cand: dict, *, scene_cuts: list[float],
         out["cut_mid_sentence"] = cuts_mid
 
     # 서론 금지 — 첫 조각에 신뢰할 단어가 하나도 없으면 **판정하지 않는다**(None).
+    # ⚠ 여기서 '첫 조각'은 **편집 순서**의 첫 조각이다(정렬본의 첫 항목이 아니다) —
+    # 시청자가 0초에 보는 화면이 무엇인지 묻는 신호이기 때문이다. 선형 편성에서는
+    # 둘이 같아 값이 변하지 않는다.
     if plaus_words is not None:
-        head = segments[0]
+        raw_segments = _raw_segments_of(cand)
+        head = raw_segments[0] if raw_segments else segments[0]
         inside = [w.start_sec for w in plaus_words
                   if head.start_sec <= w.start_sec < head.end_sec]
         if inside:

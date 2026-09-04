@@ -261,6 +261,12 @@ def _hints_block(hints: dict | None) -> str:
     return "\n".join(lines) if lines else "- (휴리스틱 후보 없음)"
 
 
+# 비선형 편성을 여는 덧붙임 절(게이트 `--nonlinear`). 미지정이면 "" 이라 프롬프트가
+# **종전과 바이트 동일**하다. 기본 프롬프트는 순서를 말하지 않고 출력 예시가 오름차순
+# 이라, 모델이 조각을 늘 소스 시간 순으로 낸다(실측 11/11 후보 · 4/4 edit_plan 단조).
+ORDER_FREE_CLAUSE = """9. **조각 배열의 순서가 곧 붙는 순서다** — 소스 시간 순일 필요가 없다. 결말·최고조 대사를 첫 조각으로 앞당기고 그 뒤에 발단을 붙이는 구성을 써도 된다. 다만 ① 조각끼리 소스 구간이 **겹치면 안 된다**(같은 화면이 두 번 나간다) ② 앞당긴 조각이 그 자체로 이해되어야 한다(맥락 없이 이름·지시대명사만 나오는 대사는 훅으로 쓰지 마라).
+"""
+
 PROMPT_TEMPLATE = """당신은 쇼츠 편집 후보를 고르는 구성작가다. 첨부한 영상 전체를 훑고, 아래 전사·격자 요약을 근거로 **쇼츠 후보 {n_min}~{n_max}개**를 골라라.
 
 이 단계에서 하는 일은 **구간 고르기 하나**다. 내레이션 문장·화면 라벨·효과 문구·최종 제목은 쓰지 않는다 — 뒷단계가 쓴다. 지금 쓰면 출력이 잘려 전부 버려진다.
@@ -299,7 +305,7 @@ PROMPT_TEMPLATE = """당신은 쇼츠 편집 후보를 고르는 구성작가다
 6. **대사 신뢰** — 전사 줄에 `[저확신 …]` 이 붙어 있으면 받아쓰기가 흔들린 구간이라 그 줄을 `quote` 로 쓰지 마라(그 구간을 꼭 쓰려면 같은 조각의 다른 줄을 골라라). 전사에 줄이 없는 시각대는 **대사가 없는 구간**이다 — 그런 조각의 `quote` 는 `null` 이다.
 7. **인트로·지난 줄거리·예고·엔딩 크레딧·방송 종료 화면**을 `exception_sector` 로 함께 신고하라. 없는 항목은 `null`. 예고(teaser)는 화면에 콜라주·장식 프레임, 스태프롤 병행, "다음 이야기" 문구, 본편과 단절된 빠른 몽타주(장소·의상이 컷마다 바뀜)로 알아본다. ⚠ 예고의 **시작은 장식 프레임이 뜨는 순간이 아니라** 본편 서사가 끝난 뒤 예고 소재가 시작되는 **첫 컷**이다. 경계가 불확실하면 **이른 쪽**을 골라라 — 본편에 예고가 새는 것이 예고를 조금 잘라내는 것보다 훨씬 나쁘다.
 8. 후보의 조각은 본편에서 고른다 — 위에서 신고한 인트로·예고·크레딧 구간은 쓰지 마라.
-{reject_block}
+{order_block}{reject_block}
 ## 출력 (JSON 만)
 {{"candidates": [
  {{"id": "c01", "template": "{first_template}", "reason": "선택 사유 한 문장",
@@ -317,7 +323,7 @@ def build_prompt(*, work_title: str, transcript: str, grid_summary: str,
                  research_context: str = "", hints: dict | None = None,
                  templates: tuple[str, ...], target_sec: float, max_sec: float,
                  n_min: int = CANDIDATES_MIN, n_max: int = CANDIDATES_MAX,
-                 reject_note: str = "") -> str:
+                 reject_note: str = "", nonlinear: bool = False) -> str:
     """6단계 프롬프트. 순수 — 같은 인자면 같은 문자열(지문의 전제).
 
     담는 것(계약 §2): ① 절대초로 답하라 ② quote 를 **전사에서 그대로** ③ 서로 다른 아크로
@@ -329,6 +335,8 @@ def build_prompt(*, work_title: str, transcript: str, grid_summary: str,
     if research_context and research_context.strip():
         # 상한 2000자는 v3 `seq_analyze.build_prompt` 와 같은 자다(같은 재료·같은 자리).
         research_block = "\n\n## 작품 배경 (리서치)\n" + research_context.strip()[:2000]
+    # 게이트 — 미지정이면 "" 이라 렌더된 프롬프트가 종전과 바이트 동일하다.
+    order_block = ORDER_FREE_CLAUSE if nonlinear else ""
     reject_block = ""
     if reject_note and reject_note.strip():
         reject_block = ("\n## ⚠ 직전 제안 반려 사유 — 전부 고쳐서 다시 내라\n"
@@ -340,6 +348,7 @@ def build_prompt(*, work_title: str, transcript: str, grid_summary: str,
         transcript=transcript, segments_max=SEGMENTS_MAX,
         target_sec=float(target_sec), max_sec=float(max_sec),
         n_min=int(n_min), n_max=int(n_max), title_max=TITLE_DRAFT_MAX_CHARS,
+        order_block=order_block,
         reject_block=reject_block, first_template=templates[0])
 
 
@@ -644,7 +653,7 @@ def run_candidates(gemini: Any, handle: Any, *, work_title: str, grid: dict,
                    templates: tuple[str, ...] = TEMPLATES_DEFAULT,
                    target_sec: float, max_sec: float,
                    n_min: int = CANDIDATES_MIN, n_max: int = CANDIDATES_MAX,
-                   log=print) -> tuple[dict, dict]:
+                   nonlinear: bool = False, log=print) -> tuple[dict, dict]:
     """1콜(+재질의 ≤MAX_REASKS) → (`checkpoint_candidates` 의 후보 절, audit).
 
     · 영상은 **전체를 한 파트로** 붙인다(조각 첨부는 8단계의 일이다). 표본 fps 는 4단계가
@@ -676,6 +685,7 @@ def run_candidates(gemini: Any, handle: Any, *, work_title: str, grid: dict,
         "transcript_lines": transcript.count("\n") + 1 if transcript else 0,
         "hints": hints,
         "n_range": [int(n_min), int(n_max)],
+        "nonlinear": bool(nonlinear),
     }
 
     accepted: list[dict] | None = None
@@ -687,7 +697,7 @@ def run_candidates(gemini: Any, handle: Any, *, work_title: str, grid: dict,
             work_title=work_title, transcript=transcript, grid_summary=grid_summary,
             research_context=research_ctx, hints=hints, templates=templates,
             target_sec=target_sec, max_sec=max_sec, n_min=n_min, n_max=n_max,
-            reject_note=reject_note)
+            reject_note=reject_note, nonlinear=nonlinear)
         sha = prompt_sha(prompt)
         if attempt == 0:
             base_sha = sha

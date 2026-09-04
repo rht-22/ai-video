@@ -133,17 +133,37 @@ def _pick_hit(hits: list[tuple[float, float]], origin: float) -> tuple[float, fl
     return min(hits, key=lambda h: (abs(h[0] - origin), h[0]))
 
 
+def _is_linear(spans: list[tuple[float, float] | None]) -> bool:
+    """조각이 **소스 시간 순으로** 왔는가. 순수.
+
+    이 후보가 시간 순행 편성인지 판별한다. 순행이면 '조각 순서 = 소스 순서'가
+    작가의 의도이므로 그것을 깨는 재배치는 이야기를 거꾸로 붙인다. 반대로 애초에
+    비순행으로 온 후보(결말을 앞으로 빼는 편성)에서는 그 관계가 의도가 아니므로
+    같은 잣대를 대면 멀쩡한 재배치를 이유 없이 포기한다."""
+    seen = [sp for sp in spans if sp is not None]
+    return all(a[0] <= b[0] for a, b in zip(seen, seen[1:]))
+
+
 def _conflicts(new_span: tuple[float, float], others: list[tuple[int, tuple[float, float]]],
-               idx: int) -> str | None:
+               idx: int, *, linear: bool = True) -> str | None:
     """재배치가 다른 조각과 겹치거나 **편집 순서를 뒤집는가** → 사유 또는 None. 순수.
 
-    조각 순서는 곧 편집 순서다. 겹치면 같은 화면이 두 번 나가고, 순서가 뒤집히면
-    이야기가 거꾸로 붙는다 — 둘 다 재배치로 얻는 것보다 잃는 것이 크므로 **재배치를
-    포기하고 원위치를 유지**한다(드롭도 아니다 — 판정 근거가 없는 쪽으로 기울인다)."""
+    겹치면 같은 화면이 두 번 나간다 — 순서와 무관한 사고라 **항상** 본다.
+
+    순서 뒤집힘은 `linear=True`(후보가 시간 순행 편성)일 때만 본다. 순행 후보에서
+    조각 순서는 곧 편집 순서이고 그것을 깨면 이야기가 거꾸로 붙는다 — 재배치로 얻는
+    것보다 잃는 것이 크므로 **재배치를 포기하고 원위치를 유지**한다(드롭이 아니다 —
+    판정 근거가 없는 쪽으로 기울인다).
+
+    ⚠ `linear=False` 는 비순행 편성이다(2026-09-04). 그때 소스 시간의 앞뒤 관계는
+    작가가 일부러 뒤집은 것이라 '뒤집힘'이라는 개념 자체가 성립하지 않는다 — 이
+    검사를 그대로 두면 비선형 후보의 정상 재배치가 전부 포기된다."""
     ns, ne = new_span
     for j, (os_, oe) in others:
         if ne > os_ and ns < oe:
             return f"재배치 자리가 조각{j}[{os_:.1f}, {oe:.1f}] 와 겹칩니다"
+        if not linear:
+            continue
         if j < idx and os_ > ns:
             return f"재배치하면 조각{j} 보다 앞서 편집 순서가 뒤집힙니다"
         if j > idx and os_ < ns:
@@ -315,7 +335,8 @@ def verify_candidate(cand: dict, *, segments: list[dict], source_duration_sec: f
                 others = [(j, sp) for j, sp in finals]
                 others += [(j, sp) for j, sp in enumerate(originals)
                            if j > idx and sp is not None]
-                clash = _conflicts(new_span, others, idx)
+                clash = _conflicts(new_span, others, idx,
+                                   linear=_is_linear(originals))
 
                 if clash:
                     notes.append({"segment": idx, "action": "ok",

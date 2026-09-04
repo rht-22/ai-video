@@ -3,7 +3,8 @@
     python -m app.v4 --video <원본.mp4> --work-title <작품명> \\
         [--srt 자막.srt] [--episode N] [--outdir outputs] [--job-id <재개>] \\
         [--from-step <단계>] [--stop-after <단계>] [--max-shorts 1..8] \\
-        [--winner-detail] [--skip-research] [--scene-threshold 0.3] \\
+        [--winner-detail] [--nonlinear] [--skip-research] \\
+        [--scene-threshold 0.3] \\
         [--edit-overrides <json>]
 
 받는 키 집합을 여기서 못박는다 — **모르는 플래그는 argparse 가 거절**한다(기획서 §6).
@@ -78,6 +79,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--winner-detail", action="store_true",
                    help="10a 정밀 청취 — 승인 편 구간만 3fps 로 다시 듣는다"
                         "(화자·깨진 전사 보정). 미지정이면 화자별 자막색이 없다")
+    p.add_argument("--nonlinear", action="store_true",
+                   help="비선형 편성 허용 — 결말·최고조를 첫 조각으로 앞당기는 구성을 "
+                        "6단계에 연다. 미지정이면 프롬프트가 종전과 바이트 동일하고 "
+                        "후보는 소스 시간 순으로만 온다")
     p.add_argument("--scene-threshold", type=float, default=SCENE_THRESHOLD,
                    help=f"ffmpeg scene score 임계(기본 {SCENE_THRESHOLD})")
     p.add_argument("--edit-overrides", default=None,
@@ -129,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
                  skip_research=args.skip_research,
                  max_shorts=args.max_shorts,
                  winner_detail=args.winner_detail,
+                 nonlinear=args.nonlinear,
                  scene_threshold=args.scene_threshold,
                  edit_overrides_path=(Path(args.edit_overrides)
                                       if args.edit_overrides else None))

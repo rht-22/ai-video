@@ -518,3 +518,29 @@ def test_genuine_relocation_still_fires_after_the_overlap_fix():
     got = verify_candidate(cand, segments=SEGMENTS, source_duration_sec=1200.0)
     assert got["verdict"] == "relocated"
     assert got["segments"][0]["start_sec"] == pytest.approx(518.9)
+
+
+# ── 순서 뒤집힘 검사는 **순행 후보에만** (2026-09-04) ──────────────────────
+
+def test_is_linear_reads_source_order():
+    assert V._is_linear([(0.0, 10.0), (20.0, 30.0)])
+    assert not V._is_linear([(20.0, 30.0), (0.0, 10.0)])
+    assert V._is_linear([None, (5.0, 6.0)])          # 못 읽은 조각은 건너뛴다
+    assert V._is_linear([])
+
+
+def test_order_check_is_skipped_for_a_nonlinear_candidate():
+    """비순행 편성에서는 '뒤집힘'이라는 개념이 성립하지 않는다.
+
+    검사를 그대로 두면 결말을 앞으로 뺀 후보의 **정상 재배치가 전부 포기**된다."""
+    others = [(0, (600.0, 630.0))]                   # 조각0 이 소스상 뒤에 있다
+    # 조각1 을 570 으로 옮긴다 — 순행 잣대로는 '조각0 보다 앞선다'
+    assert V._conflicts((570.0, 600.0), others, 1, linear=True) is not None
+    assert V._conflicts((570.0, 600.0), others, 1, linear=False) is None
+
+
+def test_overlap_is_refused_even_when_nonlinear():
+    """겹침은 순서와 무관한 사고다 — 비순행에서도 막는다."""
+    others = [(0, (600.0, 630.0))]
+    why = V._conflicts((620.0, 640.0), others, 1, linear=False)
+    assert why and "겹칩니다" in why

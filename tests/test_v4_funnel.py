@@ -581,3 +581,31 @@ def test_recap_overlap_is_recorded_like_intro_not_hard():
     _kept, rec = F.run_funnel([cand], **{**BASE, "exception_sectors": {
         "recap": {"start_sec": 90.0, "end_sec": 200.0}}})
     assert rec["intro_overlap"] and rec["intro_overlap"][0]["sector"] == "recap"
+
+
+# ── lead_in_sec 은 **편집 순서** 첫 조각을 본다 (2026-09-04) ───────────────
+
+def test_lead_in_measures_the_edit_order_head_not_the_earliest_in_source():
+    """0초에 보이는 화면을 묻는 신호다 — 정렬본의 첫 항목이 아니다.
+
+    `_segments_of` 가 시각순으로 정렬하므로, 결말을 앞으로 뺀 편성에서는 정렬본의
+    첫 항목이 훅이 아니라 **소스상 가장 이른 조각**(=발단)이다. 그 조각의 서론을
+    재면 훅과 무관한 값이 나온다."""
+    # 편집 순서: 결말(600~640) 먼저, 발단(100~140) 나중
+    cand = {"segments": [{"start_sec": 600.0, "end_sec": 640.0, "quote": "q1"},
+                         {"start_sec": 100.0, "end_sec": 140.0, "quote": "q2"}]}
+    sig = F.soft_signals(cand, scene_cuts=[],
+                         speech_intervals=[_iv(600, 620), _iv(100, 120)],
+                         words=_words(601.0, 105.0))
+    # 훅(600)의 첫 단어는 601 → 1.0s. 발단(100)을 봤다면 5.0s 가 나온다.
+    assert sig["lead_in_sec"] == pytest.approx(1.0)
+
+
+def test_lead_in_unchanged_for_a_linear_candidate():
+    """순행 후보에서는 정렬본과 편집 순서가 같다 — 값이 안 움직인다(회귀 0)."""
+    cand = {"segments": [{"start_sec": 100.0, "end_sec": 140.0, "quote": "q1"},
+                         {"start_sec": 200.0, "end_sec": 220.0, "quote": None}]}
+    sig = F.soft_signals(cand, scene_cuts=[],
+                         speech_intervals=[_iv(100, 120), _iv(200, 215)],
+                         words=_words(103.0, 206.0))
+    assert sig["lead_in_sec"] == pytest.approx(3.0)

@@ -124,7 +124,7 @@ def snap_segments(segments: list[dict], *, grid: dict,
 
     out: list[dict] = []
     record: list[dict] = []
-    prev_end: float | None = None
+    seen: list[tuple[float, float]] = []   # 이미 본 조각의 소스 구간(교차 판정용)
     for i, seg in enumerate(segments or []):
         if not isinstance(seg, dict):
             raise ValueError(f"조각{i}: dict 가 아니다({type(seg).__name__})")
@@ -166,11 +166,21 @@ def snap_segments(segments: list[dict], *, grid: dict,
             # err == 0 : 이미 눈금 위 — 적을 것이 없다(기록을 잡음으로 채우지 않는다)
 
         s, e = round(s, 3), round(e, 3)
-        if prev_end is not None and s < prev_end - _EPS:
-            record.append({"segment": i, "boundary": "start", "action": "overlap",
-                           "from": s, "to": s, "prev_end": prev_end,
-                           "why": "스냅 뒤 앞 조각과 겹친다 — 고치지 않고 알린다"})
-        prev_end = e
+        # 🛑 겹침은 **구간이 실제로 교차하는가**로 본다(2026-09-04 교정). 종전에는
+        # `s < prev_end` 로 봤는데, 그것은 "조각이 소스 시간 순으로 온다"를 가정한
+        # 판정이라 **비선형 편성**(결말을 앞으로 빼는 구성)에서 멀쩡한 배치를
+        # 겹침으로 신고했다 — 예: [(609,636), (570,605)] 는 소스에서 서로 떨어져
+        # 있는데 570 < 636 이라 걸렸다. 실제로 나쁜 것은 같은 화면이 두 번 나가는
+        # 것이고, 그것은 순서와 무관한 교차 판정이다.
+        for j, (ps, pe) in enumerate(seen):
+            if s < pe - _EPS and e > ps + _EPS:
+                record.append({"segment": i, "boundary": "start", "action": "overlap",
+                               "from": s, "to": s, "prev_start": ps, "prev_end": pe,
+                               "with": j,
+                               "why": f"조각{j}[{ps:g}, {pe:g}] 와 소스가 겹친다 "
+                                      "— 같은 화면이 두 번 나간다(고치지 않고 알린다)"})
+                break
+        seen.append((s, e))
         out.append({**seg, "start_sec": s, "end_sec": e})
     return out, record
 

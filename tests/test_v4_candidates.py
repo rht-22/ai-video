@@ -754,3 +754,40 @@ def test_prompt_tells_the_model_the_minimum_segment_count():
     block = C._template_block(("recap_dialogue", "conflict_payoff"))
     assert "최소 2개로 나눠라" in block                 # conflict_payoff
     assert "최소 1개로 나눠라" not in block             # recap_dialogue 는 자명하다
+
+
+# ── 비선형 편성 게이트 (2026-09-04) ────────────────────────────────────────
+#
+# 조사 결과 v4 어디에도 '조각은 소스 시간 순이어야 한다'를 강제하는 벨트가 **없다**.
+# 막고 있던 것은 프롬프트뿐이다 — 순서를 말하지 않고 출력 예시가 오름차순이라 모델이
+# 늘 시간 순으로 냈다(실측 11/11 후보 · 4/4 edit_plan 단조). 이 절은 그 자물쇠를
+# 게이트 뒤에서 여는 것을 고정한다.
+
+def _order_prompt(**kw):
+    """이 절 전용 프롬프트 — 윗 `_prompt` 헬퍼와 기본값이 다르므로 이름을 나눈다."""
+    base = dict(work_title="작품", transcript="0.0 대사", grid_summary="요약",
+                templates=("recap_dialogue",), target_sec=50.0, max_sec=60.0)
+    base.update(kw)
+    return C.build_prompt(**base)
+
+
+def test_default_prompt_is_byte_identical_without_the_gate():
+    """미지정 = 회귀 0. 이 한 줄이 깨지면 전 채널 후보 편성이 함께 움직인다."""
+    assert _order_prompt() == _order_prompt(nonlinear=False)
+    assert "9. " not in _order_prompt()
+    assert C.ORDER_FREE_CLAUSE not in _order_prompt()
+
+
+def test_gate_adds_the_order_clause_only():
+    """켜면 절이 **덧붙는다** — 본문은 그대로다(프롬프트 동결 규율)."""
+    off, on = _order_prompt(), _order_prompt(nonlinear=True)
+    assert C.ORDER_FREE_CLAUSE in on
+    assert off != on
+    # 덧붙임이라 off 의 모든 줄이 on 에 그대로 있다.
+    missing = [ln for ln in off.splitlines() if ln and ln not in on.splitlines()]
+    assert not missing, f"본문이 바뀌었다: {missing[:3]}"
+
+
+def test_order_clause_forbids_source_overlap():
+    """순서는 열되 **겹침은 막는다** — 같은 화면이 두 번 나가는 것은 별개 사고다."""
+    assert "겹치면 안 된다" in C.ORDER_FREE_CLAUSE
