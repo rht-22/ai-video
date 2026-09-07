@@ -1,0 +1,35 @@
+{
+ "schema": "exception_label/v1",
+ "labeled_by": "Claude — 프레임 실측(타일 접촉시트 + blackdetect)",
+ "date": "2026-09-07",
+ "policy": "exception = 화면의 주 내용이 본편이 아닌 구간(전용 카드·예고 영상). 본편 화면 위 글자 오버레이는 exception 아님 — aux 로 보조 기록. credit 은 max_overreach 를 선언한다(갭 7 — 본편 엔딩을 먹는 과잉은 손실이 아니라 결말 소실).",
+ "source_hint": "EP01.mp4",
+ "duration_sec": 3146.325,
+ "labels": {
+  "intro": {
+   "start": 0.0,
+   "end": 8.0,
+   "tol": 0.5,
+   "desc": "흑 위 제공사 카드 — 'A Coupang Play Series' → KOCCA → 고지문. 8.0 부터 콜드오픈(철거촌 밤)"
+  },
+  "recap": null,
+  "credit": {
+   "start": 2943.5,
+   "end": 3146.325,
+   "tol": 1.0,
+   "max_overreach": 1.0,
+   "desc": "2943.5 전면 흑(blackdetect 2943.524~2967.298) → 2946 '투자/제공 쿠팡플레이' → 스태프롤 → 3141.7 흑. 직전 2927.5~2930.8 암전은 본편 전환(뒤에 투샷 2934·기사 2936·댓글 2940 = 회차 엔딩 리빌)"
+  },
+  "teaser": null,
+  "end": null
+ },
+ "aux": {
+  "title_card": {
+   "start": 393.7,
+   "end": 409.0,
+   "tol": 2.0,
+   "desc": "콜드오픈 뒤 타이틀 시퀀스 — 흑(393.7) → '지금 불륜이 문제가 아닙니다' 로고 → '1화 불륜남 A' 카드 → 410 본편. 같은 키(intro)에 두 구간을 못 두므로 중립 처리"
+  }
+ },
+ "notes": "2026-09-07 실사고: Stage 1 원판정 credit 2943.5(정답) → M8 refine 경계 프로브가 2930.75 로 −12.75s 이동 → verify_part(2935.75~2965.75 다수결)가 유지 → 기사 「류지수♥강태한」·댓글 「차은빈은 뭔 죄임」 리빌이 chunk_split 에서 물리 제거. max_overreach 1.0 이 이 사고를 fail 로 박제한다."
+}

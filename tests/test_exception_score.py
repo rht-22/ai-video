@@ -102,3 +102,38 @@ def test_report_renders_fail_rows():
     rows = [{"name": "gw", **score_one(GAWANG_LABEL, GAWANG_PRED)}]
     md = render_report(rows)
     assert "fail" in md and "teaser ✗" in md
+
+
+# ── 갭 7 (2026-09-07) — EP01 엔딩 리빌 소실 사고를 박제한다(max_overreach 옵트인) ───
+import json  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+EP01_LABEL = json.loads((Path(__file__).parent / "data" / "v3_exception_labels"
+                         / "bulryun_ep01.json").read_text(encoding="utf-8"))
+
+
+def test_ep01_incident_fails_via_declared_max_overreach():
+    # 실판정(cb337459): credit 2930.75 — 레이블 2943.5 보다 12.75s 이르다(본편 엔딩 소실)
+    pred = {"intro": {"start": "00:00:00.000", "end": "00:00:08.000"},
+            "credit": {"start": "00:48:50.750", "end": "00:52:26.325"},
+            "recap": None, "teaser": None, "end": None}
+    s = score_one(EP01_LABEL, pred)
+    credit = next(z for z in s["zones"] if z["zone"] == "credit")
+    assert credit["uncovered_sec"] == 0.0                      # miss 는 없다 — 종전 정책이면 pass
+    assert credit["adjacent_overreach_sec"] == pytest.approx(12.75, abs=0.01)
+    assert credit["overreach_allow_sec"] == pytest.approx(3.0)  # max_overreach 1.0 + SNAP 2.0
+    assert credit["pass"] is False and s["verdict"] == "fail"
+    # 정답(2943.5)이면 credit 통과
+    good = dict(pred, credit={"start": "00:49:03.500", "end": "00:52:26.325"})
+    s2 = score_one(EP01_LABEL, good)
+    assert next(z for z in s2["zones"] if z["zone"] == "credit")["pass"] is True
+    assert s2["verdict"] == "pass"
+
+
+def test_max_overreach_is_opt_in_only():
+    # 선언 없는 기존 레이블(가왕쇼)은 인접 초과가 커도 종전대로 경고뿐
+    pred = dict(GAWANG_PRED, teaser={"start": "00:28:00.000", "end": "00:30:54.100"})   # 61.5s 과잉
+    s = score_one(GAWANG_LABEL, pred)
+    teaser = next(z for z in s["zones"] if z["zone"] == "teaser")
+    assert teaser["overreach_allow_sec"] is None and teaser["adjacent_overreach_sec"] > 60
+    assert teaser["pass"] is True

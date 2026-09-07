@@ -513,6 +513,106 @@ def fix_names(segments: list[dict], names: list[str]) -> tuple[list[dict], list[
     return fixed, log
 
 
+# ── 갭 6(2026-09-07) — 사전 없는 인명의 **내부 표기 불일치** ──────────────────
+# 사람에게만 붙는 표지. 범용 조사(는/가)는 일반명사에 파묻힌다(EP01 실측: 노이즈 15쌍 →
+# 정답 1쌍). ⚠ 정규식은 실측 재현의 근거라 바꾸면 EP01 토큰 14개·1쌍이 흔들린다.
+_PERSON_MARKER = _re.compile(r"([가-힣]{2,4})(?:씨|님|이랑|랑|한테|에게|하고)\b")
+VARIANT_LINES_MAX = 3      # 신고 항목당 표본 줄 수
+
+
+def _stem_pattern(name: str) -> "_re.Pattern[str]":
+    """어절 핵이 그 이름(+조사·표지 ≤3음절)인가 — 세는 것과 고치는 것이 같은 자를 쓴다."""
+    return _re.compile(r"^" + _re.escape(name) + r"[가-힣]{0,3}$")
+
+
+def check_internal_variants(segments: list[dict], names: list[str] | None = None
+                            ) -> list[dict]:
+    """A 폴백 — 사전 **없이** 전사 자체의 표기 불일치로 인명 오인식을 신고한다. 순수.
+
+    EP01 실사고: 전사가 「유지수」5회 / 「류지수」3회로 갈렸고 정답은 **소수파**(류지수).
+    사전엔 류지수가 없어 check_names 가 못 잡았고 완성본에 「유지수」가 나갔다.
+      ① 사람 표지(씨/님/이랑/랑/한테/에게/하고) 뒤의 어절만 후보(3음절+)
+      ② 같은 길이 · 편집거리 1 인 쌍을 신고
+      ③ **자동으로 고르지 않는다** — 다수결이면 틀린다(5:3 에서 다수가 오답).
+         suggest 는 사전에 **한쪽만** 있을 때 그 쪽, 둘 다 있거나 둘 다 없으면 None(사람 확인).
+    반환 항목: {a, b, count_a, count_b, suggest, lines[(at, line)] ≤3}. count 는 표지 유무와
+    무관한 어절 핵 등장 수(조사 포함 — 「유지수는」도 유지수다). 실측: EP01 grid 단어로
+    돌리면 후보 토큰 14개 · 신고 정확히 (유지수, 류지수) 1쌍."""
+    segs = list(segments or [])
+    first_seen: dict[str, int] = {}
+    for i, seg in enumerate(segs):
+        for m in _PERSON_MARKER.finditer(str(seg.get("text") or "")):
+            cand = m.group(1)
+            if len(cand) >= NAME_MIN_LEN:
+                first_seen.setdefault(cand, i)
+    cands = sorted(first_seen, key=first_seen.__getitem__)
+    exact = set(dict.fromkeys(names or []))
+
+    def _count_and_lines(name: str) -> tuple[int, list[tuple[float, str]]]:
+        pat = _stem_pattern(name)
+        n, lines = 0, []
+        for seg in segs:
+            text = str(seg.get("text") or "")
+            k = sum(1 for raw in text.split() if pat.match(raw.strip(_STRIP)))
+            if k:
+                n += k
+                if len(lines) < VARIANT_LINES_MAX:
+                    lines.append((round(float(seg.get("start_sec") or 0), 2), text))
+        return n, lines
+
+    out: list[dict] = []
+    for i, a in enumerate(cands):
+        for b in cands[i + 1:]:
+            if len(a) != len(b) or edit_distance(a, b) != 1:
+                continue
+            in_a, in_b = a in exact, b in exact
+            suggest = a if (in_a and not in_b) else b if (in_b and not in_a) else None
+            ca, la = _count_and_lines(a)
+            cb, lb = _count_and_lines(b)
+            out.append({"a": a, "b": b, "count_a": ca, "count_b": cb,
+                        "suggest": suggest,
+                        # 표본은 양쪽 표기가 다 보이게 — b 자리를 최소 하나 남긴다
+                        "lines": (la[:VARIANT_LINES_MAX - 1] + lb)[:VARIANT_LINES_MAX]})
+    return out
+
+
+def fix_internal_variants(segments: list[dict], variants: list[dict]
+                          ) -> tuple[list[dict], list[dict]]:
+    """A 폴백 승격판 — `suggest` 가 있는 쌍**만** 사전 쪽 표기로 교정한 사본 + 기록. 순수.
+
+    게이트(--fix-names) 뒤에서만 쓴다. suggest 가 None 인 쌍은 **절대 건드리지 않는다**
+    (사람 확인 몫 — 다수결 금지). 어절 단위로, 핵이 오표기(+조사 ≤3음절)인 어절만 핵을
+    바꾼다(fix_names 의 '정확히 일치하는 어절만' 규율의 조사 허용판 — 세는 자와 같다)."""
+    table: dict[str, str] = {}
+    for v in variants or []:
+        sug = v.get("suggest")
+        if not sug:
+            continue
+        wrong = v["b"] if sug == v["a"] else v["a"]
+        table[wrong] = sug
+    pats = {w: _stem_pattern(w) for w in table}
+    fixed, log = [], []
+    for seg in segments or []:
+        text = str(seg.get("text") or "")
+        parts, subs = [], []
+        for raw in text.split():
+            core = raw.strip(_STRIP)
+            hit = next((w for w, p in pats.items() if p.match(core)), None)
+            if hit is None:
+                parts.append(raw)
+                continue
+            parts.append(raw.replace(core, table[hit] + core[len(hit):], 1))
+            subs.append({"token": core, "suggest": table[hit]})
+        if not subs:
+            fixed.append(dict(seg))
+            continue
+        new_text = " ".join(parts)
+        fixed.append({**seg, "text": new_text})
+        log.append({"at": round(float(seg.get("start_sec") or 0), 2),
+                    "before": text, "after": new_text, "subs": subs, "n": len(subs)})
+    return fixed, log
+
+
 def check_repetition(segments: list[dict]) -> list[dict]:
     """B — 자막 반복 환각 서명. 경고 목록(비면 정상). 순수.
 

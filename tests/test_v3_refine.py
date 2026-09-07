@@ -223,3 +223,154 @@ def test_degenerate_loop_detection():
           for i, w in enumerate("설레이다 꺼낸 가슴을 오라버니 어깨에 기대해볼래요 커다란 얼굴을 묻고".split())]
     assert is_degenerate_loop(ok) is None
     assert is_degenerate_loop([]) is None
+
+
+# ── 갭 7 (2026-09-07, EP01 실사고) — credit 경계는 흑 앵커 · 잘라낸 조각 검증 ─────────
+# 사고: Stage 1 원판정 credit 2943.5(정답) → 경계 프로브가 2930.75 로 −12.75s → 창 다수결
+# verify_part 가 유지 → 기사·댓글 리빌 소실. 아래는 그 사고를 LLM 없이 재현·차단한다.
+
+from pathlib import Path  # noqa: E402
+
+from app.v3 import refine as rf  # noqa: E402
+from app.v3.scenecut import parse_blackdetect  # noqa: E402
+
+EP01_DUR = 3146.325
+EP01_RUNS = [(2927.508, 2930.761), (2943.524, 2967.298)]     # blackdetect 실측
+EP01_CUTS = [2880.0, 2912.5, 2930.8, 2934.5, 2936.8, 2943.5]
+
+
+def test_parse_blackdetect_offsets_and_order():
+    log = ("[blackdetect @ 0x1] black_start:77.507917 black_end:80.761167 black_duration:3.25\n"
+           "[blackdetect @ 0x1] black_start:93.523917 black_end:117.297667 black_duration:23.7\n")
+    assert parse_blackdetect(log, offset=2850.0) == [(2927.508, 2930.761), (2943.524, 2967.298)]
+    assert parse_blackdetect("", 0.0) == []
+
+
+def test_anchor_candidates_black_onsets_plus_adjacent_cuts():
+    grid = {"scene_cuts": EP01_CUTS}
+    c = rf.anchor_candidates(grid, EP01_RUNS, 2853.5, 3033.5)
+    # 흑 시작점 2927.5·2943.5 — scene cut 2943.5 는 앵커 0.024s 옆이라 하나로 합쳐지고,
+    # 2930.8(암전 **끝**)·2934.5·2936.8 은 앵커에서 멀어 후보가 아니다(사고의 그 컷들)
+    assert [x["t"] for x in c] == [2927.508, 2943.5]
+    assert c[0]["id"] == "a00" and c[1]["rel"] == pytest.approx(90.0)
+    # 1초 미만 흑·창 밖 흑은 앵커가 아니다 · 앵커 없으면 빈 목록(호출자가 scene cut 폴백)
+    assert rf.anchor_candidates(grid, [(2900.0, 2900.5), (100.0, 105.0)], 2853.5, 3033.5) == []
+    assert rf.anchor_candidates(grid, [], 2853.5, 3033.5) == []
+
+
+def test_probe_prompt_edge_note_differs_for_credit():
+    assert "{edge_note}" in rf.PROBE_PROMPT
+    assert "본편 서사가 끝나는 첫 컷" in rf.edge_note("teaser")           # 예고 규칙 그대로
+    assert "앞당겨 크레딧에 넣지 마라" in rf.edge_note("credit")
+    assert rf.edge_note("end") == rf.EDGE_NOTE_CREDIT and rf.edge_note("intro") == rf.EDGE_NOTE_DEFAULT
+    assert "글자 화면**은 본편" in rf.DELTA_PROMPT
+
+
+def _ep01_doc(credit_start: float, teaser: tuple | None = None):
+    ex = _ex(credit=(credit_start, EP01_DUR), **({"teaser": teaser} if teaser else {}))
+    body_end = teaser[0] if teaser else credit_start
+    return {"sequences": [
+        {"number": 0, "content": "a",
+         "time": {"start": format_ts(0.0), "end": format_ts(2698.25)},
+         "chunks": [{"number": 0, "meanings": [],
+                     "time": {"start": format_ts(0.0), "end": format_ts(2698.25)}}]},
+        {"number": 1, "content": "b",
+         "time": {"start": format_ts(2698.25), "end": format_ts(body_end)},
+         "chunks": [{"number": 0, "meanings": [],
+                     "time": {"start": format_ts(2698.25), "end": format_ts(body_end)}}]},
+    ], "exception_sector": ex}
+
+
+def _fake_env(monkeypatch, answers: dict, calls: list):
+    """LLM·ffmpeg 없이: 재단은 빈 파일, blackdetect 는 실측 목록(절대초·프로브 클립은 상대초),
+    모델은 프롬프트 종류별 고정 답."""
+    monkeypatch.setattr(rf, "find_ffmpeg_command", lambda *_a: "ffmpeg")
+
+    def cut(ffmpeg, video, t0, t1, out):
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        Path(out).write_bytes(b"")
+        cut.last = (t0, t1)
+    monkeypatch.setattr(rf, "_cut_probe_clip", cut)
+
+    def black(video, t0=None, t1=None, *, min_sec=0.5, pix_th=0.1):
+        if str(video).endswith("probe_0_credit_start.mp4"):        # 프로브 클립 = 창 상대초
+            base = cut.last[0]
+            return [(a - base, z - base) for a, z in EP01_RUNS if cut.last[0] <= a <= cut.last[1]]
+        return [(a, z) for a, z in EP01_RUNS if (t0 or 0) - 0.01 <= a <= (t1 or 1e9)]
+    monkeypatch.setattr(rf, "detect_black_runs", black)
+
+    def call(gemini, clip, prompt):
+        calls.append(prompt)
+        if "사이로 지목된 조각" in prompt:
+            return {"kind": answers["delta"]}
+        if "크레딧 직전" in prompt:
+            return {"kind": answers["teaser_check"]}
+        if "이 클립의 **주 내용**이 본편" in prompt:
+            return {"kind": answers["verify"]}
+        if "다음 회차 예고" in prompt or ("예고" in prompt and "후보" in prompt and "크레딧 경계" not in prompt):
+            return {"boundary": answers.get("teaser_probe", "none")}
+        return {"boundary": answers["probe"]}
+    monkeypatch.setattr(rf, "_call_probe", call)
+
+
+def test_refine_credit_expansion_rejected_by_delta_check(tmp_path, monkeypatch):
+    # 사고 재현: 모델이 앵커 a00(2927.5 암전)을 고른다 → 잘라낸 2927.5~2943.5 는 main → 기각
+    calls: list = []
+    _fake_env(monkeypatch, {"probe": "a00", "delta": "main", "verify": "exception",
+                            "teaser_check": "main"}, calls)
+    grid = {"source": {"duration_sec": EP01_DUR}, "scene_cuts": EP01_CUTS}
+    doc, audit = rf.refine_exception(object(), _ep01_doc(2943.5), grid, Path("v.mp4"),
+                                     tmp_path, log=lambda *a: None)
+    assert parse_ts(doc["exception_sector"]["credit"]["start"]) == pytest.approx(2943.5)
+    p0 = audit["probes"][0]
+    assert p0["candidate_source"] == "black_anchor" and p0["candidates"] == 2
+    assert str(p0["result"]).startswith("확대 기각") and p0["delta_check"]["kind"] == "main"
+    assert p0["delta_check"]["t0"] == pytest.approx(2927.508) and p0["delta_check"]["t1"] == pytest.approx(2943.5)
+    assert audit["moved"] == 0
+    # 크레딧 경계 프롬프트는 credit 편향 문구, 예고 문구가 아니다
+    assert "앞당겨 크레딧에 넣지 마라" in calls[0] and "본편 서사가 끝나는 첫 컷" not in calls[0]
+    # 예고 존재 검사가 돌았고(main) — 총 Flash 4콜 = 프로브·조각 검증·머리 표본·예고 검사
+    assert any(r.get("edge") == "pre_credit_check" and r["result"] == "main" for r in audit["probes"])
+    assert audit["flash_calls"] == 4
+
+
+def test_refine_credit_head_moves_to_black_anchor(tmp_path, monkeypatch):
+    # Stage 1 이 처음부터 2930.75 로 이르게 냈다면 — 머리가 앵커에 안 붙어 있다 →
+    # 2930.75~2943.5 조각 검증(main) → 앵커 2943.524 로 민다 · 재타일링이 해방 구간을 덮는다
+    calls: list = []
+    _fake_env(monkeypatch, {"probe": "none", "delta": "main", "verify": "exception",
+                            "teaser_check": "main"}, calls)
+    grid = {"source": {"duration_sec": EP01_DUR}, "scene_cuts": EP01_CUTS}
+    doc, audit = rf.refine_exception(object(), _ep01_doc(2930.75), grid, Path("v.mp4"),
+                                     tmp_path, log=lambda *a: None)
+    assert parse_ts(doc["exception_sector"]["credit"]["start"]) == pytest.approx(2943.524)
+    head = next(r for r in audit["probes"] if r.get("edge") == "head_anchor")
+    assert head["result"]["moved_sec"] == pytest.approx(12.774, abs=0.01)
+    assert parse_ts(doc["sequences"][-1]["time"]["end"]) == pytest.approx(2943.524)
+    # 앵커에 붙어 있으면 머리 검사는 돌지 않는다(종전 표본 검증)
+    calls2: list = []
+    _fake_env(monkeypatch, {"probe": "none", "delta": "exception", "verify": "exception",
+                            "teaser_check": "main"}, calls2)
+    doc2, audit2 = rf.refine_exception(object(), _ep01_doc(2943.5), grid, Path("v.mp4"),
+                                       tmp_path, log=lambda *a: None)
+    assert not any(r.get("edge") == "head_anchor" for r in audit2["probes"])
+    assert parse_ts(doc2["exception_sector"]["credit"]["start"]) == pytest.approx(2943.5)
+
+
+def test_refine_creates_teaser_before_credit_when_check_says_teaser(tmp_path, monkeypatch):
+    # 본편→예고→크레딧: credit 앵커는 뒤에 물러나 있고 예고가 무표시 — 직전 60s 3분법이
+    # teaser 면 예고 규칙(scene cut 후보·이른 쪽)으로 시작점을 찾아 zone 을 만든다
+    calls: list = []
+    _fake_env(monkeypatch, {"probe": "none", "delta": "exception", "verify": "exception",
+                            "teaser_check": "teaser", "teaser_probe": "c00"}, calls)
+    grid = {"source": {"duration_sec": EP01_DUR}, "scene_cuts": EP01_CUTS}
+    doc, audit = rf.refine_exception(object(), _ep01_doc(2943.5), grid, Path("v.mp4"),
+                                     tmp_path, log=lambda *a: None)
+    tz = doc["exception_sector"]["teaser"]
+    assert tz is not None and parse_ts(tz["start"]) == pytest.approx(2880.0) \
+        and parse_ts(tz["end"]) == pytest.approx(2943.5)
+    assert parse_ts(doc["sequences"][-1]["time"]["end"]) == pytest.approx(2880.0)
+    r3 = next(r for r in audit["probes"] if r.get("edge") == "pre_credit_start")
+    assert r3["result"]["chosen"] == "c00"
+    # 예고 시작 프로브는 예고 편향 문구를 쓴다
+    assert any("본편 서사가 끝나는 첫 컷" in p for p in calls)

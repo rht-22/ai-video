@@ -36,12 +36,14 @@ BUDGET_TOLERANCE = 1.3        # 대사 합계가 예산의 이 배수를 넘으�
 SKIP_MAX_VOICED_SEC = 3.0     # 구간 안에서 빼도 되는 구멍 — 유성 합계 이하면 컷(추임새)
 SKIP_MAX_LINES = 2            # · 유성 조각 수 이하
 JUMP_GAP_SEC = 5.0            # 비트 사이 원본 간격이 이보다 크면 '점프' — 다리 내레이션 필수
+SILENT_RUN_MIN_SEC = 6.0      # 무대사 구간 목록의 하한(수작업 실측 자 — EP01 48개·1,195초)
+SILENT_BLOCK_MAX = 30         # 프롬프트에 싣는 무대사 구간 수 상한(긴 것부터)
 
 TOPIC_PROMPT = """당신은 리캡 쇼츠 편집자다. 아래는 한 회차의 구조 기록이다(영상은 볼 수 없고 볼 필요도 없다 — 기록이 정본이다).
 
 ## 1단계 — 주제 정하기
 이 회차에서 쇼츠 한 편(목표 {target_sec:.0f}초)으로 만들 **사건 하나**를 고른다.
-기준: 작품을 모르는 사람이 한 번 보고 따라갈 수 있는 사건 · 시작부터 결과(또는 떡밥)까지가 {max_sec:.0f}초 안에 닫힌다 · **대사가 촘촘한 구간**이 유리하다(대사가 거의 없는 구간은 주 재료로 쓰지 마라) · 앞뒤 회차 전개와 인과·아이러니로 이어지는 사건이면 더 좋다.
+기준: 작품을 모르는 사람이 한 번 보고 따라갈 수 있는 사건 · 시작부터 결과(또는 떡밥)까지가 {max_sec:.0f}초 안에 닫힌다 · **대사가 촘촘한 구간**이 유리하다. 단, **행동 또는 화면 속 글자만으로 뜻이 닫히는 구간**(도구를 꺼낸다·숨긴다·따라간다·몰래 읽는다 / 기사·메시지·게시글·문서 같은 자료화면과 그것을 보는 인물의 반응)은 대사가 없어도 주 재료가 될 수 있다 — 이때는 내레이션이 뼈대를 맡는다 · 앞뒤 회차 전개와 인과·아이러니로 이어지는 사건이면 더 좋다.
 
 ## 작품
 {work_title}{research_block}
@@ -51,7 +53,7 @@ TOPIC_PROMPT = """당신은 리캡 쇼츠 편집자다. 아래는 한 회차의 
 {hint_block}
 ## 사건 단위 (id | 시각 | 길이 | importance | 분위기 | 인물 | 내용)
 {meaning_block}
-{reject_block}
+{silent_block}{reject_block}
 ## 출력 (JSON 만)
 {{"topic": "이 쇼츠가 무엇에 관한 이야기인지 한 문장", "why": "고른 이유 한 문장",
   "core_meanings": ["m012", "m013"], "title_draft": {{"line1": "상황", "line2": "후킹"}}}}"""
@@ -68,7 +70,7 @@ SCENES_PROMPT = """당신은 리캡 쇼츠 편집자다. 영상은 볼 수 없�
 
 ## 사건 단위 (전체)
 {meaning_block}
-{reject_block}
+{silent_block}{reject_block}
 ## 출력 (JSON 만)
 {{"scenes": [{{"meaning": "m012", "purpose": "배경|맥락|과정|결과|반응", "why": "이 씬이 하는 일 한 줄"}}],
   "title": {{"line1": "…", "line2": "…"}},
@@ -244,7 +246,7 @@ def compute_jumps(beats: list[dict], span_index: dict[str, dict],
 
 def validate_beats(resp: Any, span_index: dict[str, dict], allowed: dict[str, int],
                    *, budget_sec: float, floor_ratio: float | None = None,
-                   material_sec: float | None = None
+                   material_sec: float | None = None, require_dialogue: bool = False
                    ) -> tuple[list[dict] | None, list[str], list[str]]:
     """allowed: span id → 씬(meaning idx). 반환 비트: {scene, role, span_ids, skipped,
     hole_before, action}. 구간은 grid 순(pos)으로 펼치고 긴 구멍은 나눈다."""
@@ -330,10 +332,57 @@ def validate_beats(resp: Any, span_index: dict[str, dict], allowed: dict[str, in
                         "재료가 얇으면 완성본이 짧고 다듬을 여유도 없다 — 같은 사건 안의 "
                         "대사 구간·리액션을 더 넣어 예산을 채워라")
     if not any(span_index[x]["is_audio"] for b in beats for x in b["span_ids"]):
-        problems.append("대사가 하나도 없다 — 대사 인용이 뼈대다")
+        # 무대사 편(갭 3, 2026-09-07): 반려하지 않는다 — "대사 인용이 뼈대다"가 지키려던 건
+        # *뼈대가 있어야 한다*이지 *대사여야 한다*가 아니다. 무대사 편에서는 걸음 4 의
+        # 내레이션이 뼈대를 맡고(밀도 하한 `narration.SILENT_NARRATION_MIN_RATIO`), 여기서는
+        # 표시만 한다. require_dialogue=True 는 종전 반려(회귀 가드용).
+        if require_dialogue:
+            problems.append("대사가 하나도 없다 — 대사 인용이 뼈대다")
+        else:
+            notes.append("무대사 편성 — 대사가 하나도 없다. 내레이션이 뼈대를 맡는다(걸음 4 밀도 하한)")
     if problems:
         return None, problems, notes
     return beats, [], notes
+
+
+# ── 무대사 구간 목록(순수) ───────────────────────────────────────────────────
+# 갭 3(2026-09-07): 무대사 구간은 meaning 표 안에 유성 사건과 섞여 있어 모델이 대사 있는
+# 쪽으로 쏠린다(실측: 같은 회차 6회 중 4회가 같은 유성 사건, 지갑 66초 무대사 장면은
+# 2~23초 조각으로만). 코드가 전사 단어 간격으로 재서 별도 블록으로 싣는다 — 수작업이 쓴
+# 계산 그대로("6초 이상 발화 없음").
+
+def silent_runs(words: list[dict], duration_sec: float | None = None,
+                min_sec: float = SILENT_RUN_MIN_SEC) -> list[tuple[float, float]]:
+    """전사 단어(t0/t1) 사이 min_sec 이상 빈 구간 → [(t0, t1)] 시간순. 순수."""
+    prev = 0.0
+    out: list[tuple[float, float]] = []
+    for w in sorted((w for w in words or [] if isinstance(w, dict)),
+                    key=lambda w: float(w.get("t0", 0.0))):
+        t0, t1 = float(w.get("t0", 0.0)), float(w.get("t1", 0.0))
+        if t0 - prev >= min_sec:
+            out.append((round(prev, 3), round(t0, 3)))
+        prev = max(prev, t1)
+    if duration_sec is not None and float(duration_sec) - prev >= min_sec:
+        out.append((round(prev, 3), round(float(duration_sec), 3)))
+    return out
+
+
+def silent_block(runs: list[tuple[float, float]], rows: list[dict],
+                 *, max_items: int = SILENT_BLOCK_MAX) -> str:
+    """무대사 구간 → 프롬프트 블록(사건 단위 id·최고 importance 병기). 없으면 빈 문자열
+    (블록이 비면 프롬프트는 종전과 같다)."""
+    if not runs:
+        return ""
+    picked = sorted(sorted(runs, key=lambda r: r[1] - r[0], reverse=True)[:max_items])
+    lines = []
+    for a, z in picked:
+        hit = [r for r in rows if r["t1"] > a and r["t0"] < z]
+        ids = "/".join(f"m{r['idx']:03d}" for r in hit) or "-"
+        imp = max((r["importance"] for r in hit), default=0)
+        lines.append(f"- {fmt_t(a)}~{fmt_t(z)} ({z - a:.0f}s) {ids} imp {imp}")
+    return ("\n## 무대사 구간 (코드 실측 — 6초 이상 발화 없음 · 화면 내용은 위 사건 단위 표 참조)\n"
+            "대사 기반 탐색은 이 구간을 못 본다. 행동·자료화면만으로 뜻이 닫히는 구간이면 주 재료로 쓸 수 있다(내레이션이 뼈대).\n"
+            + "\n".join(lines) + "\n")
 
 
 # ── 재료 표 ────────────────────────────────────────────────────────────────
@@ -364,5 +413,6 @@ def title_len_ok(title: dict, title_max: int = TITLE_MAX_CHARS) -> bool:
 __all__ = ["TOPIC_PROMPT", "SCENES_PROMPT", "LINES_PROMPT", "validate_topic",
            "validate_scenes", "validate_beats", "split_at_holes", "compute_jumps",
            "lines_material", "meaning_table", "nospace_len", "reject_block", "PURPOSES",
+           "silent_runs", "silent_block", "SILENT_RUN_MIN_SEC", "SILENT_BLOCK_MAX",
            "ROLES", "TITLE_MAX_CHARS", "BUDGET_TOLERANCE", "SKIP_MAX_VOICED_SEC",
            "SKIP_MAX_LINES", "JUMP_GAP_SEC"]

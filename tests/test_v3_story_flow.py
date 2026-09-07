@@ -144,10 +144,38 @@ def test_beats_budget_tolerance_and_ordering():
     assert obj is None and any("다른 씬" in p for p in pr)
 
 
-def test_beats_require_some_dialogue():
+def test_beats_without_dialogue_pass_with_note_unless_required():
+    # 갭 3(2026-09-07): 무대사 편성은 반려하지 않고 표시만 — 내레이션이 뼈대를 맡는다
+    obj, pr, notes = sl.validate_beats({"beats": [{"role": "hook", "first": "sp0000", "last": "sp0000"}]},
+                                       IDX, _allowed(), budget_sec=30)
+    assert obj is not None and pr == [] and any("무대사" in n for n in notes)
+    # 종전 반려는 require_dialogue=True 로만
     obj, pr, _ = sl.validate_beats({"beats": [{"role": "hook", "first": "sp0000", "last": "sp0000"}]},
-                                   IDX, _allowed(), budget_sec=30)
+                                   IDX, _allowed(), budget_sec=30, require_dialogue=True)
     assert obj is None and any("대사" in p for p in pr)
+
+
+def test_silent_runs_and_block():
+    words = [{"t0": 1.0, "t1": 1.5}, {"t0": 2.0, "t1": 2.4},        # 0~1 짧은 머리(무시)
+             {"t0": 9.0, "t1": 9.5},                                # 2.4~9.0 = 6.6s ✔
+             {"t0": 12.0, "t1": 13.0}]                              # 9.5~12 = 2.5s ✘
+    runs = sl.silent_runs(words, 20.0)                              # 꼬리 13~20 = 7s ✔
+    assert runs == [(2.4, 9.0), (13.0, 20.0)]
+    assert sl.silent_runs(words, None) == [(2.4, 9.0)]
+    assert sl.silent_runs([], None) == []
+    blk = sl.silent_block(runs, ROWS)
+    assert "무대사 구간" in blk and "00:02.4~00:09.0 (7s)" in blk and "m000" in blk
+    assert sl.silent_block([], ROWS) == ""                          # 없으면 프롬프트 종전과 동일
+    # 상한: 긴 것부터 고르되 표시는 시간순
+    many = [(float(i * 10), float(i * 10 + 6 + i)) for i in range(40)]
+    blk2 = sl.silent_block(many, ROWS, max_items=3)
+    assert blk2.count("\n- ") == 3 and "06:10.0~06:53.0" in blk2
+
+
+def test_topic_prompt_allows_action_or_screen_text_scenes():
+    assert "행동 또는 화면 속 글자만으로 뜻이 닫히는 구간" in sl.TOPIC_PROMPT
+    assert "주 재료로 쓰지 마라" not in sl.TOPIC_PROMPT
+    assert "{silent_block}" in sl.TOPIC_PROMPT and "{silent_block}" in sl.SCENES_PROMPT
 
 
 def test_short_skip_is_cut_but_long_hole_splits_beat_and_marks_jump():
@@ -213,6 +241,43 @@ def test_validate_narrations_cover_ids_must_be_available():
     obj, pr, notes = nr.validate_narrations(resp, 2, available={"sp0000", "sp0003"})
     assert obj[0]["cover_ids"] == ["sp0000"] and any("무시" in n for n in notes)
     assert obj[1]["cover_ids"] == ["sp0003"]
+
+
+def test_validate_narrations_max_n_and_silent_min_total():
+    resp = {"narrations": [{"before_beat": 0, "text": "짧다.", "cover": ["sp0000"]},
+                           {"before_beat": 1, "text": "또 짧다.", "cover": ["sp0003"]},
+                           {"after_last": True, "text": "끝났죠.", "cover": ["sp0006"]}]}
+    g, pr, notes = nr.validate_narrations(resp, 2, max_n=2)
+    assert pr == [] and len(g) == 2 and any("앞 2곳만" in n for n in notes)
+    # 무대사 편 밀도 하한 — 견적 합계가 모자라면 반려(합성 앞 · 요금 0)
+    g, pr, _ = nr.validate_narrations(resp, 2, min_total_sec=30.0)
+    assert g is None and any("무대사 편은 최소 30초" in p for p in pr)
+    g, pr, _ = nr.validate_narrations(resp, 2, min_total_sec=1.0)
+    assert g is not None and pr == []
+    assert "이 편은 대사가 없다" in nr.silent_note(12.0, 3) and "{silent_note}" in nr.PROMPT
+
+
+def test_available_covers_include_silent_beats_only_silent_ones():
+    beats = _beats()                                  # 둘 다 유성 비트
+    beats.append({"scene": 2, "role": "ending", "span_ids": ["sp0006"], "lines": [], "visual": []})
+    base = nr.available_covers(beats, ROWS_BY, IDX)
+    assert "sp0006" not in base and "sp0001" not in base
+    inc = nr.available_covers(beats, ROWS_BY, IDX, include_silent_beats=True)
+    assert "sp0006" in inc and "sp0001" not in inc  # 무성 비트 조각만 열린다
+    assert nr.silent_beat_ids(beats, IDX) == {"sp0006"}
+    blk = nr.available_block(inc, IDX, {"sp0006": 2, "sp0000": 0, "sp0003": 1},
+                             beat_ids={"sp0006"})
+    assert "[비트 안 화면]" in blk
+
+
+def test_designated_window_allow_ids_opens_own_beat_spans():
+    beats = _beats()
+    assert cv.designated_window(["sp0001"], beats, IDX, 1.5) is None      # 비트 안 → 거절
+    dw = cv.designated_window(["sp0001"], beats, IDX, 1.5, allow_ids={"sp0001", "sp0002"})
+    assert dw is not None and dw["kind"] == "designated" and (dw["w0"], dw["w1"]) == (2.0, 4.0)
+    # L 이 더 크면 허용된 이웃(같은 비트 조각)으로만 넓힌다
+    dw2 = cv.designated_window(["sp0001"], beats, IDX, 3.5, allow_ids={"sp0001", "sp0002"})
+    assert (dw2["w0"], dw2["w1"]) == (2.0, 6.5)
 
 
 def test_available_covers_excludes_beat_spans():
@@ -432,6 +497,65 @@ def test_flow_doc_contract_and_assemble_belt(tmp_path, monkeypatch):
                for c in fin)
     assert abs(sum(assemble.clip_stats(plan)["durations"]) - doc["budget"]["total_after_sec"]) < 1e-6
     assert audit["probe_calls"] == 0 and audit["pieces"] == 2
+
+
+GRID_S = _mk_grid([
+    (0.0, 3.0, False, ""), (3.0, 6.0, False, ""), (6.0, 10.0, False, ""),
+    (10.0, 13.0, False, ""), (13.0, 16.0, False, ""),
+])
+GRID_S["scene_cuts"] = [3.0, 10.0]
+GRID_S["words"] = []
+GRID_S["source"] = {"duration_sec": 16.0}
+S2_S = _mk_stage2(GRID_S, [(0, 2, 4, "상자를 연다"), (3, 4, 5, "지갑을 가른다")])
+ANSWERS_S = [
+    {"topic": "말없이 지갑에 추적기를 숨긴다", "why": "w", "core_meanings": ["m000", "m001"],
+     "title_draft": {"line1": "a", "line2": "b"}},
+    {"scenes": [{"meaning": "m000", "purpose": "과정", "why": "x"},
+                {"meaning": "m001", "purpose": "결과", "why": "y"}],
+     "title": {"line1": "남편 자는 사이", "line2": "지갑을 갈랐다"}},
+    {"beats": [{"scene": "m000", "role": "hook", "first": "sp0000", "last": "sp0002", "action": "상자"},
+               {"scene": "m001", "role": "climax", "first": "sp0003", "last": "sp0004", "action": "지갑"}]},
+    {"narrations": [{"before_beat": 0, "text": "남편이 잠든 밤 상자를 열었죠.", "cover": ["sp0000"]},
+                    {"before_beat": 1, "text": "꺼낸 건 위치추적기였는데,", "cover": ["sp0003"]},
+                    {"after_last": True, "text": "지갑 속에 그대로 숨겼죠.", "cover": ["sp0004"]}]},
+]
+
+
+def test_flow_silent_episode_narrates_over_own_footage(tmp_path, monkeypatch):
+    answers = list(ANSWERS_S)
+    prompts: list[str] = []
+
+    def fake_call(g, p):
+        prompts.append(p)
+        return answers.pop(0)
+    monkeypatch.setattr(sf, "call_json", fake_call)
+
+    def synth(text, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
+        return round(0.3 + len("".join(text.split())) / 8.4, 3)
+
+    class G:
+        class config:
+            flash_model_name = "x"
+    doc, audit = sf.run_story_flow(G(), S2_S, GRID_S, work_title="T", target_sec=15, max_sec=20,
+                                   output_dir=tmp_path, synth_fn=synth, probe=False,
+                                   log=lambda *a: None)
+    assert audit["silent_episode"] is True and audit["silent_runs"] == 1   # words 없음 → 0~16 한 구간
+    assert "무대사 구간" in prompts[0] and "이 편은 대사가 없다" in prompts[3]
+    assert "[비트 안 화면] " in prompts[3]
+    # before 덮개 둘은 자기 비트 화면 위(designated) — 편 길이가 늘지 않는다(16s 그대로)
+    kinds = [(c["position"], c["kind"]) for b in doc["beats"] for c in b["covers"]]
+    assert kinds[:2] == [("before", "designated"), ("before", "designated")]
+    assert doc["beats"][0]["covers"][0]["t_in"] == 0.0 and doc["beats"][0].get("head_trim_sec")
+    # after 덮개는 자기 비트 머리를 못 가져간다(되감김 방지) — 후보 탐색으로 간다
+    assert kinds[2][0] == "after" and kinds[2][1] != "designated"
+    assert len(doc["narration_cues"]) == 3 and all(c["audio_path"] for c in doc["narration_cues"])
+    plan = assemble.assemble_edit_plan(doc, IDX_S, video_path="v", work_title="T", words=[], silences=[])
+    assert assemble.verify_edit_plan(plan, GRID_S)["pct"] == 100.0
+
+
+IDX_S, _ = st.build_span_index(S2_S, GRID_S)
 
 
 def test_flow_reask_then_fail_loud(tmp_path, monkeypatch):

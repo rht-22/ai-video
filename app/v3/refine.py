@@ -23,6 +23,7 @@ from typing import Any
 from app.modules.ffmpeg_utils import find_ffmpeg_command
 from app.modules.gemini_client import _extract_json_from_markdown, _loads_first_json
 from app.v3 import schemas
+from app.v3.scenecut import detect_black_runs
 from app.v3.seq_analyze import MAX_REASKS
 
 WINDOW_BACK_SEC = 90.0     # 경계 시작 쪽으로 — 가왕쇼 실측 49.5s 지각을 덮는 크기
@@ -33,6 +34,19 @@ MAX_VERIFIES = 3           # zone 실체 검증 상한 — 편당 Flash 총 ≤8
 VERIFY_SAMPLE_SEC = 60.0   # zone 중앙 표본 — 머리는 본편형 도입이라 애매(가왕쇼 실측)
 PROBE_WINDOW_CAP_SEC = 180.0
 FLASH_BUDGET = 8           # 편당 총 Flash 호출 예산(재질의 포함 — 강제·감사)
+# 갭 7(2026-09-07, EP01 실사고): credit 경계는 예고와 편향이 다르다 — 예고는 '서사가 끝나는
+# 첫 컷'(이른 쪽 보수, miss>overreach)이 맞지만, 본편 바로 뒤에 오는 크레딧에 같은 규칙을
+# 쓰면 본편 엔딩 컷(기사·댓글 리빌 12.75s)을 앞당겨 먹는다. credit·end 는 ① 후보를 흑 화면
+# 런 앵커(+인접 scene cut)로 제한하고 ② zone 을 앞으로 키우는 이동은 **잘라낸 조각**만 따로
+# 검증해 exception 일 때만 받고(창 다수결 금지) ③ zone 머리가 앵커에 안 붙어 있으면 앵커까지의
+# 조각을 검증해 main 이면 앵커로 민다. 예고(teaser) 규칙은 그대로다.
+CREDIT_ANCHOR_ZONES = ("credit", "end")
+BLACK_MIN_SEC = 1.0        # 앵커로 볼 전면 흑 런 하한
+ANCHOR_ADJ_SEC = 0.5       # 앵커에 '붙어 있다'고 볼 거리 · 인접 scene cut 허용 거리
+EXPAND_CHECK_MIN_SEC = 4.0 # credit 을 앞으로 키우는 이동 중 잘라낸 조각을 검증할 하한
+CREDIT_HEAD_SEC = 30.0     # zone 머리에서 앵커를 찾는 창
+TEASER_CHECK_SEC = 60.0    # 크레딧 직전 예고 존재 검사 창
+TEASER_SEARCH_SEC = 180.0  # 예고가 있다고 판정되면 시작점을 찾는 창
 PROBE_HEIGHT = 480
 PROBE_FPS = 10
 PROBE_SAMPLE_FPS = 6.0     # Gemini 표본 fps(2026-08-31 사용자 설정 — 종전 기본 1fps)
@@ -285,13 +299,73 @@ def validate_verify_response(resp) -> tuple[str | None, list[str]]:
 PROBE_PROMPT = """당신은 방송 편집 검수자다. 첨부한 클립은 원본의 {t0}~{t1} 구간(창 안 0초 = 원본 {t0})이다. 이 창 어딘가에 **{desc}와 본편의 경계**가 있는지 정밀하게 찾아라.
 
 판별 신호: 콜라주/장식 프레임 테두리, 스태프롤·제작진 자막, "다음 이야기" 문구, 본편 서사와 단절된 빠른 몽타주(장소·의상이 컷마다 바뀜), 전용 카드.
-⚠ 예고/크레딧 몽타주는 종종 **본편처럼 보이는 풀스크린 하이라이트 컷으로 문을 연다** — 경계는 장식이 뜨는 순간이 아니라 본편 서사가 끝나는 첫 컷이다.
+{edge_note}
 
 ## 경계 후보 (클립 내 상대초 | id) — 이 중에서만 고른다
 {cands}
 
 ## 출력 (JSON 만)
 {{"boundary": "c03"}}  — 경계가 이 창에 없으면 {{"boundary": "none"}}"""
+
+EDGE_NOTE_DEFAULT = ("⚠ 예고/크레딧 몽타주는 종종 **본편처럼 보이는 풀스크린 하이라이트 컷으로 문을 연다** "
+                     "— 경계는 장식이 뜨는 순간이 아니라 본편 서사가 끝나는 첫 컷이다.")
+EDGE_NOTE_CREDIT = ("⚠ 크레딧 경계는 **흑 화면·스태프롤·로고 카드가 시작되는 컷**이다. 본편의 마지막 장면"
+                    "(기사·메시지·댓글 같은 글자 화면, 인물의 마지막 표정 포함)을 앞당겨 크레딧에 넣지 마라 "
+                    "— 아래 후보는 흑 화면이 시작되는 지점들이다.")
+
+
+def edge_note(zone: str) -> str:
+    return EDGE_NOTE_CREDIT if zone in CREDIT_ANCHOR_ZONES else EDGE_NOTE_DEFAULT
+
+
+DELTA_PROMPT = """당신은 방송 편집 검수자다. 첨부한 클립은 원본 {t0}~{t1} 구간 — **본편 끝과 {desc} 사이로 지목된 조각**이다. 이 조각의 주 내용이 본편(이야기가 아직 진행 중)인가, {desc}인가만 판정하라.
+
+본편 신호: 인물·사건이 이어진다 · 기사·메시지·댓글·게시글처럼 **이야기의 정보를 보여주는 글자 화면**은 본편이다 · 어둡거나 정적인 연출 신도 본편이다.
+{desc} 신호: 스태프롤·제작사/투자사 고지·로고 카드·전면 흑 화면이 이어짐 · "다음 이야기" 카드.
+
+## 출력 (JSON 만)
+{{"kind": "main"}} 또는 {{"kind": "exception"}}"""
+
+TEASER_CHECK_PROMPT = """당신은 방송 편집 검수자다. 첨부한 클립은 원본 {t0}~{t1} 구간 — 크레딧 직전 {sec:.0f}초다. 이 구간의 **주 내용**을 하나로 판정하라.
+- main: 이 회차의 본편이 이어진다(인물·사건이 앞 이야기와 연속 · 이야기의 정보를 보여주는 글자 화면 포함)
+- teaser: **다음 회차 예고** — 아직 안 나온 장면들의 빠른 몽타주 · "다음 이야기"/"다음 화" 문구 · 장소·의상이 컷마다 바뀜
+- credit: 스태프롤·로고·제작 정보 카드
+
+## 출력 (JSON 만)
+{{"kind": "main|teaser|credit"}}"""
+
+
+def validate_teaser_check(resp) -> tuple[str | None, list[str]]:
+    if not isinstance(resp, dict):
+        return None, ["응답이 객체가 아니다"]
+    k = resp.get("kind")
+    if k in ("main", "teaser", "credit"):
+        return k, []
+    return None, [f"kind 는 main|teaser|credit: {k!r}"]
+
+
+def anchor_candidates(grid: dict, black_runs: list[tuple[float, float]], t0: float, t1: float,
+                      *, adj: float = ANCHOR_ADJ_SEC, min_black: float = BLACK_MIN_SEC) -> list[dict]:
+    """credit 경계 후보 — 창 안 전면 흑 런의 **시작점** + 그에 인접(adj 이내)한 scene cut.
+    앵커가 없으면 빈 목록(호출자가 scene cut 후보로 폴백·기록). 순수 — 테스트 대상."""
+    onsets = sorted({round(float(a), 3) for a, z in black_runs or []
+                     if float(z) - float(a) >= min_black and t0 + 0.2 <= float(a) <= t1 - 0.2})
+    if not onsets:
+        return []
+    pts = set(onsets)
+    for c in grid.get("scene_cuts") or []:
+        c = round(float(c), 3)
+        if t0 + 0.2 <= c <= t1 - 0.2 and any(abs(c - a) <= adj for a in onsets):
+            pts.add(c)
+    out: list[dict] = []
+    last = None
+    for t in sorted(pts):
+        if last is not None and t - last < 0.3:
+            continue
+        out.append({"id": f"a{len(out):02d}", "t": t, "rel": round(t - t0, 2)})
+        last = t
+    return out
+
 
 VERIFY_PROMPT = """당신은 방송 편집 검수자다. 첨부한 클립은 원본 {t0}~{t1} 구간이다. 이 클립의 **주 내용**이 본편(스토리 진행)인가, {desc}인가만 판정하라.
 
@@ -382,6 +456,23 @@ def refine_exception(gemini, stage1_doc: dict, grid: dict, video_path: Path,
                              f"{(e.stderr or b'')[-120:]!r}")
             audit["probes"].append(rec)
             continue
+        if probe["zone"] in CREDIT_ANCHOR_ZONES and probe["edge"] == "start":
+            # 갭 7 ①: credit 시작 후보는 흑 런 앵커(+인접 scene cut)로 제한 — 프로브 클립에서
+            # 바로 잰다(원본 재디코드 0). 앵커가 없으면 scene cut 후보 그대로(기록).
+            try:
+                runs = detect_black_runs(clip, min_sec=BLACK_MIN_SEC)
+                runs = [(a + probe["t0"], z + probe["t0"]) for a, z in runs]
+            except Exception as e:  # noqa: BLE001 — 앵커 실패 = 종전 후보(기록)
+                runs = []
+                rec["black_runs_error"] = str(e)[:120]
+            anchors = anchor_candidates(grid, runs, probe["t0"], probe["t1"])
+            rec["black_runs"] = [[round(a, 3), round(z, 3)] for a, z in runs]
+            if anchors:
+                cands = anchors
+                rec["candidates"] = len(cands)
+                rec["candidate_source"] = "black_anchor"
+            else:
+                rec["candidate_source"] = "scene_cut(앵커 없음)"
         desc = ZONE_DESC.get(probe["zone"], "예고/크레딧")
         cand_lines = "\n".join(f"- {c['rel']:.1f}s | {c['id']}" for c in cands)
         chosen: str | None = None
@@ -389,7 +480,8 @@ def refine_exception(gemini, stage1_doc: dict, grid: dict, video_path: Path,
         for attempt in range(1 + MAX_REASKS):
             prompt = PROBE_PROMPT.format(
                 t0=schemas.format_ts(probe["t0"]), t1=schemas.format_ts(probe["t1"]),
-                desc=desc, cands=cand_lines) + (f"\n\n⚠ 직전 반려: {reject}" if reject else "")
+                desc=desc, edge_note=edge_note(probe["zone"]),
+                cands=cand_lines) + (f"\n\n⚠ 직전 반려: {reject}" if reject else "")
             try:
                 resp = call_probe_budgeted(clip, prompt)
                 chosen, problems = validate_probe_response(resp, cands)
@@ -432,6 +524,33 @@ def refine_exception(gemini, stage1_doc: dict, grid: dict, video_path: Path,
                                  f"{chosen}={new_t}")
                 audit["probes"].append(rec)
                 continue
+        # 갭 7 ②: credit·end 를 **앞으로 키우는** 이동은 잘라낸 조각[new, orig] 만 따로 검증 —
+        # 창 다수결이 아니라 그 조각이 exception 이어야 받는다(EP01: 2930.75~2943.5 = 투샷·
+        # 기사·댓글 → main → 기각). 판정 불가·예산 소진은 기각(원판정 유지 — 엔딩 손실이 더 나쁘다).
+        expand_iv = None
+        if probe["zone"] in CREDIT_ANCHOR_ZONES and probe["edge"] == "start" \
+                and probe["orig"] is not None and new_t < probe["orig"] - 0.01:
+            expand_iv = (new_t, probe["orig"])
+        if expand_iv and expand_iv[1] - expand_iv[0] >= EXPAND_CHECK_MIN_SEC:
+            dclip = work_dir / f"deltacheck_{probe['zone']}_{probe['edge']}.mp4"
+            kind = None
+            try:
+                _cut_probe_clip(ffmpeg, video_path, expand_iv[0], expand_iv[1], dclip)
+                dresp = call_probe_budgeted(dclip, DELTA_PROMPT.format(
+                    t0=schemas.format_ts(expand_iv[0]), t1=schemas.format_ts(expand_iv[1]),
+                    desc=ZONE_DESC.get(probe["zone"], "크레딧")))
+                kind, _dp = validate_verify_response(dresp)
+            except Exception:  # noqa: BLE001 — 판정 불가 = 기각(보수)
+                kind = None
+            rec["delta_check"] = {"t0": round(expand_iv[0], 3), "t1": round(expand_iv[1], 3),
+                                  "kind": kind}
+            if kind != "exception":
+                rec["result"] = (f"확대 기각(잘라낸 조각 실체={kind or '판정 불가'}): "
+                                 f"{chosen}={new_t}")
+                log(f"  [v3/refine] {probe['zone']}.start {probe['orig']} → {new_t} 기각 — "
+                    f"잘라낸 {expand_iv[1] - expand_iv[0]:.1f}s 가 {kind or '판정 불가'}")
+                audit["probes"].append(rec)
+                continue
         applied = apply_boundary(new_exception, probe, new_t, duration)
         if probe["orig"] is not None and abs(new_t - probe["orig"]) < 0.01:
             rec["result"] = f"원판정 확인(동일 컷 {chosen}={new_t})"
@@ -459,6 +578,45 @@ def refine_exception(gemini, stage1_doc: dict, grid: dict, video_path: Path,
         zs, ze = schemas.parse_ts(zone["start"]), schemas.parse_ts(zone["end"])
         if ze - zs < 8.0:
             continue                       # 짧은 카드류 — 표본 판정이 더 위험
+        if key in CREDIT_ANCHOR_ZONES and zs > 0.5:
+            # 갭 7 ③: credit 머리가 흑 런 앵커에 붙어 있지 않으면 — 앵커까지의 조각을
+            # 검증해 main 이면 앵커로 민다(Stage 1 이 처음부터 이르게 낸 경우 · 결정적 앵커가
+            # 모델 표결보다 이긴다). 앵커에 붙어 있으면 종전 머리 표본 검증으로 간다.
+            try:
+                runs = detect_black_runs(video_path, max(0.0, zs - 1.0),
+                                         min(duration, zs + CREDIT_HEAD_SEC), min_sec=BLACK_MIN_SEC)
+            except Exception as e:  # noqa: BLE001
+                runs = []
+                audit["probes"].append({"zone": key, "edge": "head_anchor",
+                                        "result": f"blackdetect 실패 — 종전 검증: {str(e)[:80]}"})
+            onsets = [a for a, z in runs if z - a >= BLACK_MIN_SEC]
+            at_anchor = any(abs(a - zs) <= ANCHOR_ADJ_SEC for a in onsets)
+            later = [a for a in onsets if a > zs + ANCHOR_ADJ_SEC]
+            if not at_anchor and later:
+                a = later[0]
+                hclip = work_dir / f"headcheck_{key}.mp4"
+                rec = {"zone": key, "edge": "head_anchor", "t0": round(zs, 3), "t1": round(a, 3)}
+                kind = None
+                try:
+                    _cut_probe_clip(ffmpeg, video_path, zs, a, hclip)
+                    verified += 1
+                    hresp = call_probe_budgeted(hclip, DELTA_PROMPT.format(
+                        t0=schemas.format_ts(zs), t1=schemas.format_ts(a),
+                        desc=ZONE_DESC.get(key, "크레딧")))
+                    kind, _hp = validate_verify_response(hresp)
+                except Exception as e:  # noqa: BLE001
+                    kind = None
+                    rec["error"] = str(e)[:80]
+                if kind == "main":
+                    new_exception = apply_boundary(
+                        new_exception, {"zone": key, "edge": "start", "orig": zs}, a, duration)
+                    audit["moved"] += 1
+                    rec["result"] = {"new_t": round(a, 3), "moved_sec": round(a - zs, 3)}
+                    log(f"  [v3/refine] {key} 머리 {zs:.1f}~{a:.1f} 는 본편 — 흑 앵커 {a:.1f} 로 민다")
+                else:
+                    rec["result"] = f"유지({kind or '판정 불가'})"
+                audit["probes"].append(rec)
+                continue
         if ze - zs > VERIFY_SAMPLE_SEC + 1.0:
             # 긴 zone 은 전체 폐기 불가(보수) — 대신 **닻 반대쪽 30s 표본**을 검증해
             # main 이면 경계를 좁힌 창에서 1회 재프로브(포핸즈2 실측: intro 를
@@ -508,7 +666,7 @@ def refine_exception(gemini, stage1_doc: dict, grid: dict, video_path: Path,
                 _cut_probe_clip(ffmpeg, video_path, w0, w1, clip2)
                 resp2 = call_probe_budgeted(clip2, PROBE_PROMPT.format(
                     t0=schemas.format_ts(w0), t1=schemas.format_ts(w1),
-                    desc=ZONE_DESC.get(key, "예고/크레딧"),
+                    desc=ZONE_DESC.get(key, "예고/크레딧"), edge_note=edge_note(key),
                     cands="\n".join(f"- {c['rel']:.1f}s | {c['id']}" for c in cands2)))
                 chosen2, _pr2 = validate_probe_response(resp2, cands2)
             except Exception:  # noqa: BLE001
@@ -568,6 +726,59 @@ def refine_exception(gemini, stage1_doc: dict, grid: dict, video_path: Path,
         else:
             rec["result"] = f"유지({kind or '판정 불가'})"
         audit["probes"].append(rec)
+
+    # 갭 7 ④: 본편→예고→크레딧 순서에서 credit 앵커가 뒤로 물러난 만큼 예고가 무표시로 남을
+    # 수 있다 — teaser 가 없고 credit/end 가 있으면 그 직전 창을 3분법(main|teaser|credit)으로
+    # 묻고, 예고면 시작점을 예고 규칙(이른 쪽 보수 · scene cut 후보)으로 찾아 zone 을 만든다.
+    if new_exception.get("teaser") is None:
+        starts = [schemas.parse_ts(new_exception[k]["start"]) for k in CREDIT_ANCHOR_ZONES
+                  if isinstance(new_exception.get(k), dict) and new_exception[k].get("start") is not None]
+        zs = min(starts) if starts else None
+        if zs is not None and zs > TEASER_CHECK_SEC + 1.0:
+            v0, v1 = zs - TEASER_CHECK_SEC, zs
+            tclip = work_dir / "teasercheck.mp4"
+            rec = {"zone": "teaser", "edge": "pre_credit_check", "t0": round(v0, 3), "t1": round(v1, 3)}
+            kind = None
+            try:
+                _cut_probe_clip(ffmpeg, video_path, v0, v1, tclip)
+                tresp = call_probe_budgeted(tclip, TEASER_CHECK_PROMPT.format(
+                    t0=schemas.format_ts(v0), t1=schemas.format_ts(v1), sec=TEASER_CHECK_SEC))
+                kind, _tp = validate_teaser_check(tresp)
+            except Exception as e:  # noqa: BLE001 — 판정 불가 = 무표시 유지(기록)
+                rec["error"] = str(e)[:80]
+            rec["result"] = kind or "판정 불가"
+            audit["probes"].append(rec)
+            if kind == "teaser":
+                w0 = max(0.0, zs - TEASER_SEARCH_SEC)
+                cands3 = scene_cut_candidates(grid, w0, zs)
+                rec3 = {"zone": "teaser", "edge": "pre_credit_start", "t0": round(w0, 3), "t1": round(zs, 3),
+                        "candidates": len(cands3)}
+                chosen3 = None
+                if cands3:
+                    pclip = work_dir / "teaserprobe.mp4"
+                    try:
+                        _cut_probe_clip(ffmpeg, video_path, w0, zs, pclip)
+                        presp = call_probe_budgeted(pclip, PROBE_PROMPT.format(
+                            t0=schemas.format_ts(w0), t1=schemas.format_ts(zs),
+                            desc=ZONE_DESC["teaser"], edge_note=edge_note("teaser"),
+                            cands="\n".join(f"- {c['rel']:.1f}s | {c['id']}" for c in cands3)))
+                        chosen3, _p3 = validate_probe_response(presp, cands3)
+                    except Exception as e:  # noqa: BLE001
+                        rec3["error"] = str(e)[:80]
+                if chosen3 and chosen3 != "none":
+                    new_t = next(c["t"] for c in cands3 if c["id"] == chosen3)
+                    if zs - new_t >= 8.0:
+                        cand_ex = {k: (dict(v) if isinstance(v, dict) else v) for k, v in new_exception.items()}
+                        cand_ex["teaser"] = {"start": schemas.format_ts(new_t), "end": schemas.format_ts(zs)}
+                        new_exception = cand_ex
+                        audit["moved"] += 1
+                        rec3["result"] = {"chosen": chosen3, "new_t": new_t}
+                        log(f"  [v3/refine] 크레딧 앞 예고 발견 — teaser {new_t:.1f}~{zs:.1f}")
+                    else:
+                        rec3["result"] = f"예고 8s 미만 — 무시({chosen3}={new_t})"
+                else:
+                    rec3["result"] = "경계 없음/후보 없음 — 무표시 유지"
+                audit["probes"].append(rec3)
 
     if audit["moved"] == 0:
         return stage1_doc, audit

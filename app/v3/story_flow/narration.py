@@ -29,6 +29,11 @@ NAR_SPEED = "fast"           # ElevenLabs 1.1 (2026-09-03 사용자: very_fast 1
 NAR_EST_CPS = 7.7            # 합성 실패 시 견적(공백 제외 자/초 · fast)
 NAR_EST_LEAD_SEC = 0.35
 MAX_NARRATIONS = 8
+# 무대사 편(갭 3, 2026-09-07): 내레이션이 뼈대라 상한·하한이 다르다. 60초 편에 8줄×2.5초는
+# 20초뿐이라 상한을 올리고, 견적 합계가 편 길이의 이 비율에 못 미치면 걸음 4 를 반려한다
+# (합성 앞이라 요금 0 — 견적은 NAR_EST_CPS 로).
+SILENT_MAX_NARRATIONS = 12
+SILENT_NARRATION_MIN_RATIO = 0.35
 
 PROMPT = """당신은 리캡 쇼츠 구성작가다. 영상은 볼 수 없다 — 아래 편성 기록이 정본이다.
 
@@ -50,7 +55,7 @@ PROMPT = """당신은 리캡 쇼츠 구성작가다. 영상은 볼 수 없다 �
 주제: {topic}
 제목: {title_line1} / {title_line2}
 
-{rhythm_block}
+{silent_note}{rhythm_block}
 ## 편성 (비트 순 · 대사와 화면 기록)
 {beats_block}
 
@@ -145,17 +150,41 @@ def beats_block(beats: list[dict], span_index: dict[str, dict],
     return "\n".join(out)
 
 
+def silent_note(min_total_sec: float, n_beats: int) -> str:
+    """무대사 편 안내 절(걸음 4 프롬프트) — 비어 있지 않은 편에서만 프롬프트가 달라진다."""
+    return (f"\n## ⚠ 이 편은 대사가 없다 — 내레이션이 뼈대다\n"
+            f"화면만으로는 시청자가 무슨 일인지 모른다. 비트(장면)마다 무슨 일이 일어나는지 **화면이 보여주는 것을** "
+            f"한 줄씩 서술하라(비트 {n_beats}개). 내레이션 합계가 최소 {min_total_sec:.0f}초는 돼야 한다(견적 합계 미달이면 반려). "
+            f"`cover` 는 「쓸 수 있는 화면」에 **비트 안 화면**도 포함돼 있다 — 그 문장이 말하는 행동이 보이는 조각을 짚으면 "
+            f"코드가 그 위에 얹는다(길이가 늘지 않는다).\n")
+
+
+def silent_beat_ids(beats: list[dict], span_index: dict[str, dict]) -> set[str]:
+    """유성 조각이 하나도 없는 비트의 조각 id 집합(순수)."""
+    out: set[str] = set()
+    for b in beats:
+        ids = [x for x in b.get("span_ids") or [] if x in span_index]
+        if ids and not any(span_index[x]["is_audio"] for x in ids):
+            out.update(ids)
+    return out
+
+
 def available_covers(beats: list[dict], scene_rows: dict[int, dict],
-                     span_index: dict[str, dict]) -> list[str]:
-    """고른 씬의 분석된 조각 중 어느 비트에도 안 쓰인 것 — grid 순."""
+                     span_index: dict[str, dict], *,
+                     include_silent_beats: bool = False) -> list[str]:
+    """고른 씬의 분석된 조각 중 어느 비트에도 안 쓰인 것 — grid 순.
+    include_silent_beats(무대사 편): 유성 조각이 없는 비트의 조각도 포함한다 — 내레이션을
+    그 화면 **위에** 얹기 위해(덮개가 그 조각을 비트에서 가져가므로 길이가 늘지 않는다)."""
     used = {x for b in beats for x in b["span_ids"]}
+    if include_silent_beats:
+        used -= silent_beat_ids(beats, span_index)
     out = [sid for r in scene_rows.values() for sid in r["span_ids"]
            if sid in span_index and not span_index[sid].get("unanalyzed") and sid not in used]
     return sorted(set(out), key=lambda s: span_index[s]["pos"])
 
 
 def available_block(available: list[str], span_index: dict[str, dict],
-                    scene_of: dict[str, int]) -> str:
+                    scene_of: dict[str, int], *, beat_ids: set[str] | None = None) -> str:
     out: list[str] = []
     cur_scene = None
     for sid in available:
@@ -167,6 +196,8 @@ def available_block(available: list[str], span_index: dict[str, dict],
         desc = sp.get("scene_script") or ""
         if sp["is_audio"]:
             desc = (desc + f" (대사: {span_text(sp)[:30]})").strip()
+        if beat_ids and sid in beat_ids:
+            desc = "[비트 안 화면] " + desc
         out.append(f"{sid} | {fmt_t(sp['t_in'])} | {sp['t_out'] - sp['t_in']:.1f}s | {desc}")
     return "\n".join(out) if out else "(없음 — 고른 씬의 모든 조각이 대사로 쓰였다)"
 
@@ -203,10 +234,14 @@ def validate_narrations(resp: Any, n_beats: int, *,
                         hard_max: int = NAR_HARD_MAX_CHARS,
                         required: set[int] | None = None,
                         available: set[str] | None = None,
+                        max_n: int = MAX_NARRATIONS,
+                        min_total_sec: float | None = None,
                         ) -> tuple[list[dict] | None, list[str], list[str]]:
     """→ [{anchor: ("before", k) | ("after", n-1), lines: [문장…], cover_ids: [...]}].
     required: 내레이션이 반드시 있어야 하는 before_beat 집합(기본 {0}).
-    available: cover 로 고를 수 있는 id 집합(None 이면 검사 안 함)."""
+    available: cover 로 고를 수 있는 id 집합(None 이면 검사 안 함).
+    max_n: 곳 수 상한(무대사 편은 SILENT_MAX_NARRATIONS). min_total_sec: 견적 합계 하한
+    (무대사 편 밀도 — 합성 앞 견적이라 요금 0, 미달이면 반려)."""
     if not isinstance(resp, dict):
         return None, ["응답이 객체가 아니다"], []
     required = {0} if required is None else set(required)
@@ -263,9 +298,14 @@ def validate_narrations(resp: Any, n_beats: int, *,
         if ("before", bi) not in groups:
             problems.append(f"before_beat: {bi} 내레이션이 없다 — "
                             + ("도입(훅)은 필수" if bi == 0 else "점프 자리라 다리가 필수"))
-    if len(order) > MAX_NARRATIONS:
-        notes.append(f"내레이션 {len(order)}곳 → 앞 {MAX_NARRATIONS}곳만")
-        order = order[:MAX_NARRATIONS]
+    if len(order) > max_n:
+        notes.append(f"내레이션 {len(order)}곳 → 앞 {max_n}곳만")
+        order = order[:max_n]
+    if min_total_sec is not None and order:
+        est = sum(estimate_sec(ln) for k in order for ln in groups[k]["lines"])
+        if est < min_total_sec - 1e-6:
+            problems.append(f"내레이션 견적 합계 {est:.1f}초 — 무대사 편은 최소 {min_total_sec:.0f}초가 "
+                            "필요하다(내레이션이 뼈대). 비트마다 화면이 보여주는 것을 한 줄씩 더 써라")
     # 마지막 줄 닫힘 — 판정은 모델(closed), 코드는 그 답을 반려 사유로 되돌릴 뿐
     # (어미 목록을 코드에 적지 않는다 — 열린 어미는 무궁무진하다)
     if order:
@@ -319,6 +359,7 @@ def synthesize_groups(groups: list[dict], out_dir: Path,
 
 
 __all__ = ["PROMPT", "NAR_MAX_CHARS", "NAR_SPEED", "NAR_VOICE", "beats_block",
-           "available_covers", "available_block", "split_sentences",
+           "available_covers", "available_block", "split_sentences", "silent_note",
+           "silent_beat_ids", "SILENT_MAX_NARRATIONS", "SILENT_NARRATION_MIN_RATIO",
            "validate_narrations", "synthesize_groups", "default_synth", "estimate_sec",
            "reject_block"]

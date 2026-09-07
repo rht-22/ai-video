@@ -578,9 +578,38 @@ def detect_burned_subtitles(video_path: Path, clips: list, design, output_dir: P
 
 # ── 최종 렌더 어댑터 ────────────────────────────────────────────────────────
 
+def read_picture_area(output_dir: Path) -> dict | None:
+    """`checkpoint_probe.json` 의 그림 영역(`picture`) — 레터박스가 있을 때만 dict.
+
+    probe 단계(`pipeline._load_or_probe_media`)가 additive 로 실은 키다. 파일·키 없음 ·
+    실패 기록(`error`) · 그림 영역 = 컨테이너 전체(체크포인트의 width/height 와 대조)는
+    전부 None = 종전 경로 — 앵커 없는 편이 불필요한 ffprobe 없이 빈 맵으로 간다."""
+    from app.v3 import letterbox
+
+    p = Path(output_dir) / "checkpoint_probe.json"
+    if not p.exists():
+        return None
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):
+        return None
+    pic = doc.get("picture")
+    if not isinstance(pic, dict) or "error" in pic:
+        return None
+    try:
+        out = {"x": int(pic["x"]), "y": int(pic["y"]),
+               "w": int(pic["w"]), "h": int(pic["h"])}
+        if letterbox.is_full(out, int(doc["width"]), int(doc["height"])):
+            return None
+    except (KeyError, TypeError, ValueError):
+        return None
+    return out
+
+
 def subject_crop_map(timeline: list[dict], *, video_path: Path,
                      aspect_ratio: str, output_dir: Path,
                      src_size: tuple[int, int] | None = None,
+                     picture: dict | None = None, anchors: bool = True,
                      log=print) -> dict[str, Path]:
     """무성 인서트 클립의 subject_pos → 렌더러 crop_timeline_map (2026-09-02).
 
@@ -589,10 +618,26 @@ def subject_crop_map(timeline: list[dict], *, video_path: Path,
     적어 둔 subject_pos(left/right)를 그 클립의 crop x 앵커로 소비한다. 렌더러는
     이미 crop_timeline_map 을 받게 되어 있으므로(v1 얼굴 추적과 같은 통로) 렌더
     코드는 무변경. 키가 없는 클립 = 종전 중앙(회귀 0). 순수 재료라 재개마다 재도출
-    해도 같은 좌표다(E19-4 얼굴 회피와 같은 이유로 체크포인트에 안 남긴다)."""
+    해도 같은 좌표다(E19-4 얼굴 회피와 같은 이유로 체크포인트에 안 남긴다).
+
+    **레터박스(2026-09-07)**: `picture={x,y,w,h}`(probe 단계 검출, 소스 좌표)가
+    컨테이너와 다르면 **모든 클립**에 크롭을 내되 그림 사각형 안에서 밴드 비율을
+    맞춘다(높이 우선 — crop_w 가 그림 폭을 넘으면 폭 기준). x 앵커 규칙(좌/우
+    0.25/0.75 · 아니면 중앙)은 그림 영역 좌표로, y 는 그림 중앙. 그림 영역이
+    컨테이너 전체(또는 None)면 종전과 **정확히 같은 맵**(회귀 0).
+    `anchors=False` 는 subject_pos 를 무시한다(채널 face_tracking=false — 레터박스
+    제거는 앵커와 무관한 소스 성질이라 그 분기에서도 x 중앙으로 적용한다)."""
+    from app.v3 import letterbox
+
     anchored = [(i, c) for i, c in enumerate(timeline)
-                if c.get("subject_pos") in ("left", "right")]
-    if not anchored:
+                if anchors and c.get("subject_pos") in ("left", "right")]
+    if src_size is not None:
+        has_letterbox = not letterbox.is_full(picture, *src_size)
+    else:
+        # 소스 크기를 아직 모른다 — picture 가 컨테이너를 실어 오지 않으므로 아래
+        # ffprobe 뒤에 다시 판정한다. 앵커도 없고 picture 도 없으면 프로브 자체를 안 한다.
+        has_letterbox = bool(picture)
+    if not anchored and not has_letterbox:
         return {}
     if src_size is None:
         try:
@@ -607,27 +652,64 @@ def subject_crop_map(timeline: list[dict], *, video_path: Path,
             log(f"  [v3/render] ⚠ 소스 해상도 프로브 실패 — 피사체 앵커 생략: {e}")
             return {}
     src_w, src_h = src_size
+    has_letterbox = not letterbox.is_full(picture, src_w, src_h)
+    if not anchored and not has_letterbox:
+        return {}
     try:
         r_w, r_h = (int(x) for x in str(aspect_ratio).split(":"))
     except (ValueError, AttributeError):
         return {}
-    # 밴드 비율의 최대 크롭 — 렌더러 하류(scale increase → 중앙 crop)가 재크롭으로
-    # 앵커를 되물리지 않으려면 여기서 **정확히 밴드 비율**로 잘라야 한다
-    crop_h = src_h
-    crop_w = int(src_h * r_w / r_h) & ~1
-    if crop_w >= src_w - 2:          # 가로 여유가 없다(세로 크롭 소재) — 앵커 무의미
+    if r_w <= 0 or r_h <= 0:
         return {}
     out_map: dict[str, Path] = {}
-    for i, c in anchored:
-        frac = 0.25 if c["subject_pos"] == "left" else 0.75
-        x_center = min(max(frac * src_w, crop_w / 2), src_w - crop_w / 2)
+
+    if not has_letterbox:
+        # ── 종전 경로(그대로) — 밴드 비율의 최대 크롭. 렌더러 하류(scale increase →
+        # 중앙 crop)가 재크롭으로 앵커를 되물리지 않으려면 **정확히 밴드 비율**로 잘라야 한다
+        crop_h = src_h
+        crop_w = int(src_h * r_w / r_h) & ~1
+        if crop_w >= src_w - 2:          # 가로 여유가 없다(세로 크롭 소재) — 앵커 무의미
+            return {}
+        for i, c in anchored:
+            frac = 0.25 if c["subject_pos"] == "left" else 0.75
+            x_center = min(max(frac * src_w, crop_w / 2), src_w - crop_w / 2)
+            kf = [{"time_sec": 0.0, "x_center": round(x_center, 1),
+                   "y_center": src_h / 2, "crop_w": crop_w, "crop_h": crop_h}]
+            p = output_dir / f"v3_crop_subject_{i}.json"
+            p.write_text(json.dumps(kf), encoding="utf-8")
+            out_map[f"{c.get('role') or 'build'}_{i}"] = p
+            log(f"  [v3/render] 피사체 앵커 clip{i} {c['subject_pos']} — "
+                f"crop x_center {x_center:.0f}/{src_w}")
+        return out_map
+
+    # ── 레터박스 경로 — 그림 사각형 안에서 밴드 비율 최대 크롭, 전 클립 ──────
+    pic_x, pic_y = int(picture["x"]), int(picture["y"])
+    pic_w, pic_h = int(picture["w"]), int(picture["h"])
+    crop_h = pic_h & ~1
+    crop_w = int(crop_h * r_w / r_h) & ~1
+    if crop_w > pic_w:               # 그림이 밴드보다 좁다(세로 크롭 소재) → 폭 기준
+        crop_w = pic_w & ~1
+        crop_h = int(crop_w * r_h / r_w) & ~1
+    if crop_w <= 0 or crop_h <= 0:
+        return {}
+    anchor_by_idx = {i: c["subject_pos"] for i, c in anchored}
+    y_center = pic_y + pic_h / 2
+    log(f"  [v3/render] 레터박스 크롭 — 그림 {pic_w}×{pic_h}@({pic_x},{pic_y}) 안에서 "
+        f"{r_w}:{r_h} 최대 {crop_w}×{crop_h}, 클립 {len(timeline)}개"
+        + ("" if anchors else " (face_tracking=false — x 중앙)"))
+    for i, c in enumerate(timeline):
+        pos = anchor_by_idx.get(i)
+        frac = 0.25 if pos == "left" else 0.75 if pos == "right" else 0.5
+        x_center = min(max(pic_x + frac * pic_w, pic_x + crop_w / 2),
+                       pic_x + pic_w - crop_w / 2)
         kf = [{"time_sec": 0.0, "x_center": round(x_center, 1),
-               "y_center": src_h / 2, "crop_w": crop_w, "crop_h": crop_h}]
+               "y_center": y_center, "crop_w": crop_w, "crop_h": crop_h}]
         p = output_dir / f"v3_crop_subject_{i}.json"
         p.write_text(json.dumps(kf), encoding="utf-8")
         out_map[f"{c.get('role') or 'build'}_{i}"] = p
-        log(f"  [v3/render] 피사체 앵커 clip{i} {c['subject_pos']} — "
-            f"crop x_center {x_center:.0f}/{src_w}")
+        if pos:
+            log(f"  [v3/render] 피사체 앵커 clip{i} {pos} — "
+                f"crop x_center {x_center:.0f}/{src_w} (그림 영역 기준)")
     return out_map
 
 
@@ -942,10 +1024,20 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     # 싣는다(subject_crop_map 독스트링 참조). 앵커 없는 판은 빈 dict = 종전 그대로.
     # 채널 face_tracking:false(--no-reframe) 는 v3 에서 피사체 앵커 크롭까지 끈다 —
     # v1 과 같은 뜻('원본을 가운데 정렬로 넣는다'). 기본 True = 종전 그대로.
+    # 레터박스(2026-09-07): probe 단계가 잰 그림 영역 — 있으면 전 클립을 그 안에서
+    # 밴드 비율로 자른다(subject_crop_map 레터박스 경로). 없으면 None = 종전 그대로.
+    picture = read_picture_area(output_dir)
     if getattr(design, "enable_reframe", True):
         crop_map = subject_crop_map(plan["timeline"], video_path=Path(video_path),
                                     aspect_ratio=design.aspect_ratio,
-                                    output_dir=output_dir, log=log)
+                                    output_dir=output_dir, picture=picture, log=log)
+    elif picture:
+        # 레터박스 제거는 앵커와 무관한 소스 성질 — face_tracking=false 라도 적용(x 중앙)
+        log("  [v3/render] 채널 face_tracking=false — 피사체 앵커 끔, 레터박스 크롭만 적용(x 중앙)")
+        crop_map = subject_crop_map(plan["timeline"], video_path=Path(video_path),
+                                    aspect_ratio=design.aspect_ratio,
+                                    output_dir=output_dir, picture=picture,
+                                    anchors=False, log=log)
     else:
         crop_map = {}
         log("  [v3/render] 채널 face_tracking=false — 피사체 앵커 크롭 끔(중앙)")
@@ -1034,6 +1126,8 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                            "work_top": int(_work_top_final),
                            "work_min_top": _work_min_top,
                            "capped": any(n.startswith("⚠") for n in _stack_notes)}}
+    if picture:
+        cost["letterbox_crop"] = {**picture, "clips": len(crop_map)}   # 회귀 0: 없으면 키 없음
     log(f"  [v3/render] {out_path.name} — {cost['elapsed']}s · "
         f"{cost['bytes'] // (1024 * 1024)}MB")
     return out_path, cost

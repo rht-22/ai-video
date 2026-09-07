@@ -64,6 +64,38 @@ def _read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+_MEDIA_INFO_FIELDS = ("path", "duration_sec", "fps", "width", "height", "has_audio")
+
+
+def _load_or_probe_media(probe_ckpt: Path, video_path: Path, *,
+                         log=print) -> tuple[MediaInfo, dict, bool]:
+    """probe 단계 — `checkpoint_probe.json` 로드/생성 + 레터박스 `picture` 채움.
+
+    반환 (media_info, picture, refilled). `picture` = `{x,y,w,h,samples[,error]}` 는
+    체크포인트 `result` 에 **additive** 로 실린다(MediaInfo 필드가 아니라 로드 시
+    걷어낸다 — 안 걷어내면 `MediaInfo(**data)` 가 죽는다). 옛 체크포인트에 picture 가
+    없거나 지난 실행이 실패(`error`)를 기록했으면 **다시 재서 채운다**(구 잡 호환 —
+    letterbox 검출은 소스의 성질이라 재개마다 같은 값이다). refilled 가 참이면
+    호출자가 run_log step 을 남긴다."""
+    from app.v3 import letterbox
+
+    if probe_ckpt.exists():
+        data = _read_json(probe_ckpt)
+        media_info = MediaInfo(**{**{k: data[k] for k in _MEDIA_INFO_FIELDS},
+                                  "path": Path(data["path"])})
+        picture = data.get("picture")
+        if isinstance(picture, dict) and "error" not in picture:
+            return media_info, picture, False
+        log("  [v3/probe] 체크포인트에 그림 영역 없음 — 레터박스 다시 측정")
+    else:
+        media_info = probe_media(video_path)
+        data = {**asdict(media_info), "path": str(media_info.path)}
+    picture = letterbox.detect_or_full(
+        video_path, width=media_info.width, height=media_info.height, log=log)
+    _write_json(probe_ckpt, {**data, "path": str(media_info.path), "picture": picture})
+    return media_info, picture, True
+
+
 def _character_index_slot(output_dir: Path, proxy_path: Path,
                           research: dict | None, out: dict, log=print) -> None:
     """grid 와 병렬로 도는 인물 인덱스 슬롯 — 모듈이 있으면 실행, 없으면 부재 기록."""
@@ -224,17 +256,17 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
 
         # ── probe — 기존 체크포인트 모양 재사용 ────────────────────────────
         probe_ckpt = output_dir / "checkpoint_probe.json"
-        if probe_ckpt.exists():
-            data = _read_json(probe_ckpt)
-            media_info = MediaInfo(**{**data, "path": Path(data["path"])})
-        else:
-            media_info = probe_media(Path(video_path))
-            _write_json(probe_ckpt, {**asdict(media_info), "path": str(media_info.path)})
+        media_info, picture, picture_refilled = _load_or_probe_media(
+            probe_ckpt, Path(video_path), log=log)
+        if picture_refilled:
+            # 신규 probe 또는 옛 체크포인트(picture 없음·실패 기록) 재측정 — 둘 다
+            # run_log 에 남긴다(재개에서 '언제 쟀는가'가 추적돼야 한다).
             step("probe", result={"duration_sec": media_info.duration_sec,
                                   "fps": media_info.fps,
                                   "width": media_info.width,
                                   "height": media_info.height,
-                                  "has_audio": media_info.has_audio})
+                                  "has_audio": media_info.has_audio,
+                                  "picture": picture})
         duration = float(media_info.duration_sec)
 
         # ── proxy — 480p(기존 인자 그대로) + scan 변형 ─────────────────────
@@ -761,6 +793,12 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
         segments, name_fixes = textcheck.fix_names(segments, names)
     else:
         name_fixes = []
+    # A 폴백(갭 6, 2026-09-07) — 사전 유무와 무관. 전사 내부 표기 불일치(유지수/류지수)를
+    # 신고만 한다. 다수결 금지(EP01: 5:3 에서 다수가 오답) — 사전에 한쪽만 있을 때만 교정.
+    name_variants = textcheck.check_internal_variants(segments, names)
+    name_variant_fixes: list[dict] = []
+    if fix_names and any(v.get("suggest") for v in name_variants):
+        segments, name_variant_fixes = textcheck.fix_internal_variants(segments, name_variants)
     if rep_warns:
         _dropped = {i for w in rep_warns if w["kind"] == "run"
                     for i in w.get("indexes") or []}
@@ -770,6 +808,12 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
         log(f"  [v3/자막] ⚠ 인명 오인식 의심 {len(name_warns)}건: "
             + ", ".join(f"{w['token']}→{w['suggest']}" for w in name_warns[:3])
             + (" (교정 적용)" if name_fixes else " (경고만 — --fix-names 로 교정)"))
+    for v in name_variants:
+        _sug = (f"{v['suggest']}" + (" (교정 적용)" if name_variant_fixes
+                                     else " — --fix-names 로 교정)")
+                if v.get("suggest") else "없음(사람 확인)")
+        log(f"  [v3/textcheck] ⚠ 인명 표기 불일치 {v['a']}({v['count_a']})/"
+            f"{v['b']}({v['count_b']}) — 사전 제안: {_sug}")
     _write_json(output_dir / "subtitle_segments.json", segments)
 
     cues = assemble.finalize_cues(story_doc.get("narration_cues") or [],
@@ -842,6 +886,7 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
              "tts_backend": backend, "tts_cues": len(tts_cue_files),
              "subtitle_repetition_warns": rep_warns,
              "subtitle_name_warns": name_warns, "subtitle_name_fixes": name_fixes,
+             "name_variants": name_variants, "name_variant_fixes": name_variant_fixes,
              "cues_lost_to_trim": [c["text"][:40] for c in lost],
              "cue_windows_rescued": sum(1 for c in cues
                                         if c.get("window_rescued")),
@@ -1051,6 +1096,11 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
         _fp_parts.append(channel_design)
     if narration_original_db is not None:
         _fp_parts.append({"narration_original_db": narration_original_db})
+    # 레터박스(2026-09-07): 그림 영역이 있을 때만 지문에 넣는다 — 없는 소재의 지문은
+    # 종전 바이트 그대로(회귀 0). 옛 잡을 재개하면 probe 가 새로 재서 지문이 갈린다.
+    _picture = finalize.read_picture_area(output_dir)
+    if _picture:
+        _fp_parts.append({"letterbox_picture": _picture})
     render_fp = hashlib.sha1(json.dumps(_fp_parts, sort_keys=True,
                                         ensure_ascii=False).encode()).hexdigest()[:16]
     if final_path.exists() and _sidecar_ok("render_fingerprint.json", render_fp) \

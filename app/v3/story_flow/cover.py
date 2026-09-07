@@ -41,7 +41,8 @@ PROBE_PROMPT = """당신은 쇼츠 편집자다. 첨부 클립은 원본 {t0}~{t
 규칙: 시작점 start_sec(클립 기준 초, 0.1초 단위) **하나만** 골라라. 내레이션은 start_sec 부터 {L:.1f}초 동안 흐르므로 start_sec ≤ {latest:.1f} 이어야 한다({end_note}). 내레이션 문구와 맞는 그림이 흐르는 구간에서, 동작이 시작되는 순간이나 장면 전환 직후에 들어가라. 동작 중간·컷 직전에서 시작하지 마라.
 장면 전환 후보(클립 기준): {cuts}
 화면 기록(클립 기준): {scripts}
-{{"start_sec": 3.2, "reason": "한 줄", "confidence": "high|low"}}"""
+대조: 내레이션 문장이 이 창의 화면과 **모순**되면(문장이 말하는 행동·인물·물건이 창 어디에도 없다) text_matches 를 false 로 하고 seen 에 실제로 보이는 것을 한 줄로 적어라. 앵글·조명·거리 차이는 관용 — 같은 사건이면 true.
+{{"start_sec": 3.2, "reason": "한 줄", "confidence": "high|low", "text_matches": true, "seen": "실제로 보이는 것 한 줄"}}"""
 
 
 # ── 구간 산술(순수) ────────────────────────────────────────────────────────
@@ -214,14 +215,20 @@ def _cover_desc(group: dict, span_index: dict[str, dict]) -> str:
 
 
 def designated_window(cover_ids: list[str], beats: list[dict], span_index: dict[str, dict],
-                      L: float, extra_used: list[tuple[float, float]] | None = None
-                      ) -> dict | None:
+                      L: float, extra_used: list[tuple[float, float]] | None = None,
+                      allow_ids: set[str] | None = None) -> dict | None:
     """모델이 지정한 화면 조각 → 그 조각들을 담는 연속 창(kind='designated').
     지정 조각 자체는 비트 밖(미사용)이어야 하고, L 에 못 미치면 grid 인접 미사용
-    조각으로 앞뒤로 넓힌다(대사로 고른 조각·이미 놓인 덮개는 넘지 않는다)."""
+    조각으로 앞뒤로 넓힌다(대사로 고른 조각·이미 놓인 덮개는 넘지 않는다).
+    allow_ids(무대사 편, 갭 3): 이 조각들은 비트 안이어도 '미사용'으로 본다 — 내레이션을
+    그 비트의 화면 위에 얹는 길. 덮개가 가져간 조각은 apply_cover_to_beats 가 비트에서
+    빼므로 같은 화면이 두 번 나오지 않는다."""
     ids = [x for x in cover_ids if x in span_index]
     if not ids:
         return None
+    if allow_ids:
+        beats = [{**b, "span_ids": [x for x in b.get("span_ids") or [] if x not in allow_ids]}
+                 for b in beats]
     used = _merge(used_intervals(beats, span_index) + list(extra_used or []))
     ids.sort(key=lambda x: span_index[x]["pos"])
     f0 = span_index[ids[0]]["t_in"]
@@ -363,9 +370,15 @@ def run_probe(gemini, video: Path, out_dir: Path, tag: str, win: dict, L: float,
     # 스냅이 창 밖·L 미확보로 밀면 원값
     if snapped < win["w0"] - 1e-6 or snapped + L > win["w1"] + 1e-6:
         snapped, how = round(raw, 2), "raw"
+    # 문장·화면 대조(갭 8 첫 삽, 2026-09-07): 프로브는 이미 내레이션 문장과 클립을 함께
+    # 보므로 추가 호출 0 으로 "화면을 보니 문장이 틀렸다"가 나온다. 판정은 호출자가 한다
+    # (모순이면 걸음 4 재질의 1회). 칸이 없으면 None = 판정 없음(옛 응답 호환).
+    tm = resp.get("text_matches")
     return {"start": snapped, "snap": how, "raw": round(raw, 2),
             "reason": str(resp.get("reason") or "")[:120],
             "confidence": str(resp.get("confidence") or ""),
+            "text_matches": (tm if isinstance(tm, bool) else None),
+            "seen": str(resp.get("seen") or "")[:120],
             "probe_window": [round(t0, 3), round(t1, 3)]}
 
 
@@ -376,8 +389,10 @@ def choose_cover(anchor: tuple[str, int], group: dict, beats: list[dict],
                  grid: dict, *, gemini=None, video: Path | None = None,
                  out_dir: Path | None = None, budget: dict | None = None,
                  placed: list[tuple[float, float]] | None = None,
+                 allow_ids: set[str] | None = None,
                  log=print) -> dict:
-    """한 내레이션 묶음의 덮개 → {position, kind, t_in, t_out, span_ids, probe, note}."""
+    """한 내레이션 묶음의 덮개 → {position, kind, t_in, t_out, span_ids, probe, note}.
+    allow_ids: 지정 화면이 비트 안 조각이어도 허용(무대사 편 — designated_window 참조)."""
     # 엔딩(after) 덮개는 내레이션이 끝나는 곳에서 **뚝** 끊는다 — 꼬리 여유 없이 머리
     # 0.1s 만(2026-09-03 사용자 지적: 마지막 내레이션 뒤 장면이 길다)
     pad = NAR_HEAD_PAD_SEC if anchor[0] == "after" else NAR_PAD_SEC
@@ -390,7 +405,8 @@ def choose_cover(anchor: tuple[str, int], group: dict, beats: list[dict],
     wins: list[dict] = []
     focus: tuple[float, float] | None = None
     if group.get("cover_ids"):
-        dw = designated_window(group["cover_ids"], beats, span_index, L, extra_used=placed)
+        dw = designated_window(group["cover_ids"], beats, span_index, L, extra_used=placed,
+                               allow_ids=allow_ids)
         if dw is not None and group.get("hold") and dw["focus1"] - dw["focus0"] < L - 1e-6:
             # 정보 화면 붙잡기(2026-09-03): 모델이 '글자가 있는 화면'이라 판정한 지정 화면이
             # 내레이션보다 짧으면, 이웃 조각으로 넓히지 않고 **마지막 프레임을 붙잡는다**

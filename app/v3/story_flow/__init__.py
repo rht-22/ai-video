@@ -11,6 +11,7 @@ audio_path/measured_sec(resources 가 재합성 대신 그대로 쓴다), doc.fl
 """
 from __future__ import annotations
 
+import copy
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -50,10 +51,15 @@ def _hint_block(stage1_doc: dict | None) -> str:
     return "\n## 본 눈의 추천(참고 — 영상을 본 단계가 지목한 쇼츠감)\n" + "\n".join(rows) + "\n"
 
 
+COVER_REASK_MAX = 1              # 덮개 프로브가 "문장이 화면과 모순"이라 하면 걸음 4·5 를 다시 도는
+                                 # 상한(갭 8 첫 삽, 2026-09-07) — 편당 1회, 무한 루프 금지
+
+
 def _loop(name: str, make_prompt: Callable[[str], str], validate: Callable[[dict], tuple],
-          gemini, audit: dict, log=print):
-    """반려·재질의 루프(≤MAX_REASKS). validate → (obj|None, problems, notes)."""
-    rej = ""
+          gemini, audit: dict, log=print, *, initial_reject: str = ""):
+    """반려·재질의 루프(≤MAX_REASKS). validate → (obj|None, problems, notes).
+    initial_reject: 첫 호출부터 싣는 반려 사유(하류가 되돌린 관측 — 갭 8)."""
+    rej = initial_reject
     rec: list[dict] = []
     for attempt in range(1 + MAX_REASKS):
         t0 = time.time()
@@ -96,12 +102,21 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
     seq_block = "\n".join(f"- 시퀀스 {s['number']} [{fmt_t(s['t0'])}~{fmt_t(s['t1'])}] {s['content']}"
                           for s in sequence_rows(stage2_doc))
     meaning_block = meaning_table(rows)
+    # 무대사 구간 목록(갭 3, 2026-09-07) — 전사 단어 간격으로 코드가 재서 걸음 1·2 재료에
+    # 별도 블록으로 싣는다. 없으면 빈 문자열(프롬프트 종전과 동일).
+    _dur = grid.get("duration_sec") or (grid.get("source") or {}).get("duration_sec")
+    silent = sl.silent_runs(grid.get("words") or [], _dur)
+    silent_blk = sl.silent_block(silent, rows)
+    audit["silent_runs"] = len(silent)
+    if silent:
+        log(f"  [v3/flow] 무대사 구간 {len(silent)}개 · {sum(z - a for a, z in silent):.0f}s — 재료 블록으로 싣는다")
 
     # 1 주제
     topic = _loop("topic", lambda rej: sl.TOPIC_PROMPT.format(
         target_sec=target_sec, max_sec=max_sec, work_title=work_title,
         research_block=research_block, sequence_block=seq_block,
         hint_block=_hint_block(stage1_doc), meaning_block=meaning_block,
+        silent_block=silent_blk,
         reject_block=rej), lambda r: sl.validate_topic(r, rows), gemini, audit, log)
     log(f"  [v3/flow/topic] {topic['topic']} (핵심 m{'/m'.join(f'{i:03d}' for i in topic['core_meanings'])})")
 
@@ -110,6 +125,7 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
         topic=topic["topic"], min_scenes=sl.MIN_SCENES, max_scenes=sl.MAX_SCENES,
         target_sec=target_sec, title_max=sl.TITLE_MAX_CHARS, work_title=work_title,
         research_block=research_block, meaning_block=meaning_block,
+        silent_block=silent_blk,
         reject_block=rej), lambda r: sl.validate_scenes(r, rows), gemini, audit, log)
     scenes, title = scenes_doc["scenes"], scenes_doc["title"]
     log("  [v3/flow/scenes] " + " → ".join(f"m{s['meaning']:03d}[{s['purpose']}]" for s in scenes)
@@ -139,91 +155,161 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
 
     # 4 내레이션(화면 id 지정) + 합성
     scene_rows = {s["meaning"]: rows_by_idx[s["meaning"]] for s in scenes}
-    available = nr.available_covers(beats, scene_rows, span_index)
+    # 무대사 편(갭 3): 대사가 한 조각도 없으면 내레이션이 뼈대다 — 비트 안 화면을 덮개
+    # 후보에 열고(길이가 늘지 않게 그 위에 얹는다), 곳 수 상한을 올리고, 견적 밀도 하한을 건다.
+    silent_episode = not any(span_index[x]["is_audio"] for b in beats for x in b["span_ids"])
+    audit["silent_episode"] = silent_episode
+    own_ids: set[str] = nr.silent_beat_ids(beats, span_index) if silent_episode else set()
+    available = nr.available_covers(beats, scene_rows, span_index,
+                                    include_silent_beats=silent_episode)
     required = {0} | {j["before_beat"] for j in jumps}
+    max_n = max(nr.MAX_NARRATIONS, len(required) + 1)
+    min_total: float | None = None
+    silent_note = ""
+    if silent_episode:
+        max_n = max(max_n, len(beats) + 1, nr.SILENT_MAX_NARRATIONS)
+        _beat_total = sum(beat_duration(b, span_index) for b in beats)
+        min_total = round(nr.SILENT_NARRATION_MIN_RATIO * _beat_total, 1)
+        silent_note = nr.silent_note(min_total, len(beats))
+        log(f"  [v3/flow/narration] 무대사 편 — 내레이션이 뼈대: 상한 {max_n}곳 · 견적 하한 "
+            f"{min_total}s (편 {_beat_total:.1f}s × {nr.SILENT_NARRATION_MIN_RATIO})")
     rhythm = nr.scene_rhythm(scene_rows, grid)
     audit["rhythm"] = rhythm
     if rhythm:
         log(f"  [v3/flow/narration] 호흡 실측 — 발화 {rhythm['speech_cps']}자/초 · "
             f"컷 간격 {rhythm['cut_gap_med']}s · 최장 무발화 {rhythm['longest_silence']}s")
-    groups = _loop("narration", lambda rej: nr.PROMPT.format(
-        max_chars=nr.NAR_MAX_CHARS, max_n=max(nr.MAX_NARRATIONS, len(required) + 1),
-        work_title=work_title, research_block=research_block, topic=topic["topic"],
-        title_line1=title["line1"], title_line2=title["line2"],
-        beats_block=nr.beats_block(beats, span_index, rows_by_idx, jumps),
-        rhythm_block=nr.rhythm_block(rhythm),
-        available_block=nr.available_block(available, span_index, allowed),
-        tone_block=(f"\n{tone_block}\n" if tone_block else ""), reject_block=rej),
-        lambda r: nr.validate_narrations(r, len(beats), required=required,
-                                         available=set(available)),
-        gemini, audit, log)
     nar_dir = (output_dir / "narration") if output_dir else Path("narration")
-    nr.synthesize_groups(groups, nar_dir, synth_fn, log=log)
-    for g in groups:
-        log(f"  [v3/flow/narration] {g['anchor'][0]}{g['anchor'][1]}: "
-            + " | ".join(f"{t} ({m:.2f}s)" for t, m in zip(g["lines"], g["measured"]))
-            + (f"  화면 {g['cover_ids']}" if g.get("cover_ids") else "  화면 미지정"))
+    # 문장 단위 합성 캐시 — 되돌림(갭 8)으로 걸음 4 를 다시 돌아도 같은 문장은 재요금 없이
+    # 지난 파일을 복사한다(edge/ElevenLabs 모두 결정적이지 않아 길이도 함께 재사용).
+    _nar_cache: dict[str, tuple[float, Path]] = {}
+    _synth = synth_fn or nr.default_synth
 
-    # 5 덮개 — 그 자리를 다시 본다
+    def _synth_cached(text: str, path: Path) -> float:
+        hit = _nar_cache.get(text)
+        if hit and hit[1].exists() and hit[1] != path:
+            import shutil
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(hit[1], path)
+            return hit[0]
+        sec = _synth(text, path)
+        _nar_cache[text] = (float(sec), path)
+        return sec
+
     pbudget = {"left": cv.FLASH_BUDGET, "used": 0}
-    covers_audit: list[dict] = []
-    cues: list[dict] = []
-    placed: list[tuple[float, float]] = []          # 이미 놓인 덮개 — 같은 화면 재사용 금지
-    # 앵커별 순서: before 는 비트 순, after 는 마지막
-    groups.sort(key=lambda g: (g["anchor"][1], 0 if g["anchor"][0] == "before" else 1))
-    for b in beats:
-        b.setdefault("covers", [])
-    for gi, g in enumerate(groups):
-        kind, k = g["anchor"]
-        if not beats[k]["span_ids"]:
-            log(f"  [v3/flow/cover] ⚠ 비트 {k} 가 비어 덮개를 못 만든다 — 내레이션 드랍 아님, "
-                "다음 비트로 앵커 이동")
-            k = next((i for i in range(k, len(beats)) if beats[i]["span_ids"]), None)
-            if k is None:
-                raise ValueError("덮개를 붙일 비트가 없다")
-            g["anchor"] = (kind, k)
-        cover = cv.choose_cover(
-            (kind, k), g, beats, span_index, scene_rows, grid,
-            gemini=gemini if probe else None, video=video_path,
-            out_dir=(output_dir / "cover_probes") if (output_dir and probe) else None,
-            budget=pbudget, placed=placed, log=log)
-        removed = cv.apply_cover_to_beats(cover, beats, span_index, k)
-        cover["removed_span_ids"] = removed
-        if kind == "before":
-            capped = cv.cap_head_gap(beats[k], span_index)
-            if capped:
-                cover["head_gap_cap"] = capped
-                log(f"  [v3/flow/cover] 비트 {k} 머리 무발화 {capped['before_sec']:.1f}s → "
-                    f"{capped['after_sec']:.1f}s (상한 {cv.HEAD_GAP_MAX_SEC}s · 조각 "
-                    f"{len(capped['removed_span_ids'])}개 제거"
-                    + (f" · 첫 조각 {capped['head_trim_sec']}s 부터" if capped['head_trim_sec'] else "") + ")")
-        placed.append((cover["t_in"], cover["t_out"]))
-        beats[k]["covers"].append(cover)
-        # cue — 묶음의 줄들을 덮개 안에 순서대로(측정 길이 비례가 아니라 실측 그대로,
-        # 남는 여유는 마지막 줄 꼬리에)
-        t = cover["t_in"] + 0.1
-        # 붙잡은 덮개는 소스 끝(t_out)에 cue 끝을 두고, 붙잡은 꼬리는 finalize_cues 가 잇는다
-        for li, (text, m, path) in enumerate(zip(g["lines"], g["measured"], g["audio_paths"])):
-            end = cover["t_out"] if li == len(g["lines"]) - 1 else min(cover["t_out"], t + m)
-            cue = {"beat": k, "line": li, "text": text, "mode": "cover",
-                   "speed": nr.NAR_SPEED, "source_time_sec": round(t, 3),
-                   "source_end_sec": round(end, 3),
-                   "muted_span_ids": [x for x in cover["span_ids"] if span_index[x]["is_audio"]],
-                   "measured_sec": m}
-            if path:
-                cue["audio_path"] = path
-            cues.append(cue)
-            t = end
-        beats[k]["narration"] = (beats[k].get("narration") or []) + list(g["lines"])
-        covers_audit.append({"anchor": f"{kind}{k}", "kind": cover["kind"],
-                             "t_in": cover["t_in"], "t_out": cover["t_out"], "L": cover["L"],
-                             "probe": cover.get("probe"), "note": cover.get("note"),
-                             "removed": removed, "cover_ids": g.get("cover_ids") or []})
-        log(f"  [v3/flow/cover] {kind}{k} {cover['kind']} {fmt_t(cover['t_in'])}~{fmt_t(cover['t_out'])} "
-            f"({cover['L']:.1f}s)" + (f" · 프로브 {cover['probe']['snap']} {cover['probe']['reason'][:40]}"
-                                     if cover.get("probe") else " · 산술"))
-    audit["covers"] = covers_audit
-    audit["probe_calls"] = pbudget["used"]
+    beats_snapshot = copy.deepcopy(beats)
+    reask_note = ""
+    contradictions_all: list[dict] = []
+    for pass_no in range(1 + COVER_REASK_MAX):
+        if pass_no:
+            # 되돌림: 덮개가 비트에서 가져간 조각·head_trim 을 원상 복구하고 걸음 4 부터
+            beats = copy.deepcopy(beats_snapshot)
+            log(f"  [v3/flow] ↩ 덮개 프로브가 문장·화면 모순 {len(contradictions_all)}건을 봤다 — "
+                f"걸음 4(내레이션)부터 다시({pass_no}/{COVER_REASK_MAX})")
+        groups = _loop("narration" if not pass_no else f"narration_reask{pass_no}",
+                       lambda rej: nr.PROMPT.format(
+            max_chars=nr.NAR_MAX_CHARS, max_n=max_n,
+            work_title=work_title, research_block=research_block, topic=topic["topic"],
+            title_line1=title["line1"], title_line2=title["line2"],
+            beats_block=nr.beats_block(beats, span_index, rows_by_idx, jumps),
+            silent_note=silent_note,
+            rhythm_block=nr.rhythm_block(rhythm),
+            available_block=nr.available_block(available, span_index, allowed,
+                                               beat_ids=own_ids or None),
+            tone_block=(f"\n{tone_block}\n" if tone_block else ""), reject_block=rej),
+            lambda r: nr.validate_narrations(r, len(beats), required=required,
+                                             available=set(available), max_n=max_n,
+                                             min_total_sec=min_total),
+            gemini, audit, log, initial_reject=reask_note)
+        nr.synthesize_groups(groups, nar_dir, _synth_cached, log=log)
+        for g in groups:
+            log(f"  [v3/flow/narration] {g['anchor'][0]}{g['anchor'][1]}: "
+                + " | ".join(f"{t} ({m:.2f}s)" for t, m in zip(g["lines"], g["measured"]))
+                + (f"  화면 {g['cover_ids']}" if g.get("cover_ids") else "  화면 미지정"))
+
+        # 5 덮개 — 그 자리를 다시 본다
+        covers_audit: list[dict] = []
+        cues: list[dict] = []
+        placed: list[tuple[float, float]] = []          # 이미 놓인 덮개 — 같은 화면 재사용 금지
+        bad: list[dict] = []                            # 프로브가 본 문장·화면 모순(갭 8)
+        # 앵커별 순서: before 는 비트 순, after 는 마지막
+        groups.sort(key=lambda g: (g["anchor"][1], 0 if g["anchor"][0] == "before" else 1))
+        for b in beats:
+            b.setdefault("covers", [])
+        for gi, g in enumerate(groups):
+            kind, k = g["anchor"]
+            if not beats[k]["span_ids"]:
+                log(f"  [v3/flow/cover] ⚠ 비트 {k} 가 비어 덮개를 못 만든다 — 내레이션 드랍 아님, "
+                    "다음 비트로 앵커 이동")
+                k = next((i for i in range(k, len(beats)) if beats[i]["span_ids"]), None)
+                if k is None:
+                    raise ValueError("덮개를 붙일 비트가 없다")
+                g["anchor"] = (kind, k)
+            cover = cv.choose_cover(
+                (kind, k), g, beats, span_index, scene_rows, grid,
+                gemini=gemini if probe else None, video=video_path,
+                out_dir=(output_dir / "cover_probes") if (output_dir and probe) else None,
+                budget=pbudget, placed=placed,
+                # 자기 비트 화면 허용은 before 앵커만 — after 덮개가 마지막 비트 머리를 가져가면
+                # 나머지 조각이 덮개보다 먼저 재생돼 시간이 되감긴다
+                allow_ids=((own_ids & set(beats[k]["span_ids"])) or None) if kind == "before" else None,
+                log=log)
+            removed = cv.apply_cover_to_beats(cover, beats, span_index, k)
+            cover["removed_span_ids"] = removed
+            if kind == "before":
+                capped = cv.cap_head_gap(beats[k], span_index)
+                if capped:
+                    cover["head_gap_cap"] = capped
+                    log(f"  [v3/flow/cover] 비트 {k} 머리 무발화 {capped['before_sec']:.1f}s → "
+                        f"{capped['after_sec']:.1f}s (상한 {cv.HEAD_GAP_MAX_SEC}s · 조각 "
+                        f"{len(capped['removed_span_ids'])}개 제거"
+                        + (f" · 첫 조각 {capped['head_trim_sec']}s 부터" if capped['head_trim_sec'] else "") + ")")
+            placed.append((cover["t_in"], cover["t_out"]))
+            beats[k]["covers"].append(cover)
+            if cover.get("probe") and cover["probe"].get("text_matches") is False:
+                bad.append({"anchor": f"{kind}{k}", "text": " ".join(g["lines"]),
+                            "seen": cover["probe"].get("seen", ""),
+                            "reason": cover["probe"].get("reason", "")})
+            # cue — 묶음의 줄들을 덮개 안에 순서대로(측정 길이 비례가 아니라 실측 그대로,
+            # 남는 여유는 마지막 줄 꼬리에)
+            t = cover["t_in"] + 0.1
+            # 붙잡은 덮개는 소스 끝(t_out)에 cue 끝을 두고, 붙잡은 꼬리는 finalize_cues 가 잇는다
+            for li, (text, m, path) in enumerate(zip(g["lines"], g["measured"], g["audio_paths"])):
+                end = cover["t_out"] if li == len(g["lines"]) - 1 else min(cover["t_out"], t + m)
+                cue = {"beat": k, "line": li, "text": text, "mode": "cover",
+                       "speed": nr.NAR_SPEED, "source_time_sec": round(t, 3),
+                       "source_end_sec": round(end, 3),
+                       "muted_span_ids": [x for x in cover["span_ids"] if span_index[x]["is_audio"]],
+                       "measured_sec": m}
+                if path:
+                    cue["audio_path"] = path
+                cues.append(cue)
+                t = end
+            beats[k]["narration"] = (beats[k].get("narration") or []) + list(g["lines"])
+            covers_audit.append({"anchor": f"{kind}{k}", "kind": cover["kind"],
+                                 "t_in": cover["t_in"], "t_out": cover["t_out"], "L": cover["L"],
+                                 "probe": cover.get("probe"), "note": cover.get("note"),
+                                 "removed": removed, "cover_ids": g.get("cover_ids") or []})
+            log(f"  [v3/flow/cover] {kind}{k} {cover['kind']} {fmt_t(cover['t_in'])}~{fmt_t(cover['t_out'])} "
+                f"({cover['L']:.1f}s)" + (f" · 프로브 {cover['probe']['snap']} {cover['probe']['reason'][:40]}"
+                                         if cover.get("probe") else " · 산술"))
+        audit["covers"] = covers_audit
+        audit["probe_calls"] = pbudget["used"]
+
+        # 갭 8 첫 삽 — 프로브가 "문장이 화면과 모순"이라 한 묶음이 있으면 되돌린다(1회).
+        # 프로브 없는 묶음(hold·산술·예산 소진)은 판정이 없어 그대로다(기록으로 드러난다).
+        for x in bad:
+            log(f"  [v3/flow/cover] ⚠ 문장·화면 모순 {x['anchor']}: 「{x['text'][:30]}」 ↔ 화면 「{x['seen'][:40]}」")
+        if not bad or pass_no >= COVER_REASK_MAX:
+            if bad:
+                log(f"  [v3/flow] ⚠ 모순 {len(bad)}건이 남았지만 되돌림 상한({COVER_REASK_MAX}) — 검수 대상으로 기록")
+                audit["narration_contradictions_left"] = bad
+            break
+        contradictions_all = bad
+        audit["narration_contradictions"] = bad
+        reask_note = reject_block([
+            f"{x['anchor']} 의 문장 「{x['text']}」이 지정한 화면과 모순된다(화면을 다시 본 결과: "
+            f"「{x['seen']}」). 화면이 실제로 보여주는 것을 말하거나, 그 행동이 보이는 조각으로 cover 를 바꿔라"
+            for x in bad])
 
     # 덮개가 통째로 삼킨(재료 0) 비트는 빠진다 — cue.beat 는 새 번호로 옮긴다
     keep_idx = [i for i, b in enumerate(beats) if b["span_ids"] or b.get("covers")]

@@ -23,6 +23,11 @@ from typing import Any
 from app.v3 import schemas
 
 SNAP_TOL_SEC = 2.0          # 기획 §3 스냅 반려 기준 — 레이블 tol 과 독립 합산
+ADJ_WINDOW_SEC = 300.0      # zone 인접 초과(overreach)를 잴 창 — zone 앞뒤 5분 안의 판정 초과분
+# 갭 7(2026-09-07, EP01 실사고): 기본 정책 2(miss > overreach)에서 overreach 는 경고뿐이다.
+# 그러나 credit 시작이 본편 엔딩(기사·댓글 리빌 12.75s)을 먹는 사고는 '손실'이 아니라 결말
+# 소실이라, 레이블이 zone 에 `max_overreach`(초)를 **선언한 경우에만** 그 zone 의 인접 초과가
+# max_overreach + SNAP_TOL 을 넘으면 fail 로 친다(옵트인 — 선언 없는 기존 레이블은 종전 그대로).
 OVERREACH_WARN_SEC = 5.0    # 본편 손실 경고 임계(차단 아님 — 정책 2)
 
 Interval = tuple[float, float]
@@ -110,15 +115,26 @@ def score_one(label: dict, predicted: dict | None) -> dict:
     # zone 별 — uncovered ≤ tol + SNAP_TOL 이면 pass (정책 3)
     zones_out = []
     all_pass = True
+    pred_only = _subtract(pred_eff, lab_eff)               # 어느 레이블 zone 에도 없는 판정분
+    raw_labels = label.get("labels") or {}
     for key, s, e, tol in lab_zones:
         zone_eff = [(s, e)]                                # 명시 zone 은 aux 우선
         covered = _overlap_sec(zone_eff, pred_union)
         uncovered = round(_length(zone_eff) - covered, 3)
         allow = round(tol + SNAP_TOL_SEC, 3)
         ok = uncovered <= allow
+        adj = round(_overlap_sec(pred_only, [(max(0.0, s - ADJ_WINDOW_SEC), s),
+                                             (e, e + ADJ_WINDOW_SEC)]), 3)
+        max_over = (raw_labels.get(key) or {}).get("max_overreach") \
+            if isinstance(raw_labels.get(key), dict) else None
+        over_allow = None
+        if max_over is not None:
+            over_allow = round(float(max_over) + SNAP_TOL_SEC, 3)
+            ok = ok and adj <= over_allow
         all_pass = all_pass and ok
         zones_out.append({"zone": key, "span": [round(s, 3), round(e, 3)],
                           "uncovered_sec": uncovered, "allow_sec": allow,
+                          "adjacent_overreach_sec": adj, "overreach_allow_sec": over_allow,
                           "pass": ok})
     return {
         "verdict": "pass" if all_pass else "fail",

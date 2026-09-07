@@ -284,3 +284,86 @@ def test_initials_helper():
     assert tc.initials("전유진") == tc.initials("정유지") == "ㅈㅇㅈ"
     assert tc.initials("박서진") != tc.initials("박처진")
     assert tc.initials("abc") == "abc"
+
+
+# ── A 폴백: 사전 없는 내부 표기 불일치(갭 6, 2026-09-07) ─────────────────────
+# EP01 실사고: 전사 「유지수」5회 / 「류지수」3회, 정답은 소수파(류지수). 사전엔 류지수가
+# 없어 check_names 가 못 잡았다. 합성 재료는 EP01 grid 단어의 성질(노이즈 토큰 + 정답 1쌍)을
+# 그대로 옮긴 것 — 실측은 grid 단어 2,779개에서 후보 토큰 14개 · 신고 정확히 1쌍.
+
+_EP01_LIKE = [
+    (10.0, "유지수"), (11.0, "유지수."), (12.0, "유지수는"), (13.0, "유지수랑"),
+    (14.0, "유지수랑 갔어"), (20.0, "류지수씨가"), (21.0, "류지수"), (22.0, "류지수랑"),
+    # 표지가 붙은 노이즈 — 같은 길이·거리 1 쌍이 안 생겨야 한다
+    (30.0, "대원님들이랑"), (31.0, "남편분이랑"), (32.0, "박대장님"), (33.0, "안원장님"),
+    (34.0, "별장이랑"), (35.0, "병원이랑"), (36.0, "피디님이랑"), (37.0, "배우분들한테"),
+    # 2음절 표지 어절은 후보가 아니다 · 표지 없는 어절은 후보가 아니다
+    (40.0, "지수씨"), (41.0, "지우씨"), (42.0, "유지주 유지우 어제 갔대"),
+]
+
+
+def _ep01():
+    return [_seg(t, s) for t, s in _EP01_LIKE]
+
+
+def test_internal_variants_reports_exactly_one_pair_without_dictionary():
+    segs = _ep01()
+    out = tc.check_internal_variants(segs, [])
+    assert len(out) == 1
+    v = out[0]
+    assert (v["a"], v["b"]) == ("유지수", "류지수")
+    assert (v["count_a"], v["count_b"]) == (5, 3)   # 조사 포함 어절 핵 등장 수(실측 5/3)
+    assert v["suggest"] is None                      # 둘 다 사전에 없음 → 사람 확인
+    assert 1 <= len(v["lines"]) <= tc.VARIANT_LINES_MAX
+    assert any("류지수" in ln for _, ln in v["lines"])   # 소수 표기 표본도 보인다
+    assert [s["text"] for s in segs] == [s for _, s in _EP01_LIKE]   # 순수(원본 불변)
+
+
+def test_internal_variants_never_picks_by_majority():
+    """5:3 에서 다수가 오답이었다 — 사전이 없으면 suggest 는 반드시 None 이고,
+    사전이 **소수파**만 알면 그 소수파를 제안한다."""
+    segs = _ep01()
+    assert tc.check_internal_variants(segs, None)[0]["suggest"] is None
+    assert tc.check_internal_variants(segs, ["류지수"])[0]["suggest"] == "류지수"
+    assert tc.check_internal_variants(segs, ["유지수"])[0]["suggest"] == "유지수"
+    # 둘 다 사전에 있으면 동명이인일 수 있다 → 사람 확인
+    assert tc.check_internal_variants(segs, ["류지수", "유지수"])[0]["suggest"] is None
+
+
+def test_internal_variants_ignores_short_unmarked_and_far_tokens():
+    # 2음절(지수씨/지우씨) · 표지 없는 어절(유지주/유지우) · 길이 다른 쌍은 신고하지 않는다
+    segs = [_seg(1, "지수씨 지우씨"), _seg(2, "유지주 유지우 갔대"),
+            _seg(3, "박서진씨 박서진이씨"), _seg(4, "강비오랑 강비호한테 강비오씨")]
+    out = tc.check_internal_variants(segs, [])
+    assert [(v["a"], v["b"]) for v in out] == [("강비오", "강비호")]
+    assert tc.check_internal_variants([], []) == []
+    assert tc.check_internal_variants([_seg(1, "")], ["류지수"]) == []
+
+
+def test_fix_internal_variants_only_when_dictionary_decides():
+    segs = _ep01()
+    # suggest None → 한 글자도 안 바꾼다(다수결·자동 선택 금지)
+    fixed, log = tc.fix_internal_variants(segs, tc.check_internal_variants(segs, []))
+    assert log == [] and [s["text"] for s in fixed] == [s["text"] for s in segs]
+    # 사전이 류지수만 알면 유지수(+조사)만 류지수로 — 어절 핵 단위, 조사·구두점 보존
+    fixed, log = tc.fix_internal_variants(segs, tc.check_internal_variants(segs, ["류지수"]))
+    assert [s["text"] for s in fixed[:5]] == ["류지수", "류지수.", "류지수는", "류지수랑",
+                                              "류지수랑 갔어"]
+    assert len(log) == 5 and all(l["n"] == 1 for l in log)
+    assert fixed[5]["text"] == "류지수씨가"                 # 이미 정답인 쪽은 불변
+    assert fixed[18]["text"] == "유지주 유지우 어제 갔대"    # 부분 문자열 치환 없음
+    assert segs[0]["text"] == "유지수"                       # 원본 불변(순수)
+
+
+def test_internal_variants_wired_after_check_names_in_pipeline():
+    """배선 고정 — `_run_m3` 에서 check_names 뒤 · 사전 유무와 무관하게 돈다."""
+    import inspect
+    from app.v3 import pipeline
+    src = inspect.getsource(pipeline)
+    i_names = src.index("textcheck.check_names(segments, names)")
+    i_var = src.index("textcheck.check_internal_variants(segments, names)")
+    assert i_names < i_var
+    # 게이트 없이(사전 없어도) 호출되고, 교정은 --fix-names 뒤에서 suggest 가 있을 때만
+    assert "if fix_names and any(v.get(\"suggest\") for v in name_variants)" in src
+    assert '"name_variants": name_variants' in src            # run_log additive 기록
+    assert "[v3/textcheck] ⚠ 인명 표기 불일치" in src
