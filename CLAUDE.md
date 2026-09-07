@@ -2269,7 +2269,9 @@ subtitle_skip_singing}}`. **명시한 플래그가 템플릿을 이긴다**(None
   재생성돼 **다른 편이 나온다**(실사고: 세 번째 실행에서 축약한 문구로 넘겨 에녹 편이 통째로
   바뀜 → 로그·출력 기록으로 checkpoint_story 를 손으로 복원, `flow.restored_from` 메모).
   재렌더는 `--from-step render|resources` 라도 이전과 **같은 플래그**로.
-- 회귀 가드: `tests/test_v3_overrides_anchor.py`(3건).
+- **앵커가 클립 머리 직전 틈(≤`SUB_ANCHOR_GAP_TOL_SEC` 0.15s)에 있으면 그 클립 머리로** — 자막은
+  단어보다 0.05s 선행하는데 클립 사이 0.04s 틈에 떨어져 6줄이 증발했다(ep7ex02 실측).
+- 회귀 가드: `tests/test_v3_overrides_anchor.py`(4건).
 
 ### 썸네일 안전 구역 — 가왕쇼 템플릿 전체 80px 위로 (2026-09-07, 사용자 지시)
 

@@ -26,6 +26,8 @@ from app.v3 import assemble
 HANDLED_KEYS = ("schema", "clips", "title", "subtitles", "design")
 
 
+SUB_ANCHOR_GAP_TOL_SEC = 0.15   # 자막 앵커가 클립 머리 직전 이만큼의 틈에 있으면 그 클립 머리로
+
 def snap_to_span_edges(sec: float, edges: list[float]) -> tuple[float, float]:
     """최근접 span 경계로 정착 → (스냅 시각, 오차). 동률은 이른 쪽(결정성)."""
     if not edges:
@@ -132,6 +134,14 @@ def apply_overrides_to_plan(ov: dict, plan: dict, grid: dict,
                 anchored.append(seg)
                 continue
             e0 = assemble.to_edited_sec(float(st), offsets, kind="start")
+            if e0 is None:
+                # 자막은 단어보다 0.05s 앞서 뜨므로(선행) 앵커가 클립 머리 직전의 틈(클립
+                # 사이 0.04s 실측)에 떨어질 수 있다 — 틈이 작으면 다음 클립 머리로 붙인다
+                # (2026-09-07 가왕쇼 ep7ex02: 6줄이 이 이유로 증발).
+                nxt = [(cs, off) for cs, _ce, off in offsets
+                       if 0 <= cs - float(st) <= SUB_ANCHOR_GAP_TOL_SEC]
+                if nxt:
+                    e0 = min(nxt)[1]
             if e0 is None:
                 dropped_subs.append(f"{seg['text'][:12]}@{float(st):.2f}s")
                 continue

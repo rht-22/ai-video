@@ -49,3 +49,16 @@ def test_cue_ending_exactly_at_clip_end_survives():
     assert rec["cues_dropped"] == []
     cue = new_res["tts_cue_files"][0]["cue"]
     assert cue["start_sec"] == 10.1 and cue["end_sec"] == 12.0
+
+
+def test_subtitle_anchor_in_small_gap_before_clip_snaps_to_clip_head():
+    plan = {"timeline": [
+        {"role": "hook", "clip_start_sec": 100.0, "clip_end_sec": 101.0, "use_original_audio": True, "span_ids": []},
+        {"role": "hook", "clip_start_sec": 101.04, "clip_end_sec": 103.0, "use_original_audio": True, "span_ids": []}]}
+    subs = [{"start_sec": 0.95, "end_sec": 1.6, "text": "선행 자막", "source_time_sec": 101.0}]   # 틈 0.04s
+    _, segs, _, rec = apply_overrides_to_plan(_ov(subs), plan, GRID, [], {"tts_cue_files": []})
+    assert [s["text"] for s in segs] == ["선행 자막"] and segs[0]["start_sec"] == 1.0
+    assert "dropped_subtitles" not in rec
+    far = [{"start_sec": 0.0, "end_sec": 1.0, "text": "먼 앵커", "source_time_sec": 99.0}]      # 1.0s 앞 — 드랍
+    _, segs, _, rec = apply_overrides_to_plan(_ov(far), plan, GRID, [], {"tts_cue_files": []})
+    assert segs == [] and rec["dropped_subtitles"]
