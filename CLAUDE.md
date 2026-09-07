@@ -2202,3 +2202,85 @@ Flash 축약 → "싸우다 불붙었죠"로 나갔다(26자 문장이 7자로).
   더 키우려면 `TITLE_MAX_WIDTH`(980, 좌우 50px)를 넓히거나 제목 글자수를 줄이는 것뿐이다.
 - 줄 시작 벌점에 보조용언 `봐·줘·해` 추가 — 문장 첫머리 "봐, 이거" 는 덩어리 첫 어절(i==0)이라
   벌점 대상이 아니다(DP 가 문장 안 경계에만 벌점을 붙인다).
+
+## 가왕쇼 7화 재실행 3건 — 제외 주제 · 노래 구간 자막 제외 · 로고 아래 캡션 · design 템플릿 (2026-09-07)
+
+### 이미 만든 편 제외 `--exclude-topic` · `--exclude-range` (human 흐름 전용)
+
+`story_flow/select.excluded_meaning_ids`·`exclude_block` · `validate_topic/scenes(excluded=)`.
+지시: "가왕쇼 7화 한 번 더, 대신 안대 장면은 빼줘(이미 만들었으니까)".
+
+- 주제 문장은 걸음 1·2 프롬프트의 제외 블록으로, **구간(원본 초)은 사건 단위 idx 로 환산**
+  (겹침 ≥ `EXCLUDE_OVERLAP_RATIO` 0.5)해 검증기가 **형식으로** 반려한다 — 텍스트 지시만으로는
+  모델이 가장 강한 후보(같은 사건)로 되돌아온다. 씬(배경·반응)으로 쓰는 것도 반려.
+- story 지문에 `exclude` 키(지정 시에만) — 같은 잡에서 제외를 바꾸면 story 부터 재구성.
+  미지정 = 프롬프트·지문 종전과 동일. legacy 흐름에 주면 즉시 실패.
+- 실행 방식: 기존 잡을 APFS clone(`cp -Rc`) 후 파생물을 지우고 `--job-id <새이름> --from-step
+  story` — 전사·Stage 1·2 캐시 재사용으로 Pro 재과금 0, 3분 19초(처음부터는 2시간 40분,
+  82% 가 CPU whisper). 실측: 60~286s(m001~m004) 제외 → 에녹 깜짝 등장 편(36:39~40:30) 1발 통과.
+
+### 노래 구간 자막 제외 `--subtitle-skip-singing` (`app/v3/singing.py`)
+
+지시: "노래하는 부분은 자막을 빼고 싶다". 두 증인 규율(textcheck 와 같다):
+① **음향** — onset 곡선 자기상관 피크(0.25~1.0s 지연 = 60~240 BPM) 4s 창. 실측(가왕쇼 7화)
+  노래 창 0.34~0.44(양성 81~100%) vs 말 0.13~0.21(0~23%). 기각한 신호: 자기상관 f0 안정성
+  (반주·관객 소음에 헛피치 — 구분 없음), 크로마 엔트로피·저역 비율·평탄도(겹침), 단어 밀도
+  (노래 0.3~0.93/s vs BGM 대사 0.8~1.75/s — 260~276s 감사 인사가 0.81 로 겹침).
+② **Stage 2 문장** — 음향 양성 창과 겹치는 사건 단위가 `SING_HINT`(부르|열창|노래|후렴|
+  코러스|떼창|가창|듀엣|앙코르|곡|'곡명')에 걸릴 때만 확정. 전편 41개 음향 양성 중 BGM 대사
+  11개가 이 단계에서 기각됐고 노래 30개는 전부 확정(오프닝·감사·대기실 대사 자막 보존).
+- 창 단위(hop 2s) → 병합(틈 ≤4s) → 8s 미만 버림(효과음·스팅). 줄은 **소스 중점**이 창 안이면
+  제외, 건별 stdout `[v3/자막] 노래 구간 자막 제외` + run_log `subtitle_skip_singing`
+  {windows, dropped, kept, details}. 사이드카 `checkpoint_singing.json`(음향 판정은 소재의
+  성질이라 한 번, Stage 2 확정은 매번). 내레이션 cue·자막 선택(story)은 안 건드린다.
+- **기본 꺼짐** — 드라마 BGM 이 대사 자막을 지우는 오작동 방지. 템플릿 options 로 켠다.
+- ⚠ 노래 끝 직후 외침(「센터올림!」 2401s)은 창 밖이라 남는다 — 의도된 경계.
+
+### 로고 아래 캡션 `work_caption` (renderer · finalize · v1/v3 CLI)
+
+지시: "'가왕쇼' 로고를 살짝 올려주고 바로 아래에 '티빙에서 풀버전 시청 및 투표 가능!'".
+- design 키 `work_caption`·`work_caption_font_size`(40)·`work_caption_color`(white). 줄 높이
+  = 폰트×1.4 + `WORK_CAPTION_GAP` 12 만큼 **하단 한계(H−20)를 올린다** → center 정렬 로고가
+  그 절반(34px)만큼 위로, 캡션은 로고 아랫변+12 에. `platform_*`(밴드 모서리 워드마크)와
+  독립 — 둘 다 그린다. 미지정 = 필터 문자열 바이트 동일. finalize `work_caption_block` 이
+  renderer 와 같은 함수로 스택(`estimate_work_height/top`)에 예약한다.
+
+### design 템플릿 `--design-preset <이름>` (`app/data/channel_designs/<이름>.json`)
+
+지시: "이걸 템플릿으로 정해버리자". `{design: {--design-* 키}, options: {no_reframe,
+subtitle_skip_singing}}`. **명시한 플래그가 템플릿을 이긴다**(None 인 것만 채움). 없는 이름·
+모르는 키·모르는 옵션은 즉시 실패. `gawangsho.json` = 7화 두 편 실렌더 값 + 캡션 + 노래 제외.
+⚠ ves 어댑터 어휘(`work_caption*`·preset)는 아직 없다 — 로컬 v3 실행 전용.
+회귀 가드: `tests/test_v3_singing_skip.py`(10건) · `tests/test_v3_story_flow.py` 제외 절(4건).
+
+### 편집실 자막 오버라이드 앵커 · cue 끝 동률 (v3 overrides, 2026-09-07 가왕쇼 실사고 2건)
+
+`app/v3/overrides.apply_overrides_to_plan`. 사용자 오타 4건을 `edit_overrides/v3` subtitles 로
+고쳐 재렌더하다 드러났다.
+- **자막은 편집본 좌표가 아니라 `source_time_sec` 가 신원이다.** 오버라이드는 M3 조립 **뒤**·
+  watch_trim **앞**에 적용되는데, watch_trim 은 Flash 판정이라 실행마다 컷이 다르다(1.18s vs
+  1.0s 실측). 지난 실행의 편집본 좌표로 보낸 자막은 다음 실행에서 1.18s 일찍 나갔다. 앵커가
+  있는 줄은 현재 타임라인으로 다시 계산하고(`to_edited_sec(kind="start")`), 타임라인 밖이면
+  드랍 + `dropped_subtitles` 기록. 앵커 없는 줄은 종전 그대로. `speaker`·`color` 는 additive
+  로 승계(전량 교체가 화자 색을 지우던 것).
+- **cue 끝 좌표는 `kind="end"`** — 덮개 클립은 cue 끝이 클립 끝과 동률이라 시작용 [s,e) 로는
+  못 찾아 엔딩 내레이션이 통째로 드랍됐다(`cues_dropped` 에 "소스 창을 담지 않는다").
+- ⚠ **`--exclude-topic` 문구는 story 지문이다.** 같은 잡을 재렌더할 때 문구를 바꾸면 story 가
+  재생성돼 **다른 편이 나온다**(실사고: 세 번째 실행에서 축약한 문구로 넘겨 에녹 편이 통째로
+  바뀜 → 로그·출력 기록으로 checkpoint_story 를 손으로 복원, `flow.restored_from` 메모).
+  재렌더는 `--from-step render|resources` 라도 이전과 **같은 플래그**로.
+- 회귀 가드: `tests/test_v3_overrides_anchor.py`(3건).
+
+### 썸네일 안전 구역 — 가왕쇼 템플릿 전체 80px 위로 (2026-09-07, 사용자 지시)
+
+유튜브 쇼츠 피드 썸네일은 캔버스 위 ~140px·아래 ~180px 을 잘라 보여준다(스크린샷 실측 —
+**정본 표는 `docs/shorts_thumbnail_safe_zone.md`**, 권장 제목 윗변 ≥180 · 마지막 요소 ≤1700). 캡션
+1744~1782 가 잘렸다. 기존 두 편(0477d230·ep7ex01, video_y 500)은 **그대로 두고** 템플릿만:
+- `video_y` 500 → **420**. 제목(밴드 위 20)·자막(band offset)·로고(work_band_offset)·캡션(로고
+  아래) 전부 밴드 상대라 한 값으로 같이 움직인다. 실측: 제목 267→187 · 로고 1448→1365 ·
+  캡션 1744~1782 → 1664~1702.
+- **`work_title_y` 를 템플릿에서 뺐다** + renderer 로고 분기: `work_band_offset` 이 있으면
+  `work_title_y`(절대 하한, 기본 1400)를 무시하고 밴드 상대로만 앉는다 — 종전엔 이 하한 때문에
+  밴드를 80px 올려도 로고가 15px 만 따라왔다. finalize `estimate_work_top` 은 원래 이렇게 재므로
+  둘이 이제 같다. offset 없는 채널(center 정렬·work_title_y 명시 v1)은 종전과 동일.
+- 회귀 가드: `tests/test_v3_singing_skip.py` 마지막 절(1건).

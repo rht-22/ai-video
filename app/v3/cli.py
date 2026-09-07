@@ -24,6 +24,21 @@ from app.v3.scenecut import SCENE_THRESHOLD
 NARRATION_ORIGINAL_DB = -14.0
 
 
+def parse_exclude_ranges(items) -> tuple[tuple[float, float], ...]:
+    """`--exclude-range T0-T1`(초) 목록 → ((t0, t1), …). 형식 오류·역순은 즉시 실패
+    (조용히 무시하면 제외 없이 같은 편이 다시 나온다)."""
+    out: list[tuple[float, float]] = []
+    for raw in items or ():
+        try:
+            a, z = (float(x) for x in str(raw).split("-", 1))
+        except ValueError:
+            raise SystemExit(f"--exclude-range 형식은 T0-T1(초): {raw!r}")
+        if not z > a >= 0:
+            raise SystemExit(f"--exclude-range 는 0 <= T0 < T1: {raw!r}")
+        out.append((a, z))
+    return tuple(out)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="create_shorts_v3",
@@ -76,6 +91,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--story-flow", default="legacy", choices=["legacy", "human"],
                    help="Stage 3 편성기: human = 주제→씬→대사→내레이션(즉시 합성)→덮개"
                         "(그 자리 재관찰) 체인. legacy = 종전 단일 프롬프트")
+    # 제외(이미 만든 쇼츠, 2026-09-07 사용자 지시 · 가왕쇼 7화) — human 흐름 전용.
+    # 주제 문장은 프롬프트에, 구간(원본 초)은 사건 단위 idx 로 환산돼 검증기가 반려한다.
+    p.add_argument("--exclude-topic", action="append", default=None, metavar="TEXT",
+                   help="이미 만든 쇼츠의 주제(반복 가능) — 걸음 1·2 프롬프트 제외 블록")
+    p.add_argument("--exclude-range", action="append", default=None, metavar="T0-T1",
+                   help="이미 만든 쇼츠의 원본 구간(초, 예 65.5-247.4 · 반복 가능) — "
+                        "절반 이상 겹치는 사건 단위를 걸음 1·2 검증기가 반려한다")
+    # 노래 구간 자막 제외(2026-09-07 사용자 지시, 가왕쇼) — 음향 비트 주기성 + Stage 2 문장
+    # 두 증인이 노래로 확정한 소스 구간의 대사 자막을 내지 않는다. 기본 꺼짐(드라마 BGM 오작동 방지).
+    p.add_argument("--subtitle-skip-singing", action="store_true",
+                   help="노래(가창) 구간의 대사 자막을 내지 않는다 — 음향 비트 주기성 + Stage 2 "
+                        "문장 두 증인 확정, 건별 기록(checkpoint_singing.json · run_log)")
+    # 채널 design 템플릿(2026-09-07) — app/data/channel_designs/<이름>.json 의 design 키를
+    # 명시하지 않은 --design-* 의 기본값으로 쓴다(명시한 플래그가 이긴다). options 는 불리언 스위치.
+    p.add_argument("--design-preset", default=None, metavar="NAME",
+                   help="채널 design 템플릿 이름(app/data/channel_designs/<NAME>.json). "
+                        "명시한 --design-* 플래그가 템플릿 값을 덮는다")
     # 채널 design 주입(2026-09-04, 사용자 지시) — 어댑터 CHANNEL_DESIGN_FLAGS 어휘 중
     # v3 가 받는 키(ves V3_DESIGN_KEYS 와 1:1). 값은 Stage 4 프리셋 기본값을 덮고 최종
     # 렌더 디자인 위에 얹는다(채널 명시 > AI > 기본값). 미지정 = 종전과 동일.
@@ -115,11 +147,52 @@ CHANNEL_DESIGN_ARGS: dict[str, dict] = {
     "platform_align": dict(type=str, choices=["left", "right"]),
     "platform_placement": dict(type=str, choices=["band", "above_work"]),
     "work_band_offset": dict(type=int),
+    # 작품명/로고 아래 캡션(2026-09-07 가왕쇼 템플릿)
+    "work_caption": dict(type=str), "work_caption_font_size": dict(type=int),
+    "work_caption_color": dict(type=str),
     # v3 전용(2026-09-04) — 자막 블록 윗변을 '밴드 하단 + N px' 에 거는 상대 앵커.
     # 화면비·video_y 가 바뀌어도 채널이 margin 을 다시 잡지 않는다(음수 = 밴드 안쪽).
     "subtitle_band_offset": dict(type=int), "tts_band_offset": dict(type=int),
 }
 V3_ONLY_DESIGN_KEYS = frozenset({"subtitle_band_offset", "tts_band_offset"})
+
+
+CHANNEL_DESIGN_DIR = Path(__file__).resolve().parent.parent / "data" / "channel_designs"
+PRESET_OPTIONS = ("no_reframe", "subtitle_skip_singing")   # 템플릿이 켤 수 있는 불리언 스위치
+
+
+def load_design_preset(name: str, *, base_dir: Path | None = None) -> dict:
+    """`<base_dir>/<name>.json` → {"design": {...}, "options": {...}}. 없는 이름·모르는
+    키·모르는 옵션은 즉시 실패(조용히 빠지면 템플릿을 켰다고 믿은 채 다른 화면이 나간다)."""
+    import json as _json
+    f = (base_dir or CHANNEL_DESIGN_DIR) / f"{name}.json"
+    if not f.is_file():
+        raise SystemExit(f"--design-preset {name!r}: 파일 없음 {f}")
+    doc = _json.loads(f.read_text(encoding="utf-8"))
+    design = doc.get("design") or {}
+    bad = sorted(set(design) - set(CHANNEL_DESIGN_ARGS))
+    if bad:
+        raise SystemExit(f"--design-preset {name!r}: 모르는 design 키 {bad}")
+    opts = doc.get("options") or {}
+    bad = sorted(set(opts) - set(PRESET_OPTIONS))
+    if bad:
+        raise SystemExit(f"--design-preset {name!r}: 모르는 options 키 {bad}")
+    return {"design": design, "options": opts}
+
+
+def apply_design_preset(args: argparse.Namespace, preset: dict) -> list[str]:
+    """템플릿 값을 **명시하지 않은** 플래그에만 채운다(명시 > 템플릿). 채운 키 목록 반환. 순수."""
+    filled: list[str] = []
+    for key, val in (preset.get("design") or {}).items():
+        attr = f"design_{key}"
+        if getattr(args, attr, None) is None:
+            setattr(args, attr, val)
+            filled.append(key)
+    for key, val in (preset.get("options") or {}).items():
+        if val and not getattr(args, key, False):
+            setattr(args, key, True)
+            filled.append(key)
+    return filled
 
 
 def channel_design_from_args(args: argparse.Namespace) -> dict:
@@ -173,6 +246,9 @@ def main(argv: list[str] | None = None) -> int:
         args.fix_names = True
         print("  [v3] --story-flow human → 인명 교정(--fix-names) 기본 켬")
 
+    if args.design_preset:
+        _filled = apply_design_preset(args, load_design_preset(args.design_preset))
+        print(f"  [v3] design 템플릿 {args.design_preset!r} 적용 — {_filled}")
     channel_design = channel_design_from_args(args)
     if channel_design:
         print(f"  [v3] 채널 design 주입: {channel_design}")
@@ -197,6 +273,9 @@ def main(argv: list[str] | None = None) -> int:
                      if args.story_templates else None),
                  style_preset=args.style_preset, style_tone=args.style_tone,
                  story_flow=args.story_flow,
+                 exclude_topics=tuple(args.exclude_topic or ()) or None,
+                 exclude_ranges=parse_exclude_ranges(args.exclude_range) or None,
+                 subtitle_skip_singing=bool(args.subtitle_skip_singing),
                  channel_design=channel_design or None,
                  narration_original_db=args.narration_original_db,
                  scene_threshold=args.scene_threshold)

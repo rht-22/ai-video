@@ -146,6 +146,9 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
            story_templates: tuple[str, ...] | None = None,
            style_preset: str | None = None, style_tone: str | None = None,
            story_flow: str = "legacy",
+           exclude_topics: tuple[str, ...] | None = None,
+           exclude_ranges: tuple[tuple[float, float], ...] | None = None,
+           subtitle_skip_singing: bool = False,
            channel_design: dict | None = None,
            narration_original_db: float | None = None,
            scene_threshold: float = SCENE_THRESHOLD, log=print) -> Path:
@@ -443,12 +446,16 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
                     story_max_sec=story_max_sec, fix_names=fix_names,
                     story_templates=story_templates, style_tone=style_tone,
                     story_flow=story_flow,
+                    exclude_topics=exclude_topics, exclude_ranges=exclude_ranges,
+                    subtitle_skip_singing=subtitle_skip_singing,
                     get_gemini=get_gemini, step=step, log=log)
 
         # ── M6-A: 훅 변형 — M3 산출 위에(본편 불변 · 렌더는 변형 발주 시) ──
         if hook_variants and (output_dir / "edit_plan.json").exists():
             _run_hook_variants(output_dir=output_dir, video_path=Path(video_path),
                                work_title=work_title, grid=grid, n=hook_variants,
+                               skip_windows=(_load_singing_windows(output_dir)
+                                             if subtitle_skip_singing else None),
                                get_gemini=get_gemini, step=step, log=log)
 
         # ── M5(C4): 편집실 edit_overrides 반영 — M3 산출 위에, M4 앞에 ─────
@@ -635,13 +642,55 @@ def _run_m2(*, output_dir: Path, video_path: Path, stage1_path: Path, grid: dict
         f"인물일관성 {validation['character_check']['overall_consistency']}")
 
 
+SINGING_CKPT = "checkpoint_singing.json"
+
+
+def _load_singing_windows(output_dir: Path) -> list[tuple[float, float]]:
+    """사이드카의 **확정** 창(없으면 빈 목록). 변형 경로 등 재사용."""
+    f = output_dir / SINGING_CKPT
+    if not f.exists():
+        return []
+    return [(float(a), float(z)) for a, z in (_read_json(f).get("confirmed") or [])]
+
+
+def _ensure_singing_windows(output_dir: Path, video_path: Path, stage2_doc: dict,
+                            *, log=print) -> list[tuple[float, float]]:
+    """노래 구간 사이드카(`checkpoint_singing.json`) 로드/생성 → 확정 창.
+    음향 판정(`singing.detect_singing`)은 소재의 성질이라 한 번만 재고, Stage 2 문장으로
+    확정하는 단계는 매번 다시 한다(Stage 2 가 바뀌면 확정도 바뀐다 — 값이 싸다)."""
+    from app.v3 import singing
+    from app.v3.story_flow.common import meaning_rows
+
+    f = output_dir / SINGING_CKPT
+    doc = _read_json(f) if f.exists() else None
+    if not doc or doc.get("schema") != singing.SCHEMA:
+        wav = sorted(output_dir.glob("*_16k.wav"))
+        src = wav[0] if wav else video_path
+        t0 = time.time()
+        doc = singing.detect_singing(src)
+        doc["audio"] = str(src)
+        log(f"  [v3/노래] 비트 주기성 판정 — 음향 양성 창 {len(doc['windows'])}개 "
+            f"({time.time() - t0:.1f}s, {Path(src).name})")
+    ok, rejected = singing.confirm_windows(doc["windows"], meaning_rows(stage2_doc))
+    doc["confirmed"] = [[a, z] for a, z in ok]
+    doc["rejected"] = rejected
+    _write_json(f, doc)
+    for r in rejected:
+        log(f"  [v3/노래] 음향 양성이나 기각 {r['t0']:.0f}~{r['t1']:.0f}s — {r['why']}")
+    log("  [v3/노래] 확정 " + (", ".join(f"{a:.0f}~{z:.0f}s" for a, z in ok) or "없음"))
+    return ok
+
+
 def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
             research: dict | None, from_step: str | None,
             story_target_sec: float | None, story_max_sec: float | None,
             get_gemini, step, log, fix_names: bool = False,
             story_templates: tuple[str, ...] | None = None,
             style_tone: str | None = None,
-            story_flow: str = "legacy") -> None:
+            story_flow: str = "legacy",
+            exclude_topics: tuple[str, ...] | None = None,
+            exclude_ranges: tuple[tuple[float, float], ...] | None = None,
+            subtitle_skip_singing: bool = False) -> None:
     """Stage 3(story) + 경계면 조립 + resources(TTS 합성) — 발주서 v3-m3.
 
     story 캐시는 M2 와 같은 규율로 **상류 지문**에 묶는다 — stage2 의 meaning/span
@@ -688,6 +737,16 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
     if story_flow == "human":
         from app.v3.story_flow.narration import NAR_SPEED as _nar_speed
         _fp_payload["flow"] = f"human:{_nar_speed}"    # 배속이 바뀌면 합성·덮개가 다르다
+    # 제외(이미 만든 쇼츠, 2026-09-07) — 사람 흐름 체인 전용. 지문 재료다(같은 잡에서
+    # 제외를 바꿔 다시 돌리면 story 부터 재구성). 미지정이면 키를 안 넣어 캐시 회귀 0.
+    _ex_topics = tuple(t for t in (exclude_topics or ()) if str(t).strip())
+    _ex_ranges = tuple((float(a), float(z)) for a, z in (exclude_ranges or ()))
+    if _ex_topics or _ex_ranges:
+        if story_flow != "human":
+            raise ValueError("--exclude-topic/--exclude-range 는 --story-flow human 전용이다")
+        _fp_payload["exclude"] = {"topics": list(_ex_topics),
+                                  "ranges": [list(r) for r in _ex_ranges]}
+        log(f"  [v3/story] 제외 — 주제 {len(_ex_topics)}건 · 구간 {len(_ex_ranges)}개")
     fingerprint = hashlib.sha1(json.dumps(
         _fp_payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
@@ -731,7 +790,8 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
                 research_context=research_ctx, target_sec=target, max_sec=max_sec,
                 video_path=video_path, output_dir=output_dir,
                 stage1_doc=(_read_json(_s1p) if _s1p.exists() else None),
-                tone_block=tone_block, log=log)
+                tone_block=tone_block,
+                exclude_topics=_ex_topics, exclude_ranges=_ex_ranges, log=log)
         else:
             story_doc, audit = st.run_story(
                 get_gemini(), stage2_doc, grid, work_title=work_title,
@@ -772,9 +832,24 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
     names = [c["character_name"] for c in (research or {}).get("cast_images") or []
              if c.get("character_name")]
     _name_arb: list[dict] = []
+    # 노래 구간 자막 제외(2026-09-07 사용자 지시, 가왕쇼) — 게이트 켠 실행만. 음향(비트
+    # 주기성)이 창을 대고 Stage 2 문장이 노래임을 확인한 창에서만 줄을 버린다.
+    _skip_win: list[tuple[float, float]] | None = None
+    _skip_log: list[dict] = []
+    if subtitle_skip_singing:
+        _skip_win = _ensure_singing_windows(output_dir, video_path, stage2_doc, log=log)
     segments = assemble.word_subtitles(plan["timeline"], span_index,
                                        grid.get("words") or [], _mw,
-                                       cast_names=names, name_fix_log=_name_arb)
+                                       cast_names=names, name_fix_log=_name_arb,
+                                       skip_windows=_skip_win, skip_log=_skip_log)
+    if subtitle_skip_singing:
+        for f in _skip_log:
+            log(f"  [v3/자막] 노래 구간 자막 제외 {f['span_id']} "
+                f"{f['src_start']:.2f}~{f['src_end']:.2f}s {f['text']!r}")
+        step("subtitle_skip_singing", windows=[list(w) for w in (_skip_win or [])],
+             dropped=len(_skip_log), kept=len(segments),
+             details=[{k: f[k] for k in ("span_id", "src_start", "text")} for f in _skip_log])
+        log(f"  [v3/자막] 노래 구간 {len(_skip_win or [])}개 — 자막 {len(_skip_log)}줄 제외 · {len(segments)}줄 유지")
     _WHY = {"latin": ("어절", "모델 청취(영문 오인식 → 한글)"),
             "spelling": ("맞춤법", "모델 청취(초성 동일·모음/받침 차이)"),
             "aligned": ("맞춤법", "모델 청취(공백 제거 정렬 · 자모 차이 ≤2~3)"),
@@ -1187,7 +1262,8 @@ def _apply_edit_overrides(*, output_dir: Path, overrides_path: Path, grid: dict,
 
 
 def _run_hook_variants(*, output_dir: Path, video_path: Path, work_title: str,
-                       grid: dict, n: int, get_gemini, step, log) -> None:
+                       grid: dict, n: int, get_gemini, step, log,
+                       skip_windows: list[tuple[float, float]] | None = None) -> None:
     """M6-A — 훅 변형 N개: edit_plan_variant_<k>.json + 변형별 자막·cue 계획.
 
     본편 산출은 건드리지 않는다. TTS 합성은 변형 렌더 시점의 일 — cue 계획까지만
@@ -1216,7 +1292,8 @@ def _run_hook_variants(*, output_dir: Path, video_path: Path, work_title: str,
             raise AssertionError(f"변형 {k} 시각 정합 벨트 위반: {belt}")
         segs = assemble.word_subtitles(
             plan["timeline"], span_index, grid.get("words") or [],
-            sorted(w for wins in assemble.narration_windows(vdoc).values() for w in wins))
+            sorted(w for wins in assemble.narration_windows(vdoc).values() for w in wins),
+            skip_windows=skip_windows or None)
         cues = [c for c in assemble.finalize_cues(
                     vdoc.get("narration_cues") or [], plan["timeline"],
                     voice="ko_female", speed="normal", fps=plan.get("source_fps"))

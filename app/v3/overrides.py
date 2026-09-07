@@ -107,13 +107,42 @@ def apply_overrides_to_plan(ov: dict, plan: dict, grid: dict,
 
     new_segments = segments
     if ov.get("subtitles") is not None:
+        # speaker·color 는 additive(C6 — 옛 소비자는 세 키만 읽는다). 편집실이 원본
+        # 목록을 그대로 되돌려 보내면 화자 색이 살아남는다(2026-09-07: 전량 교체가
+        # 색을 지워 모든 줄이 기본색으로 나가던 것).
         new_segments = [{"start_sec": round(float(s["start_sec"]), 3),
                          "end_sec": round(float(s["end_sec"]), 3),
-                         "text": str(s["text"])} for s in ov["subtitles"]]
+                         "text": str(s["text"]),
+                         **{k: str(s[k]) for k in ("speaker", "color") if s.get(k)}}
+                        for s in ov["subtitles"]]
         record["applied"].append(f"subtitles({len(new_segments)}줄 · 전량 교체)")
 
     # cue 승계 — source_time_sec 신원(C2). 편집본 좌표만 새 timeline 으로 재계산.
     offsets = assemble.edited_offsets(new_plan["timeline"], new_plan.get("source_fps"))
+    # 자막 앵커(F-401 · 2026-09-07): source_time_sec 가 있는 줄은 **원본 절대초**가 신원이다 —
+    # 편집본 좌표는 그 줄이 만들어진 시점의 타임라인 것이라, 다음 실행에서 조립·watch_trim
+    # 이 타임라인을 바꾸면 어긋난다(실사고: 다른 실행의 좌표로 보낸 자막이 1.18s 일찍 나감).
+    # 앵커가 현재 타임라인에 없으면 그 줄은 버리고 기록한다(조용한 0 금지).
+    if ov.get("subtitles") is not None:
+        anchored: list[dict] = []
+        dropped_subs: list[str] = []
+        for seg, src in zip(new_segments, ov["subtitles"]):
+            st = src.get("source_time_sec")
+            if st is None:
+                anchored.append(seg)
+                continue
+            e0 = assemble.to_edited_sec(float(st), offsets, kind="start")
+            if e0 is None:
+                dropped_subs.append(f"{seg['text'][:12]}@{float(st):.2f}s")
+                continue
+            dur = seg["end_sec"] - seg["start_sec"]
+            anchored.append({**seg, "start_sec": round(e0, 3), "end_sec": round(e0 + dur, 3)})
+        n_anch = sum(1 for s in ov["subtitles"] if s.get("source_time_sec") is not None)
+        if n_anch:
+            record["applied"].append(f"subtitles 앵커 재배치 {n_anch}줄")
+        if dropped_subs:
+            record["dropped_subtitles"] = dropped_subs
+        new_segments = sorted(anchored, key=lambda x: (x["start_sec"], x["end_sec"]))
     new_files = []
     for f in resources.get("tts_cue_files") or []:
         cue = dict(f.get("cue") or {})
@@ -121,7 +150,9 @@ def apply_overrides_to_plan(ov: dict, plan: dict, grid: dict,
             continue
         e0 = assemble.to_edited_sec(float(cue["source_time_sec"]), offsets)
         src_end = float(cue["source_time_sec"]) + float(cue.get("duration_sec") or 0)
-        e1 = assemble.to_edited_sec(src_end, offsets)
+        # 끝 좌표는 kind="end"((s, e] 반개구간) — 덮개 클립처럼 cue 끝이 클립 끝과 동률이면
+        # 시작용 [s, e) 로는 못 찾아 엔딩 내레이션이 통째로 드랍됐다(2026-09-07 실사고).
+        e1 = assemble.to_edited_sec(src_end, offsets, kind="end")
         if e0 is None or e1 is None or e1 <= e0:
             record["cues_dropped"].append(
                 {"source_time_sec": cue["source_time_sec"],

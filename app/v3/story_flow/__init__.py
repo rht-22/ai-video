@@ -87,7 +87,13 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
                    video_path: Path | None = None, output_dir: Path | None = None,
                    stage1_doc: dict | None = None, tone_block: str = "",
                    synth_fn: Callable[[str, Path], float] | None = None,
-                   probe: bool = True, log=print) -> tuple[dict, dict]:
+                   probe: bool = True,
+                   exclude_topics: tuple[str, ...] = (),
+                   exclude_ranges: tuple[tuple[float, float], ...] = (),
+                   log=print) -> tuple[dict, dict]:
+    """exclude_topics / exclude_ranges: 이미 만든 쇼츠(주제 문장 · 원본 초 구간) — 걸음
+    1·2 프롬프트에 제외 블록으로 싣고, 구간과 겹치는 사건 단위는 검증기가 반려한다
+    (2026-09-07). 둘 다 비면 프롬프트·검증 종전과 동일."""
     span_index, span_order = build_span_index(stage2_doc, grid)
     if not span_index:
         raise ValueError("분석된 span 이 없다 — Stage 2 가 선행돼야 한다")
@@ -111,13 +117,26 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
     if silent:
         log(f"  [v3/flow] 무대사 구간 {len(silent)}개 · {sum(z - a for a, z in silent):.0f}s — 재료 블록으로 싣는다")
 
+    # 제외(이미 만든 쇼츠, 2026-09-07) — 구간 → 사건 단위 idx 는 코드가 정한다
+    excluded = sl.excluded_meaning_ids(rows, exclude_ranges)
+    exclude_blk = sl.exclude_block(exclude_topics, excluded, rows)
+    if exclude_blk:
+        audit["excluded"] = {"topics": list(exclude_topics),
+                             "ranges": [list(r) for r in exclude_ranges],
+                             "meanings": sorted(excluded)}
+        log(f"  [v3/flow] 제외 — 주제 {len(exclude_topics)}건 · 구간 {len(exclude_ranges)}개 → "
+            f"사건 단위 {len(excluded)}개(" + "/".join(f"m{k:03d}" for k in sorted(excluded)) + ")")
+        if exclude_ranges and not excluded:
+            log("  [v3/flow] ⚠ 제외 구간이 어떤 사건 단위와도 절반 이상 겹치지 않는다 — 프롬프트 지시로만 막는다")
+
     # 1 주제
     topic = _loop("topic", lambda rej: sl.TOPIC_PROMPT.format(
         target_sec=target_sec, max_sec=max_sec, work_title=work_title,
         research_block=research_block, sequence_block=seq_block,
         hint_block=_hint_block(stage1_doc), meaning_block=meaning_block,
-        silent_block=silent_blk,
-        reject_block=rej), lambda r: sl.validate_topic(r, rows), gemini, audit, log)
+        silent_block=silent_blk, exclude_block=exclude_blk,
+        reject_block=rej), lambda r: sl.validate_topic(r, rows, excluded=excluded),
+        gemini, audit, log)
     log(f"  [v3/flow/topic] {topic['topic']} (핵심 m{'/m'.join(f'{i:03d}' for i in topic['core_meanings'])})")
 
     # 2 씬 + 제목
@@ -125,8 +144,9 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
         topic=topic["topic"], min_scenes=sl.MIN_SCENES, max_scenes=sl.MAX_SCENES,
         target_sec=target_sec, title_max=sl.TITLE_MAX_CHARS, work_title=work_title,
         research_block=research_block, meaning_block=meaning_block,
-        silent_block=silent_blk,
-        reject_block=rej), lambda r: sl.validate_scenes(r, rows), gemini, audit, log)
+        silent_block=silent_blk, exclude_block=exclude_blk,
+        reject_block=rej), lambda r: sl.validate_scenes(r, rows, excluded=excluded),
+        gemini, audit, log)
     scenes, title = scenes_doc["scenes"], scenes_doc["title"]
     log("  [v3/flow/scenes] " + " → ".join(f"m{s['meaning']:03d}[{s['purpose']}]" for s in scenes)
         + f" · 제목 {title['line1']} / {title['line2']}")

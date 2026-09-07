@@ -583,8 +583,13 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                    grid_words: list[dict],
                    mute_windows: list[tuple[float, float]] | None = None,
                    cast_names: list[str] | None = None,
-                   name_fix_log: list[dict] | None = None) -> list[dict]:
+                   name_fix_log: list[dict] | None = None,
+                   skip_windows: list[tuple[float, float]] | None = None,
+                   skip_log: list[dict] | None = None) -> list[dict]:
     """채택 유성 span(뮤트 제외) → 어절 자막 세그먼트(**편집본 좌표** — C6).
+
+    skip_windows(2026-09-07): 자막을 내지 않을 **소스** 구간(노래 — `singing`). 줄의
+    소스 중점이 창 안이면 그 줄을 버리고 skip_log 에 건별 기록한다. None/빈 = 종전 동일.
 
     단어 소속은 중점 기준(span 재단과 같은 규율). 자막은 원본 오디오 인용에만 —
     내레이션 텍스트는 cue 가 나른다(편집실이 cue.text 로 오버레이)."""
@@ -647,6 +652,12 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                 mid = (ln["start"] + ln["end"]) / 2      # 소속은 중점 기준(span 재단과 같은 규율)
                 if not any(a <= mid < z for a, z in audible):
                     continue                      # 뮤트 창 안 — 소리가 없으니 자막도 없다
+                if skip_windows and any(a <= mid < z for a, z in skip_windows):
+                    if skip_log is not None:
+                        skip_log.append({"span_id": sid, "src_start": round(ln["start"], 3),
+                                         "src_end": round(ln["end"], 3), "edit_start": e0,
+                                         "text": ln["text"]})
+                    continue                      # 노래 구간 — 가사 자막을 내지 않는다
                 # speaker·color 는 additive — 옛 소비자는 세 키만 읽는다(C6).
                 # 다화자 span 이면 이 줄의 첫 단어가 속한 화자의 색을 쓴다.
                 l_spk, l_color = speaker, color

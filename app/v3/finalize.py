@@ -128,6 +128,12 @@ def design_from_style(design: dict) -> DesignConfig:
               "platform_image_height", "platform_font_size"):
         if design.get(k) is not None:
             up[k] = int(design[k])
+    # 작품명 아래 캡션(2026-09-07) — 문자열 둘·크기 하나. 없으면 종전과 동일.
+    for k in ("work_caption", "work_caption_color"):
+        if design.get(k):
+            up[k] = str(design[k])
+    if design.get("work_caption_font_size") is not None:
+        up["work_caption_font_size"] = int(design["work_caption_font_size"])
     return dataclasses.replace(base, **up)
 
 
@@ -310,11 +316,17 @@ def platform_line_block(design) -> int:
     return platform_line_geometry(design)["line_h"] + PF_LINE_GAP
 
 
+def work_caption_block(design) -> int:
+    """작품명/로고 **아래** 캡션 줄(work_caption)의 높이(줄 + 여백) — renderer 와 같은 함수."""
+    from app.modules.renderer import work_caption_block as _wcb
+    return _wcb(design)
+
+
 def estimate_work_height(design) -> int:
     """하단 작품명/로고 **블록** 높이(px) 추정 — renderer 와 같은 수식(텍스트 = 폰트×1.4,
     로고 = contain 박스 실측) + 작품명 위 플랫폼 줄(above_work). 로고 PNG 크기를 못 읽으면
     박스 높이(보수적 = 더 큼). 순수."""
-    return _work_item_height(design) + platform_line_block(design)
+    return _work_item_height(design) + platform_line_block(design) + work_caption_block(design)
 
 
 def _work_item_height(design) -> int:
@@ -346,18 +358,20 @@ def estimate_work_top(design, *, band_bottom: int, canvas_height: int = 1920,
     # above_work 플랫폼 줄은 작품명 위에 붙는다 — 반환값은 **블록 윗변**(줄이 있으면 줄의 윗변)
     blk = platform_line_block(design)
     safe_top += blk
+    # 아래 캡션(work_caption)은 하단 한계를 그만큼 올린다 — renderer 의 _work_bottom 과 같은 수식
+    bottom = H - 20 - work_caption_block(design)
     if getattr(design, "work_type", "text") != "image" or not getattr(design, "work_value", None):
         y = max(int(getattr(design, "work_title_y", 1400)), safe_top)
         th = _work_item_height(design)
-        if y + th > H - 20:
-            y = max(safe_top, H - th - 20)
+        if y + th > bottom:
+            y = max(safe_top, bottom - th)
         return y - blk
     logo_h = _work_item_height(design)
     y = safe_top
     if getattr(design, "work_image_align", "top") == "center" and _off is None:
-        y = safe_top + (H - 20 - safe_top - logo_h) // 2
-    if y + logo_h > H - 20:
-        y = H - logo_h - 20
+        y = safe_top + (bottom - safe_top - logo_h) // 2
+    if y + logo_h > bottom:
+        y = bottom - logo_h
     return max(safe_top, y) - blk
 
 

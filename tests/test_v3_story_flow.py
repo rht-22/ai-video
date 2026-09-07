@@ -630,3 +630,42 @@ def test_trim_headroom_widens_lines_budget():
     # 이번 실사고 수치: max 60 · 씬 5 → 종전 45s, 여유분 반영 49s
     n_hint = 5
     assert max(20.0, 60 + flow.TRIM_HEADROOM_SEC - flow.NARRATION_ALLOWANCE_SEC * (n_hint + 1)) == 49.0
+
+
+# ── 제외(이미 만든 쇼츠, 2026-09-07) ─────────────────────────────────────────
+
+def test_excluded_meaning_ids_by_overlap_ratio():
+    # ROWS: m000 0~6.5 · m001 6.5~14 · m002 14~17
+    assert sl.excluded_meaning_ids(ROWS, [(0.0, 6.5)]) == {0}
+    assert sl.excluded_meaning_ids(ROWS, [(0.0, 2.0)]) == set()          # 6.5 의 31% — 미달
+    assert sl.excluded_meaning_ids(ROWS, [(3.0, 13.0)]) == {0, 1}        # 각각 54%·87%
+    assert sl.excluded_meaning_ids(ROWS, []) == set()
+
+
+def test_exclude_block_empty_when_nothing_and_prompts_keep_placeholder():
+    assert sl.exclude_block((), set(), ROWS) == ""
+    blk = sl.exclude_block(("안대 벗는 장면",), {1}, ROWS)
+    assert "안대 벗는 장면" in blk and "m001" in blk
+    assert "{exclude_block}" in sl.TOPIC_PROMPT and "{exclude_block}" in sl.SCENES_PROMPT
+
+
+def test_topic_and_scenes_reject_excluded_meanings():
+    obj, pr = sl.validate_topic({"topic": "t", "core_meanings": ["m001"]}, ROWS, excluded={1})
+    assert obj is None and any("제외" in p for p in pr)
+    obj, pr = sl.validate_topic({"topic": "t", "core_meanings": ["m002"]}, ROWS, excluded={1})
+    assert obj is not None
+    resp = {"scenes": [{"meaning": "m001", "purpose": "배경"}, {"meaning": "m002", "purpose": "결과"}],
+            "title": {"line1": "a", "line2": "b"}}
+    obj, pr, _ = sl.validate_scenes(resp, ROWS, excluded={1})
+    assert obj is None and any("제외" in p for p in pr)
+    obj, pr, _ = sl.validate_scenes(resp, ROWS)
+    assert obj is not None
+
+
+def test_cli_parse_exclude_ranges_fail_loud():
+    from app.v3.cli import parse_exclude_ranges
+    assert parse_exclude_ranges(["65.5-247.4", "0-3"]) == ((65.5, 247.4), (0.0, 3.0))
+    assert parse_exclude_ranges(None) == ()
+    for bad in (["abc"], ["10-5"], ["-3-4"]):
+        with pytest.raises(SystemExit):
+            parse_exclude_ranges(bad)

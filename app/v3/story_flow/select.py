@@ -38,6 +38,7 @@ SKIP_MAX_LINES = 2            # · 유성 조각 수 이하
 JUMP_GAP_SEC = 5.0            # 비트 사이 원본 간격이 이보다 크면 '점프' — 다리 내레이션 필수
 SILENT_RUN_MIN_SEC = 6.0      # 무대사 구간 목록의 하한(수작업 실측 자 — EP01 48개·1,195초)
 SILENT_BLOCK_MAX = 30         # 프롬프트에 싣는 무대사 구간 수 상한(긴 것부터)
+EXCLUDE_OVERLAP_RATIO = 0.5   # 제외 구간과 사건 단위가 이 비율 이상 겹치면 그 사건은 제외(2026-09-07)
 
 TOPIC_PROMPT = """당신은 리캡 쇼츠 편집자다. 아래는 한 회차의 구조 기록이다(영상은 볼 수 없고 볼 필요도 없다 — 기록이 정본이다).
 
@@ -53,7 +54,7 @@ TOPIC_PROMPT = """당신은 리캡 쇼츠 편집자다. 아래는 한 회차의 
 {hint_block}
 ## 사건 단위 (id | 시각 | 길이 | importance | 분위기 | 인물 | 내용)
 {meaning_block}
-{silent_block}{reject_block}
+{silent_block}{exclude_block}{reject_block}
 ## 출력 (JSON 만)
 {{"topic": "이 쇼츠가 무엇에 관한 이야기인지 한 문장", "why": "고른 이유 한 문장",
   "core_meanings": ["m012", "m013"], "title_draft": {{"line1": "상황", "line2": "후킹"}}}}"""
@@ -70,7 +71,7 @@ SCENES_PROMPT = """당신은 리캡 쇼츠 편집자다. 영상은 볼 수 없�
 
 ## 사건 단위 (전체)
 {meaning_block}
-{silent_block}{reject_block}
+{silent_block}{exclude_block}{reject_block}
 ## 출력 (JSON 만)
 {{"scenes": [{{"meaning": "m012", "purpose": "배경|맥락|과정|결과|반응", "why": "이 씬이 하는 일 한 줄"}}],
   "title": {{"line1": "…", "line2": "…"}},
@@ -102,7 +103,11 @@ LINES_PROMPT = """당신은 리캡 쇼츠 편집자다. 영상은 볼 수 없다
 
 # ── 검증(순수) ─────────────────────────────────────────────────────────────
 
-def validate_topic(resp: Any, rows: list[dict]) -> tuple[dict | None, list[str]]:
+def validate_topic(resp: Any, rows: list[dict], *,
+                   excluded: set[int] | None = None) -> tuple[dict | None, list[str]]:
+    """excluded: 이미 만든 편의 사건 단위 idx(제외 구간·주제 — `excluded_meaning_ids`).
+    core_meanings 가 하나라도 거기 들면 반려(프롬프트 지시만으로는 모델이 같은 사건으로
+    되돌아온다 — 형식으로 막는다)."""
     if not isinstance(resp, dict):
         return None, ["응답이 객체가 아니다"]
     problems: list[str] = []
@@ -117,6 +122,11 @@ def validate_topic(resp: Any, rows: list[dict]) -> tuple[dict | None, list[str]]
             core.append(k)
     if not core:
         problems.append("core_meanings 에 아는 사건 단위 id 가 없다(m012 형식)")
+    hit = [k for k in core if excluded and k in excluded]
+    if hit:
+        problems.append("이미 만든 쇼츠의 사건이다 — 제외 목록의 사건 단위("
+                        + "/".join(f"m{k:03d}" for k in hit)
+                        + ")를 핵심으로 고르지 마라. 다른 사건을 골라라")
     td = resp.get("title_draft") if isinstance(resp.get("title_draft"), dict) else {}
     if problems:
         return None, problems
@@ -127,7 +137,8 @@ def validate_topic(resp: Any, rows: list[dict]) -> tuple[dict | None, list[str]]
 
 
 def validate_scenes(resp: Any, rows: list[dict], *,
-                    title_max: int = TITLE_MAX_CHARS) -> tuple[dict | None, list[str], list[str]]:
+                    title_max: int = TITLE_MAX_CHARS,
+                    excluded: set[int] | None = None) -> tuple[dict | None, list[str], list[str]]:
     if not isinstance(resp, dict):
         return None, ["응답이 객체가 아니다"], []
     problems: list[str] = []
@@ -152,6 +163,10 @@ def validate_scenes(resp: Any, rows: list[dict], *,
             purpose = "과정"
         scenes.append({"meaning": idx, "purpose": purpose,
                        "why": str(s.get("why") or "").strip()[:120]})
+    ex_hit = [s["meaning"] for s in scenes if excluded and s["meaning"] in excluded]
+    if ex_hit:
+        problems.append("제외 목록의 사건 단위(" + "/".join(f"m{k:03d}" for k in ex_hit)
+                        + ")를 씬으로 썼다 — 이미 만든 쇼츠의 장면은 배경·반응으로도 쓰지 마라")
     if len(scenes) < MIN_SCENES:
         problems.append(f"씬이 {len(scenes)}개 — 최소 {MIN_SCENES}개(배경/맥락 + 과정/결과)")
     if len(scenes) > MAX_SCENES:
@@ -385,6 +400,47 @@ def silent_block(runs: list[tuple[float, float]], rows: list[dict],
             + "\n".join(lines) + "\n")
 
 
+# ── 제외(이미 만든 쇼츠) ──────────────────────────────────────────────────────
+# 2026-09-07 사용자 지시(가왕쇼 7화): 같은 회차로 다시 돌리되 이미 만든 장면은 빼라.
+# 텍스트만 프롬프트에 실으면 모델은 같은 사건(가장 강한 후보)으로 되돌아온다 — 제외
+# 구간(원본 초)과 사건 단위의 겹침으로 idx 집합을 코드가 만들고 걸음 1·2 검증기가
+# **형식으로** 반려한다. 제외가 없으면 블록이 빈 문자열이라 프롬프트는 종전과 같다.
+
+def excluded_meaning_ids(rows: list[dict], ranges,
+                         *, ratio: float = EXCLUDE_OVERLAP_RATIO) -> set[int]:
+    """제외 구간 [(t0, t1)] 과 사건 단위(rows: t0/t1)의 겹침이 사건 길이의 ratio 이상이면
+    그 idx 를 제외 집합에 넣는다. 순수."""
+    out: set[int] = set()
+    for r in rows:
+        length = float(r["t1"]) - float(r["t0"])
+        if length <= 0:
+            continue
+        ov = 0.0
+        for a, z in ranges or ():
+            ov += max(0.0, min(float(r["t1"]), float(z)) - max(float(r["t0"]), float(a)))
+        if ov / length >= ratio:
+            out.add(r["idx"])
+    return out
+
+
+def exclude_block(topics, excluded: set[int], rows: list[dict]) -> str:
+    """제외 주제(문장)·제외 사건 단위 → 프롬프트 블록. 둘 다 비면 빈 문자열."""
+    topics = [str(t).strip() for t in (topics or ()) if str(t).strip()]
+    if not topics and not excluded:
+        return ""
+    lines = ["\n## 제외 — 이미 만든 쇼츠(고르지 마라 · 배경·반응 씬으로도 쓰지 마라)"]
+    for t in topics:
+        lines.append(f"- 주제: {t}")
+    by_idx = {r["idx"]: r for r in rows}
+    for k in sorted(excluded):
+        r = by_idx.get(k)
+        if r is None:
+            continue
+        lines.append(f"- m{k:03d} [{fmt_t(r['t0'])}~{fmt_t(r['t1'])}] {str(r.get('content') or '')[:60]}")
+    lines.append("이 사건과 다른 **별개의 사건**을 골라라(같은 사건의 다른 각도도 금지).")
+    return "\n".join(lines) + "\n"
+
+
 # ── 재료 표 ────────────────────────────────────────────────────────────────
 
 def lines_material(scenes: list[dict], rows: list[dict],
@@ -414,5 +470,6 @@ __all__ = ["TOPIC_PROMPT", "SCENES_PROMPT", "LINES_PROMPT", "validate_topic",
            "validate_scenes", "validate_beats", "split_at_holes", "compute_jumps",
            "lines_material", "meaning_table", "nospace_len", "reject_block", "PURPOSES",
            "silent_runs", "silent_block", "SILENT_RUN_MIN_SEC", "SILENT_BLOCK_MAX",
+           "excluded_meaning_ids", "exclude_block", "EXCLUDE_OVERLAP_RATIO",
            "ROLES", "TITLE_MAX_CHARS", "BUDGET_TOLERANCE", "SKIP_MAX_VOICED_SEC",
            "SKIP_MAX_LINES", "JUMP_GAP_SEC"]

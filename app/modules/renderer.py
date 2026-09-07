@@ -1027,6 +1027,16 @@ def _parse_drawtext_color(color: str) -> tuple[int, int, int, int]:
 
 
 PF_LINE_GAP = 16   # 작품명 위 플랫폼 줄과 작품명/로고 사이 여백(px)
+WORK_CAPTION_GAP = 12   # 작품명/로고와 그 아래 캡션 줄 사이 여백(px)
+
+
+def work_caption_block(design) -> int:
+    """작품명/로고 **아래** 캡션 줄이 차지하는 높이(줄 + 여백, px). 없으면 0. 순수 —
+    v3 finalize 의 자막 스택이 같은 함수로 예약 높이를 잰다."""
+    if not getattr(design, "work_caption", None):
+        return 0
+    fs = int(getattr(design, "work_caption_font_size", 40) or 40)
+    return int(fs * 1.4) + WORK_CAPTION_GAP
 
 
 def platform_line_geometry(design) -> dict:
@@ -1763,6 +1773,11 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
     _pf_geo = platform_line_geometry(d) if _pf_above_work else None
     if _pf_geo:
         _safe_work_top += _pf_geo["line_h"] + PF_LINE_GAP
+    # 작품명/로고 **아래** 캡션(work_caption, 2026-09-07) — 그 줄 높이만큼 하단 한계를 올린다
+    # (로고가 "살짝" 올라가고 캡션이 바로 밑에 붙는다). 없으면 0 = 종전과 동일.
+    _cap_blk = work_caption_block(d)
+    _work_bottom = H - 20 - _cap_blk
+    _work_h = 0
     work_y_final = max(d.work_title_y, _safe_work_top)
     if work_type == "image" and work_value:
         logo_w = getattr(d, 'work_image_width', 350)
@@ -1790,10 +1805,16 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         # 정렬: top=영상 하단에 붙임(종전) · center=영상 하단~캔버스 하단 밴드의 세로 중앙.
         # center 는 로고 높이가 달라져도 균형이 유지돼 작품별로 y 를 다시 찾지 않아도 된다.
         if getattr(d, 'work_image_align', 'top') == "center" and _work_off is None:
-            work_y_final = _safe_work_top + (H - 20 - _safe_work_top - logo_h_final) // 2
-        if work_y_final + logo_h_final > H - 20:
-            work_y_final = H - logo_h_final - 20
+            work_y_final = _safe_work_top + (_work_bottom - _safe_work_top - logo_h_final) // 2
+        elif _work_off is not None:
+            # work_band_offset 이 있으면 로고는 **밴드 상대**다 — 절대값 work_title_y(기본 1400)가
+            # 하한으로 남아 밴드를 올려도 로고가 안 따라오던 것(2026-09-07 가왕쇼 템플릿 실측:
+            # 밴드 80px 위로 → 로고 15px). finalize.estimate_work_top 은 원래 이렇게 잰다.
+            work_y_final = _safe_work_top
+        if work_y_final + logo_h_final > _work_bottom:
+            work_y_final = _work_bottom - logo_h_final
         work_y_final = max(_safe_work_top, work_y_final)
+        _work_h = logo_h_final
 
         logo_path_str = str(_logo_path).replace("\\", "/").replace(":", "\\:")
         print(f"  [Logo] {_nat_w}x{_nat_h} → {logo_w_final}x{logo_h_final} @ y={work_y_final}")
@@ -1807,8 +1828,9 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         if getattr(d, 'work_letter_spacing', False):
             raw_work = " ".join(raw_work)
         _estimated_text_h = int(d.work_font_size * 1.4)
-        if work_y_final + _estimated_text_h > H - 20:
-            work_y_final = max(_safe_work_top, H - _estimated_text_h - 20)
+        if work_y_final + _estimated_text_h > _work_bottom:
+            work_y_final = max(_safe_work_top, _work_bottom - _estimated_text_h)
+        _work_h = _estimated_text_h
         escaped_val = _escape_text_for_drawtext(raw_work)
         filters.append(f"{last_v_label}drawtext=expansion=none:fontfile='{font_arg}':text='{escaped_val}':fontcolor={d.work_color}:fontsize={d.work_font_size}:x=(w-text_w)/2:y={work_y_final}{work_label}")
     if _pf_geo:
@@ -1840,6 +1862,17 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         print(f"  [Platform] 작품명 위 줄 — 아이콘 {_pf_geo['icon_w']}x{_pf_geo['icon_h']} · "
               f"텍스트 {_pf_text_w}px @ y={_pf_line_y} (작품명 {work_y_final})")
         work_label = _pf_prev
+    if _cap_blk:
+        # 캡션 줄 윗변 = 작품명/로고 아랫변 + 여백. 가로 중앙(drawtext 가 폭을 직접 잰다).
+        _cap_fs = int(getattr(d, "work_caption_font_size", 40) or 40)
+        _cap_y = work_y_final + _work_h + WORK_CAPTION_GAP
+        _cap_esc = _escape_text_for_drawtext(str(d.work_caption))
+        filters.append(
+            f"{work_label}drawtext=expansion=none:fontfile='{font_arg}':text='{_cap_esc}':"
+            f"fontcolor={getattr(d, 'work_caption_color', 'white')}:fontsize={_cap_fs}:"
+            f"x=(w-text_w)/2:y={_cap_y}+({int(_cap_fs * 1.4)}-text_h)/2[with_cap]")
+        print(f"  [Caption] {d.work_caption!r} @ y={_cap_y} (작품명 {work_y_final}+{_work_h})")
+        work_label = "[with_cap]"
 
 
     # [6.5] 편집실 이미지 오버레이(edit_overrides/v3 images, F-408)

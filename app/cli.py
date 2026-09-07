@@ -268,6 +268,13 @@ def build_parser() -> argparse.ArgumentParser:
                         choices=["left", "right"],
                         help="플랫폼 표기 가로 앵커 (기본 left). right 면 영상 오른쪽 상단 — "
                              "platform-x 는 오른쪽 가장자리에서 안쪽으로의 오프셋이 된다")
+    design.add_argument("--design-work-caption", type=str, default=None,
+                        help="작품명/로고 바로 아래 한 줄 문구(예: 티빙에서 풀버전 시청 및 투표 가능!). "
+                             "그 높이만큼 로고가 위로 올라간다")
+    design.add_argument("--design-work-caption-font-size", type=int, default=None,
+                        help="아래 캡션 글자 크기(기본 40)")
+    design.add_argument("--design-work-caption-color", type=str, default=None,
+                        help="아래 캡션 색(기본 white)")
     design.add_argument("--design-work-band-offset", type=int, default=None,
                         help="작품명/로고 블록 윗변을 영상 밴드 하단에서 N px 아래에 둔다(로고 center "
                              "정렬 대신). 미지정 = 종전(밴드+20 안전선·center)")
@@ -382,6 +389,9 @@ _CLI_TO_DESIGN_FIELD = {
     "design_platform_align": "platform_align",
     "design_platform_placement": "platform_placement",
     "design_work_band_offset": "work_band_offset",
+    "design_work_caption": "work_caption",
+    "design_work_caption_font_size": "work_caption_font_size",
+    "design_work_caption_color": "work_caption_color",
 }
 
 

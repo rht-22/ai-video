@@ -1,0 +1,26 @@
+{
+  "_doc": "가왕쇼(한 입 주막) 쇼츠 템플릿 — 2026-09-07 사용자 확정. 7화 두 편(0477d230·ep7ex01) 실렌더 값 + 로고 아래 캡션 + 노래 구간 자막 제외. --design-* 를 명시하면 그 값이 이긴다. work_band_offset 40 = 로고를 center 대신 자막 스택 바로 밑(밴드+40, 스택 하한이 이기면 그 자리)에 붙인다(2026-09-07 '위치가 너무 아래야'). video_y 500→420(2026-09-07 '썸네일에서 캡션이 잘린다' — 전체 80px 위로. 제목·자막·로고·캡션 전부 밴드 상대라 함께 움직인다. 이전 두 편(0477d230·ep7ex01)은 500 으로 만든 것). work_title_y(절대 1430) 제거 — 밴드 상대(work_band_offset)가 절대 하한에 막히던 것.",
+  "design": {
+    "video_y": 420,
+    "aspect_ratio": "13:9",
+    "title_font": "여기어때 잘난체 고딕 TTF",
+    "title_color": "white",
+    "title_color2": "#ff3b30",
+    "subtitle_font": "여기어때 잘난체 고딕 TTF",
+    "subtitle_color": "#ffffff",
+    "tts_color": "#F783AC",
+    "platform_text": "티빙",
+    "platform_font_size": 56,
+    "platform_align": "right",
+    "subtitle_band_offset": 30,
+    "tts_band_offset": 24,
+    "work_caption": "티빙에서 풀버전 시청 및 투표 가능!",
+    "work_caption_font_size": 40,
+    "work_caption_color": "white",
+    "work_band_offset": 40
+  },
+  "options": {
+    "no_reframe": true,
+    "subtitle_skip_singing": true
+  }
+}

@@ -132,6 +132,12 @@ class DesignConfig:
     # 쿠팡플레이에서 시청하세요") — 밴드 모서리의 회색 워드마크가 어두운 장면에서 안 보여
     # 사용자가 참고 쇼츠(작품 로고 위 아이콘+흰 글자)를 들어 정한 자리.
     platform_placement: str = "band"
+    # 작품명/로고 **바로 아래** 한 줄 문구(2026-09-07 가왕쇼 템플릿 — "티빙에서 풀버전 시청 및
+    # 투표 가능!"). 그 높이만큼 로고가 위로 올라간다(캔버스 하단 클램프·center 범위가 줄어든다).
+    # None = 종전과 바이트 동일. 플랫폼 표기(platform_*)와 독립 — 밴드 모서리 워드마크는 그대로.
+    work_caption: str | None = None
+    work_caption_font_size: int = 40
+    work_caption_color: str = "white"
 
     overlay_image_path: str | None = None # 필요 시 이미지 경로
 
