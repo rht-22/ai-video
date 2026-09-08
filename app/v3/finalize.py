@@ -1106,7 +1106,14 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                            "fx": str(pos.get("fx") or "pop"),
                            "color": str(pos.get("color") or _cycle_color(lb["index"]))})
     texts_path = None
+    _label_face_records: list[dict] = []
     if labels:
+        # 라벨 얼굴 회피(2026-09-08 사용자 지적) — 렌더 직전·결정적. 초안 프레임의 얼굴을 검출해
+        # 겹치는 라벨을 비켜 놓는다(app/v3/label_faces). 초안이 없으면 그대로.
+        from app.v3 import label_faces as _lf
+        labels, _label_face_records = _lf.avoid_faces_for_labels(
+            labels, output_dir / "draft_480.mp4", _geom,
+            canvas_w=config.canvas_width, canvas_h=config.canvas_height, log=log)
         texts_path = output_dir / "v3_labels.ass"
         build_texts_ass(labels, texts_path)
 
@@ -1258,6 +1265,8 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     if speaker_audit:
         cost["speaker_tracking"] = {"detector": (channel_design or {}).get("face_detector") or "haar",
                                     "clips": speaker_audit}            # 갭 12: 켠 실행만
+    if _label_face_records:
+        cost["label_face_avoid"] = _label_face_records                      # 2026-09-08: 겹친 라벨만
     log(f"  [v3/render] {out_path.name} — {cost['elapsed']}s · "
         f"{cost['bytes'] // (1024 * 1024)}MB")
     return out_path, cost
