@@ -589,6 +589,9 @@ PROMPT_TEMPLATE = """당신은 방송 영상의 장면 기록가다. 첨부한 �
 ]}}"""
 
 
+STAGE2_RESEARCH_MAX_CHARS = 3000
+
+
 def build_stage2_prompt(chunk: dict, stage1_doc: dict, chunk_spans: list[dict],
                         appearances: list[dict] | None,
                         research_context: str = "",
@@ -600,7 +603,10 @@ def build_stage2_prompt(chunk: dict, stage1_doc: dict, chunk_spans: list[dict],
         if character_names:
             parts.append("등장인물 사전: " + ", ".join(character_names[:20]))
         if research_context:
-            parts.append(research_context.strip()[:1200])
+            # 리서치 예산(2026-09-08 사용자 결정): 1,200자는 인물 목록 중간에서 잘려 [핵심 갈등/서사]
+            # (누가 누구와 겨루는지)가 빠졌다 — 가왕쇼 7화에서 참모·가왕의 허세 대화를 둘의 신경전으로
+            # 오독한 원인. 3,000자면 현행 리서치 문서(1.6k)가 통째로 들어간다(청크당 ~300토큰).
+            parts.append(research_context.strip()[:STAGE2_RESEARCH_MAX_CHARS])
         research_block = "## 작품 배경\n" + "\n".join(parts) + "\n\n"
 
     s1_lines = []
