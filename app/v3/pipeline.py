@@ -1296,19 +1296,31 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
         log("  [v3/watch-trim] 캐시(트림 0) — 건너뜀")
     else:
         from app.v3 import watch_trim as wt
-        from app.v3.story import build_span_index as _bsi
-        _s2 = _read_json(output_dir / "stage2.json")
-        _sidx, _ = _bsi(_s2, grid)
-        _imp = {sid: (sp["is_audio"], sp["importance"])
-                for sid, sp in _sidx.items()}
-        _deficit = float((story_doc.get("budget") or {}).get("deficit_sec") or 0.0)
-        log(f"  [v3/watch-trim] Flash vision 요청 (draft "
-            f"{wt.WATCH_SAMPLE_FPS:g}fps 표본)"
-            + (f" — 예산 컷 판(초과 {_deficit:.1f}s)" if _deficit > 0.1 else ""))
-        cuts, wt_audit = wt.run_watch_trim(
-            get_gemini(), draft_path, timeline=plan["timeline"], grid=grid,
-            resources=resources, segments=segments, importance=_imp,
-            span_index=_sidx, budget_deficit=_deficit, log=log)
+        # 캐시 3: pre 지문 일치 + 컷 있음 = **같은 초안에 같은 컷을 재적용**(2026-09-08).
+        # M3 는 매 실행 story 에서 조립하므로 여기 도착하는 지문은 늘 트림 전 값이다 —
+        # 종전엔 이 경우가 빠져 재렌더마다 Flash 를 다시 물었고(비결정: 1.44s vs 3.44s),
+        # 그 결과 post 지문·style 지문이 실행마다 갈려 라벨이 매번 새로 생성됐다(사람이
+        # 승인한 라벨이 다음 렌더에서 증발 — 가왕쇼 ep7ex03 실사고).
+        _replay = (_wt.get("cuts") if _wt.get("pre_fingerprint") == fingerprint
+                   and _wt.get("cuts") and from_step not in ("draft_render",) else None)
+        if _replay is not None:
+            cuts = [dict(c) for c in _replay]
+            wt_audit = {**(_wt.get("audit") or {}), "replayed": True}
+            log(f"  [v3/watch-trim] 캐시(같은 초안 · 컷 {len(cuts)}개 재적용) — 재호출 없음")
+        else:
+            from app.v3.story import build_span_index as _bsi
+            _s2 = _read_json(output_dir / "stage2.json")
+            _sidx, _ = _bsi(_s2, grid)
+            _imp = {sid: (sp["is_audio"], sp["importance"])
+                    for sid, sp in _sidx.items()}
+            _deficit = float((story_doc.get("budget") or {}).get("deficit_sec") or 0.0)
+            log(f"  [v3/watch-trim] Flash vision 요청 (draft "
+                f"{wt.WATCH_SAMPLE_FPS:g}fps 표본)"
+                + (f" — 예산 컷 판(초과 {_deficit:.1f}s)" if _deficit > 0.1 else ""))
+            cuts, wt_audit = wt.run_watch_trim(
+                get_gemini(), draft_path, timeline=plan["timeline"], grid=grid,
+                resources=resources, segments=segments, importance=_imp,
+                span_index=_sidx, budget_deficit=_deficit, log=log)
         pre_fp = fingerprint
         removed_sec = round(sum(c["end"] - c["start"] for c in cuts), 2)
         if cuts:
