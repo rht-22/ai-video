@@ -90,6 +90,7 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
                    probe: bool = True,
                    exclude_topics: tuple[str, ...] = (),
                    exclude_ranges: tuple[tuple[float, float], ...] = (),
+                   editorial_block: str = "", editorial_tone_block: str = "",
                    episode_map: dict | None = None,
                    corrections: list[dict] | None = None,
                    topic_override: dict | None = None,
@@ -143,6 +144,13 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
     # 제외(이미 만든 쇼츠, 2026-09-07) — 구간 → 사건 단위 idx 는 코드가 정한다
     excluded = sl.excluded_meaning_ids(rows, exclude_ranges)
     exclude_blk = sl.exclude_block(exclude_topics, excluded, rows)
+    # 편집 지침(editorial, 2026-09-08 — v1 --editorial-json 과 같은 입구): 걸음 1·2 프롬프트 뒤에
+    # 제외 블록과 같은 자리로 덧붙인다(템플릿 무변경). 톤은 걸음 4 로. 비면 종전과 동일.
+    if editorial_block:
+        exclude_blk = exclude_blk + editorial_block
+        audit["editorial"] = True
+    if editorial_tone_block:
+        tone_block = (tone_block or "") + editorial_tone_block
     if exclude_blk:
         audit["excluded"] = {"topics": list(exclude_topics),
                              "ranges": [list(r) for r in exclude_ranges],

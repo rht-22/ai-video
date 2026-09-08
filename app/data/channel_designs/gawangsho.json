@@ -22,5 +22,11 @@
   "options": {
     "no_reframe": true,
     "subtitle_skip_singing": true
+  },
+  "editorial": {
+    "_doc": "권리사 가이드(2026-09-08 사용자): 투표 결과 공유 금지. avoid 는 권리사 요구만 — 기획 방향은 --editorial-run-json prefer 로.",
+    "avoid": [
+      "투표 결과 노출 — 순위·득표수 발표 장면과 '투표 결과' 텔롭, 그리고 그에 대한 언급"
+    ]
   }
 }

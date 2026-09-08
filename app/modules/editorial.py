@@ -188,6 +188,30 @@ def format_editorial_block(editorial: dict[str, Any] | None, use_case: str) -> s
                 f"- {tone}")
         return "\n".join(parts) + "\n"
 
+    if use_case == "v3_story":
+        # v3 사람 편집 흐름(걸음 1 주제·걸음 2 씬) — 어휘가 다르다: candidate 가 아니라 사건 단위,
+        # guideline_flags 태깅 없음. 강제 수준은 v1 과 같다(avoid·rules 절대 / prefer 편향).
+        parts = ["\n## 작품별 편집 지침 — 권리사 가이드/운영 지시(2026-09-08 v3 입구)"]
+        if avoid:
+            parts.append("금지 요소 — 절대 규칙(다른 모든 지침보다 우선):\n" + _bullets(avoid) + "\n"
+                         "- ❌ 위 요소가 담긴 사건 단위는 주제·씬으로 고르지 말라. 제목·내레이션 문구로도 "
+                         "언급·암시하지 말라(장면이 없어도 문구가 결과를 스포하면 같은 위반).\n"
+                         "- ✅ 위 요소가 **없는** 사건은 종전과 같이 자유롭게 쓴다 — 주변 소재로 확대 적용 금지.")
+        if rules:
+            parts.append("구성 제약 — 절대 규칙(조합·길이):\n" + _bullets(rules))
+        if prefer:
+            parts.append("우선 소재 — 랭킹 편향(절대 규칙 아님):\n" + _bullets(prefer) + "\n"
+                         "- 조건이 비슷한 사건끼리는 위 소재가 담긴 쪽을 **주제로** 우선 고르고, 씬·제목도 "
+                         "이 방향을 부각하라.\n"
+                         "- 단, 위 소재의 사건이 없으면 억지로 끼워 맞추지 말고 다른 사건으로 정상 구성하라.")
+        if tone:
+            parts.append(f"문구 톤 — 제목·내레이션 문체에만: {tone}")
+        return "\n".join(parts) + "\n"
+
+    if use_case == "v3_tone":
+        # 걸음 4(내레이션) — 톤만. 선정 지침은 이미 걸음 1·2 에서 소비됐다.
+        return f"\n## 문구 톤(운영 지시) — 내레이션 문체에만 적용: {tone}\n" if tone else ""
+
     raise ValueError(f"알 수 없는 use_case: {use_case!r}")
 
 

@@ -98,6 +98,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--exclude-range", action="append", default=None, metavar="T0-T1",
                    help="이미 만든 쇼츠의 원본 구간(초, 예 65.5-247.4 · 반복 가능) — "
                         "절반 이상 겹치는 사건 단위를 걸음 1·2 검증기가 반려한다")
+    # 편집 지침(2026-09-08) — v1 app.cli 와 같은 입구·같은 계약(app/modules/editorial.py).
+    # 상시 지침(작품·채널)은 템플릿 `editorial` 키 또는 --editorial-json, 1회성은 --editorial-run-json.
+    p.add_argument("--editorial-json", dest="editorial_json", default=None,
+                   help="작품별 편집 지침 JSON {avoid, rules, prefer, tone} — 걸음 1·2 선정에 주입"
+                        "(avoid·rules 절대 / prefer 편향 / tone 은 내레이션 문체)")
+    p.add_argument("--editorial-run-json", dest="editorial_run_json", default=None,
+                   help="이번 실행 한정 지시 JSON(같은 키) — 예: 특정 인물 중심 "
+                        "{\"prefer\": [\"홍지윤이 주인공인 사건\"]}")
     # 노래 구간 자막 제외(2026-09-07 사용자 지시, 가왕쇼) — 음향 비트 주기성 + Stage 2 문장
     # 두 증인이 노래로 확정한 소스 구간의 대사 자막을 내지 않는다. 기본 꺼짐(드라마 BGM 오작동 방지).
     p.add_argument("--episode-map", action="store_true",
@@ -189,7 +197,15 @@ def load_design_preset(name: str, *, base_dir: Path | None = None) -> dict:
     bad = sorted(set(opts) - set(PRESET_OPTIONS))
     if bad:
         raise SystemExit(f"--design-preset {name!r}: 모르는 options 키 {bad}")
-    return {"design": design, "options": opts}
+    # 채널 상시 편집 지침(2026-09-08) — editorial 계약 그대로 검증(모르는 키 즉시 실패)
+    editorial = None
+    if doc.get("editorial") is not None:
+        from app.modules.editorial import parse_editorial
+        try:
+            editorial = parse_editorial(_json.dumps(doc["editorial"], ensure_ascii=False))
+        except ValueError as e:
+            raise SystemExit(f"--design-preset {name!r}: editorial 오류 — {e}")
+    return {"design": design, "options": opts, "editorial": editorial}
 
 
 def apply_design_preset(args: argparse.Namespace, preset: dict) -> list[str]:
@@ -258,9 +274,22 @@ def main(argv: list[str] | None = None) -> int:
         args.fix_names = True
         print("  [v3] --story-flow human → 인명 교정(--fix-names) 기본 켬")
 
+    _preset_editorial = None
     if args.design_preset:
-        _filled = apply_design_preset(args, load_design_preset(args.design_preset))
-        print(f"  [v3] design 템플릿 {args.design_preset!r} 적용 — {_filled}")
+        _preset = load_design_preset(args.design_preset)
+        _filled = apply_design_preset(args, _preset)
+        _preset_editorial = _preset.get("editorial")
+        print(f"  [v3] design 템플릿 {args.design_preset!r} 적용 — {_filled}"
+              + (" · editorial" if _preset_editorial else ""))
+    # 편집 지침 병합: 템플릿 상시 ⊕ --editorial-json ⊕ --editorial-run-json (avoid·rules 는 합집합)
+    from app.modules.editorial import merge_editorial, parse_editorial
+    try:
+        _ed_base = merge_editorial(_preset_editorial, parse_editorial(args.editorial_json))
+        editorial = merge_editorial(_ed_base, parse_editorial(args.editorial_run_json))
+    except ValueError as e:
+        raise SystemExit(f"editorial 지침 오류: {e}")
+    if editorial:
+        print(f"  [v3] 편집 지침: {editorial}")
     channel_design = channel_design_from_args(args)
     if channel_design:
         print(f"  [v3] 채널 design 주입: {channel_design}")
@@ -288,6 +317,7 @@ def main(argv: list[str] | None = None) -> int:
                  exclude_topics=tuple(args.exclude_topic or ()) or None,
                  exclude_ranges=parse_exclude_ranges(args.exclude_range) or None,
                  subtitle_skip_singing=bool(args.subtitle_skip_singing),
+                 editorial=editorial,
                  channel_design=channel_design or None,
                  narration_original_db=args.narration_original_db,
                  episode_map=bool(args.episode_map),

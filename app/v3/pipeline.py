@@ -150,6 +150,7 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
            exclude_topics: tuple[str, ...] | None = None,
            exclude_ranges: tuple[tuple[float, float], ...] | None = None,
            subtitle_skip_singing: bool = False,
+           editorial: dict | None = None,
            channel_design: dict | None = None,
            narration_original_db: float | None = None,
            episode_map: bool = False,
@@ -474,6 +475,7 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
                     story_flow=story_flow,
                     exclude_topics=exclude_topics, exclude_ranges=exclude_ranges,
                     subtitle_skip_singing=subtitle_skip_singing,
+                    editorial=editorial,
                     use_episode_map=episode_map, plan_slot=plan_slot,
                     get_gemini=get_gemini, step=step, log=log)
 
@@ -872,6 +874,7 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
             exclude_topics: tuple[str, ...] | None = None,
             exclude_ranges: tuple[tuple[float, float], ...] | None = None,
             subtitle_skip_singing: bool = False,
+            editorial: dict | None = None,
             use_episode_map: bool = False,
             plan_slot: int | None = None) -> None:
     """Stage 3(story) + 경계면 조립 + resources(TTS 합성) — 발주서 v3-m3.
@@ -935,6 +938,18 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
         _fp_payload["exclude"] = {"topics": list(_ex_topics),
                                   "ranges": [list(r) for r in _ex_ranges]}
         log(f"  [v3/story] 제외 — 주제 {len(_ex_topics)}건 · 구간 {len(_ex_ranges)}개")
+    # 편집 지침(editorial, 2026-09-08) — v1 --editorial-json 과 같은 입구. 지문 재료(지침이 바뀌면
+    # 주제 선정이 달라진다). 미지정 = 키 없음(캐시 회귀 0). human 흐름 전용(legacy 프롬프트 동결).
+    _ed_block = _ed_tone = ""
+    if editorial:
+        if story_flow != "human":
+            raise ValueError("--editorial-json 은 v3 에서 --story-flow human 전용이다")
+        from app.modules.editorial import format_editorial_block as _feb
+        _fp_payload["editorial"] = editorial
+        _ed_block = _feb(editorial, "v3_story"); _ed_tone = _feb(editorial, "v3_tone")
+        log(f"  [v3/story] 편집 지침 — avoid {len(editorial.get('avoid') or [])} · rules "
+            f"{len(editorial.get('rules') or [])} · prefer {len(editorial.get('prefer') or [])}"
+            + (" · tone" if editorial.get("tone") else ""))
     # 회차 지도(3단계, 2026-09-08) — 있을 때만 지문 재료(지도가 바뀌면 편성 재료가 다르다).
     # 미지정·파일 없음 = 키 없음(캐시 회귀 0). human 흐름만 소비한다(legacy 는 프롬프트 동결).
     _map_doc = load_episode_map(output_dir) if (use_episode_map and story_flow == "human") else None
@@ -1003,6 +1018,7 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
                 max_sec=max_sec, video_path=video_path, output_dir=output_dir,
                 stage1_doc=(_read_json(_s1p) if _s1p.exists() else None),
                 tone_block=tone_block, exclude_topics=_ex_topics, exclude_ranges=_ex_ranges,
+                editorial_block=_ed_block, editorial_tone_block=_ed_tone,
                 episode_map=_map_doc, topic_override=_topic_override, log=log)
             story_doc, audit = run_story_flow(get_gemini(), stage2_doc, grid, **_flow_kw)
             # 갭 8 역류(3단계 3-3): 덮개 프로브가 되돌림 상한 뒤에도 "문장·화면 모순"을 남기면
@@ -1075,7 +1091,8 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
     segments = assemble.word_subtitles(plan["timeline"], span_index,
                                        grid.get("words") or [], _mw,
                                        cast_names=names, name_fix_log=_name_arb,
-                                       skip_windows=_skip_win, skip_log=_skip_log)
+                                       skip_windows=_skip_win, skip_log=_skip_log,
+                                       fps=plan.get("source_fps"))
     if subtitle_skip_singing:
         for f in _skip_log:
             log(f"  [v3/자막] 노래 구간 자막 제외 {f['span_id']} "
@@ -1554,7 +1571,7 @@ def _run_hook_variants(*, output_dir: Path, video_path: Path, work_title: str,
         segs = assemble.word_subtitles(
             plan["timeline"], span_index, grid.get("words") or [],
             sorted(w for wins in assemble.narration_windows(vdoc).values() for w in wins),
-            skip_windows=skip_windows or None)
+            skip_windows=skip_windows or None, fps=plan.get("source_fps"))
         cues = [c for c in assemble.finalize_cues(
                     vdoc.get("narration_cues") or [], plan["timeline"],
                     voice="ko_female", speed="normal", fps=plan.get("source_fps"))
