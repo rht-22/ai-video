@@ -1080,7 +1080,8 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
     _WHY = {"latin": ("어절", "모델 청취(영문 오인식 → 한글)"),
             "spelling": ("맞춤법", "모델 청취(초성 동일·모음/받침 차이)"),
             "aligned": ("맞춤법", "모델 청취(공백 제거 정렬 · 자모 차이 ≤2~3)"),
-            "merge": ("어절 병합", "모델 청취가 한 어절 — whisper 가 끊은 단어를 합침")}
+            "merge": ("어절 병합", "모델 청취가 한 어절 — whisper 가 끊은 단어를 합침"),
+            "heard": ("저확신 span 청취 채택", "whisper 평균 확신 < 0.6 · 청취가 요약이 아님")}
     for f in _name_arb:
         _what, _why = _WHY.get(f.get("kind") or "", ("인명", "모델 청취 + 인물표"))
         log(f"  [v3/자막] {_what} 대조 교정 {f.get('span_id')} {f['from']!r} → {f['to']!r} "

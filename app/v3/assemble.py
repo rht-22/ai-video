@@ -13,6 +13,8 @@
 """
 from __future__ import annotations
 
+import re
+
 CANVAS = "1080x1920"
 AUDIO_MIX = {"tts_gain_db": -3, "original_gain_db": -3, "bgm_gain_db": -20}
 SUB_LEAD_SEC = 0.05          # 첫 어절 선행
@@ -182,19 +184,23 @@ def assemble_edit_plan(story_doc: dict, span_index: dict[str, dict], *,
         # 구간이라 경계가 grid 위가 아닐 수 있다. 제 클립(원음 끔)으로 정식 등록한다
         # (tail_pad·head_trimmed 와 같은 지위 — 벨트가 `cover` 키를 인정한다).
         def emit_cover(cv: dict, beat=b) -> None:
-            ids_c = [s for s in (cv.get("span_ids") or []) if s in span_index]
-            timeline.append({
-                "role": beat["role"],
-                "clip_start_sec": round(float(cv["t_in"]), 3),
-                "clip_end_sec": round(float(cv["t_out"]), 3),
-                "subtitle": "",
-                "use_original_audio": False,
-                "reframe": {"mode": "center"},
-                "span_ids": ids_c,
-                "cover": str(cv.get("kind") or "cover"),
-                **({"hold_sec": round(float(cv["hold_sec"]), 3)} if cv.get("hold_sec") else {}),
-                "beat": _beat_no,      # additive(4단계) — 같은 소스 구간이 두 번 나올 때(훅 회수) cue 의 클립 신원
-            })
+            # 컷 쌓기(stack, 2026-09-08): parts 마다 제 클립 — 정지 대신 정배속 컷 여러 개
+            parts = [(float(a), float(z)) for a, z in (cv.get("parts") or [(cv["t_in"], cv["t_out"])])]
+            for a, z in parts:
+                ids_c = [s for s in (cv.get("span_ids") or []) if s in span_index
+                         and span_index[s]["t_in"] < z - 1e-6 and span_index[s]["t_out"] > a + 1e-6]
+                timeline.append({
+                    "role": beat["role"],
+                    "clip_start_sec": round(a, 3),
+                    "clip_end_sec": round(z, 3),
+                    "subtitle": "",
+                    "use_original_audio": False,
+                    "reframe": {"mode": "center"},
+                    "span_ids": ids_c,
+                    "cover": str(cv.get("kind") or "cover"),
+                    **({"hold_sec": round(float(cv["hold_sec"]), 3)} if cv.get("hold_sec") and len(parts) == 1 else {}),
+                    "beat": _beat_no,      # additive(4단계) — 같은 소스 구간이 두 번 나올 때(훅 회수) cue 의 클립 신원
+                })
 
         for cv in b.get("covers") or []:
             if cv.get("position", "before") == "before":
@@ -479,6 +485,39 @@ def _lines_for_span(words: list[dict], t_in: float, t_out: float) -> list[dict]:
     return merged
 
 
+# 저확신 전사 → 청취 우선(2026-09-08 사용자 지시, 가왕쇼 ep7ex02 실사고): whisper 가 발음이 뭉개진
+# 대사를 "2명만 젖었잖아 … 손도 쪼꼬 방향이" 로 냈고 Stage 2 는 "두 명이면 더 좋잖아 … 손붙잡고
+# 가면 좋잖아" 로 정확히 들었는데, 어절 정렬 교정은 자모 차이 ≤2~3 만 뒤집어 못 잡았다. 그 span 의
+# whisper 단어 확신도는 0.09~0.5. 실측(2편 937 span): 평균 확신 p10 0.63~0.72 · p50 0.86 — 0.6 미만은
+# 하위 ~8%. 그 구간에서 청취가 whisper 와 다르면 대체로 청취가 맞지만, 청취가 문장을 **요약**한 경우
+# (whisper 20자 → 청취 7자)도 있어 길이 비율 하한을 함께 건다(요약은 대사를 지운다).
+HEARD_PREFER_MAX_PROB = 0.6     # span 의 whisper 평균 확신이 이 미만이면 저확신
+HEARD_PREFER_MIN_LEN_RATIO = 0.6  # 청취 글자수(공백 제외) ≥ whisper 의 이 비율일 때만(요약 방지)
+_HEARD_CMP_STRIP = re.compile(r"[\s,.!?…~\"'·\-]+")   # 비교용 정규화(구두점·공백 제거)
+
+
+def prefer_heard(words: list[dict], heard: str, *, max_prob: float = HEARD_PREFER_MAX_PROB,
+                 min_len_ratio: float = HEARD_PREFER_MIN_LEN_RATIO) -> dict | None:
+    """저확신 span 판정 — 청취를 쓸 거면 {mean_prob, whisper, heard} 를, 아니면 None. 순수.
+    조건: whisper 단어 ≥2 · 평균 prob < max_prob · 청취 비어 있지 않음 · 공백 제거 텍스트가
+    다름 · 청취 길이 ≥ whisper 길이 × min_len_ratio."""
+    ws = [w for w in words or [] if str(w.get("text") or "").strip()]
+    heard = str(heard or "").strip()
+    if len(ws) < 2 or not heard:
+        return None
+    probs = [float(w.get("prob", 1.0)) for w in ws]
+    mean = sum(probs) / len(probs)
+    if mean >= max_prob:
+        return None
+    wtxt = " ".join(str(w["text"]).strip() for w in ws)
+    # 구두점·공백 차이만이면 뒤집지 않는다 — 청취 경로는 어절 타임코드가 없어(균등 배분)
+    # 쉼표 하나 얻자고 단어 싱크를 버리게 된다(실측: 채택 23건 중 8건이 구두점 차이뿐).
+    a, b = _HEARD_CMP_STRIP.sub("", wtxt), _HEARD_CMP_STRIP.sub("", heard)
+    if a == b or len(b) < len(a) * min_len_ratio:
+        return None
+    return {"mean_prob": round(mean, 2), "whisper": wtxt, "heard": heard}
+
+
 def _lines_from_text(text: str, t_in: float, t_out: float) -> list[dict]:
     """어절 타임코드 없는 텍스트(M9-C heard) → span 구간 균등 배분 라인. 순수.
 
@@ -624,13 +663,20 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
             src = sp.get("text_source")
             if src == "none":
                 continue
+            in_span = [w for w in grid_words
+                       if sp["t_in"] <= (float(w["t0"]) + float(w["t1"])) / 2
+                       < sp["t_out"]]
+            # 저확신 전사 → 청취 우선(위 prefer_heard). 판정은 span 단위·순수, 건별 기록.
+            _ph = None if src == "heard" else prefer_heard(in_span, sp.get("heard_text"))
+            if _ph is not None:
+                src = "heard"
+                if name_fix_log is not None:
+                    name_fix_log.append({"kind": "heard", "span_id": sid, "from": _ph["whisper"],
+                                         "to": _ph["heard"], "mean_prob": _ph["mean_prob"]})
             if src == "heard":
                 lines = _lines_from_text(str(sp.get("heard_text") or ""),
                                          sp["t_in"], sp["t_out"])
             else:
-                in_span = [w for w in grid_words
-                           if sp["t_in"] <= (float(w["t0"]) + float(w["t1"])) / 2
-                           < sp["t_out"]]
                 # 인명 대조(2026-09-03): whisper 어절이 인물표 이름과 가깝고 모델
                 # 청취(heard_text)에 그 이름이 정확히 있으면 그 이름으로 — 두 증인
                 # 일치 시에만. cast_names 없으면 종전과 동일.

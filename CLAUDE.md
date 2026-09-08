@@ -2345,3 +2345,18 @@ subtitle_skip_singing}}`. **명시한 플래그가 템플릿을 이긴다**(None
 - `scripts/edit_plan_to_xml.py`: edit_plan → 프리미어 xmeml + SRT(참조용 — 렌더 정본 아님).
 - 회귀 가드: `tests/test_v3_stage2.py`(+10) · `test_v3_story_flow.py`(+4) · `test_v3_episode_map.py`(8) ·
   `test_v3_plan.py`(7) · `test_v3_gap_extras.py`(10). 전체 2132 통과.
+
+### 저확신 전사 → Stage 2 청취 우선 (2026-09-08, 사용자 지시 · 가왕쇼 ep7ex02 실사고)
+
+`assemble.prefer_heard` · `word_subtitles` 의 텍스트 소스 분기 · 기록 kind=`heard`.
+- 실사고: 발음이 뭉개진 대사를 whisper 가 "2명만 젖었잖아 … 손도 쪼꼬 방향이" 로 내고 Stage 2 는
+  "두 명이면 더 좋잖아 … 손붙잡고 가면 좋잖아" 로 정확히 들었는데, 어절 정렬 교정은 자모 차이 ≤2~3
+  만 뒤집어 못 잡았고 Stage 2 의 '각색 복원'(diff>0.35 → 전사 채택)은 정반대로 작동했다.
+- 규칙(span 단위·순수): whisper 단어 ≥2 · **평균 prob < 0.6**(`HEARD_PREFER_MAX_PROB` — 실측 2편
+  937 span 의 하위 ~8%) · 청취가 비어 있지 않음 · 구두점·공백을 뺀 텍스트가 다름 · **청취 길이 ≥
+  whisper 의 60%**(`HEARD_PREFER_MIN_LEN_RATIO` — 청취가 문장을 요약한 경우 방지, "약간 놀랐잖아
+  밥 먹고 왔습니다…" → "밥 먹고 왔어?" 실측). 채택되면 M9-C heard 경로(균등 배분 라인)로 나간다 —
+  어절 타임코드를 잃으므로 구두점만 다른 줄은 뒤집지 않는다.
+- 드라이런: 가왕쇼 7화 12/579 · 지금불륜 EP01 14/625 span 채택 — 목표 span(sp1202·sp1203) 포함.
+  기록: stdout `[v3/자막] 저확신 span 청취 채택 …` + run_log 자막 교정 목록(kind heard·mean_prob).
+- 회귀 가드: `tests/test_v3_heard_priority.py`(2건).
