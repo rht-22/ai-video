@@ -134,3 +134,49 @@ def confirm_windows(windows, rows: list[dict]) -> tuple[list[tuple[float, float]
             rejected.append({"t0": a, "t1": z,
                              "why": "Stage 2 문장에 노래 근거 없음" if hit else "겹치는 사건 단위 없음"})
     return ok, rejected
+
+
+# ── 창 가장자리 보강: 같은 노래 사건 단위 안에서 잇고 경계까지 늘린다 ─────────────────
+# 실측(가왕쇼 7화 네 번째 편, 박서진·최수호 듀엣 m033~m034 2006.7~2199.1): 음향 창이
+# [2008~2036] [2042~2060] [2084~2120] [2130~2144] 로 끊겨 그 틈(댄스 브레이크·화음 구간)의
+# 가사 3줄이 자막으로 새어 나갔고, 노래 첫 구호('가자!' 2006.7)도 창 밖이었다. 비트 검출은
+# 4초 창·2초 hop 이라 가장자리에서 ±2~4초, 브레이크에서 수 초씩 빈다. Stage 2 의 사건 단위는
+# "듀엣 무대" 같은 노래 사건을 하나로 적으므로 **그 단위 안**의 창은 한 노래다 — 창 사이를 잇고,
+# 단위 경계가 창에서 EDGE_EXTEND_MAX_SEC 안이면 경계까지 늘린다(멀면 그 사이는 MC 멘트 —
+# 전유진 편 '여러분 기다리셨습니다' 2199~2213 은 창(2216)에서 17s 앞이라 살아남는다).
+EDGE_EXTEND_MAX_SEC = 10.0
+
+
+def bridge_windows(windows, rows: list[dict],
+                   *, edge_max_sec: float = EDGE_EXTEND_MAX_SEC) -> list[tuple[float, float]]:
+    """확정 창 × Stage 2 사건 단위(t0/t1/content) → 같은 노래 단위 안의 창을 잇고 경계로 늘린
+    창 목록(정렬·병합). 노래 근거(SING_HINT)가 없는 단위는 건드리지 않는다. 순수."""
+    wins = [(float(a), float(z)) for a, z in windows or ()]
+    if not wins:
+        return []
+    out: list[tuple[float, float]] = []
+    used: set[int] = set()
+    for r in rows:
+        if not SING_HINT.search(str(r.get("content") or "")):
+            continue
+        t0, t1 = float(r["t0"]), float(r["t1"])
+        inside = [i for i, (a, z) in enumerate(wins) if z > t0 and a < t1]
+        if not inside:
+            continue
+        lo = min(wins[i][0] for i in inside)
+        hi = max(wins[i][1] for i in inside)
+        if 0 <= lo - t0 <= edge_max_sec:
+            lo = t0
+        if 0 <= t1 - hi <= edge_max_sec:
+            hi = t1
+        out.append((lo, hi))            # 늘리기만 — 다음 단위로 넘어간 창을 자르지 않는다
+        used.update(inside)
+    out.extend(w for i, w in enumerate(wins) if i not in used)
+    out.sort()
+    merged: list[list[float]] = []
+    for a, z in out:
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], z)
+        else:
+            merged.append([a, z])
+    return [(round(a, 3), round(z, 3)) for a, z in merged]

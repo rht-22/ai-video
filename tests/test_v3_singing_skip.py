@@ -224,3 +224,18 @@ def test_renderer_logo_follows_band_offset_not_absolute_work_title_y(tmp_path):
     fg = _build_filtergraph(_inputs(d), 1, 0)
     band_bottom = 420 + 746
     assert f"overlay=(W-w)/2:{band_bottom + 40}[" in fg          # 1206 — 1430 하한 무시
+
+
+def test_bridge_windows_joins_gaps_inside_singing_meaning_and_only_extends():
+    rows = [{"idx": 0, "t0": 0.0, "t1": 20.0, "content": "MC 멘트"},
+            {"idx": 1, "t0": 20.0, "t1": 100.0, "content": "듀엣 무대로 월미도를 달군다"},
+            {"idx": 2, "t0": 100.0, "t1": 130.0, "content": "관객과 대화"}]
+    wins = [(22.0, 40.0), (48.0, 60.0), (80.0, 96.0), (110.0, 120.0)]
+    out = singing.bridge_windows(wins, rows)
+    # 노래 단위(20~100) 안 세 창은 하나로 잇고 경계(20·100)까지 늘린다(각 ≤10s). 밖의 창은 그대로
+    assert out == [(20.0, 100.0), (110.0, 120.0)]
+    # 경계가 10s 넘게 멀면 늘리지 않는다(MC 멘트 보존) · 다음 단위로 넘어간 창은 자르지 않는다
+    rows2 = [{"idx": 1, "t0": 20.0, "t1": 100.0, "content": "'올래' 솔로 무대"}]
+    assert singing.bridge_windows([(37.0, 130.0)], rows2) == [(37.0, 130.0)]
+    assert singing.bridge_windows([], rows) == []
+    assert singing.bridge_windows([(5.0, 15.0)], rows) == [(5.0, 15.0)]     # 근거 없는 단위는 불변

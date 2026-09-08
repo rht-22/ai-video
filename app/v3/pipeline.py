@@ -718,7 +718,9 @@ def _ensure_singing_windows(output_dir: Path, video_path: Path, stage2_doc: dict
         doc["audio"] = str(src)
         log(f"  [v3/노래] 비트 주기성 판정 — 음향 양성 창 {len(doc['windows'])}개 "
             f"({time.time() - t0:.1f}s, {Path(src).name})")
-    ok, rejected = singing.confirm_windows(doc["windows"], meaning_rows(stage2_doc))
+    _rows = meaning_rows(stage2_doc)
+    ok, rejected = singing.confirm_windows(doc["windows"], _rows)
+    ok = singing.bridge_windows(ok, _rows)     # 같은 노래 단위 안 틈 잇기 + 경계 늘리기
     doc["confirmed"] = [[a, z] for a, z in ok]
     doc["rejected"] = rejected
     _write_json(f, doc)
