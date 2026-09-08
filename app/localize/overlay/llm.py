@@ -33,8 +33,8 @@ def resolve_model(config: dict, hero: bool = False) -> Optional[str]:
     """이 레포의 **모델 규칙**을 강제한다 — vlp 와 의도적으로 갈라지는 지점.
 
     ⚠ vlp config 는 `gemini-3.5-flash`·`gemini-pro-latest` 를 쓰는데 둘 다 이 레포에서
-    **사용 금지**다(CLAUDE.md 모델 규칙: Pro 는 `gemini-3.1-pro-preview`, 그 외 전부
-    `gemini-3.6-flash`). config 값을 읽지 않고 env 기본값을 따른다 — P1 이 `localize_run`
+    **사용 금지**다(CLAUDE.md 모델 규칙 — 기본값 정본은 `app.model_policy`). config 값을
+    읽지 않고 env 기본값을 따른다 — P1 이 `localize_run`
     Flash 를 바꾼 것과 같은 규약이고, 같은 이유로 여기서만 갈린다.
 
     hero=True 는 '고품질' 요청이라 Pro 로 보낸다. 다만 이 계층에서 Pro 를 쓰는 것은

@@ -23,6 +23,7 @@ from pathlib import Path
 
 import app.modules.gemini_client as _gc
 from app.config import AppConfig
+from app.model_policy import flash_model_name, pro_model_name
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]   # .../ai-video
 
@@ -93,8 +94,10 @@ def build_provenance(config: AppConfig, design=None) -> dict:
         "host": _host(),
         "machine": _machine(),
         "models": {
-            "pro": os.getenv("GEMINI_MODEL_NAME", "gemini-3.1-pro-preview"),
-            "flash": os.getenv("GEMINI_FLASH_MODEL_NAME", "gemini-3.6-flash"),
+            # 기본값은 app.model_policy 정본 — 2026-09-08 까지 옛 기본값이 베껴져 있어
+            # env 없는 노드에서 실제 호출(3.7-flash)과 다른 이름을 기록했다.
+            "pro": pro_model_name(),
+            "flash": flash_model_name(),
             # 역할 → 슬롯 (모델 정책 2026-08-23, 사용자 결정): **Pro 는 영상을 실제로
             # 보는 호출 하나뿐**이고 나머지 텍스트-온리 호출은 전부 Flash 최신이다.
             # 두 슬롯(pro/flash) 이름만으로는 '어느 호출이 무엇을 썼는가'가 안 남아

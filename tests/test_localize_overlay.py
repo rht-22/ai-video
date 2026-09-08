@@ -26,9 +26,10 @@ def test_forbidden_config_models_are_ignored():
     """vlp config 는 gemini-3.5-flash·gemini-pro-latest 를 쓴다 — 이 레포는 금지다."""
     got = llm.resolve_model({"translate": {"model": "gemini-3.5-flash",
                                            "hero_model": "gemini-pro-latest"}})
-    assert got == "gemini-3.6-flash"
+    from app.model_policy import DEFAULT_FLASH_MODEL, DEFAULT_PRO_MODEL
+    assert got == DEFAULT_FLASH_MODEL
     hero = llm.resolve_model({"translate": {"hero_model": "gemini-pro-latest"}}, hero=True)
-    assert hero == "gemini-3.1-pro-preview"
+    assert hero == DEFAULT_PRO_MODEL
 
 
 def test_model_follows_env_like_the_rest_of_the_repo(monkeypatch):

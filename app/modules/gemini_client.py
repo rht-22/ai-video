@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from app.model_policy import (DEFAULT_FLASH_MODEL, DEFAULT_PRO_MODEL, pro_model_name)
+from app.model_policy import flash_model_name as flash_model_name_default
 from app.modules.editorial import format_editorial_block
 
 from dotenv import load_dotenv
@@ -1568,8 +1570,8 @@ class GeminiConfig:
     # 2026-08-31 사용자 결정: v1 도 전 호출 Flash 3.7 — v3 A/B 실측(가왕쇼:
     # meaning 동급·전사 준수·예고 판정 우세) 근거. 배포 노드의 env
     # (GEMINI_MODEL_NAME 등)가 있으면 그쪽이 이긴다 — 이 기본값은 env 부재 시.
-    model_name: str = "gemini-3.7-flash"
-    flash_model_name: str = "gemini-3.7-flash"
+    model_name: str = DEFAULT_PRO_MODEL
+    flash_model_name: str = DEFAULT_FLASH_MODEL
     max_retries: int = 3
     # Google 공식 가이드(Gemini 3.x): temperature/top_p/top_k 같은 샘플링 매개변수는
     # 설정하지 말고 기본값을 따르도록 권장. 카테고리별 thinking_level만 제어한다.
@@ -2643,8 +2645,8 @@ def load_gemini_client() -> GeminiClient:
             "GEMINI_API_KEY environment variable is required. "
             "Please set it in .env file or as an environment variable."
         )
-    model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-3.7-flash")
-    flash_model_name = os.getenv("GEMINI_FLASH_MODEL_NAME", "gemini-3.7-flash")
+    model_name = pro_model_name()
+    flash_model_name = flash_model_name_default()
     max_retries = int(os.getenv("GEMINI_MAX_RETRIES", "3"))
     analysis_thinking_level = os.getenv("GEMINI_ANALYSIS_THINKING_LEVEL", "medium")
     relationship_thinking_level = os.getenv("GEMINI_RELATIONSHIP_THINKING_LEVEL", "medium")

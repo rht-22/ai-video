@@ -4,8 +4,10 @@
 
 ⚠ 이식하며 **의도적으로 바꾼 것 하나** — Flash 모델.
    vlp 는 `gemini-3-flash-preview` 를 박아 썼지만 ai-video CLAUDE.md 의 모델 규칙이
-   그 모델을 금지한다(허용: Pro `gemini-3.1-pro-preview` · Flash `gemini-3.6-flash`).
-   그래서 **ai-video 규칙을 따른다** — gemini_client 와 같은 환경변수를 읽는다.
+   그 모델을 금지한다. 그래서 **ai-video 규칙을 따른다** — 기본값은 `app.model_policy`
+   (gemini_client 와 같은 정본 · 같은 환경변수). 2026-09-08 까지는 여기 옛 기본값
+   (`gemini-3.1-pro-preview`/`gemini-3.6-flash`)이 베껴져 있어 env 없는 노드에서
+   현지화만 금지 모델을 불렀다 — 정본 한 곳으로 합쳤다.
    Pro 는 양쪽이 같은 모델이라 차이가 없다. Flash 가 쓰이는 곳은 L2b(텔롭 타이밍
    프레임 판독)와 제목 축약뿐이고, 둘 다 LLM 판단이라 회귀 0 측정 대상이 애초에
    아니다(기획서 §8-2: 번역 결과를 고정 입력으로 주입해 렌더 계층만 대조한다).
@@ -17,6 +19,8 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+from app.model_policy import flash_model_name, pro_model_name
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = Path(__file__).resolve().parent / "data"
@@ -38,12 +42,12 @@ BRAIN = engine_path("BRAIN_ROOT", "ai-improvement-edit-video")
 
 def model_pro() -> str:
     """정밀 분석(영상 패스·통번역). ai-video 모델 규칙과 같은 환경변수를 읽는다."""
-    return os.getenv("GEMINI_MODEL_NAME", "gemini-3.1-pro-preview")
+    return pro_model_name()
 
 
 def model_flash() -> str:
     """스크리닝(프레임 판독·제목 축약). 위 머리말의 ⚠ 참조."""
-    return os.getenv("GEMINI_FLASH_MODEL_NAME", "gemini-3.6-flash")
+    return flash_model_name()
 
 
 def load_locales() -> dict:

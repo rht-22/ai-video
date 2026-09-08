@@ -39,8 +39,9 @@ def test_model_rule_is_ai_video_not_vlp(monkeypatch):
     """CLAUDE.md 모델 규칙 — vlp 가 쓰던 `gemini-3-flash-preview` 는 이 레포에서 금지다."""
     monkeypatch.delenv("GEMINI_MODEL_NAME", raising=False)
     monkeypatch.delenv("GEMINI_FLASH_MODEL_NAME", raising=False)
-    assert spec.model_pro() == "gemini-3.1-pro-preview"
-    assert spec.model_flash() == "gemini-3.6-flash"
+    from app.model_policy import DEFAULT_FLASH_MODEL, DEFAULT_PRO_MODEL
+    assert spec.model_pro() == DEFAULT_PRO_MODEL
+    assert spec.model_flash() == DEFAULT_FLASH_MODEL
     # 산문(주석)에는 '왜 안 쓰는지'를 적어 두므로, **코드로 쓰인 형태**만 막는다.
     for py in (ROOT / "app" / "localize").rglob("*.py"):
         src = py.read_text(encoding="utf-8")

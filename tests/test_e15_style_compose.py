@@ -473,6 +473,25 @@ def test_gemini_config_default_is_not_a_banned_model():
     assert cfg.flash_model_name == "gemini-3.7-flash"
 
 
+def test_model_defaults_have_a_single_source(monkeypatch):
+    """2026-09-08: 현지화 spec·provenance 가 옛 기본값(3.1-pro-preview/3.6-flash)을 따로
+    들고 있었다 — env 부재 시 세 계층(생성·현지화·기록)이 **같은 이름**을 봐야 한다."""
+    monkeypatch.delenv("GEMINI_MODEL_NAME", raising=False)
+    monkeypatch.delenv("GEMINI_FLASH_MODEL_NAME", raising=False)
+    from app.config import AppConfig
+    from app.localize import spec
+    from app.model_policy import DEFAULT_FLASH_MODEL, DEFAULT_PRO_MODEL
+    from app.modules.gemini_client import GeminiConfig
+    from app.modules.provenance import build_provenance
+    cfg = GeminiConfig(api_key="x")
+    models = build_provenance(AppConfig())["models"]
+    assert cfg.model_name == spec.model_pro() == models["pro"] == DEFAULT_PRO_MODEL
+    assert cfg.flash_model_name == spec.model_flash() == models["flash"] == DEFAULT_FLASH_MODEL
+    # 규칙 위반 모델이 기본값으로 되살아나지 않는다
+    for banned in ("gemini-3.1-pro-preview", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5"):
+        assert banned not in {DEFAULT_PRO_MODEL, DEFAULT_FLASH_MODEL}
+
+
 def test_provenance_records_role_to_slot_map():
     """두 슬롯 이름만으로는 전환 전후 산출물을 구분할 수 없다 — 역할 표를 남긴다."""
     from app.config import AppConfig

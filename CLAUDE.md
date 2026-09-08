@@ -34,10 +34,27 @@
 - 회귀 가드: `tests/test_e15_style_compose.py` (`model=self.config.model_name` 은 코드
   전체에 **한 번만** 나와야 한다).
 
+## 모델 기본값 단일화 (2026-09-08)
+
+`app/model_policy.py` — `DEFAULT_PRO_MODEL`·`DEFAULT_FLASH_MODEL`·`pro_model_name()`·
+`flash_model_name()`. 문서 대조에서 잡힌 규칙 위반: 위 표는 "코드 기본값은 3.7-flash 로 고정"
+인데 `app/localize/spec.py`(rerender L2b·제목 축약, overlay `llm.resolve_model`)와
+`app/modules/provenance.py` 가 8/31 전환 전 기본값(`gemini-3.1-pro-preview`/`gemini-3.6-flash`)을
+따로 들고 있었다. env 가 없는 노드에서는 **현지화만 금지 모델을 부르고**, run_log
+`provenance.models` 는 실제 호출과 다른 이름을 남겼다(generation 은 이미 3.7 이었다).
+
+- 세 곳(gemini_client 팩토리·GeminiConfig 기본값·spec·provenance)이 전부 이 모듈을 읽는다.
+  의존이 없는 별도 모듈인 이유: overlay 계층은 생성 스택을 import 하지 않는 것이 계약이라
+  gemini_client 에서 가져올 수 없다.
+- env(`GEMINI_MODEL_NAME`·`GEMINI_FLASH_MODEL_NAME`)가 있으면 종전처럼 그쪽이 이긴다 —
+  배포 노드 산출은 안 바뀐다. 바뀌는 것은 env 부재 실행(로컬·테스트)뿐.
+- 회귀 가드: `tests/test_e15_style_compose.py::test_model_defaults_have_a_single_source`
+  (세 계층 동일 + 금지 모델이 기본값으로 되살아나지 않음).
+
 ## 아키텍처 개요
 
-- **Pro 모델** (`gemini-3.1-pro-preview`): 청크별 영상 분석 (Agent 2, `analyze_chunk()`)
-- **Flash 모델** (`gemini-3.6-flash`): 그 외 전 호출 — 스크리닝·스토리 구성·관계 추출·
+- **Pro 슬롯** (기본 `gemini-3.7-flash`, 2026-08-31 전환 — 위 규칙 표 참조): 청크별 영상 분석 (Agent 2, `analyze_chunk()`)
+- **Flash 슬롯** (기본 `gemini-3.7-flash`): 그 외 전 호출 — 스크리닝·스토리 구성·관계 추출·
   리서치·제목 단축·비트 컷·스타일 구성
 - **청크 분할**: 프록시(480p)를 청크별로 물리적 분할 후 각각 독립 업로드 → 10fps 유지 가능
 
@@ -389,7 +406,8 @@ video-localization-project `scripts/localize_run.py`(917줄)를 **충실히 이�
   '고쳤는데 왜 그대로지'가 된다.
 - ⚠ **이식하며 의도적으로 바꾼 것 둘**:
   ① **Flash 모델** — vlp 는 `gemini-3-flash-preview` 를 박아 썼지만 이 레포의 모델
-     규칙이 금지한다. `GEMINI_FLASH_MODEL_NAME`(기본 `gemini-3.6-flash`)을 따른다.
+     규칙이 금지한다. `GEMINI_FLASH_MODEL_NAME`(기본값은 `app.model_policy` 정본 — 2026-09-08
+     전에는 여기만 옛 `gemini-3.6-flash` 가 베껴져 있었다, 아래 §모델 기본값 단일화)을 따른다.
      Pro 는 양쪽이 같다. Flash 가 쓰이는 곳은 L2b 프레임 판독·제목 축약뿐이고 둘 다
      LLM 판단이라 회귀 0 측정 대상이 아니다(발주서 §8-2).
   ② **진행 상태 파일** — vlp 는 자기 레포 `results/` 에 썼다. 엔진 레포에 런타임 상태를
@@ -1232,8 +1250,10 @@ E11·E12 는 **모든** 실패를 fail-loud 로 막았다(조용한 목소리 �
 ## 채널 톤 프로파일 (E19-1, 2026-08-28)
 
 `app/modules/style_tone.py` · `app/data/style_tones/<이름>.json` · `--style-tone <이름>`.
-발주서: `docs/prompts/e19-drama-clip-preset.md` §1 — **E19 의 나머지 항목(2~8)은 미구현**이고
-이 플래그 하나가 E19 전체의 유일한 신규 CLI 플래그다(롤아웃 표면적 최소화 설계).
+발주서: `docs/prompts/e19-drama-clip-preset.md` §1. ~~E19 의 나머지 항목(2~8)은 미구현~~ —
+이 절을 쓴 시점(E19-1 착수)의 말이고, 같은 날 E19-2~9 가 전부 구현됐다(아래 절들). 신규 CLI
+플래그도 이것 하나가 아니다(`--silence-min-residual`·`--design-title-highlight-color`·
+`--design-subtitle-profanity-mask`). 롤아웃 표면적 최소화 설계 의도만 유효하다.
 값 정본: `docs/design_presets/drama_clip_kr.preset.json` 의 `status:"prompt"` 항목 —
 프로파일과 갈리면 `tests/test_e19_style_tone.py` 가 잡는다.
 
