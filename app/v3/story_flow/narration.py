@@ -19,7 +19,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable
 
-from app.v3.story_flow.common import fmt_t, nospace_len, reject_block, span_text
+from app.v3.story_flow.common import fmt_t, nospace_len, reject_block, span_text, screen_text_tag, diegesis_tag
 
 NAR_MAX_CHARS = 16           # 한 문장 공백 제외 상한(권장) — 넘으면 나눈다
 NAR_HARD_MAX_CHARS = 24      # 나눠도 이보다 길면 반려
@@ -47,6 +47,8 @@ PROMPT = """당신은 리캡 쇼츠 구성작가다. 영상은 볼 수 없다 �
 - 서술체(~했죠 / ~는데,). 예고형이 완료 묘사형보다 낫다. **다음 대사의 내용을 먼저 말하지 마라** — 상황만 깔고 대사가 답하게.
 - 근거는 기록뿐: 구체 명사·인물명을 기록 그대로 써라. 화면에 없는 행동을 지어내지 마라.
 - `cover`: 이 문장이 흐르는 동안 **보여줄 화면**을 아래 「쓸 수 있는 화면」에서 조각 id 로 골라라(1~3개, 이어지는 조각). 코드가 그 화면의 소리를 끄고 그 위에 얹는다. **내레이션이 가리키는 정보가 화면에 글자로 있으면(메시지·문서·검색창·자막) 그 화면을 짚고 `hold: true`** — 코드가 그 화면의 마지막 프레임을 내레이션 길이만큼 붙잡아 시청자가 읽게 한다(동작이 시작되는 컷보다 정보가 보이는 컷이 우선). 글자가 없는 화면은 hold 를 쓰지 마라. **문장은 그 화면이 보여주는 것을 말해야 한다** — 발장난을 말하려면 발장난 조각을 짚어라. 대사 중인 얼굴이라도 내레이션이 가리키는 장면이면 괜찮다. 짚을 화면이 없는 말은 쓰지 마라.
+- 화면 글자(📄)가 있는 조각은 그 문구를 근거로 쓸 수 있다(원문을 인용해도 된다). 글자 화면을 짚으면 `hold: true`.
+- ⚠ 표시된 장면(회상/상상/unclear)은 **사건으로 단정하는 문장을 쓰지 마라** — '~하는 상상을 한다'·'~했다고 믿는다'·'~를 떠올린다' 식으로 층위를 드러내라.
 - 훅(before_beat: 0)은 **필수**. ⚠ 점프 자리도 **필수**. 엔딩 뒤 한 줄(after_last)은 선택 — 다음에 벌어질 일의 암시·떡밥(작품 정보·다른 씬 요약에 있는 사건은 화면 없이 말로 예고할 수 있다). 해소·정리 멘트 금지.
 - 최대 {max_n}곳.
 
@@ -143,10 +145,12 @@ def beats_block(beats: list[dict], span_index: dict[str, dict],
             sp = span_index[sid]
             who = [str(x) for x in (sp.get("characters") or []) if x]
             tag = f" ({', '.join(who)})" if who else ""
+            # 2단계(2026-09-08): 글자 원문 📄 · 연출 층위 ⚠(회상/상상) — 없으면 종전 행 그대로
+            extra = screen_text_tag(sp.get("screen_text")) + diegesis_tag(sp.get("diegesis"))
             if sp["is_audio"]:
-                out.append(f"   대사 {sid}{tag}: {span_text(sp)}")
+                out.append(f"   대사 {sid}{tag}: {span_text(sp)}{extra}")
             else:
-                out.append(f"   화면 {sid}: {sp.get('scene_script', '')}")
+                out.append(f"   화면 {sid}: {sp.get('scene_script', '')}{extra}")
     return "\n".join(out)
 
 
@@ -198,6 +202,7 @@ def available_block(available: list[str], span_index: dict[str, dict],
             desc = (desc + f" (대사: {span_text(sp)[:30]})").strip()
         if beat_ids and sid in beat_ids:
             desc = "[비트 안 화면] " + desc
+        desc += screen_text_tag(sp.get("screen_text")) + diegesis_tag(sp.get("diegesis"))
         out.append(f"{sid} | {fmt_t(sp['t_in'])} | {sp['t_out'] - sp['t_in']:.1f}s | {desc}")
     return "\n".join(out) if out else "(없음 — 고른 씬의 모든 조각이 대사로 쓰였다)"
 

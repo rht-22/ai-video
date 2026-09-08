@@ -34,6 +34,12 @@ from app.v3.seq_analyze import MAX_REASKS, _upload_video
 TRANSCRIPT_DIFF_MAX = 0.35     # 정규화 편집거리(공백 제거) — 넘으면 각색으로 보고 복원
 CHUNK_SAMPLE_FPS = 3.0         # Gemini 표본 fps(2026-08-31 사용자 설정 — 종전 기본 1fps)
 MOOD_MAX_CHARS = 20
+SCREEN_TEXT_MAX_CHARS = 300    # 화면 글자 원문 절단 상한(갭 1, 2026-09-08) — 넘으면 자르고 note
+DIEGESIS_VALUES = ("actual", "imagined", "recalled", "unclear")   # 갭 2 연출 층위
+# Stage 2 스키마 버전(2026-09-08 · 2단계) — 캐시 지문에 들어간다. 프롬프트 문구는 지문에
+# 없으므로 span 필드를 더하면 여기 버전을 올려야 옛 캐시가 폐기된다(옛 캐시가 조용히
+# 재사용되면 새 필드가 영원히 비어 있다).
+STAGE2_SCHEMA = "v3_stage2/v2"
 
 
 def _name_list(value: Any, notes: list[str], where: str) -> list[str]:
@@ -88,6 +94,56 @@ def edit_ratio(a: str, b: str) -> float:
 
 
 # ── 모델 응답 검증(순수) ────────────────────────────────────────────────────
+
+def _extra_span_fields(entry: dict, sid: str, is_audio: bool, notes: list[str]) -> dict:
+    """screen_text · has_text · diegesis · is_claim — 갭 1·2·5 (2026-09-08).
+
+    - screen_text: 문자열만. 300자 절단(+note). 비어 있지 않으면 has_text 는 자동 true.
+    - has_text: bool 만. 'true 인데 screen_text 없음' = 못 읽었다는 자기 신고(정독 패스 대상).
+    - diegesis: 화이트리스트 밖은 폐기+note. actual 은 기본이라 키를 남기지 않는다(생략 가능).
+    - is_claim: bool · 유성 한정. 무성 span 이면 폐기+note."""
+    out: dict = {}
+    st = entry.get("screen_text")
+    if st is not None and st != "":
+        if isinstance(st, str):
+            txt = st.strip()
+            if len(txt) > SCREEN_TEXT_MAX_CHARS:
+                notes.append(f"{sid} screen_text {len(txt)}자 → {SCREEN_TEXT_MAX_CHARS}자 절단")
+                txt = txt[:SCREEN_TEXT_MAX_CHARS]
+            if txt:
+                out["screen_text"] = txt
+        else:
+            notes.append(f"{sid} screen_text 가 문자열이 아님({type(st).__name__}) 폐기")
+    ht = entry.get("has_text")
+    if ht is not None:
+        if isinstance(ht, bool):
+            if ht:
+                out["has_text"] = True
+        else:
+            notes.append(f"{sid} has_text {ht!r} 폐기(bool 만)")
+    if out.get("screen_text"):
+        out["has_text"] = True
+    dg = entry.get("diegesis")
+    if dg is not None and dg != "":
+        if dg in DIEGESIS_VALUES:
+            if dg != "actual":
+                out["diegesis"] = dg
+        else:
+            notes.append(f"{sid} diegesis {dg!r} 폐기({'/'.join(DIEGESIS_VALUES)} 만)")
+    ic = entry.get("is_claim")
+    if ic is not None:
+        if not isinstance(ic, bool):
+            notes.append(f"{sid} is_claim {ic!r} 폐기(bool 만)")
+        elif not is_audio:
+            if ic:
+                notes.append(f"{sid} 무성 span 의 is_claim 폐기(대사가 없다)")
+        elif ic:
+            out["is_claim"] = True
+    return out
+
+
+EXTRA_SPAN_KEYS = ("screen_text", "has_text", "diegesis", "is_claim")
+
 
 def validate_stage2_response(resp: Any, chunk_spans: list[dict], *,
                              final_attempt: bool) -> tuple[list[dict], list[str], list[str]]:
@@ -227,6 +283,9 @@ def validate_stage2_response(resp: Any, chunk_spans: list[dict], *,
             }
             if subj:
                 row["subject_pos"] = subj
+            # 2단계 additive 필드(2026-09-08, 갭 1·2·5) — 전부 선택. 오값은 **키만 폐기+note**
+            # (반려가 아니다 — 반려면 다른 항목까지 통째로 날아간다). 키가 없으면 종전과 같다.
+            row.update(_extra_span_fields(entry, sid, gsp["is_audio"], notes))
             spans_out.append(row)
         if missing:
             if final_attempt:
@@ -441,7 +500,12 @@ def assemble_chunk_meanings(norm: list[dict], chunk_spans: list[dict]) -> list[d
                 "time_authority": gsp["time_authority"],
                 **({"subject_pos": s["subject_pos"]}
                    if s.get("subject_pos") else {}),          # additive — 크롭 앵커 재료
+                # 2단계 additive(2026-09-08) — 키가 있을 때만 옮긴다(없으면 문서 종전과 동일)
+                **{k: s[k] for k in EXTRA_SPAN_KEYS if k in s},
             })
+        # meaning 수준 screen_texts — 걸음 1·2 재료(meaning_table)가 span 을 안 보고
+        # meaning 만 보기 때문에 여기서 모아 둔다(순서 = span 순서). 없으면 키도 없다.
+        texts = [sp["screen_text"] for sp in spans_doc if sp.get("screen_text")]
         out.append({
             "number": num,
             "time": {"start": schemas.format_ts(float(first["t_in"])),
@@ -451,6 +515,7 @@ def assemble_chunk_meanings(norm: list[dict], chunk_spans: list[dict]) -> list[d
             "importance": m["importance"],
             "mood": m["mood"],
             "spans": spans_doc,
+            **({"screen_texts": texts} if texts else {}),
         })
     return out
 
@@ -502,6 +567,9 @@ PROMPT_TEMPLATE = """당신은 방송 영상의 장면 기록가다. 첨부한 �
    ⚠ **묘사는 그 span 의 영상 내 시각으로 실제로 이동해 확인하고 적어라** — 이야기 흐름으로 짐작해 앞당겨 적지 마라(실사고: 뒤에 나올 장면을 14초 이른 span 에 적었다).
    ⚠ **조각 안에서 화자가 바뀌면 heard 를 화자별 여러 행으로**, 말한 순서대로 나눠 적어라 — 자막이 화자별 색을 입히는 근거다(한 행에 뭉치면 뒷사람 대사가 앞사람 색으로 나간다).
    ⚠ heard 는 전사를 베끼는 칸이 아니다. 위 전사표는 참고일 뿐이고, **들리는 대로** 적어라 — 전사가 잡음·음악에 망가져 있을 수 있다(같은 말이 수십 번 반복되는 등). 최종 대사는 코드가 전사와 당신의 heard 를 대조해 확정하니, 당신은 각색하지 말고 들은 것만 정확히 옮기면 된다.
+   ⚠ **화면에 글자가 보이면(메시지·기사 헤드라인·게시글·댓글·검색창·문서·명패·자막) `screen_text` 에 읽어서 그대로 옮겨라.** 원문 그대로, 요약·해석 금지. 여러 줄이면 `/` 로 잇는다. 못 읽겠으면 `screen_text` 는 비우고 `has_text: true` 만 적어라 — **지어내지 마라**(코드가 원본 해상도로 다시 읽는다). 글자가 없는 span 은 두 칸 다 생략.
+   ⚠ `diegesis`: 이 장면이 **지금 실제로 일어나는 일**(`actual`, 생략 가능)인지, 인물의 상상(`imagined`)·회상/플래시백(`recalled`)·꿈인지 적어라. 단서: 그 장면을 바라보는 인물의 클로즈업이 앞뒤에 있는가 · 색/초점/사운드가 바뀌는가 · 같은 시각 그 인물이 다른 장소에 있는가. **확신이 없으면 `unclear`** — 확신 없이 `actual` 로 적지 마라(상상 장면을 사건으로 적으면 제목까지 거짓이 된다).
+   ⚠ `is_claim`(유성 span 만): 인물이 **앞으로의 행동을 단언·맹세·약속**하거나 남을 단정하는 대사(「저 여자가 먼저 인사해도 쌩깔 거야」류)면 `is_claim: true`.
 4. **무성 span 한정, 선택 필드** subject_pos: 그 span 의 주 피사체(화면이 보여주려는 대상 — 물건·화면·손 등)가 프레임 가로 어디에 있는지 "left"/"center"/"right" 로 적어라. **중앙에서 뚜렷이 벗어난 경우에만** 적고, 애매하면 생략하라(생략 = 중앙 취급). 세로 쇼츠 크롭이 이 값으로 잘리는 쪽을 정한다 — 구석의 피사체가 크롭에 잘려 나가는 것을 막는 재료다.
 {reject_block}
 ## 출력 (JSON 만)
@@ -512,7 +580,11 @@ PROMPT_TEMPLATE = """당신은 방송 영상의 장면 기록가다. 첨부한 �
       {{"id": "sp0000", "scene_script": "…", "characters": ["이름"], "importance": 3,
         "heard": [{{"speaker": "이름", "line": "들은 대사 그대로"}}]}},
       {{"id": "sp0001", "scene_script": "…", "characters": [], "importance": 4,
-        "subject_pos": "right"}}
+        "subject_pos": "right", "screen_text": "오빠랑 같이 해서 너무 좋았어 / 나도 즐거웠어", "has_text": true}},
+      {{"id": "sp0002", "scene_script": "…", "characters": ["이름"], "importance": 3,
+        "diegesis": "unclear"}},
+      {{"id": "sp0003", "scene_script": "…", "characters": ["이름"], "importance": 3,
+        "heard": [{{"speaker": "이름", "line": "…"}}], "is_claim": true}}
     ]}}
 ]}}"""
 

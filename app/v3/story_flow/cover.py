@@ -407,7 +407,12 @@ def choose_cover(anchor: tuple[str, int], group: dict, beats: list[dict],
     if group.get("cover_ids"):
         dw = designated_window(group["cover_ids"], beats, span_index, L, extra_used=placed,
                                allow_ids=allow_ids)
-        if dw is not None and group.get("hold") and dw["focus1"] - dw["focus0"] < L - 1e-6:
+        # 글자 화면은 자동 hold(갭 1, 2026-09-08): Stage 2 가 screen_text 를 읽은 조각을 짚었으면
+        # 모델이 hold 를 안 달았어도 붙잡는다 — 읽을 글자가 있는 화면을 넓혀 얼굴 컷을 섞지 않는다.
+        auto_hold = any((span_index.get(x) or {}).get("screen_text") for x in group["cover_ids"])
+        if auto_hold and not group.get("hold"):
+            log(f"  [v3/cover] {tag}: 지정 화면에 글자(📄) — hold 자동 승격")
+        if dw is not None and (group.get("hold") or auto_hold) and dw["focus1"] - dw["focus0"] < L - 1e-6:
             # 정보 화면 붙잡기(2026-09-03): 모델이 '글자가 있는 화면'이라 판정한 지정 화면이
             # 내레이션보다 짧으면, 이웃 조각으로 넓히지 않고 **마지막 프레임을 붙잡는다**
             # (넓히면 얼굴 컷이 섞여 정보가 사라진다 — EP01 카톡 화면 0.1초 실사고).

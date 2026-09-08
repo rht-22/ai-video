@@ -52,6 +52,11 @@ def meaning_rows(stage2_doc: dict) -> list[dict]:
                     "mood": str(m.get("mood") or ""),
                     "span_ids": [s.get("span_id") for s in m.get("spans") or []
                                  if isinstance(s.get("span_id"), str)],
+                    # 2단계(2026-09-08): 글자 원문(걸음 1·2 재료)과 연출 층위(actual 이
+                    # 아닌 값의 집합 — 하나라도 있으면 그 사건 단위는 검수 대상)
+                    "screen_texts": list(m.get("screen_texts") or []),
+                    "diegesis": sorted({str(s.get("diegesis")) for s in m.get("spans") or []
+                                        if s.get("diegesis") and s.get("diegesis") != "actual"}),
                 })
     return rows
 
@@ -77,8 +82,35 @@ def meaning_table(rows: list[dict], only: set[int] | None = None) -> str:
         lines.append(
             f"m{r['idx']:03d} | {fmt_t(r['t0'])}~{fmt_t(r['t1'])} | "
             f"{r['t1'] - r['t0']:.0f}s | imp {r['importance']} | {r['mood']} | "
-            f"{'/'.join(r['characters'])} | {r['content']}")
+            f"{'/'.join(r['characters'])} | {r['content']}"
+            + screen_text_tag(r.get("screen_texts"), limit=2)
+            + diegesis_tag(r.get("diegesis")))
     return "\n".join(lines)
+
+
+SCREEN_TEXT_ROW_CHARS = 60   # 재료 표 한 행에 싣는 글자 원문 상한(전문은 span 기록에 있다)
+
+
+def screen_text_tag(texts, limit: int = 1) -> str:
+    """재료 표 꼬리 ` 📄 "…"` — 없으면 빈 문자열(프롬프트 종전과 바이트 동일)."""
+    if isinstance(texts, str):
+        texts = [texts]
+    texts = [str(t).strip() for t in (texts or []) if str(t or "").strip()]
+    if not texts:
+        return ""
+    shown = []
+    for t in texts[:limit]:
+        shown.append(t if len(t) <= SCREEN_TEXT_ROW_CHARS else t[:SCREEN_TEXT_ROW_CHARS] + "…")
+    more = f" (+{len(texts) - limit})" if len(texts) > limit else ""
+    return " 📄 " + " / ".join(f'"{t}"' for t in shown) + more
+
+
+def diegesis_tag(values) -> str:
+    """사건 단위·조각의 연출 층위 표시 — actual 뿐이면 빈 문자열."""
+    if isinstance(values, str):
+        values = [values]
+    vals = [v for v in (values or []) if v and v != "actual"]
+    return f" ⚠ 회상/상상({'/'.join(sorted(set(vals)))})" if vals else ""
 
 
 def span_row(sid: str, sp: dict) -> str:
@@ -99,8 +131,10 @@ def span_row(sid: str, sp: dict) -> str:
             tag += " ↪다음과 한 문장"
         elif sp.get("pause_cont_from"):
             tag += " ↪앞 조각에서 이어졌을 수 있음"
-        return f"{sid} | 유성 {dur:.1f}s | imp {sp['importance']}{tag} | {speech}"
-    return f"{sid} | 무성 {dur:.1f}s | imp {sp['importance']} | {sp.get('scene_script', '')}"
+        return (f"{sid} | 유성 {dur:.1f}s | imp {sp['importance']}{tag} | {speech}"
+                + screen_text_tag(sp.get("screen_text")) + diegesis_tag(sp.get("diegesis")))
+    return (f"{sid} | 무성 {dur:.1f}s | imp {sp['importance']} | {sp.get('scene_script', '')}"
+            + screen_text_tag(sp.get("screen_text")) + diegesis_tag(sp.get("diegesis")))
 
 
 def span_text(sp: dict) -> str:

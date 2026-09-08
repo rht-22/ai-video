@@ -23,6 +23,7 @@ face_id.py 는 014335e 가 지웠다가 2026-08-31 사용자 지시로 복원(�
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import threading
 import time
@@ -52,7 +53,7 @@ from app.v3.transcribe import WHISPER_MODEL_NAME, transcribe_words
 V3_MODEL_DEFAULT = "gemini-3.7-flash"
 
 V3_STEPS = ("init", "research", "probe", "proxy", "grid", "seq_analyze",
-            "chunk_split", "chunk_analyze", "story", "resources",
+            "chunk_split", "chunk_analyze", "episode_map", "plan", "story", "resources",
             "draft_render", "style", "render", "validate")
 
 
@@ -151,6 +152,8 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
            subtitle_skip_singing: bool = False,
            channel_design: dict | None = None,
            narration_original_db: float | None = None,
+           episode_map: bool = False,
+           plan_shorts: int | None = None, plan_slot: int | None = None,
            scene_threshold: float = SCENE_THRESHOLD, log=print) -> Path:
     """v3 실행(M1 grid·Stage1 + M2 chunk_split·Stage2) → output_dir 반환.
     channel_design: 채널 design 키(`--design-*` 어댑터 어휘) — Stage 4 프리셋 기본값을
@@ -401,6 +404,13 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
             doc, refine_audit = refine_exception(
                 get_gemini(), doc, grid, Path(video_path),
                 output_dir / "refine_probes", log=log)
+            # 갭 7 ⑤(2단계 2-5): 잘려 나갈 exception 머리를 두 문장으로 남긴다 — 3단계 사실
+            # 장부 재료. refine 이 쓴 Flash 콜을 이어 세서 편당 예산을 넘지 않는다.
+            from app.v3.refine import describe_zone_heads
+            doc, head_audit = describe_zone_heads(
+                get_gemini(), doc, Path(video_path), output_dir / "refine_probes",
+                used_calls=int(refine_audit.get("flash_calls") or 0), log=log)
+            refine_audit = {**refine_audit, "head_desc": head_audit}
             _write_json(stage1_path, doc)
             step("seq_analyze", elapsed=round(time.time() - t0, 1),
                  refine=refine_audit,
@@ -430,8 +440,24 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
                     retry_failed=retry_failed_chunks,
                     get_gemini=get_gemini, step=step, log=log)
 
-        # ── M3: Stage 3 story → edit_plan·자막·TTS cue ────────────────────
+        # ── 3단계: 회차 지도(--episode-map · 미지정 = 단계 없음) ──────────
         stage2_path = output_dir / "stage2.json"
+        if episode_map and stage2_path.exists():
+            _run_map(output_dir=output_dir, work_title=work_title, grid=grid,
+                     research=research, from_step=from_step,
+                     get_gemini=get_gemini, step=step, log=log)
+        elif episode_map:
+            log("  [v3/map] stage2.json 없음 — 건너뜀(Stage 2 가 선행돼야 한다)")
+            step("episode_map", skipped="stage2.json 없음")
+
+        # ── 4단계: plan(N편) — 지도 위에서(지도 없으면 크게 실패) ──────────
+        if plan_shorts is not None and stage2_path.exists():
+            _run_plan(output_dir=output_dir, work_title=work_title, grid=grid, research=research,
+                      from_step=from_step, n=int(plan_shorts),
+                      exclude_topics=exclude_topics or (), exclude_ranges=exclude_ranges or (),
+                      get_gemini=get_gemini, step=step, log=log)
+
+        # ── M3: Stage 3 story → edit_plan·자막·TTS cue ────────────────────
         if skip_stage3:
             log("  [v3/story] 건너뜀(--skip-stage3)")
             step("story", skipped="--skip-stage3")
@@ -448,6 +474,7 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
                     story_flow=story_flow,
                     exclude_topics=exclude_topics, exclude_ranges=exclude_ranges,
                     subtitle_skip_singing=subtitle_skip_singing,
+                    use_episode_map=episode_map, plan_slot=plan_slot,
                     get_gemini=get_gemini, step=step, log=log)
 
         # ── M6-A: 훅 변형 — M3 산출 위에(본편 불변 · 렌더는 변형 발주 시) ──
@@ -531,10 +558,13 @@ def _run_m2(*, output_dir: Path, video_path: Path, stage1_path: Path, grid: dict
     # 재구성하면 같은 번호의 chunk 라도 다른 경계·다른 span 체계다. 지문이 다르면
     # 캐시를 통째로 버린다(옛 grid 의 meanings 가 새 문서에 접합되던 리뷰 재현 수정).
     import hashlib
+    from app.v3.chunk_analyze import STAGE2_SCHEMA
     fingerprint = hashlib.sha1(json.dumps(
         {"plan": chunks_plan,
          "spans": [[s["id"], s["t_in"], s["t_out"]] for s in
-                   grid.get("span_candidates") or []]},
+                   grid.get("span_candidates") or []],
+         # 스키마 버전(2단계, 2026-09-08) — span 필드가 늘면 옛 캐시는 새 필드가 영원히 빈다
+         "schema": STAGE2_SCHEMA},
         sort_keys=True).encode("utf-8")).hexdigest()[:16]
     ca_ckpt = output_dir / "checkpoint_chunk_analyze.json"
     done: dict[str, Any] = {}
@@ -553,7 +583,7 @@ def _run_m2(*, output_dir: Path, video_path: Path, stage1_path: Path, grid: dict
                 else:
                     log("  [v3/stage2] --retry-failed-chunks: 실패 청크 없음 — 캐시 그대로")
         elif cached:
-            log("  [v3/stage2] ⚠ 상류(stage1/grid) 변경 감지 — 청크 캐시 폐기")
+            log("  [v3/stage2] ⚠ 상류(stage1/grid) 또는 Stage 2 스키마 변경 감지 — 청크 캐시 폐기")
 
     research_ctx = (research or {}).get("work_context") or ""
     names = [c["character_name"] for c in (research or {}).get("cast_images") or []
@@ -625,11 +655,28 @@ def _run_m2(*, output_dir: Path, video_path: Path, stage1_path: Path, grid: dict
                             "assignments": cc_all,
                             "status": "ok" if cc_all else "skipped"},
     }
-    stage2_doc = {**stage1_doc, "schema": "v3_stage2/v1",
+    stage2_doc = {**stage1_doc, "schema": STAGE2_SCHEMA,
                   "coverage": {"chunks_planned": len(manifest["chunks"]),
                                "analyzed": analyzed, "failed": failed,
                                "not_split": not_split, "failures": fail_notes},
                   "validation": validation}
+    # ── 정독 패스(2단계 · 갭 1, 2026-09-08) — stage2.json 조립 직전, 그 자리에서 써 넣는다.
+    # 하류가 두 파일을 합치지 않게 stage2.json 은 정독 결과가 반영된 문서 하나다.
+    # 사이드카는 청크 캐시와 같은 지문에 묶인다(재개 시 재호출 0).
+    from app.v3 import screen_text as _st
+    _dur = (grid.get("source") or {}).get("duration_sec")
+    try:
+        _st_audit = _st.run_screen_text_pass(
+            get_gemini() if _st.targets(stage2_doc) else None, stage2_doc, video_path,
+            output_dir, duration_sec=_dur, fingerprint=fingerprint, log=log)
+    except Exception as e:  # noqa: BLE001 — 정독은 부가물: 실패해도 초벌로 진행(기록)
+        _st_audit = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
+        log(f"  [v3/screen_text] ⚠ 정독 패스 실패 — 초벌 유지: {e}")
+    if _st_audit.get("scenes") or _st_audit.get("error"):
+        step("screen_text_read", **_st_audit)
+        if _st_audit.get("scenes"):
+            log(f"  [v3/screen_text] 대상 {_st_audit['targets']}조각 · {_st_audit['scenes']}장면 · "
+                f"호출 {_st_audit['calls']}/{_st_audit['budget']} · 채움 {_st_audit['filled']}")
     _write_json(output_dir / "stage2.json", stage2_doc)
     step("chunk_analyze", elapsed=round(time.time() - t0, 1),
          analyzed=analyzed, failed=failed, not_split=not_split,
@@ -681,6 +728,133 @@ def _ensure_singing_windows(output_dir: Path, video_path: Path, stage2_doc: dict
     return ok
 
 
+MAP_FILE = "episode_map.json"
+MAP_OVERRIDES_FILE = "map_overrides.json"
+
+
+def load_episode_map(output_dir: Path) -> dict | None:
+    p = output_dir / MAP_FILE
+    return _read_json(p) if p.exists() else None
+
+
+def _run_map(*, output_dir: Path, work_title: str, grid: dict, research: dict | None,
+             from_step: str | None, get_gemini, step, log) -> None:
+    """3단계 회차 지도(2026-09-08) — Stage 2 기록 위 정방향·역방향 두 번 읽기. Stage 2 를
+    덮어쓰지 않는 additive 층. 캐시 = stage2 내용 지문(2단계 재실행이면 자동 무효).
+    사람 교정 `map_overrides.json` 은 매번 로드 직후 얹는다(캐시 재사용 시에도)."""
+    from app.v3 import episode_map as em
+    stage2_doc = _read_json(output_dir / "stage2.json")
+    fp = em.fingerprint_of(stage2_doc)
+    map_path = output_dir / MAP_FILE
+    ov_path = output_dir / MAP_OVERRIDES_FILE
+    overrides = _read_json(ov_path) if ov_path.exists() else None
+    spans = em.span_table(stage2_doc)
+    if map_path.exists() and from_step != "episode_map":
+        cached = _read_json(map_path)
+        if cached.get("fingerprint") == fp:
+            if overrides:
+                notes = em.apply_overrides(cached, overrides, spans)
+                cached["review"] = em.build_review(cached, spans)
+                _write_json(map_path, cached)
+                for n in notes:
+                    log(f"  [v3/map] 사람 교정 — {n}")
+            log(f"  [v3/map] 캐시 로드 — 레지스터 {len(cached.get('register') or [])} · "
+                f"검수 {len(cached.get('review') or [])}(--from-step episode_map 로 재구성)")
+            step("episode_map", cached=True, register=len(cached.get("register") or []),
+                 review=len(cached.get("review") or []))
+            return
+        log("  [v3/map] ⚠ 상류(stage2) 변경 감지 — 회차 지도 폐기")
+    t0 = time.time()
+    research_ctx = (research or {}).get("work_context") or ""
+    names = [c["character_name"] for c in (research or {}).get("cast_images") or []
+             if c.get("character_name")]
+    map_doc, audit = em.run_episode_map(
+        get_gemini(), stage2_doc, grid, work_title=work_title, research_context=research_ctx,
+        character_names=names or None, overrides=overrides, log=log)
+    _write_json(map_path, map_doc)
+    step("episode_map", elapsed=round(time.time() - t0, 1), calls=audit["calls"],
+         sequences=audit["sequences"], register=audit["register"],
+         register_paid=audit["register_paid"], review=audit["review"],
+         facts=len(map_doc["facts_ledger"]), beliefs=len(map_doc["beliefs_ledger"]),
+         diegesis_final=len(map_doc["diegesis_final"]),
+         audit_forward={k: len(v) for k, v in audit["forward"].items()},
+         audit_backward={k: len(v) for k, v in audit["backward"].items()})
+    log(f"  [v3/map] 완료 — 시퀀스 {audit['sequences']} · 호출 {audit['calls']} · 사실 "
+        f"{len(map_doc['facts_ledger'])} · 믿음 {len(map_doc['beliefs_ledger'])} · 레지스터 "
+        f"{audit['register']}(회수 {audit['register_paid']}) · diegesis {len(map_doc['diegesis_final'])} · "
+        f"검수 {audit['review']} → {MAP_FILE}")
+
+
+PLAN_FILE = "checkpoint_plan.json"
+
+
+def _run_plan(*, output_dir: Path, work_title: str, grid: dict, research: dict | None,
+              from_step: str | None, n: int, exclude_topics, exclude_ranges,
+              get_gemini, step, log) -> None:
+    """4단계 plan(N편) — episode_map.json 위에서. 캐시 = 지도 지문 + stage2 지문 + N + 제외."""
+    from app.v3 import plan as pl
+    stage2_doc = _read_json(output_dir / "stage2.json")
+    map_doc = load_episode_map(output_dir)
+    if map_doc is None:
+        raise ValueError("--plan-shorts 는 회차 지도가 필요하다 — --episode-map 을 함께 주거나 먼저 돌려라")
+    from app.v3.story_flow.common import meaning_rows as _mr
+    from app.v3.story_flow.select import excluded_meaning_ids as _ex
+    excluded = _ex(_mr(stage2_doc), tuple((float(a), float(z)) for a, z in (exclude_ranges or ())))
+    fp = pl.plan_fingerprint(map_doc, stage2_doc, n, excluded)
+    path = output_dir / PLAN_FILE
+    if path.exists() and from_step not in ("plan", "episode_map"):
+        cached = _read_json(path)
+        if cached.get("fingerprint") == fp:
+            log(f"  [v3/plan] 캐시 로드 — 편 {len(cached.get('shorts') or [])}개(--from-step plan 으로 재구성)")
+            step("plan", cached=True, shorts=len(cached.get("shorts") or []))
+            return
+        log("  [v3/plan] ⚠ 상류(지도/stage2/N/제외) 변경 감지 — plan 폐기")
+    t0 = time.time()
+    doc, audit = pl.run_plan(
+        get_gemini(), stage2_doc, grid, n=n, map_doc=map_doc, work_title=work_title,
+        research_context=(research or {}).get("work_context") or "",
+        exclude_topics=tuple(exclude_topics or ()), exclude_ranges=tuple(exclude_ranges or ()), log=log)
+    _write_json(path, doc)
+    step("plan", elapsed=round(time.time() - t0, 1), n=n, shorts=len(doc["shorts"]),
+         calls=audit["calls"], kinds=[it["kind"] for it in doc["shorts"]],
+         audit_attempts=audit["plan"])
+    log(f"  [v3/plan] 완료 — 편 {len(doc['shorts'])}/{n} · 호출 {audit['calls']} → {PLAN_FILE}")
+
+
+def label_facts_for(output_dir: Path, timeline: list[dict], grid: dict) -> dict | None:
+    """갭 10 라벨 검증 재료(순수 재료 — LLM 0콜): stage2 색인에서 컷별 화면 글자·인물, 지도에서
+    회수된 레지스터. stage2.json 이 없으면 None(종전)."""
+    s2 = output_dir / "stage2.json"
+    if not s2.exists():
+        return None
+    from app.v3.story import build_span_index
+    idx, _ = build_span_index(_read_json(s2), grid)
+    screen = {i for i, c in enumerate(timeline)
+              if any((idx.get(x) or {}).get("screen_text") for x in c.get("span_ids") or [])}
+    chars: dict[int, list[str]] = {}
+    for i, c in enumerate(timeline):
+        names: list[str] = []
+        for x in c.get("span_ids") or []:
+            for nm in (idx.get(x) or {}).get("characters") or []:
+                if nm and nm not in names:
+                    names.append(str(nm))
+        if names:
+            chars[i] = names
+    m = load_episode_map(output_dir)
+    regs = [{"id": r["id"], "setup": r.get("setup"), "payoff": r.get("payoff")}
+            for r in (m or {}).get("register") or [] if r.get("payoff")]
+    return {"screen_clips": screen, "clip_characters": chars, "register": regs}
+
+
+def stage2_schema_key(stage2_doc: dict) -> str | None:
+    """story 지문에 넣을 Stage 2 스키마 키 — `v3_stage2/v1`(또는 없음)이면 None(종전 지문)."""
+    sch = str(stage2_doc.get("schema") or "")
+    m = re.fullmatch(r"v3_stage2/v(\d+)", sch)
+    if not m or int(m.group(1)) < 2:
+        return None
+    return sch
+
+
 def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
             research: dict | None, from_step: str | None,
             story_target_sec: float | None, story_max_sec: float | None,
@@ -690,7 +864,9 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
             story_flow: str = "legacy",
             exclude_topics: tuple[str, ...] | None = None,
             exclude_ranges: tuple[tuple[float, float], ...] | None = None,
-            subtitle_skip_singing: bool = False) -> None:
+            subtitle_skip_singing: bool = False,
+            use_episode_map: bool = False,
+            plan_slot: int | None = None) -> None:
     """Stage 3(story) + 경계면 조립 + resources(TTS 합성) — 발주서 v3-m3.
 
     story 캐시는 M2 와 같은 규율로 **상류 지문**에 묶는다 — stage2 의 meaning/span
@@ -713,6 +889,11 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
         "spans": [[sid, span_index[sid]["t_in"], span_index[sid]["t_out"],
                    span_index[sid]["importance"]] for sid in span_order],
         "target": target, "max": max_sec}
+    # Stage 2 스키마(2단계, 2026-09-08) — v2 이상일 때만 키를 넣는다(v1 잡의 지문은 종전 그대로
+    # → 캐시 회귀 0). v2 재분석은 span 경계가 같아도 재료(글자·연출 층위)가 다르다.
+    _s2_schema = stage2_schema_key(stage2_doc)
+    if _s2_schema:
+        _fp_payload["stage2_schema"] = _s2_schema
     # 템플릿 목록도 지문 재료다(길이 노브와 같은 규율) — 단, 미지정이면 키를 아예
     # 안 넣어 기존 잡의 지문이 그대로 유지된다(캐시 회귀 0).
     if story_templates:
@@ -747,6 +928,31 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
         _fp_payload["exclude"] = {"topics": list(_ex_topics),
                                   "ranges": [list(r) for r in _ex_ranges]}
         log(f"  [v3/story] 제외 — 주제 {len(_ex_topics)}건 · 구간 {len(_ex_ranges)}개")
+    # 회차 지도(3단계, 2026-09-08) — 있을 때만 지문 재료(지도가 바뀌면 편성 재료가 다르다).
+    # 미지정·파일 없음 = 키 없음(캐시 회귀 0). human 흐름만 소비한다(legacy 는 프롬프트 동결).
+    _map_doc = load_episode_map(output_dir) if (use_episode_map and story_flow == "human") else None
+    if _map_doc:
+        _fp_payload["episode_map"] = hashlib.sha1(json.dumps(
+            {k: _map_doc.get(k) for k in ("fingerprint", "register", "diegesis_final", "facts_ledger")},
+            sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
+        log(f"  [v3/story] 회차 지도 소비 — 레지스터 {len(_map_doc.get('register') or [])} · "
+            f"diegesis_final {len(_map_doc.get('diegesis_final') or {})}")
+    # plan 항목(4단계) — 걸음 1 을 대체한다. 지문 재료(같은 잡에서 slot 을 바꾸면 story 재구성).
+    _topic_override = None
+    if plan_slot is not None:
+        if story_flow != "human":
+            raise ValueError("--plan-slot 은 --story-flow human 전용이다")
+        _plan_p = output_dir / PLAN_FILE
+        if not _plan_p.exists():
+            raise ValueError("--plan-slot 인데 checkpoint_plan.json 이 없다 — --plan-shorts N 을 먼저")
+        _plan = _read_json(_plan_p)
+        _items = _plan.get("shorts") or []
+        if not 1 <= int(plan_slot) <= len(_items):
+            raise ValueError(f"--plan-slot {plan_slot}: plan 에는 편이 {len(_items)}개다")
+        from app.v3.plan import plan_item_as_topic
+        _topic_override = plan_item_as_topic(_items[int(plan_slot) - 1])
+        _fp_payload["plan_slot"] = {"fingerprint": _plan.get("fingerprint"), "slot": int(plan_slot)}
+        log(f"  [v3/story] plan 편 {plan_slot}/{len(_items)} — {_topic_override['kind']} 「{_topic_override['topic'][:40]}」")
     fingerprint = hashlib.sha1(json.dumps(
         _fp_payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
@@ -785,13 +991,34 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
         if story_flow == "human":
             from app.v3.story_flow import run_story_flow
             log("  [v3/story] 사람 편집 흐름 체인(topic→scenes→lines→narration→cover)")
-            story_doc, audit = run_story_flow(
-                get_gemini(), stage2_doc, grid, work_title=work_title,
-                research_context=research_ctx, target_sec=target, max_sec=max_sec,
-                video_path=video_path, output_dir=output_dir,
+            _flow_kw = dict(
+                work_title=work_title, research_context=research_ctx, target_sec=target,
+                max_sec=max_sec, video_path=video_path, output_dir=output_dir,
                 stage1_doc=(_read_json(_s1p) if _s1p.exists() else None),
-                tone_block=tone_block,
-                exclude_topics=_ex_topics, exclude_ranges=_ex_ranges, log=log)
+                tone_block=tone_block, exclude_topics=_ex_topics, exclude_ranges=_ex_ranges,
+                episode_map=_map_doc, topic_override=_topic_override, log=log)
+            story_doc, audit = run_story_flow(get_gemini(), stage2_doc, grid, **_flow_kw)
+            # 갭 8 역류(3단계 3-3): 덮개 프로브가 되돌림 상한 뒤에도 "문장·화면 모순"을 남기면
+            # lines/topic 수준 모순이다 — 지도의 corrections 에 관측 스키마로 쓰고 **편당 1회**
+            # story 를 다시 돈다(지난 관측을 걸음 1·3 의 첫 반려 사유로). 무한 루프 금지.
+            _left = audit.get("narration_contradictions_left") or []
+            if _map_doc is not None and _left:
+                from app.v3 import episode_map as em
+                _corr = []
+                for x in _left:
+                    _cov = next((c for b in story_doc.get("beats") or [] for c in b.get("covers") or []
+                                 if f"{c.get('position')}{b.get('number')}" == x.get("anchor")), None)
+                    _corr.append(em.correction_entry(
+                        "narration", f"「{x.get('text', '')[:60]}」 ↔ 화면 「{x.get('seen', '')[:60]}」 {x.get('reason', '')}",
+                        t=(_cov or {}).get("t_in"), span_id=((_cov or {}).get("span_ids") or [None])[0],
+                        frame_path=None))
+                _map_doc.setdefault("corrections", []).extend(_corr)
+                _write_json(output_dir / MAP_FILE, _map_doc)
+                log(f"  [v3/story] ↩ 갭 8 역류 — 모순 {len(_corr)}건을 지도 corrections 에 기록, story 1회 재실행")
+                story_doc, audit2 = run_story_flow(get_gemini(), stage2_doc, grid,
+                                                   corrections=_corr, **_flow_kw)
+                audit2["rerun_after_corrections"] = {"first": audit, "corrections": _corr}
+                audit = audit2
         else:
             story_doc, audit = st.run_story(
                 get_gemini(), stage2_doc, grid, work_title=work_title,
@@ -883,6 +1110,17 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
         log(f"  [v3/자막] ⚠ 인명 오인식 의심 {len(name_warns)}건: "
             + ", ".join(f"{w['token']}→{w['suggest']}" for w in name_warns[:3])
             + (" (교정 적용)" if name_fixes else " (경고만 — --fix-names 로 교정)"))
+    # 사람 게이트 산출물(2단계, 2026-09-08) — story 의 review(연출 층위) + 인명 표기 불일치를
+    # 한 파일에 모은다. 대시보드 노출은 ves 몫. 항목이 없어도 파일은 쓴다(빈 목록 = 확인 없음).
+    _review = [dict(r) for r in (story_doc.get("review") or [])]
+    for v in name_variants:
+        _review.append({"kind": "name", "a": v.get("a"), "b": v.get("b"),
+                        "count_a": v.get("count_a"), "count_b": v.get("count_b"),
+                        "suggest": v.get("suggest"),
+                        "why": "전사 내부 표기 불일치 — 사전 제안이 없으면 사람 확인"})
+    _write_json(output_dir / "review.json", {"schema": "v3_review/v1", "items": _review})
+    if _review:
+        log(f"  [v3/review] 사람 확인 항목 {len(_review)}건 → review.json")
     for v in name_variants:
         _sug = (f"{v['suggest']}" + (" (교정 적용)" if name_variant_fixes
                                      else " — --fix-names 로 교정)")
@@ -1147,12 +1385,15 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
         # M16: 라벨은 Stage 4 가 초안을 보며 직접 쓴다 — 대사 타임라인(편집본
         # 좌표)과 영상 길이를 준다. label_plan 은 구 체크포인트 호환용으로만 남긴다.
         _dur = sum(_clip_len(c) for c in plan["timeline"])
+        # 갭 10(2026-09-08): 라벨 검증 재료 — 컷별 화면 글자 유무·인물(Stage 2)·레지스터(지도).
+        # 없으면 None = 종전 프롬프트·검증 그대로.
+        _lf = label_facts_for(output_dir, plan["timeline"], grid)
         style_doc, audit = stage4.run_style(get_gemini(), draft_path, story_doc,
                                             preset=_preset,
                                             windows=win, labels=label_plan,
                                             dialogue=segments, duration=_dur,
                                             band=band, timeline=plan["timeline"],
-                                            log=log)
+                                            label_facts=_lf, log=log)
         _write_json(style_ckpt, {"fingerprint": style_fp, "style": style_doc})
         step("style", elapsed=round(time.time() - t0, 1),
              attempts=len(audit["attempts"]), fallback=audit.get("fallback", False),

@@ -727,6 +727,93 @@ def subject_crop_map(timeline: list[dict], *, video_path: Path,
     return out_map
 
 
+def band_crop_size(aspect_ratio: str, src_size: tuple[int, int],
+                   picture: dict | None) -> tuple[int, int, int, int, int, int] | None:
+    """밴드 비율의 최대 크롭 (crop_w, crop_h, pic_x, pic_y, pic_w, pic_h) — subject_crop_map 과
+    같은 수식(그림 사각형 안 · 높이 우선). 비율이 깨졌거나 가로 여유가 없으면 None."""
+    from app.v3 import letterbox
+    src_w, src_h = src_size
+    try:
+        r_w, r_h = (int(x) for x in str(aspect_ratio).split(":"))
+    except (ValueError, AttributeError):
+        return None
+    if r_w <= 0 or r_h <= 0:
+        return None
+    if letterbox.is_full(picture, src_w, src_h):
+        pic_x, pic_y, pic_w, pic_h = 0, 0, src_w, src_h
+    else:
+        pic_x, pic_y = int(picture["x"]), int(picture["y"])
+        pic_w, pic_h = int(picture["w"]), int(picture["h"])
+    crop_h = pic_h & ~1
+    crop_w = int(crop_h * r_w / r_h) & ~1
+    if crop_w > pic_w:
+        crop_w = pic_w & ~1
+        crop_h = int(crop_w * r_h / r_w) & ~1
+    if crop_w <= 0 or crop_h <= 0 or crop_w >= pic_w - 2:
+        return None
+    return crop_w, crop_h, pic_x, pic_y, pic_w, pic_h
+
+
+def speaker_crop_map(timeline: list[dict], *, video_path: Path, aspect_ratio: str,
+                     output_dir: Path, src_size: tuple[int, int], picture: dict | None = None,
+                     detector: str | None = None, sample_interval_sec: float = 0.5,
+                     build=None, log=print) -> tuple[dict[str, Path], list[dict]]:
+    """갭 12(2026-09-08): 클립별 화자 추적 크롭 — v1 `reframe.build_crop_timeline`(입 움직임 0.3 ·
+    0.5s 표본 · y 추적)을 v3 클립에 배선한다. 덮개(cover) 클립은 제외(피사체 앵커 맵이 맡는다).
+    밴드 비율 크롭을 그림 사각형 안에 가둔다. Stage 2 `subject_pos` 와 교차 검증 — 모델이 left 라
+    했는데 검출 평균이 right 면 경고(맵은 검출을 따른다 · 기록). 반환 (crop_map, 감사)."""
+    from app.modules.reframe import build_crop_timeline
+    _build = build or build_crop_timeline
+    geo = band_crop_size(aspect_ratio, src_size, picture)
+    if geo is None:
+        log("  [v3/render] 화자 추적 — 밴드 비율 크롭 불가(가로 여유 없음) · 생략")
+        return {}, []
+    crop_w, crop_h, pic_x, pic_y, pic_w, pic_h = geo
+    src_w, src_h = src_size
+    out_map: dict[str, Path] = {}
+    audit: list[dict] = []
+    prev_x = prev_y = None
+    for i, c in enumerate(timeline):
+        if c.get("cover"):
+            continue
+        s, e = float(c["clip_start_sec"]), float(c["clip_end_sec"])
+        p = output_dir / f"v3_crop_speaker_{i}.json"
+        rec: dict = {"clip": i, "start": s, "end": e}
+        try:
+            kfs = _build(Path(video_path), p, src_w, src_h, sample_interval_sec,
+                         start_sec=s, end_sec=e, enable_speaker_tracking=True,
+                         initial_x=prev_x, initial_y=prev_y, detector=detector,
+                         crop_size=(crop_w, crop_h))
+        except Exception as ex:  # noqa: BLE001 — 안전장치가 연출을 막지 않는다(E17-2 규율)
+            rec["result"] = f"실패 — 이 클립은 종전 맵: {type(ex).__name__}: {str(ex)[:80]}"
+            audit.append(rec)
+            log(f"  [v3/render] ⚠ 화자 추적 clip{i} 실패 — {rec['result']}")
+            continue
+        rows = [kf.__dict__ if hasattr(kf, "__dict__") else dict(kf) for kf in kfs]
+        # 그림 사각형 안으로(레터박스) — x·y 모두
+        for r in rows:
+            r["crop_w"], r["crop_h"] = crop_w, crop_h
+            r["x_center"] = round(min(max(float(r["x_center"]), pic_x + crop_w / 2), pic_x + pic_w - crop_w / 2), 1)
+            r["y_center"] = round(min(max(float(r["y_center"]), pic_y + crop_h / 2), pic_y + pic_h - crop_h / 2), 1)
+        p.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+        out_map[f"{c.get('role') or 'build'}_{i}"] = p
+        faces = sum(1 for r in rows if float(r.get("face_w") or 0) > 0)
+        mean_x = sum(float(r["x_center"]) for r in rows) / max(1, len(rows))
+        side = "left" if mean_x < pic_x + pic_w * 0.45 else "right" if mean_x > pic_x + pic_w * 0.55 else "center"
+        rec.update({"keyframes": len(rows), "faces": faces, "mean_x": round(mean_x, 1), "side": side})
+        sp = c.get("subject_pos")
+        if sp in ("left", "right") and side != "center" and side != sp:
+            rec["subject_pos_conflict"] = sp
+            log(f"  [v3/render] ⚠ 화자 추적 clip{i}: Stage 2 subject_pos={sp} 인데 검출 평균은 {side}"
+                f"(x {mean_x:.0f}/{src_w}) — 검출을 따른다(기록)")
+        if rows:
+            prev_x, prev_y = float(rows[-1]["x_center"]), float(rows[-1]["y_center"])
+        audit.append(rec)
+    log(f"  [v3/render] 화자 추적 크롭 — 클립 {len(out_map)}개 ({detector or 'haar'}) · "
+        f"얼굴 표본 {sum(r.get('faces', 0) for r in audit)}")
+    return out_map, audit
+
+
 def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                  segments: list[dict], resources: dict, story_doc: dict,
                  output_dir: Path, out_name: str = "final_1080x1920.mp4",
@@ -1055,6 +1142,32 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     else:
         crop_map = {}
         log("  [v3/render] 채널 face_tracking=false — 피사체 앵커 크롭 끔(중앙)")
+    # 갭 12(2026-09-08): 화자 추적 — v3 전용 design 키 speaker_tracking=on 일 때만(기본 꺼짐 =
+    # 위 맵 그대로 · 회귀 0). face_tracking=false 면 끈다(v1 과 같은 뜻).
+    _cd = channel_design or {}
+    speaker_audit: list[dict] = []
+    if str(_cd.get("speaker_tracking") or "off").lower() == "on" and getattr(design, "enable_reframe", True):
+        try:
+            _src = None
+            _pr = output_dir / "checkpoint_probe.json"
+            if _pr.exists():
+                _pj = json.loads(_pr.read_text(encoding="utf-8"))
+                if _pj.get("width") and _pj.get("height"):
+                    _src = (int(_pj["width"]), int(_pj["height"]))
+            if _src is None:
+                _out = subprocess.run(
+                    [find_ffmpeg_command("ffprobe"), "-v", "error", "-select_streams", "v:0",
+                     "-show_entries", "stream=width,height", "-of", "csv=p=0", str(video_path)],
+                    capture_output=True, text=True, check=True).stdout.strip()
+                _w, _h = _out.split("\n")[0].split(",")[:2]
+                _src = (int(_w), int(_h))
+            _smap, speaker_audit = speaker_crop_map(
+                plan["timeline"], video_path=Path(video_path), aspect_ratio=design.aspect_ratio,
+                output_dir=output_dir, src_size=_src, picture=picture,
+                detector=_cd.get("face_detector"), log=log)
+            crop_map = {**crop_map, **_smap}
+        except Exception as e:  # noqa: BLE001
+            log(f"  [v3/render] ⚠ 화자 추적 실패 — 종전 맵으로 진행: {e}")
     # 내레이션 시작 효과음 — cue 와 같은 믹스 경로(E19-5 sfx_audio)를 탄다.
     # 번들에 narration_manifest.json 이 없으면 빈 리스트라 RenderInputs 도 필터그래프도
     # 종전과 완전히 같다. 자리는 cue_files 가 확정된 뒤(존재하는 파일만 남은 목록) —
@@ -1142,6 +1255,9 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                            "capped": any(n.startswith("⚠") for n in _stack_notes)}}
     if picture:
         cost["letterbox_crop"] = {**picture, "clips": len(crop_map)}   # 회귀 0: 없으면 키 없음
+    if speaker_audit:
+        cost["speaker_tracking"] = {"detector": (channel_design or {}).get("face_detector") or "haar",
+                                    "clips": speaker_audit}            # 갭 12: 켠 실행만
     log(f"  [v3/render] {out_path.name} — {cost['elapsed']}s · "
         f"{cost['bytes'] // (1024 * 1024)}MB")
     return out_path, cost

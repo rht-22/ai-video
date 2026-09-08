@@ -803,3 +803,75 @@ def refine_exception(gemini, stage1_doc: dict, grid: dict, video_path: Path,
         log(f"  [v3/refine] ⚠ 재타일링 커버리지 위반 {len(problems)}건 — 원판정 유지")
         return stage1_doc, audit
     return doc, audit
+
+
+# ── 갭 7 ⑤ — 잘린 exception 머리 기록(2단계 2-5, 2026-09-08) ─────────────────────
+# chunk_split 이 exception 을 물리 제거하므로 그 안의 내용은 어디에도 남지 않는다. zone 마다
+# 머리 HEAD_DESC_SEC 를 480p 로 잘라 "무엇이 보이나 두 문장"을 받아 exception_sector[key]
+# ["head_desc"] 에 남긴다 — 편성 재료가 아니라 3단계 사실 장부 재료다. 예산은 refine 의
+# FLASH_BUDGET 안에서 zone 당 1콜(refine_exception 이 쓴 콜 수를 이어 센다).
+HEAD_DESC_SEC = 20.0
+HEAD_DESC_PROMPT = """당신은 방송 편집 검수자다. 첨부한 클립은 원본 {t0}~{t1} 구간 — **{desc}로 판정된 구간의 머리 {sec:.0f}초**다.
+이 클립에 **무엇이 보이는지** 두 문장으로 적어라(보이는 것만 — 인물·화면 글자·카드·로고. 해석·줄거리 추정 금지).
+JSON 만: {{"desc": "…"}}"""
+HEAD_DESC_MAX_CHARS = 200
+
+
+def validate_head_desc(resp: Any) -> tuple[str | None, list[str]]:
+    if not isinstance(resp, dict) or not isinstance(resp.get("desc"), str):
+        return None, ["desc 문자열이 없다"]
+    d = resp["desc"].strip()
+    if not d:
+        return None, ["desc 가 비었다"]
+    return d[:HEAD_DESC_MAX_CHARS], []
+
+
+def describe_zone_heads(gemini, stage1_doc: dict, video_path: Path, work_dir: Path, *,
+                        used_calls: int = 0, budget: int = FLASH_BUDGET,
+                        log=print) -> tuple[dict, dict]:
+    """exception zone 머리 기술 → (head_desc 가 붙은 stage1 사본, 감사). 실패는 무표시 유지."""
+    exception = stage1_doc.get("exception_sector") or {}
+    audit: dict[str, Any] = {"zones": [], "flash_calls": 0}
+    zones = [(k, z) for k, z in exception.items() if isinstance(z, dict) and z.get("start") is not None]
+    if not zones:
+        return stage1_doc, audit
+    doc = dict(stage1_doc)
+    doc["exception_sector"] = {k: (dict(z) if isinstance(z, dict) else z) for k, z in exception.items()}
+    ffmpeg = None
+    for key, z in zones:
+        rec: dict[str, Any] = {"zone": key}
+        if used_calls + audit["flash_calls"] >= budget:
+            rec["result"] = "Flash 예산 소진 — 무표시"
+            audit["zones"].append(rec)
+            continue
+        s, e = schemas.parse_ts(z["start"]), schemas.parse_ts(z["end"])
+        t1 = min(e, s + HEAD_DESC_SEC)
+        if t1 - s < 1.0:
+            rec["result"] = "zone 이 1초 미만 — 생략"
+            audit["zones"].append(rec)
+            continue
+        rec.update({"t0": round(s, 3), "t1": round(t1, 3)})
+        try:
+            if ffmpeg is None:
+                ffmpeg = find_ffmpeg_command("ffmpeg")
+                work_dir.mkdir(parents=True, exist_ok=True)
+            clip = work_dir / f"head_{key}.mp4"
+            _cut_probe_clip(ffmpeg, video_path, s, t1, clip)
+            audit["flash_calls"] += 1
+            resp = _call_probe(gemini, clip, HEAD_DESC_PROMPT.format(
+                t0=schemas.format_ts(s), t1=schemas.format_ts(t1),
+                desc=ZONE_DESC.get(key, key), sec=t1 - s))
+            desc, problems = validate_head_desc(resp)
+        except Exception as e:  # noqa: BLE001 — 기록 실패는 편을 막지 않는다
+            rec["result"] = f"실패 — 무표시: {type(e).__name__}: {str(e)[:80]}"
+            audit["zones"].append(rec)
+            continue
+        if desc is None:
+            rec["result"] = "판정 불가 — 무표시: " + "; ".join(problems)
+        else:
+            doc["exception_sector"][key]["head_desc"] = desc
+            rec["result"] = "ok"
+            rec["desc"] = desc
+            log(f"  [v3/refine] {key} 머리 {HEAD_DESC_SEC:.0f}s: {desc[:60]}")
+        audit["zones"].append(rec)
+    return doc, audit

@@ -916,3 +916,79 @@ v12 는 드라마가 계단(하트 → 남친? → 부인 → 커플링 → 말�
 `{silent_note}` — 무대사 구간이 없는 편도 TOPIC 예외 문구 한 줄은 달라진다). story 캐시 지문에
 프롬프트는 안 들어가므로 기존 잡 재개는 캐시를 그대로 쓴다(재구성은 `--from-step story`).
 credit 앵커 경로는 `seq_analyze` 재구성 때만 돈다.
+
+---
+
+# 2단계 실행 기록 (2026-09-08 · Stage 2 스키마 묶음 — 인수인계 §2, 커밋 전)
+
+전체 `tests/` **2132 통과**(시작 2093 → +39, 3·4단계·별건 포함). EP01 실런 1회(cb337459 clone →
+`_ep01s2`, `--from-step seq_analyze --story-flow human`): Gemini 48콜 · 토큰 205만 · 751s.
+
+| 항목 | 바꾼 곳 | 실측(EP01 `_ep01s2`) |
+| :-- | :-- | :-- |
+| 2-1 스키마 v2 | `chunk_analyze` `_extra_span_fields`(screen_text 300자·has_text·diegesis 화이트리스트·is_claim 유성 한정 — 오값은 키만 폐기+note) · `assemble_chunk_meanings`(span 승계 + meaning `screen_texts`) · `story.build_span_index` · `common.meaning_rows/meaning_table/span_row`(📄·⚠) · 프롬프트 과제 3 | span 1,366 중 **screen_text 104**(has_text 108) · diegesis≠actual 45(recalled 37·imagined 8) · is_claim 12 · 시각 정합 100% |
+| 2-2 정독 패스 | 신규 `app/v3/screen_text.py`(장면 클러스터 2.0s · 예산 10분당 4 · 원본 1080p 프레임 1~3장 · 사이드카 `checkpoint_screen_text.json` = 청크 캐시 지문) · `_run_m2` stage2.json 조립 직전 | 대상 13조각 → 11장면 · 호출 11/24 · 채움 6(GPS 앱 「GPS Tracks Live」·메시지 알림·「안 내 문」·「예지네」…) · readable=false 5 |
+| 2-3 하류 | `narration.PROMPT` 📄 인용·⚠ 단정 금지 규칙 · `beats_block`/`available_block` 표기 · `cover.choose_cover` 글자 화면 hold 자동 승격 · `select.validate_beats` diegesis_flags(hook/climax note) · `build_story_doc.review` · `<job>/review.json`(diegesis + 인명 불일치) | 편성이 회상 조각을 안 써 review 0건(지도의 review 는 45건) |
+| 2-4 지문 | `STAGE2_SCHEMA = v3_stage2/v2` — 청크 캐시 지문 + `stage2.json.schema` · story 지문은 v2 이상일 때만 키(`stage2_schema_key`) | 옛 캐시 자동 폐기 로그 확인("Stage 2 스키마 변경 감지") |
+| 2-5 exception 머리 | `refine.describe_zone_heads`(zone 당 1콜 · refine 예산 이어 셈 · `head_desc`) — `seq_analyze` 단계에서 refine 뒤 | credit 머리 20s: "검은 배경 위 투자·제작사·출연진 이름·협찬 로고" |
+
+**합격 판정(§2-6)**: ① credit **2943.5 유지** ✅ · ② 글자 원문 — 카톡 `sp1078` 2336.5 「류지수 / 오빠랑
+같이 해서 너무 좋았어 / 나도 지수 덕에 즐거웠어. 따로 한 번 보자 내가 밥 살게」 ✅ · 찌라시 2256/2376
+✅ · 게시판 2526~2549 ✅(5조각) · 기사/댓글 2936/2940 「[단독] 류지수♥강태한…」「차은빈은 뭔 죄임…」 ✅
+(갭 7 회복 덕에 본편에 있다) · ③ 카페 2580~2591 `recalled`(≠actual) ✅ · ④ 693s `is_claim` ✅ ·
+⑤ 걸음 1 은 **위치추적기 편**(m057/61/62/63)을 다시 골랐고, 제외 후 재실행(3·4단계 런)에서는
+**저녁 식사 와인 편**(m035~037)을 골랐다 — 카톡→침실 추궁→지갑 편은 두 번 다 안 나왔다 ❌(아래 4단계
+plan 이 그 사건을 편 3(irony)의 payoff 로는 잡았다). ⑥ v10 나란히 보기는 사람 몫.
+
+곁다리: Stage 1 이 intro(0~8 제공사 카드)를 이번에도 못 잡았다 → 프롬프트 과제 3 에 "제공사·제작지원
+카드도 intro" 문구 추가(다음 `seq_analyze` 재구성부터). 카톡 원문의 실제 위치는 갭 문서의 38:30~38:51
+이 아니라 **38:56~38:58**(sp1078~1079)이다.
+
+# 3단계 실행 기록 (2026-09-08 · 회차 지도 — 인수인계 §3)
+
+신규 `app/v3/episode_map.py` · CLI `--episode-map`(미지정 = 단계 없음) · `V3_STEPS` 에 `episode_map` ·
+`map_overrides.json` 병합(fail-loud) · story_flow 소비(`register_block`·`facts_block` 걸음 1·2 덧붙임,
+`apply_diegesis_final` 색인 층 덮기) · 갭 8 역류(`corrections` 관측 스키마 + story 편당 1회 재실행).
+
+실런(같은 잡 `--from-step episode_map`): 시퀀스 5 · Flash **10콜 · 48.7s** · 사실 33 · 믿음 11(확정 4) ·
+레지스터 9(회수 3) · diegesis_final 45 · review 45.
+
+| 합격 항목 | 결과 |
+| :-- | :-- |
+| 「먼저 인사해도 쌩깔 거야」(693) ↔ 회수 | ✅ r003 claim: m017@574 「인사도 안해」 → m027@1116 「안수정의 병원에 홍보하러 감」(식탁 1247 대신 병원 방문으로 잡음) |
+| 도장=가족화목(2040) ↔ 침실 추궁(2344) | ❌ 미등록 |
+| 딸 추궁(2089) ↔ 아내 추궁(2347) 대칭 | ❌ 미등록(symmetry 0건) |
+| 추가로 잡은 것 | r004 claim 「여배우 꼬셔서 투자」(1228) → 「불륜설로 투자 철회」(2140) · r009 object 「Anywhere Tag」(2627) → 「GPS Tracks Live」(2823) |
+| 카페 diegesis_final ≠ actual | ✅ recalled(Stage 2 초벌 유지 — 역방향이 imagined 로 바꾸진 않았다) |
+| review 에 diegesis 항목 | ✅ 45건(인명은 --fix-names 로 교정돼 0) |
+
+⚠ 수작업 지도(Cowork `project_ep01_story_arc.md`)와의 대조는 사람 몫. 역방향 패스는 5 시퀀스에서
+믿음 확정 4·diegesis 변경 0·회수 연결 0 — 프롬프트가 "충돌 없으면 빈 값"이라 보수적으로 답한다.
+
+# 4단계 실행 기록 (2026-09-08 · plan + contrast + 갭 9·11 — 인수인계 §4, §4-2 제외)
+
+- 4-1 `app/v3/plan.py` + `--plan-shorts N`(지도 필수 · 캐시 = 지도/stage2/N/제외 지문) →
+  `checkpoint_plan.json`. 실런 N=3 · 1콜 · 9.3s: **편1 event**(옥탑방→골드버튼→청담 입성 0:28~5:58) ·
+  **편2 contrast**(「상종 않겠다」m017 → 영업사원 돌변 m027, 7:38~21:07) · **편3 irony**(「여배우
+  꼬셔라」m022 → 불륜 목격담 m055, 16:18~43:20). 중복 0 · 레지스터 대응 ✅.
+- 4-3 `select`: `TOPIC_KINDS`(event/contrast/irony · setup<payoff 필수) · `purpose_axis`(contrast 는
+  선언/경과/반전 축 — event 문구는 종전과 바이트 동일) · `ROLES` += setup/payoff/hook_return ·
+  `validate_beats` 훅 조각 1회 재사용(길이 ≤ 훅 · 맨 뒤 정렬 · 덮개 후보 자동 제외) · `assemble` 클립
+  `beat` 키(additive) + `finalize_cues` 가 cue 의 beat 와 같은 클립을 먼저 찾는다(두 번째 등장 좌표).
+- `--plan-slot K`: 걸음 1 을 plan 항목으로 대체(`topic_override` · 같은 검증기).
+- **§4-2(`--reuse-analysis <회차잡> --plan-slot k` 편별 잡 레이아웃)는 §4-4 결정 1 대기 — 미구현.**
+
+# 별건 실행 기록 (2026-09-08 · 인수인계 §5)
+
+- 갭 10: `stage4` `LABEL_KINDS`(reaction/identity/pointer/irony) · `LABEL_JUDGMENT_WORDS` 드롭 ·
+  지시형은 화면 글자 컷에서만 · 인물 지목은 Stage 2 characters 대조 · irony 는 회수된 레지스터
+  `register_id` 필수 · 절대초 폴백도 컷 경계 클램프. 재료는 `pipeline.label_facts_for`(LLM 0콜).
+  프롬프트는 재료가 있을 때만 pointer/irony 어휘를 연다.
+- 갭 12: `reframe` 검출기 선택(`FACE_DETECTOR=haar|yunet` · `_HaarDetector` 종전 동작 · `_YuNetDetector`
+  ONNX `app/assets/models/face_detection_yunet_2023mar.onnx` 번들 232KB) · `build_crop_timeline(detector=,
+  crop_size=)` · v3 `finalize.speaker_crop_map`(클립별 v1 화자 추적 · 그림 사각형 안 밴드 비율 · subject_pos
+  교차 검증) — **design 키 `speaker_tracking=on`·`face_detector` 로만 켜진다(기본 꺼짐 = 회귀 0).
+  실렌더 A/B 는 아직이다.**
+- 자산: `scripts/edit_plan_to_xml.py`(edit_plan → FCP7 xmeml + SRT, bb71cb7d 실측 클립 19·cue 9 파싱 통과).
+  컷별 `cy` 는 화자 추적 맵의 y_center 로 포함.
+- EP01 intro: Stage 1 프롬프트 한 줄(제공사·제작지원 카드도 intro).

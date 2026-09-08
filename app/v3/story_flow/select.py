@@ -25,7 +25,13 @@ from app.v3.story_flow.common import (
 )
 
 PURPOSES = ("배경", "맥락", "과정", "결과", "반응")
-ROLES = ("hook", "build", "turn", "climax", "reaction", "ending")
+# 4단계(2026-09-08, 갭 5·9·11): 대비형(contrast)·아이러니형(irony) 주제는 씬의 쓰임 축이 다르다 —
+# 선언(설정) · 경과 · 반전(회수). event(기본)는 종전 축 그대로.
+TOPIC_KINDS = ("event", "contrast", "irony")
+CONTRAST_PURPOSES = ("선언", "경과", "반전")
+ROLES = ("hook", "build", "turn", "climax", "reaction", "ending",
+         "setup", "payoff", "hook_return")   # 뒤 셋은 4단계 추가(hook_return 은 훅 조각 재사용 1회)
+DIEGESIS_GATE_ROLES = ("hook", "climax")   # 갭 2: 이 역할에 상상/unclear 조각이 들면 검수 항목
 MIN_SCENES, MAX_SCENES = 2, 7
 TITLE_MAX_CHARS = 16          # 상단 밴드 2줄 각각의 실측 상한(story.TITLE_MAX_CHARS)
 BUDGET_FLOOR_RATIO = 0.85     # 대사 합계가 예산의 이 비율 미만이면 반려(재료를 더 넣어라) —
@@ -54,7 +60,7 @@ TOPIC_PROMPT = """당신은 리캡 쇼츠 편집자다. 아래는 한 회차의 
 {hint_block}
 ## 사건 단위 (id | 시각 | 길이 | importance | 분위기 | 인물 | 내용)
 {meaning_block}
-{silent_block}{exclude_block}{reject_block}
+{silent_block}{exclude_block}{map_block}{reject_block}
 ## 출력 (JSON 만)
 {{"topic": "이 쇼츠가 무엇에 관한 이야기인지 한 문장", "why": "고른 이유 한 문장",
   "core_meanings": ["m012", "m013"], "title_draft": {{"line1": "상황", "line2": "후킹"}}}}"""
@@ -63,7 +69,7 @@ SCENES_PROMPT = """당신은 리캡 쇼츠 편집자다. 영상은 볼 수 없�
 
 ## 2단계 — 사용 씬 고르기
 주제: {topic}
-이 사건을 **작품을 모르는 사람이 봐도 다 이해하고 재미있으려면** 어떤 씬을 보여줘야 하나. 각 씬의 쓰임을 정하라 — 배경(왜 이 상황인지) · 맥락(인물 관계·무엇이 걸렸는지) · 과정(사건 진행) · 결과(정점·반전) · 반응(리액션·여운). 필요한 것만 {min_scenes}~{max_scenes}개, **원본 시간 순서**로. 씬 = 아래 사건 단위(id). 길이 감각: 완성본 {target_sec:.0f}초이고 씬 원본 합계는 그 2~3배까지 허용된다(다음 단계에서 대사를 골라 줄인다).
+이 사건을 **작품을 모르는 사람이 봐도 다 이해하고 재미있으려면** 어떤 씬을 보여줘야 하나. 각 씬의 쓰임을 정하라 — {purpose_axis}. 필요한 것만 {min_scenes}~{max_scenes}개, **원본 시간 순서**로. 씬 = 아래 사건 단위(id). 길이 감각: 완성본 {target_sec:.0f}초이고 씬 원본 합계는 그 2~3배까지 허용된다(다음 단계에서 대사를 골라 줄인다).
 제목 두 줄도 정하라 — line1(위) = 상황·도입, line2(아래) = 후킹. 각 {title_max}자 이내, 이어 읽어 한 호흡. 결말을 다 말하지 마라(읽은 사람이 '그래서?'를 묻게). 아랫줄이 사건의 **결과·반전 자체**(누가 무엇을 했다/당했다)를 말해버리면 볼 이유가 사라진다 — 결과 대신 그 직전의 질문·위기를 남겨라. `title_review.line2_reveals_ending` 에 네 판정을 적고, true 면 고쳐서 내라.
 
 ## 작품
@@ -71,9 +77,9 @@ SCENES_PROMPT = """당신은 리캡 쇼츠 편집자다. 영상은 볼 수 없�
 
 ## 사건 단위 (전체)
 {meaning_block}
-{silent_block}{exclude_block}{reject_block}
+{silent_block}{exclude_block}{map_block}{reject_block}
 ## 출력 (JSON 만)
-{{"scenes": [{{"meaning": "m012", "purpose": "배경|맥락|과정|결과|반응", "why": "이 씬이 하는 일 한 줄"}}],
+{{"scenes": [{{"meaning": "m012", "purpose": "{purpose_choices}", "why": "이 씬이 하는 일 한 줄"}}],
   "title": {{"line1": "…", "line2": "…"}},
   "title_review": {{"line2_reveals_ending": false}}}}"""
 
@@ -120,30 +126,64 @@ def validate_topic(resp: Any, rows: list[dict], *,
         k = parse_meaning_id(v)
         if k is not None and k in known and k not in core:
             core.append(k)
-    if not core:
-        problems.append("core_meanings 에 아는 사건 단위 id 가 없다(m012 형식)")
     hit = [k for k in core if excluded and k in excluded]
     if hit:
         problems.append("이미 만든 쇼츠의 사건이다 — 제외 목록의 사건 단위("
                         + "/".join(f"m{k:03d}" for k in hit)
                         + ")를 핵심으로 고르지 마라. 다른 사건을 골라라")
     td = resp.get("title_draft") if isinstance(resp.get("title_draft"), dict) else {}
+    # 4단계 additive — kind(없으면 event) · contrast/irony 는 setup·payoff 사건 단위 필수(setup 이 앞)
+    kind = str(resp.get("kind") or "event").strip()
+    if kind not in TOPIC_KINDS:
+        problems.append(f"kind {kind!r} — {'/'.join(TOPIC_KINDS)} 중 하나")
+    setup = parse_meaning_id(resp.get("setup")) if resp.get("setup") is not None else None
+    payoff = parse_meaning_id(resp.get("payoff")) if resp.get("payoff") is not None else None
+    if kind in ("contrast", "irony"):
+        if setup is None or setup not in known or payoff is None or payoff not in known:
+            problems.append(f"{kind} 주제는 setup·payoff 사건 단위(m012 형식)가 둘 다 필요하다")
+        else:
+            by_idx = {r["idx"]: r for r in rows}
+            if not by_idx[setup]["t0"] < by_idx[payoff]["t0"]:
+                problems.append(f"setup(m{setup:03d}) 이 payoff(m{payoff:03d}) 보다 앞이어야 한다")
+            for k in (setup, payoff):
+                if k not in core:
+                    core.append(k)
+            core.sort()
+    if not core:
+        problems.append("core_meanings 에 아는 사건 단위 id 가 없다(m012 형식)")
     if problems:
         return None, problems
     return {"topic": topic, "why": str(resp.get("why") or "").strip(),
             "core_meanings": sorted(core),
             "title_draft": {"line1": str(td.get("line1") or "").strip(),
-                            "line2": str(td.get("line2") or "").strip()}}, []
+                            "line2": str(td.get("line2") or "").strip()},
+            "kind": kind,
+            **({"setup": setup, "payoff": payoff} if kind != "event" else {})}, []
+
+
+def purpose_axis(kind: str) -> tuple[tuple[str, ...], str, str]:
+    """주제 종류 → (쓰임 화이트리스트, 프롬프트 축 설명, 출력 선택지). event 는 종전 문구 그대로."""
+    if kind in ("contrast", "irony"):
+        return (CONTRAST_PURPOSES,
+                "선언(설정 — 인물이 단언·약속·조건을 세우는 장면) · 경과(그 사이 벌어진 일 — 짧게) · "
+                "반전(회수 — 단언이 번복되고 조건이 뒤집히는 장면). 선언과 반전을 **나란히** 보여주는 것이 이 편의 재미다",
+                "선언|경과|반전")
+    return (PURPOSES,
+            "배경(왜 이 상황인지) · 맥락(인물 관계·무엇이 걸렸는지) · 과정(사건 진행) · 결과(정점·반전) · 반응(리액션·여운)",
+            "배경|맥락|과정|결과|반응")
 
 
 def validate_scenes(resp: Any, rows: list[dict], *,
                     title_max: int = TITLE_MAX_CHARS,
-                    excluded: set[int] | None = None) -> tuple[dict | None, list[str], list[str]]:
+                    excluded: set[int] | None = None,
+                    purposes: tuple[str, ...] = PURPOSES) -> tuple[dict | None, list[str], list[str]]:
+    """purposes(4단계): 주제 종류별 쓰임 축 — 기본은 종전 PURPOSES(폴백 '과정'), contrast 는 '경과'."""
     if not isinstance(resp, dict):
         return None, ["응답이 객체가 아니다"], []
     problems: list[str] = []
     notes: list[str] = []
     by_idx = {r["idx"]: r for r in rows}
+    default_purpose = "과정" if purposes is PURPOSES or "과정" in purposes else purposes[1]
     scenes: list[dict] = []
     seen: set[int] = set()
     for k, s in enumerate(resp.get("scenes") or []):
@@ -158,9 +198,9 @@ def validate_scenes(resp: Any, rows: list[dict], *,
             continue
         seen.add(idx)
         purpose = str(s.get("purpose") or "").strip()
-        if purpose not in PURPOSES:
-            notes.append(f"scenes[{k}] purpose {purpose!r} → 과정")
-            purpose = "과정"
+        if purpose not in purposes:
+            notes.append(f"scenes[{k}] purpose {purpose!r} → {default_purpose}")
+            purpose = default_purpose
         scenes.append({"meaning": idx, "purpose": purpose,
                        "why": str(s.get("why") or "").strip()[:120]})
     ex_hit = [s["meaning"] for s in scenes if excluded and s["meaning"] in excluded]
@@ -191,6 +231,10 @@ def validate_scenes(resp: Any, rows: list[dict], *,
     if problems:
         return None, problems, notes
     return {"scenes": scenes, "title": {"line1": l1, "line2": l2}}, [], notes
+
+
+def _span_sec(ids: list[str], span_index: dict[str, dict]) -> float:
+    return sum(span_index[x]["t_out"] - span_index[x]["t_in"] for x in ids)
 
 
 def _voiced_sec(ids: list[str], span_index: dict[str, dict]) -> float:
@@ -277,6 +321,8 @@ def validate_beats(resp: Any, span_index: dict[str, dict], allowed: dict[str, in
         by_scene[sc].sort(key=lambda x: span_index[x]["pos"])
     used: set[str] = set()
     raw_beats: list[dict] = []
+    hook_range: list[str] | None = None
+    hook_return_seen = False
     for k, b in enumerate(resp.get("beats") or []):
         if not isinstance(b, dict):
             problems.append(f"beats[{k}] 가 객체가 아님")
@@ -295,7 +341,26 @@ def validate_beats(resp: Any, span_index: dict[str, dict], allowed: dict[str, in
             p0, p1 = p1, p0
         rng = [x for x in by_scene[scene] if p0 <= span_index[x]["pos"] <= p1]
         reused = [x for x in rng if x in used]
-        if reused:
+        role_in = str(b.get("role") or "").strip()
+        hook_return = False
+        if reused and role_in == "hook_return":
+            # 훅 회수(4단계 · 갭 11): hook 비트의 조각을 **편당 1회** 되풀이할 수 있다(길이 ≤ 훅).
+            # 재사용 조각은 덮개 후보에서도 빠진다(used_intervals 가 같은 구간을 점유물로 본다).
+            hook_ids = hook_range
+            if hook_ids is None:
+                problems.append(f"beats[{k}] hook_return 인데 앞에 hook 비트가 없다")
+                continue
+            if hook_return_seen:
+                problems.append(f"beats[{k}] hook_return 은 편당 하나다")
+                continue
+            if not set(rng) <= set(hook_ids):
+                problems.append(f"beats[{k}] hook_return 은 hook 비트의 조각만 되풀이할 수 있다 {sorted(set(rng) - set(hook_ids))[:3]}")
+                continue
+            if _span_sec(rng, span_index) > _span_sec(hook_ids, span_index) + 1e-6:
+                problems.append(f"beats[{k}] hook_return 이 hook 보다 길다")
+                continue
+            hook_return = True
+        elif reused:
             problems.append(f"beats[{k}] 구간이 다른 비트와 겹친다 {reused[:3]} — 구간끼리 겹치지 않게")
             continue
         skip_in = [str(x) for x in (b.get("skip") or []) if isinstance(x, str)]
@@ -314,16 +379,26 @@ def validate_beats(resp: Any, span_index: dict[str, dict], allowed: dict[str, in
                 problems.append(f"beats[{k}] 문장 반토막: {x} 는 {nxt} 로 이어진다 — 짝을 함께 넣거나 둘 다 빼라")
             if prv and prv in span_index and prv not in keep and prv not in used:
                 problems.append(f"beats[{k}] 문장 반토막: {x} 는 {prv} 에서 이어진다 — 짝을 함께 넣거나 둘 다 빼라")
-        used.update(rng)
-        role = str(b.get("role") or "").strip()
+        if not hook_return:
+            used.update(rng)
+        role = role_in
         if role not in ROLES:
             notes.append(f"beats[{k}] role {role!r} → build")
             role = "build"
+        if role == "hook_return" and not hook_return:
+            notes.append(f"beats[{k}] hook_return 인데 훅 조각 재사용이 아니다 → build")
+            role = "build"
+        if role == "hook" and hook_range is None:
+            hook_range = list(rng)
+        if hook_return:
+            hook_return_seen = True
         raw_beats.append({"scene": scene, "role": role, "range_ids": rng, "skip": skip,
-                          "action": str(b.get("action") or "").strip()[:80]})
+                          "action": str(b.get("action") or "").strip()[:80],
+                          **({"reuse_of": "hook"} if hook_return else {})})
     if not raw_beats:
         return None, problems + ["beats 가 비었다"], notes
-    raw_beats.sort(key=lambda b: span_index[b["range_ids"][0]]["pos"])
+    # hook_return 은 원본 순서와 무관하게 **맨 뒤**(회수는 편의 끝에 온다)
+    raw_beats.sort(key=lambda b: (1 if b.get("reuse_of") else 0, span_index[b["range_ids"][0]]["pos"]))
     beats: list[dict] = []
     for rb in raw_beats:
         pieces = split_at_holes(rb, span_index)
@@ -346,6 +421,17 @@ def validate_beats(resp: Any, span_index: dict[str, dict], allowed: dict[str, in
         problems.append(f"구간 합계 {total:.0f}초 — 예산 {budget_sec:.0f}초의 {floor_ratio:.0%} 미만이다. "
                         "재료가 얇으면 완성본이 짧고 다듬을 여유도 없다 — 같은 사건 안의 "
                         "대사 구간·리액션을 더 넣어 예산을 채워라")
+    # 연출 층위 게이트(갭 2, 2026-09-08 · 반려 아님 — 경고+검수 항목): hook/climax 비트에
+    # 상상·회상·unclear 조각이 있으면 note 를 남기고 비트에 diegesis_flags 를 붙인다.
+    # 사람 확인 지점으로 설계한다 — 모델이 혼자 100% 맞힐 문제가 아니다.
+    for k, b in enumerate(beats):
+        flags = {x: span_index[x].get("diegesis") for x in b["span_ids"]
+                 if span_index[x].get("diegesis") and span_index[x].get("diegesis") != "actual"}
+        if flags:
+            b["diegesis_flags"] = flags
+            if b["role"] in DIEGESIS_GATE_ROLES:
+                notes.append(f"⚠ 비트 {k}({b['role']}) 에 상상/불확실 장면 "
+                             f"{'/'.join(sorted(set(flags.values())))} {sorted(flags)[:3]} — 사람 확인")
     if not any(span_index[x]["is_audio"] for b in beats for x in b["span_ids"]):
         # 무대사 편(갭 3, 2026-09-07): 반려하지 않는다 — "대사 인용이 뼈대다"가 지키려던 건
         # *뼈대가 있어야 한다*이지 *대사여야 한다*가 아니다. 무대사 편에서는 걸음 4 의

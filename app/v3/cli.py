@@ -54,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "clip 경계는 최근접 grid span 경계로 정착(오차 run_log 기록)")
     p.add_argument("--from-step", default=None,
                    choices=["grid", "seq_analyze", "chunk_split", "chunk_analyze",
-                            "story", "resources",
+                            "episode_map", "plan", "story", "resources",
                             "draft_render", "style", "render", "validate"],
                    help="캐시를 무시하고 이 단계부터 재구성")
     p.add_argument("--retry-failed-chunks", action="store_true",
@@ -100,6 +100,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "절반 이상 겹치는 사건 단위를 걸음 1·2 검증기가 반려한다")
     # 노래 구간 자막 제외(2026-09-07 사용자 지시, 가왕쇼) — 음향 비트 주기성 + Stage 2 문장
     # 두 증인이 노래로 확정한 소스 구간의 대사 자막을 내지 않는다. 기본 꺼짐(드라마 BGM 오작동 방지).
+    p.add_argument("--episode-map", action="store_true",
+                   help="3단계 회차 지도(2026-09-08): Stage 2 기록 위 정방향·역방향 두 번 읽기 → "
+                        "episode_map.json(사실/믿음 장부·레지스터·diegesis 확정·검수). 미지정 = 단계 없음")
+    p.add_argument("--plan-shorts", type=int, default=None, metavar="N",
+                   help="4단계 plan: 회차 지도 위에서 편 N개를 계획 → checkpoint_plan.json (--episode-map 필요)")
+    p.add_argument("--plan-slot", type=int, default=None, metavar="K",
+                   help="plan 의 K번째 편으로 story 를 만든다(걸음 1 대체) — --story-flow human 전용")
     p.add_argument("--subtitle-skip-singing", action="store_true",
                    help="노래(가창) 구간의 대사 자막을 내지 않는다 — 음향 비트 주기성 + Stage 2 "
                         "문장 두 증인 확정, 건별 기록(checkpoint_singing.json · run_log)")
@@ -153,8 +160,13 @@ CHANNEL_DESIGN_ARGS: dict[str, dict] = {
     # v3 전용(2026-09-04) — 자막 블록 윗변을 '밴드 하단 + N px' 에 거는 상대 앵커.
     # 화면비·video_y 가 바뀌어도 채널이 margin 을 다시 잡지 않는다(음수 = 밴드 안쪽).
     "subtitle_band_offset": dict(type=int), "tts_band_offset": dict(type=int),
+    # 갭 12(2026-09-08) — v3 전용 · 기본 꺼짐(회귀 0 아님 — 실렌더 A/B 뒤 채널 단위로 켠다):
+    # 클립별 화자 추적 크롭(v1 reframe 기계 재사용) · 얼굴 검출기(haar 종전 | yunet ONNX)
+    "speaker_tracking": dict(type=str, choices=["on", "off"]),
+    "face_detector": dict(type=str, choices=["haar", "yunet"]),
 }
-V3_ONLY_DESIGN_KEYS = frozenset({"subtitle_band_offset", "tts_band_offset"})
+V3_ONLY_DESIGN_KEYS = frozenset({"subtitle_band_offset", "tts_band_offset",
+                                 "speaker_tracking", "face_detector"})
 
 
 CHANNEL_DESIGN_DIR = Path(__file__).resolve().parent.parent / "data" / "channel_designs"
@@ -278,6 +290,8 @@ def main(argv: list[str] | None = None) -> int:
                  subtitle_skip_singing=bool(args.subtitle_skip_singing),
                  channel_design=channel_design or None,
                  narration_original_db=args.narration_original_db,
+                 episode_map=bool(args.episode_map),
+                 plan_shorts=args.plan_shorts, plan_slot=args.plan_slot,
                  scene_threshold=args.scene_threshold)
     print(f"[v3] 완료 → {out}")
     return 0

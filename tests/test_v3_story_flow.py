@@ -669,3 +669,85 @@ def test_cli_parse_exclude_ranges_fail_loud():
     for bad in (["abc"], ["10-5"], ["-3-4"]):
         with pytest.raises(SystemExit):
             parse_exclude_ranges(bad)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 2단계 하류 배선(2026-09-08 · 갭 1·2) — 📄 노출 · hold 자동 · diegesis note · review
+# ══════════════════════════════════════════════════════════════════════════
+
+def _idx_with_v2():
+    import copy
+    idx = copy.deepcopy(IDX)
+    idx["sp0003"]["screen_text"] = "오빠랑 같이 해서 너무 좋았어 / 나도 즐거웠어"
+    idx["sp0003"]["has_text"] = True
+    idx["sp0004"]["diegesis"] = "unclear"
+    idx["sp0001"]["is_claim"] = True
+    return idx
+
+
+def test_material_rows_show_screen_text_and_diegesis_only_when_present():
+    from app.v3.story_flow.common import span_row, meaning_table, screen_text_tag, diegesis_tag
+    idx = _idx_with_v2()
+    assert '📄 "오빠랑 같이 해서' in span_row("sp0003", idx["sp0003"])
+    assert "⚠ 회상/상상(unclear)" in span_row("sp0004", idx["sp0004"])
+    assert "📄" not in span_row("sp0001", idx["sp0001"]) and "⚠ 회상" not in span_row("sp0001", idx["sp0001"])
+    # 종전 행과 바이트 동일(새 키가 없을 때)
+    assert span_row("sp0001", IDX["sp0001"]) == span_row("sp0001", {**IDX["sp0001"]})
+    assert screen_text_tag(None) == "" and diegesis_tag(["actual"]) == ""
+    assert screen_text_tag("x" * 80).count("…") == 1
+    rows = [dict(r) for r in ROWS]
+    rows[1]["screen_texts"] = ["첫 글자", "둘째", "셋째"]
+    rows[1]["diegesis"] = ["imagined"]
+    t = meaning_table(rows)
+    assert '📄 "첫 글자" / "둘째" (+1)' in t and "⚠ 회상/상상(imagined)" in t
+    assert meaning_table(ROWS) == meaning_table([dict(r) for r in ROWS])
+
+
+def test_narration_blocks_and_prompt_carry_screen_text_rule():
+    idx = _idx_with_v2()
+    beats = _beats()
+    blk = nr.beats_block(beats, idx, ROWS_BY, [])
+    assert "⚠ 회상/상상(unclear)" in blk and "📄" not in blk    # sp0003 은 비트 밖
+    av = nr.available_block(["sp0003"], idx, {"sp0003": 1})
+    assert '📄 "오빠랑' in av
+    assert "화면 글자(📄)" in nr.PROMPT and "사건으로 단정하는 문장을 쓰지 마라" in nr.PROMPT
+
+
+def test_cover_auto_holds_screen_text_span(monkeypatch):
+    idx = _idx_with_v2()
+    beats = _beats()
+    g = _group(("before", 1), ["카톡을 본다"], [3.0])       # L 3.25 > 지정 화면 2.5s
+    g["cover_ids"] = ["sp0003"]                   # 글자 화면 · hold 미지정
+    logs = []
+    c = cv.choose_cover(("before", 1), g, beats, idx, ROWS_BY, GRID, log=logs.append)
+    assert c["kind"] == "hold" and c["t_in"] == 6.5 and c["t_out"] == 9.0
+    assert c["hold_sec"] == pytest.approx(0.75)
+    assert any("hold 자동 승격" in x for x in logs)
+    # 글자 없는 화면은 종전 그대로(이웃으로 넓히거나 다른 후보 — hold 아님)
+    g2 = _group(("before", 1), ["카톡을 본다"], [3.0])
+    g2["cover_ids"] = ["sp0003"]
+    c2 = cv.choose_cover(("before", 1), g2, beats, IDX, ROWS_BY, GRID, log=lambda *a: None)
+    assert c2["kind"] != "hold"
+
+
+def test_validate_beats_flags_diegesis_on_gate_roles_only():
+    idx = _idx_with_v2()
+    allowed = _allowed()
+    resp = {"beats": [{"first": "sp0001", "last": "sp0002", "role": "hook"},
+                      {"first": "sp0004", "last": "sp0005", "role": "climax"}]}
+    beats, pr, notes = sl.validate_beats(resp, idx, allowed, budget_sec=30)
+    assert pr == [] and beats[1]["diegesis_flags"] == {"sp0004": "unclear"}
+    assert "diegesis_flags" not in beats[0]
+    assert any("사람 확인" in n and "climax" in n for n in notes)
+    resp2 = {"beats": [{"first": "sp0001", "last": "sp0002", "role": "hook"},
+                       {"first": "sp0004", "last": "sp0005", "role": "build"}]}
+    beats2, _, notes2 = sl.validate_beats(resp2, idx, allowed, budget_sec=30)
+    assert beats2[1]["diegesis_flags"] and not any("사람 확인" in n for n in notes2)
+    items = sf.review_items(beats2, idx)
+    assert items == [{"kind": "diegesis", "beat": 1, "role": "build", "span_ids": ["sp0004"], "value": "unclear"}]
+    doc = sf.build_story_doc(beats2, idx, [], topic={"topic": "t"}, title={"line1": "a", "line2": "b"},
+                             scenes=[], target_sec=20, max_sec=30)
+    assert doc["review"] == items and doc["beats"][1]["diegesis_flags"] == {"sp0004": "unclear"}
+    assert "diegesis_flags" not in doc["beats"][0]
+    assert sf.build_story_doc(_beats(), IDX, [], topic={"topic": "t"}, title={"line1": "a", "line2": "b"},
+                              scenes=[], target_sec=20, max_sec=30)["review"] == []

@@ -173,9 +173,10 @@ def assemble_edit_plan(story_doc: dict, span_index: dict[str, dict], *,
     분할 지점: (a) 소스 시간 불연속(원거리는 비트가 나뉘므로 방어) (b) 뮤트 여부가
     바뀌는 곳 — use_original_audio 는 클립 단위 계약이라 뮤트 span 은 제 클립을 갖는다."""
     timeline: list[dict] = []
-    for b in story_doc["beats"]:
+    for bi, b in enumerate(story_doc["beats"]):
         muted = set(b.get("muted_span_ids") or [])
         group: list[str] = []
+        _beat_no = int(b.get("number", bi))
 
         # 내레이션 덮개(story_flow · 2026-09-03) — 내레이션 실측 길이에 맞춰 **다시 본**
         # 구간이라 경계가 grid 위가 아닐 수 있다. 제 클립(원음 끔)으로 정식 등록한다
@@ -192,6 +193,7 @@ def assemble_edit_plan(story_doc: dict, span_index: dict[str, dict], *,
                 "span_ids": ids_c,
                 "cover": str(cv.get("kind") or "cover"),
                 **({"hold_sec": round(float(cv["hold_sec"]), 3)} if cv.get("hold_sec") else {}),
+                "beat": _beat_no,      # additive(4단계) — 같은 소스 구간이 두 번 나올 때(훅 회수) cue 의 클립 신원
             })
 
         for cv in b.get("covers") or []:
@@ -220,6 +222,7 @@ def assemble_edit_plan(story_doc: dict, span_index: dict[str, dict], *,
                 "use_original_audio": group[0] not in muted,
                 "reframe": {"mode": "center"},
                 "span_ids": list(group),
+                "beat": _beat_no,      # additive(4단계) — 훅 회수 시 cue·자막 좌표의 클립 신원
             }
             # 크롭 앵커 재료(2026-09-02, additive) — **전부 무성**인 클립(시각 인서트)
             # 에서 Stage 2 가 주 피사체를 좌/우로 봤으면 클립에 접는다. 판별 신호는
@@ -683,8 +686,16 @@ def finalize_cues(narration_cues: list[dict], timeline: list[dict], *,
     total = round(sum(clip_duration(clip_len(c), fps) for c in timeline), 3)
     out: list[dict] = []
     for cue in narration_cues:
-        e0 = to_edited_sec(cue["source_time_sec"], offsets, kind="start")
-        e1 = to_edited_sec(cue["source_end_sec"], offsets, kind="end")
+        # 훅 회수(4단계): 같은 소스 구간이 두 클립에 있으면 cue 의 beat 와 같은 클립을 먼저
+        # 찾는다(첫 등장으로 새지 않게). 클립에 beat 가 없거나(옛 plan) 못 찾으면 종전 전체 탐색.
+        _own = [o for o, c in zip(offsets, timeline)
+                if cue.get("beat") is not None and c.get("beat") == cue.get("beat")]
+        e0 = to_edited_sec(cue["source_time_sec"], _own, kind="start") if _own else None
+        e1 = to_edited_sec(cue["source_end_sec"], _own, kind="end") if _own else None
+        if e0 is None:
+            e0 = to_edited_sec(cue["source_time_sec"], offsets, kind="start")
+        if e1 is None:
+            e1 = to_edited_sec(cue["source_end_sec"], offsets, kind="end")
         # 붙잡은 덮개(hold_sec): 소스 끝에 맞춘 cue 끝은 붙잡은 꼬리까지 이어진다
         if e1 is not None:
             for c in timeline:

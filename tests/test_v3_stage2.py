@@ -488,7 +488,7 @@ def test_pipeline_m2_wiring(tmp_path, monkeypatch):
     assert man["chunks"][0]["file"] and (out / "chunks" / man["chunks"][0]["file"]).exists()
     assert man["exceptions_removed"][0]["key"] == "end"
     s2 = json.loads((out / "stage2.json").read_text(encoding="utf-8"))
-    assert s2["schema"] == "v3_stage2/v1"
+    assert s2["schema"] == ca_mod.STAGE2_SCHEMA == "v3_stage2/v2"   # 2단계 스키마(2026-09-08)
     assert s2["sequences"][0]["chunks"][0]["meanings"], "meanings 가 채워져야 한다"
     assert s2["coverage"]["analyzed"] == 1 and s2["coverage"]["failed"] == 0
     assert s2["validation"]["time_alignment"]["pct"] == 100.0
@@ -595,3 +595,239 @@ def test_drop_failed_chunks_keeps_successes_only():
     keep, retry = drop_failed_chunks(done)
     assert list(keep) == ["s0c0"] and retry == ["s1c0", "s1c1"]
     assert drop_failed_chunks({}) == ({}, [])
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 2단계 — Stage 2 스키마 v2 (2026-09-08 · 갭 1·2·5) — screen_text · has_text ·
+# diegesis · is_claim + 정독 패스 + 캐시 지문 버전
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_stage2_v2_fields_accepted_dropped_and_forwarded():
+    spans = _spans4()
+    r = _resp_ok()
+    sp = r["meanings"][0]["spans"]
+    sp[1]["screen_text"] = "오빠랑 같이 해서 너무 좋았어 / 나도 즐거웠어"   # 무성 — 정상
+    sp[1]["diegesis"] = "unclear"
+    sp[0]["is_claim"] = True                                       # 유성 — 정상
+    sp[0]["diegesis"] = "actual"                                   # 기본값 = 키 없음
+    sp2 = r["meanings"][1]["spans"]
+    sp2[0]["has_text"] = True                                      # 못 읽은 자기 신고
+    sp2[0]["diegesis"] = "dream"                                   # 화이트리스트 밖 → 폐기+note
+    sp2[1]["screen_text"] = ["리스트"]                              # 형식 오류 → 폐기+note
+    sp2[1]["is_claim"] = "yes"                                     # bool 아님 → 폐기
+    norm, problems, notes = ca.validate_stage2_response(r, spans, final_attempt=False)
+    assert problems == []                                          # 오값은 반려가 아니다
+    a, b = norm[0]["spans"], norm[1]["spans"]
+    assert a[1]["screen_text"].startswith("오빠랑") and a[1]["has_text"] is True
+    assert a[1]["diegesis"] == "unclear"
+    assert a[0]["is_claim"] is True and "diegesis" not in a[0]
+    assert b[0]["has_text"] is True and "screen_text" not in b[0] and "diegesis" not in b[0]
+    assert "screen_text" not in b[1] and "is_claim" not in b[1]
+    assert sum("diegesis" in n for n in notes) == 1
+    assert any("screen_text" in n for n in notes) and any("is_claim" in n for n in notes)
+    meanings = ca.assemble_chunk_meanings(norm, spans)
+    d = meanings[0]["spans"]
+    assert d[1]["screen_text"] == a[1]["screen_text"] and d[1]["has_text"] is True
+    assert d[1]["diegesis"] == "unclear" and d[0]["is_claim"] is True
+    assert meanings[0]["screen_texts"] == [a[1]["screen_text"]]   # meaning 수준 재료
+    assert "screen_texts" not in meanings[1]                       # 없으면 키도 없다
+    # 색인까지 도달(하류 세 곳 규율)
+    from app.v3 import story as st
+    grid = _grid_spans([(0, 4, True, "x"), (4, 8, False, ""), (8, 12, True, "y"), (12, 16, True, "z")])
+    doc = {"sequences": [{"number": 0, "chunks": [{"number": 0, "meanings": meanings}]}]}
+    idx, _ = st.build_span_index(doc, grid)
+    assert idx["sp0001"]["screen_text"].startswith("오빠랑") and idx["sp0001"]["has_text"]
+    assert idx["sp0001"]["diegesis"] == "unclear" and idx["sp0000"]["is_claim"] is True
+    assert idx["sp0002"]["screen_text"] is None and idx["sp0002"]["diegesis"] is None
+
+
+def test_stage2_v2_silent_claim_dropped_and_screen_text_truncated():
+    spans = _spans4()
+    r = _resp_ok()
+    r["meanings"][0]["spans"][1]["is_claim"] = True                # 무성 → 폐기+note
+    r["meanings"][0]["spans"][1]["screen_text"] = "가" * 400
+    norm, problems, notes = ca.validate_stage2_response(r, spans, final_attempt=False)
+    assert problems == []
+    assert "is_claim" not in norm[0]["spans"][1]
+    assert len(norm[0]["spans"][1]["screen_text"]) == ca.SCREEN_TEXT_MAX_CHARS
+    assert any("무성 span 의 is_claim" in n for n in notes) and any("절단" in n for n in notes)
+
+
+def test_stage2_v2_absent_keys_keep_document_identical():
+    """새 필드를 안 내면 문서 모양이 종전과 같다(additive)."""
+    spans = _spans4()
+    norm, _, _ = ca.validate_stage2_response(_resp_ok(), spans, final_attempt=False)
+    for m in ca.assemble_chunk_meanings(norm, spans):
+        assert "screen_texts" not in m
+        for s in m["spans"]:
+            assert not set(ca.EXTRA_SPAN_KEYS) & set(s)
+
+
+def test_stage2_prompt_asks_for_v2_fields():
+    chunk, spans, s1 = _mk_chunk_for_prompt()
+    p = ca.build_stage2_prompt(chunk, s1, spans, None)
+    for key in ("screen_text", "has_text", "diegesis", "is_claim", "unclear"):
+        assert key in p
+    assert "지어내지 마라" in p
+
+
+def test_stage2_schema_version_in_fingerprint_and_story_key():
+    from app.v3 import pipeline as v3p
+    assert ca.STAGE2_SCHEMA == "v3_stage2/v2"
+    src = (Path(__file__).resolve().parents[1] / "app" / "v3" / "pipeline.py").read_text(encoding="utf-8")
+    assert '"schema": STAGE2_SCHEMA' in src              # 청크 캐시 지문에 버전
+    assert v3p.stage2_schema_key({"schema": "v3_stage2/v1"}) is None      # v1 잡 지문 종전 그대로
+    assert v3p.stage2_schema_key({}) is None
+    assert v3p.stage2_schema_key({"schema": "v3_stage2/v2"}) == "v3_stage2/v2"
+
+
+# ── 정독 패스(app/v3/screen_text.py) — 순수 부분 ──────────────────────────────
+
+def _s2_with_text_spans(rows):
+    """rows: [(t0, t1, has_text, screen_text, imp)] → stage2 문서(한 meaning)."""
+    spans = []
+    for i, (a, b, ht, st_, imp) in enumerate(rows):
+        s = {"number": i, "span_id": f"sp{i:04d}",
+             "time": {"start": schemas.format_ts(a), "end": schemas.format_ts(b)},
+             "is_audio": False, "scene_script": "화면", "characters": [], "importance": imp,
+             "time_authority": "scene"}
+        if ht:
+            s["has_text"] = True
+        if st_:
+            s["screen_text"] = st_
+        spans.append(s)
+    m = {"number": 0, "time": {"start": spans[0]["time"]["start"], "end": spans[-1]["time"]["end"]},
+         "content": "c", "characters": [], "importance": 3, "mood": "x", "spans": spans}
+    return {"schema": ca.STAGE2_SCHEMA,
+            "sequences": [{"number": 0, "chunks": [{"number": 0, "meanings": [m]}]}]}
+
+
+def test_screen_text_targets_cluster_budget_and_order():
+    from app.v3 import screen_text as stx
+    doc = _s2_with_text_spans([
+        (0, 2, True, None, 3),          # 대상(못 읽음)
+        (3, 5, True, "카톡", 5),        # 대상(짧음 ≤4자) — 틈 1s → 같은 장면
+        (5, 12, True, None, 2),         # 같은 장면(붙어 있음) → 장면 0~12 (긴 장면)
+        (20, 22, True, "오빠랑 같이 해서 너무 좋았어", 4),  # 읽힘 — 대상 아님
+        (30, 31, False, None, 3),       # 글자 없음
+        (40, 41, True, None, 1),        # 대상 — 새 장면
+    ])
+    rows = stx.targets(doc)
+    # 2026-09-08 트리거 교정: 읽힌 span(sp0003)도 대상 — 원본으로 대조한다. 글자 없는 span 만 제외
+    assert [r["span_id"] for r in rows] == ["sp0000", "sp0001", "sp0002", "sp0003", "sp0005"]
+    assert [r["unread"] for r in rows] == [True, True, True, False, True]
+    scenes = stx.cluster_scenes(rows)
+    assert [(s["t0"], s["t1"], s["span_ids"]) for s in scenes] == [
+        (0.0, 12.0, ["sp0000", "sp0001", "sp0002"]), (20.0, 22.0, ["sp0003"]), (40.0, 41.0, ["sp0005"])]
+    assert scenes[0]["importance"] == 5 and scenes[0]["unread"] and scenes[0]["drafts"] == ["카톡"]
+    assert scenes[1]["unread"] is False and scenes[1]["drafts"] == ["오빠랑 같이 해서 너무 좋았어"]
+    assert stx.budget_for(3146.325) == 24 and stx.budget_for(600.0) == 4 and stx.budget_for(None) == 4
+    # 못 읽은 장면 먼저(unread) · 그 뒤 importance 순 — 읽힌 imp4 장면(20s)은 unread imp1(40s) 뒤
+    assert [s["t0"] for s in stx.order_scenes(scenes)] == [0.0, 40.0, 20.0]
+    assert stx.frame_times(scenes[0]) == [0.3, 6.0, 11.7]     # 4s 초과 → 시작·중앙·끝
+    assert stx.frame_times(scenes[2]) == [40.5]
+    # 짧은 장면이라도 조각별 초벌이 다르면(타이핑 화면) 끝 프레임을 더 뜬다
+    assert stx.frame_times({"t0": 10.0, "t1": 12.0, "drafts": ["a", "b"]}) == [11.0, 11.7]
+    assert stx.frame_times({"t0": 10.0, "t1": 12.0, "drafts": ["a"]}) == [11.0]
+    assert "베끼지 말고" in stx.scene_hint(scenes[1]) and stx.scene_hint({"drafts": []}) == ""
+    assert "{hint}" in stx.PROMPT and stx.PROMPT.format(hint="").count("{") == 1
+
+
+def test_screen_text_validate_and_apply():
+    from app.v3 import screen_text as stx
+    assert stx.validate_read({"kind": "메시지", "text": " 안녕 ", "readable": True})[0] == \
+        {"kind": "메시지", "text": "안녕", "readable": True}
+    assert stx.validate_read({"readable": True, "text": ""})[0] is None
+    assert stx.validate_read({"readable": "yes", "text": "x"})[0] is None
+    assert stx.validate_read(["x"])[0] is None
+    doc = _s2_with_text_spans([(0, 2, True, None, 3), (2, 4, True, "카톡", 3)])
+    scenes = stx.cluster_scenes(stx.targets(doc))
+    assert stx.apply_result(scenes[0], {"kind": "메시지", "text": "원문", "readable": True}) == 2
+    sp = doc["sequences"][0]["chunks"][0]["meanings"][0]["spans"]
+    assert sp[0]["screen_text"] == "원문" and sp[0]["screen_text_source"] == "fullres"
+    assert sp[1]["screen_text"] == "원문" and sp[1]["has_text"] is True
+    stx.refresh_meaning_texts(doc)
+    assert doc["sequences"][0]["chunks"][0]["meanings"][0]["screen_texts"] == ["원문", "원문"]
+    assert stx.apply_result(scenes[0], {"kind": "기타", "text": "", "readable": False}) == 0
+
+
+def test_screen_text_pass_budget_sidecar_and_failure_keep_draft(tmp_path):
+    from app.v3 import screen_text as stx
+    doc = _s2_with_text_spans([
+        (0, 2, True, None, 5), (10, 12, True, None, 3), (20, 22, True, None, 1),
+        (30, 32, True, "초벌 원문이 길게 읽힘", 2)])        # 초벌이 읽힌 span 은 출처 표기만
+    calls = []
+    def extract(ffmpeg, video, t, out):
+        out.write_bytes(b"jpg")
+    def call(g, frames, hint=""):
+        calls.append(len(frames))
+        if len(calls) == 2:
+            raise RuntimeError("boom")                         # 실패 → 초벌 유지 + 기록
+        return {"kind": "문서", "text": f"읽음{len(calls)}", "readable": True}
+    a = stx.run_screen_text_pass(None, doc, Path("v.mp4"), tmp_path, duration_sec=300.0,
+                                 fingerprint="fp1", extract=extract, call=call,
+                                 ffmpeg="ffmpeg", log=lambda *x: None)
+    # 예산 4(≤10분) ≥ 장면 4(못 읽은 3 + 초벌 있는 1) → 4콜(unread 먼저: 0·10·20, 그다음 30)
+    # 2번째(10s)는 실패 → 초벌 유지. 초벌 장면(30s)은 원본 판독으로 교정되고 초벌은 draft 에 남는다
+    assert a["scenes"] == 4 and a["unread_scenes"] == 3 and a["calls"] == 4
+    assert a["filled"] == 3 and a["changed"] == 1 and a["skipped"] == 0
+    sp = doc["sequences"][0]["chunks"][0]["meanings"][0]["spans"]
+    assert sp[0]["screen_text"] == "읽음1" and sp[0]["screen_text_source"] == "fullres"
+    assert "screen_text" not in sp[1]                          # 실패 장면은 초벌 그대로(없음)
+    assert sp[3]["screen_text"] == "읽음4" and sp[3]["screen_text_source"] == "fullres"
+    assert sp[3]["screen_text_draft"] == "초벌 원문이 길게 읽힘"
+    assert any("실패" in d["result"] for d in a["details"])
+    assert (tmp_path / stx.CKPT_NAME).exists()
+    # 재실행 — 사이드카 재적용: 읽힌 장면은 호출 0, 실패 장면만 다시
+    doc2 = _s2_with_text_spans([
+        (0, 2, True, None, 5), (10, 12, True, None, 3), (20, 22, True, None, 1)])
+    calls.clear()
+    a2 = stx.run_screen_text_pass(None, doc2, Path("v.mp4"), tmp_path, duration_sec=300.0,
+                                  fingerprint="fp1", extract=extract, call=call,
+                                  ffmpeg="ffmpeg", log=lambda *x: None)
+    assert a2["calls"] == 1 and a2["filled"] == 3
+    # 지문이 다르면 사이드카 폐기 → 전부 다시(예산 2 로 좁히면 1장면은 초벌 유지)
+    doc3 = _s2_with_text_spans([
+        (0, 2, True, None, 5), (10, 12, True, None, 3), (20, 22, True, None, 1)])
+    calls.clear()
+    import app.v3.screen_text as _m
+    a3 = _m.run_screen_text_pass(None, doc3, Path("v.mp4"), tmp_path, duration_sec=None,
+                                 fingerprint="fp2", extract=extract, call=lambda g, f, hint="": {"kind": "k", "text": "t", "readable": True},
+                                 ffmpeg="ffmpeg", log=lambda *x: None)
+    assert a3["calls"] == 3 and a3["skipped"] == 0            # duration None → 예산 4
+    sp3 = doc3["sequences"][0]["chunks"][0]["meanings"][0]["spans"]
+    assert all(s["screen_text"] == "t" for s in sp3)
+
+
+def test_screen_text_pass_noop_without_targets(tmp_path):
+    from app.v3 import screen_text as stx
+    doc = _s2_with_text_spans([(0, 2, False, None, 3), (2, 4, False, None, 3)])   # 글자 없음
+    a = stx.run_screen_text_pass(None, doc, Path("v.mp4"), tmp_path, duration_sec=100.0,
+                                 fingerprint="x", call=lambda *a: (_ for _ in ()).throw(AssertionError("호출 금지")),
+                                 extract=lambda *a: None, ffmpeg="ffmpeg", log=lambda *x: None)
+    assert a["scenes"] == 0 and a["calls"] == 0
+    assert not (tmp_path / stx.CKPT_NAME).exists()
+
+
+def test_describe_zone_heads_budget_and_failure(monkeypatch, tmp_path):
+    from app.v3 import refine as rf
+    monkeypatch.setattr(rf, "find_ffmpeg_command", lambda *_a: "ffmpeg")
+    monkeypatch.setattr(rf, "_cut_probe_clip", lambda *a, **k: Path(a[4]).write_bytes(b""))
+    prompts = []
+    def call(g, clip, prompt):
+        prompts.append(prompt)
+        if "credit" in str(clip):
+            return {"desc": "검은 화면 위 스태프롤. 로고 카드."}
+        return {"nope": 1}
+    monkeypatch.setattr(rf, "_call_probe", call)
+    doc = _stage1([(8, 900, [(8, 900)])], exc={"intro": (0, 8), "credit": (900, 1000)})
+    out, audit = rf.describe_zone_heads(object(), doc, Path("v.mp4"), tmp_path, used_calls=0,
+                                        log=lambda *a: None)
+    assert out["exception_sector"]["credit"]["head_desc"].startswith("검은 화면")
+    assert "head_desc" not in out["exception_sector"]["intro"]   # 판정 불가 = 무표시
+    assert doc["exception_sector"]["credit"].get("head_desc") is None   # 원본 불변(사본)
+    assert audit["flash_calls"] == 2 and all("머리 20초" in p or "머리 8초" in p for p in prompts)
+    # 예산 소진 — 호출 0·기록
+    out2, audit2 = rf.describe_zone_heads(object(), doc, Path("v.mp4"), tmp_path,
+                                          used_calls=rf.FLASH_BUDGET, log=lambda *a: None)
+    assert audit2["flash_calls"] == 0 and all("예산" in z["result"] for z in audit2["zones"])

@@ -2306,3 +2306,42 @@ subtitle_skip_singing}}`. **명시한 플래그가 템플릿을 이긴다**(None
   밴드를 80px 올려도 로고가 15px 만 따라왔다. finalize `estimate_work_top` 은 원래 이렇게 재므로
   둘이 이제 같다. offset 없는 채널(center 정렬·work_title_y 명시 v1)은 종전과 동일.
 - 회귀 가드: `tests/test_v3_singing_skip.py` 마지막 절(1건).
+
+## V3 갭 2~5단계 — Stage 2 스키마 v2 · 회차 지도 · plan(N편) · 별건 (2026-09-08)
+
+인수인계 `docs/v3_gaps_handoff.md` §2~§5 를 그대로 구현(§4-2 편별 잡 레이아웃만 §4-4 결정 대기).
+실행 기록·합격 판정은 `docs/v3_gaps_from_manual_shorts.md` 「2·3·4단계 실행 기록」「별건 실행 기록」.
+
+- **Stage 2 스키마 v2** (`chunk_analyze.STAGE2_SCHEMA`): span 에 `screen_text`(300자)·`has_text`·
+  `diegesis`(actual 생략/imagined/recalled/unclear)·`is_claim`(유성 한정) — 전부 additive, 오값은 **키만
+  폐기+note**(반려 아님). 하류 도달 세 곳(validate row → assemble → build_span_index) + meaning
+  `screen_texts`. **스키마 버전이 청크 캐시 지문에 들어간다** — 옛 캐시는 자동 폐기(새 필드가 영원히
+  비는 조용한 재사용 방지). story 지문은 v2 이상일 때만 키(v1 잡 회귀 0).
+- **정독 패스** `app/v3/screen_text.py`: has_text 인데 못 읽은(≤4자) span 만, 장면(틈 2.0s) 단위 1콜,
+  원본 1080p 프레임(4s 넘으면 시작·끝 추가), 예산 10분당 4콜(importance·길이 순), 사이드카
+  `checkpoint_screen_text.json`(청크 지문). 실패·소진 = 초벌 유지+기록. `screen_text_source` stage2|fullres.
+- **하류**: 재료 표 `📄 "…"`·`⚠ 회상/상상(…)` 표기(`common.screen_text_tag/diegesis_tag` — 없으면 바이트
+  동일) · 내레이션 인용 규칙 · 글자 화면 hold 자동 승격 · hook/climax 의 비actual 조각은 note +
+  `diegesis_flags` · `<job>/review.json`(diegesis + 인명 불일치 — 대시보드 노출은 ves 몫).
+- **exception 머리 기록** `refine.describe_zone_heads` — zone 당 1콜, refine 예산 이어 셈, `head_desc`.
+- **회차 지도** `app/v3/episode_map.py` · `--episode-map`(미지정 = 단계 없음) · `V3_STEPS` `episode_map`·
+  `plan`(chunk_analyze 와 story 사이). 정방향(시퀀스당 1콜, 직전 상태 4k자 압축) → 역방향(거꾸로, 충돌만
+  수정). 검증: id 존재·kind 화이트리스트·setup.t<payoff.t·payoff 는 그 시퀀스. 캐시 = stage2 내용 지문.
+  `map_overrides.json` 은 로드 직후 병합(모르는 span·값은 즉시 실패). story_flow(human)는 지도가 있을 때만
+  레지스터·사실 장부 블록을 덧붙이고 `diegesis_final` 로 색인만 덮는다(stage2.json 불변). **갭 8 역류**:
+  덮개 프로브 모순이 되돌림 상한 뒤에도 남으면 `corrections`(관측 스키마) 기록 + story **편당 1회** 재실행.
+- **plan** `app/v3/plan.py` · `--plan-shorts N`(지도 필수 — 없으면 크게 실패) → `checkpoint_plan.json`
+  {kind event|contrast|irony, core_meanings, setup/payoff}. 중복 ≤20% 코드가 잰다 · contrast/irony 는
+  setup<payoff·60s 이상 거리·레지스터 밖 쌍은 note. `--plan-slot K` 가 걸음 1 을 대체(human 전용).
+- **story_flow 확장**: `TOPIC_KINDS`·`purpose_axis`(contrast 는 선언/경과/반전) · `hook_return`(훅 조각
+  1회 재사용, 길이 ≤ 훅, 맨 뒤) · 타임라인 클립 `beat` 키 + `finalize_cues` 가 같은 beat 의 클립을 먼저
+  본다(같은 소스 구간 두 번째 등장의 cue 좌표).
+- **라벨 확장(갭 10)**: `stage4.LABEL_KINDS`·`LABEL_JUDGMENT_WORDS`(단정 드롭) · pointer 는 글자 컷에서만 ·
+  identity 는 Stage 2 characters 대조 · irony 는 `register_id` 필수 · 절대초 폴백도 컷 경계 클램프.
+  재료는 `pipeline.label_facts_for`(LLM 0콜). 6번째 호출 없음.
+- **검출기·화자 추적(갭 12)**: `reframe.resolve_face_detector`(`FACE_DETECTOR` haar 기본 | yunet ONNX 번들
+  `app/assets/models/`) · `build_crop_timeline(detector=, crop_size=)` · v3 `finalize.speaker_crop_map` —
+  **design 키 `speaker_tracking=on`(v3 전용) 일 때만**, 기본 꺼짐(회귀 0). 실렌더 A/B 는 미실시.
+- `scripts/edit_plan_to_xml.py`: edit_plan → 프리미어 xmeml + SRT(참조용 — 렌더 정본 아님).
+- 회귀 가드: `tests/test_v3_stage2.py`(+10) · `test_v3_story_flow.py`(+4) · `test_v3_episode_map.py`(8) ·
+  `test_v3_plan.py`(7) · `test_v3_gap_extras.py`(10). 전체 2132 통과.

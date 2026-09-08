@@ -178,6 +178,11 @@ def build_span_index(stage2_doc: dict, grid: dict) -> tuple[dict[str, dict], lis
                         # 주 피사체 가로 위치(2026-09-02, 무성 인서트 선택 필드) —
                         # 조립이 클립 단위로 접어 크롭 앵커 재료로 쓴다
                         "subject_pos": s.get("subject_pos"),
+                        # 2단계 additive(2026-09-08, 갭 1·2·5) — 없으면 None/False
+                        "screen_text": s.get("screen_text") or None,
+                        "has_text": bool(s.get("has_text")),
+                        "diegesis": s.get("diegesis") or None,
+                        "is_claim": bool(s.get("is_claim")),
                         # 같은 문장이 다음 span 으로 이어짐(위 _cont) — 분석 밖
                         # 다음 span 은 요구할 수 없으니 색인에 있을 때만 산다
                         "continues_to": _cont.get(sid),

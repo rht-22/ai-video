@@ -90,13 +90,36 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
                    probe: bool = True,
                    exclude_topics: tuple[str, ...] = (),
                    exclude_ranges: tuple[tuple[float, float], ...] = (),
+                   episode_map: dict | None = None,
+                   corrections: list[dict] | None = None,
+                   topic_override: dict | None = None,
                    log=print) -> tuple[dict, dict]:
     """exclude_topics / exclude_ranges: 이미 만든 쇼츠(주제 문장 · 원본 초 구간) — 걸음
     1·2 프롬프트에 제외 블록으로 싣고, 구간과 겹치는 사건 단위는 검증기가 반려한다
-    (2026-09-07). 둘 다 비면 프롬프트·검증 종전과 동일."""
+    (2026-09-07). 둘 다 비면 프롬프트·검증 종전과 동일.
+    episode_map(3단계, 2026-09-08): 회차 지도 — 있으면 걸음 1·2 에 레지스터·사실 장부 블록을
+    덧붙이고 diegesis_final 이 색인의 연출 층위를 덮는다(색인 층에서만). 없으면 종전과 동일.
+    corrections: 갭 8 역류 — 지난 실행의 하류 관측(문장·화면 모순)을 걸음 1·3 의 첫 반려
+    사유로 싣는다(편당 1회 재실행은 호출자 몫).
+    topic_override(4단계): plan 단계가 정한 편 항목({topic, why, core_meanings, kind, setup?,
+    payoff?}) — 걸음 1(주제) 호출을 생략하고 이 값을 쓴다. 검증은 같은 validate_topic."""
     span_index, span_order = build_span_index(stage2_doc, grid)
     if not span_index:
         raise ValueError("분석된 span 이 없다 — Stage 2 가 선행돼야 한다")
+    from app.v3 import episode_map as em
+    if episode_map:
+        _n = em.apply_diegesis_final(span_index, episode_map)
+        if _n:
+            log(f"  [v3/flow] 회차 지도 diegesis_final — 조각 {_n}개 연출 층위 갱신(색인 층)")
+    map_blk = em.register_block(episode_map) + em.facts_block(episode_map)
+    corr_note = ""
+    if corrections:
+        corr_note = reject_block([
+            f"지난 실행(하류 관측 · {c.get('stage')}): {c.get('reason')}"
+            + (f" — 조각 {c['evidence'].get('span_id')} {fmt_t(c['evidence']['t'])}"
+               if c.get("evidence", {}).get("span_id") else "")
+            for c in corrections])
+        log(f"  [v3/flow] ↩ 갭 8 역류 — 하류 관측 {len(corrections)}건을 걸음 1·3 의 첫 반려 사유로 싣는다")
     rows = meaning_rows(stage2_doc)
     rows = [r for r in rows if any(s in span_index for s in r["span_ids"])]
     if not rows:
@@ -130,22 +153,32 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
             log("  [v3/flow] ⚠ 제외 구간이 어떤 사건 단위와도 절반 이상 겹치지 않는다 — 프롬프트 지시로만 막는다")
 
     # 1 주제
-    topic = _loop("topic", lambda rej: sl.TOPIC_PROMPT.format(
-        target_sec=target_sec, max_sec=max_sec, work_title=work_title,
-        research_block=research_block, sequence_block=seq_block,
-        hint_block=_hint_block(stage1_doc), meaning_block=meaning_block,
-        silent_block=silent_blk, exclude_block=exclude_blk,
-        reject_block=rej), lambda r: sl.validate_topic(r, rows, excluded=excluded),
-        gemini, audit, log)
+    if topic_override is not None:
+        # plan 단계(4단계)가 정한 편 — 호출 생략, 검증은 같은 검증기(형식 위반은 크게 실패)
+        topic, _tp = sl.validate_topic(topic_override, rows, excluded=excluded)
+        if topic is None:
+            raise ValueError(f"plan 항목이 주제 검증을 못 넘었다: {_tp[:3]}")
+        audit["topic"] = [{"attempt": 0, "elapsed": 0.0, "problems": [], "notes": ["plan 항목으로 대체(호출 생략)"]}]
+        log(f"  [v3/flow/topic] plan 항목으로 대체 — {topic['kind']}")
+    else:
+        topic = _loop("topic", lambda rej: sl.TOPIC_PROMPT.format(
+            target_sec=target_sec, max_sec=max_sec, work_title=work_title,
+            research_block=research_block, sequence_block=seq_block,
+            hint_block=_hint_block(stage1_doc), meaning_block=meaning_block,
+            silent_block=silent_blk, exclude_block=exclude_blk, map_block=map_blk,
+            reject_block=rej), lambda r: sl.validate_topic(r, rows, excluded=excluded),
+            gemini, audit, log, initial_reject=corr_note)
     log(f"  [v3/flow/topic] {topic['topic']} (핵심 m{'/m'.join(f'{i:03d}' for i in topic['core_meanings'])})")
 
-    # 2 씬 + 제목
+    # 2 씬 + 제목 — 주제 종류(event/contrast/irony)에 따라 쓰임 축이 다르다(4단계)
+    _purposes, _axis, _choices = sl.purpose_axis(topic.get("kind") or "event")
     scenes_doc = _loop("scenes", lambda rej: sl.SCENES_PROMPT.format(
         topic=topic["topic"], min_scenes=sl.MIN_SCENES, max_scenes=sl.MAX_SCENES,
         target_sec=target_sec, title_max=sl.TITLE_MAX_CHARS, work_title=work_title,
         research_block=research_block, meaning_block=meaning_block,
-        silent_block=silent_blk, exclude_block=exclude_blk,
-        reject_block=rej), lambda r: sl.validate_scenes(r, rows, excluded=excluded),
+        silent_block=silent_blk, exclude_block=exclude_blk, map_block=map_blk,
+        purpose_axis=_axis, purpose_choices=_choices,
+        reject_block=rej), lambda r: sl.validate_scenes(r, rows, excluded=excluded, purposes=_purposes),
         gemini, audit, log)
     scenes, title = scenes_doc["scenes"], scenes_doc["title"]
     log("  [v3/flow/scenes] " + " → ".join(f"m{s['meaning']:03d}[{s['purpose']}]" for s in scenes)
@@ -163,7 +196,7 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
                                     floor_ratio=sl.BUDGET_FLOOR_RATIO,
                                     material_sec=sum(span_index[x]["t_out"] - span_index[x]["t_in"]
                                                      for x in allowed if x in span_index)),
-        gemini, audit, log)
+        gemini, audit, log, initial_reject=corr_note)
     _dial = sum(span_index[x]["t_out"] - span_index[x]["t_in"]
                 for b in beats for x in b["span_ids"])
     jumps = sl.compute_jumps(beats, span_index)
@@ -389,6 +422,7 @@ def build_story_doc(beats: list[dict], span_index: dict[str, dict], cues: list[d
             "hole_before": list(b.get("hole_before") or []) or None,
             "covers": [dict(c) for c in covers],
             **({"head_trim_sec": b["head_trim_sec"]} if b.get("head_trim_sec") is not None else {}),
+            **({"diegesis_flags": dict(b["diegesis_flags"])} if b.get("diegesis_flags") else {}),
         })
     total = round(sum(beat_duration(b, span_index) for b in beats), 3)
     deficit = round(max(0.0, total - max_sec), 3)
@@ -405,8 +439,28 @@ def build_story_doc(beats: list[dict], span_index: dict[str, dict], cues: list[d
                    "total_before_sec": total, "total_after_sec": total,
                    "removed": [], "unmet": deficit > 0, "deficit_sec": deficit},
         "flow": {"scenes": scenes, "core_meanings": topic.get("core_meanings"),
-                 "jumps": list(jumps or [])},
+                 "jumps": list(jumps or []),
+                 **({"kind": topic["kind"]} if topic.get("kind") and topic["kind"] != "event" else {}),
+                 **({"setup": topic["setup"], "payoff": topic["payoff"]} if topic.get("setup") is not None else {})},
+        # 사람 확인 목록(갭 2, 2026-09-08) — additive. 비면 빈 목록(키는 늘 있다).
+        "review": review_items(beats, span_index),
     }
 
 
-__all__ = ["run_story_flow", "build_story_doc", "beat_duration", "TEMPLATE"]
+def review_items(beats: list[dict], span_index: dict[str, dict]) -> list[dict]:
+    """편성에 든 상상/회상/unclear 조각 → `{kind:"diegesis", beat, role, span_ids, value}`.
+    전 비트가 대상(게이트 역할 밖도 검수엔 실린다 — 내레이션이 단정하면 안 되는 자리)."""
+    out: list[dict] = []
+    for i, b in enumerate(beats):
+        by_val: dict[str, list[str]] = {}
+        for x in b.get("span_ids") or []:
+            v = (span_index.get(x) or {}).get("diegesis")
+            if v and v != "actual":
+                by_val.setdefault(str(v), []).append(x)
+        for v, ids in sorted(by_val.items()):
+            out.append({"kind": "diegesis", "beat": i, "role": b.get("role"),
+                        "span_ids": ids, "value": v})
+    return out
+
+
+__all__ = ["run_story_flow", "build_story_doc", "beat_duration", "review_items", "TEMPLATE"]

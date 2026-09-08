@@ -36,14 +36,26 @@ def build_crop_timeline(
     enable_speaker_tracking: bool = True,
     initial_x: float | None = None,
     initial_y: float | None = None,
+    detector: str | None = None,
+    crop_size: tuple[int, int] | None = None,
 ) -> list[CropKeyframe]:
+    """detector(갭 12): "haar"(기본·종전) | "yunet". None 이면 env FACE_DETECTOR(기본 haar).
+    crop_size: 크롭 크기(w,h) 명시 — None 이면 종전 9:16 `_portrait_crop_size`(v1 그대로)."""
     if _has_cv2():
         keyframes = _detect_faces(
             clip_path, width, height, sample_interval_sec, start_sec, end_sec,
             enable_speaker_tracking=enable_speaker_tracking,
             initial_x=initial_x,
             initial_y=initial_y,
+            detector=detector,
         )
+        if crop_size is not None:
+            import dataclasses
+            cw, ch = int(crop_size[0]) & ~1, int(crop_size[1]) & ~1
+            keyframes = [dataclasses.replace(
+                kf, crop_w=cw, crop_h=ch,
+                x_center=min(max(kf.x_center, cw / 2), width - cw / 2),
+                y_center=min(max(kf.y_center, ch / 2), height - ch / 2)) for kf in keyframes]
     else:
         keyframes = _center_crop(width, height, sample_interval_sec)
 
@@ -100,6 +112,91 @@ def _pick_speaker(faces, gray, prev_gray, frame_w: int, frame_h: int, prev_x: fl
     return best_face
 
 
+FACE_DETECTORS = ("haar", "yunet")
+YUNET_MODEL_PATH = Path(__file__).resolve().parent.parent / "assets" / "models" / "face_detection_yunet_2023mar.onnx"
+
+
+def resolve_face_detector(name: str | None) -> str:
+    """검출기 이름 확정 — 인자 > env FACE_DETECTOR > haar. 모르는 값은 즉시 실패(조용한 폴백 금지)."""
+    kind = (name or os.environ.get("FACE_DETECTOR") or "haar").strip().lower()
+    if kind not in FACE_DETECTORS:
+        raise ValueError(f"FACE_DETECTOR 는 {FACE_DETECTORS} 중 하나: {kind!r}")
+    if kind == "yunet" and not YUNET_MODEL_PATH.exists():
+        raise FileNotFoundError(f"YuNet 모델 없음: {YUNET_MODEL_PATH}")
+    return kind
+
+
+class _HaarDetector:
+    """종전 3단 cascade(정면 → alt2 → 프로필 → 반전 프로필) — 동작 동일."""
+
+    def __init__(self, tmp_dir: str):
+        import cv2
+        self._cv2 = cv2
+        dets = {}
+        for name in ("haarcascade_frontalface_default.xml", "haarcascade_frontalface_alt2.xml",
+                     "haarcascade_profileface.xml"):
+            dst = os.path.join(tmp_dir, name)
+            shutil.copy2(cv2.data.haarcascades + name, dst)
+            dets[name] = cv2.CascadeClassifier(dst)
+        self.front = dets["haarcascade_frontalface_default.xml"]
+        self.alt = dets["haarcascade_frontalface_alt2.xml"]
+        self.profile = dets["haarcascade_profileface.xml"]
+
+    def detect(self, gray, frame_bgr=None):
+        import numpy as np
+        cv2 = self._cv2
+        kw = dict(scaleFactor=1.15, minNeighbors=4, minSize=(40, 40))
+        faces = self.front.detectMultiScale(gray, **kw)
+        if len(faces) == 0:
+            faces = self.alt.detectMultiScale(gray, **kw)
+        if len(faces) == 0:
+            faces = self.profile.detectMultiScale(gray, **kw)
+            if len(faces) == 0:
+                flipped = cv2.flip(gray, 1)
+                faces_flip = self.profile.detectMultiScale(flipped, **kw)
+                if len(faces_flip) > 0:
+                    fw = gray.shape[1]
+                    faces = np.array([[fw - (x + w), y, w, h] for x, y, w, h in faces_flip])
+        return faces
+
+
+class _YuNetDetector:
+    """OpenCV FaceDetectorYN(ONNX) — 측면·작은 얼굴을 Haar 보다 훨씬 덜 놓친다(autoframe 실측:
+    Haar 는 10배 느리고 놓치는 프레임이 4배). 입력 크기가 바뀌면 다시 만든다."""
+
+    def __init__(self, model_path: Path, score_th: float = 0.6, nms_th: float = 0.3, top_k: int = 5000):
+        import cv2
+        if not hasattr(cv2, "FaceDetectorYN"):
+            raise RuntimeError(f"이 OpenCV({cv2.__version__})에는 FaceDetectorYN 이 없다 — opencv 4.5.4+ 필요")
+        self._cv2 = cv2
+        self._model = str(model_path)
+        self._args = (score_th, nms_th, top_k)
+        self._det = None
+        self._size = None
+
+    def detect(self, gray, frame_bgr=None):
+        import numpy as np
+        cv2 = self._cv2
+        if frame_bgr is None:
+            frame_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        h_, w_ = frame_bgr.shape[:2]
+        if self._size != (w_, h_):
+            self._det = cv2.FaceDetectorYN.create(self._model, "", (w_, h_), *self._args)
+            self._size = (w_, h_)
+        _, faces = self._det.detect(frame_bgr)
+        if faces is None or len(faces) == 0:
+            return []
+        out = [[int(f[0]), int(f[1]), int(f[2]), int(f[3])] for f in faces if f[2] >= 40 and f[3] >= 40]
+        return np.array(out) if out else []
+
+
+def _make_detector(name: str | None, tmp_dir: str):
+    kind = resolve_face_detector(name)
+    if kind == "yunet":
+        return _YuNetDetector(YUNET_MODEL_PATH)
+    return _HaarDetector(tmp_dir)
+
+
 def _detect_faces(
     clip_path: Path,
     width: int,
@@ -110,9 +207,9 @@ def _detect_faces(
     enable_speaker_tracking: bool = True,
     initial_x: float | None = None,
     initial_y: float | None = None,
+    detector: str | None = None,
 ) -> list[CropKeyframe]:
     import cv2
-    import numpy as np
 
     video_path_str = str(Path(clip_path).resolve())
     capture = cv2.VideoCapture(video_path_str)
@@ -137,20 +234,10 @@ def _detect_faces(
     # 0.5초(sample_interval_sec) 간격으로 프레임을 건너뛰며 분석
     frame_step = max(1, int(fps * sample_interval_sec))
 
-    # Haar Cascade 로드 (정면 + 프로필 얼굴)
+    # 얼굴 검출기(2026-09-08, 갭 12): 기본 Haar(종전 그대로 — 회귀 0) · `FACE_DETECTOR=yunet`
+    # 또는 detector="yunet" 이면 YuNet(ONNX, app/assets/models). 선택은 한 곳(_make_detector).
     _tmp_dir = tempfile.mkdtemp()
-
-    cascade_front_tmp = os.path.join(_tmp_dir, "haarcascade_frontalface_default.xml")
-    shutil.copy2(cv2.data.haarcascades + "haarcascade_frontalface_default.xml", cascade_front_tmp)
-    detector_front = cv2.CascadeClassifier(cascade_front_tmp)
-
-    cascade_alt_tmp = os.path.join(_tmp_dir, "haarcascade_frontalface_alt2.xml")
-    shutil.copy2(cv2.data.haarcascades + "haarcascade_frontalface_alt2.xml", cascade_alt_tmp)
-    detector_alt = cv2.CascadeClassifier(cascade_alt_tmp)
-
-    cascade_profile_tmp = os.path.join(_tmp_dir, "haarcascade_profileface.xml")
-    shutil.copy2(cv2.data.haarcascades + "haarcascade_profileface.xml", cascade_profile_tmp)
-    detector_profile = cv2.CascadeClassifier(cascade_profile_tmp)
+    _det = _make_detector(detector, _tmp_dir)
 
     keyframes = []
     # 라운드 24: 직전 클립의 마지막 위치를 초기값으로 받아 컷 경계 점프 완화.
@@ -178,20 +265,7 @@ def _detect_faces(
         # 히스토그램 평활화로 명암 대비 개선 (어두운 장면 대응)
         gray = cv2.equalizeHist(gray)
 
-        # 다중 Cascade로 얼굴 탐지 (정면 → alt2 → 프로필)
-        faces = detector_front.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=4, minSize=(40, 40))
-        if len(faces) == 0:
-            faces = detector_alt.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=4, minSize=(40, 40))
-        if len(faces) == 0:
-            faces = detector_profile.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=4, minSize=(40, 40))
-            if len(faces) == 0:
-                # 좌우 반전으로 반대쪽 프로필도 시도
-                flipped = cv2.flip(gray, 1)
-                faces_flip = detector_profile.detectMultiScale(flipped, scaleFactor=1.15, minNeighbors=4, minSize=(40, 40))
-                if len(faces_flip) > 0:
-                    # 좌표를 원본 기준으로 복원
-                    fw = gray.shape[1]
-                    faces = np.array([[fw - (x + w), y, w, h] for x, y, w, h in faces_flip])
+        faces = _det.detect(gray, frame)
 
         _det_face: tuple[float, float, int, int] | None = None   # E19-4: 이 표본의 raw 얼굴 박스
         if len(faces) > 0:

@@ -135,6 +135,12 @@ LABEL_TEXT_MAX = 12            # 괄호 제외 자수 — 길면 화면을 가�
 # 등장 효과 — 렌더러(build_texts_ass/_text_fx_tags)가 이미 굽는 어휘. 기본은 pop
 # ("띠용" 오버슈트 30%→110%→100%, 220ms). 미지정이 none 이면 라벨이 그냥 튀어나온다.
 LABEL_FX = ("pop", "glow", "shake", "none")
+# 갭 10 라벨 확장(2026-09-08): 종류 어휘 + 검증기 셋. **6번째 호출을 만들지 않는다** — Stage 4 가
+# 이미 초안을 본다. 지시형([…])은 화면 글자가 있는 컷에서만, 아이러니 주석은 레지스터(설정↔회수)를
+# 가리키는 것만, 인물 지목은 그 인물이 화면에 있는 구간만(Stage 2 characters), 판정 동사 금지.
+LABEL_KINDS = ("reaction", "identity", "pointer", "irony")
+LABEL_JUDGMENT_WORDS = ("거짓말", "불륜", "살인", "범인", "바람", "사기", "살해", "배신", "가짜", "진범",
+                        "유죄", "죄인", "악녀", "악마")   # 단정 — is_claim 규율(화면이 보여주기 전엔 금지)
 # 라벨 앵커 + 프로브(2026-09-04, 지금불륜 EP01 '(영혼 탈곡됨)' 실사고 — 모델이 6fps 초안을
 # 보고 절대초로 적은 시각이 다른 아이의 웃는 얼굴 위에 앉았다). 시각은 절대초가 아니라
 # **편집본 이벤트**(대사 줄 L·대사 직후 정적 G·컷 시작 C)에 앵커하고 코드가 이벤트 표에서
@@ -450,9 +456,13 @@ def validate_style_response(resp: Any, n_beats: int,
                             preset: dict | None = None,
                             duration: float | None = None,
                             events: list[dict] | None = None,
-                            clips: list[dict] | None = None) \
+                            clips: list[dict] | None = None,
+                            label_facts: dict | None = None) \
         -> tuple[dict | None, list[str], list[str]]:
     """모델 응답 → (정규화 스타일 | None, 반려 사유, 노트). 순수.
+
+    label_facts(갭 10): {screen_clips: {clip idx}, clip_characters: {clip idx: [이름]},
+    register: [{id, setup, payoff}]} — 지시형·인물 지목·아이러니 라벨의 검증 재료. None = 종전.
 
     design 은 STYLE_ALLOWED 만 — 어휘 밖 키는 반려(C5), 범위 밖 값도 반려.
     beats 항목은 additive 라 관용(모르는 비트 번호만 반려)."""
@@ -528,12 +538,30 @@ def validate_style_response(resp: Any, n_beats: int,
                          f"{item.get('text')!r}")
             continue
         text = item["text"].strip()
-        if not (text.startswith("(") and text.endswith(")")):
+        kind = str(item.get("kind") or "reaction").strip().lower()
+        if kind not in LABEL_KINDS:
+            notes.append(f"라벨 {text!r} kind {kind!r} → reaction")
+            kind = "reaction"
+        if kind == "pointer" or (text.startswith("[") and text.endswith("]")):
+            kind = "pointer"
+            if not (text.startswith("[") and text.endswith("]")):
+                text = f"[{text.strip('()[]')}]"
+        elif not (text.startswith("(") and text.endswith(")")):
             notes.append(f"라벨 괄호 보정: {text!r}")
             text = f"({text.strip('()')})"
         if len(text) - 2 > LABEL_TEXT_MAX:
             notes.append(f"라벨 {len(text) - 2}자 — {LABEL_TEXT_MAX}자 초과 드롭: {text!r}")
             continue
+        _judge = [w for w in LABEL_JUDGMENT_WORDS if w in text]
+        if _judge:
+            notes.append(f"라벨 {text!r} 판정 동사({'/'.join(_judge)}) — 드롭(화면이 보여주기 전엔 단정 금지)")
+            continue
+        if kind == "irony":
+            _rid = str(item.get("register_id") or "").strip()
+            _regs = {r.get("id") for r in (label_facts or {}).get("register") or [] if r.get("payoff")}
+            if _rid not in _regs:
+                notes.append(f"라벨 {text!r} irony 인데 레지스터(설정↔회수) 대응이 없다({_rid!r}) — 드롭")
+                continue
         anchor_id = None
         anchored = False
         if events is not None and item.get("anchor"):
@@ -567,6 +595,29 @@ def validate_style_response(resp: Any, n_beats: int,
         if t1 - t0 > LABEL_MAX_DUR_SEC:
             notes.append(f"라벨 {text!r} {t1 - t0:.1f}s → {LABEL_MAX_DUR_SEC:g}s 로 자름")
             t1 = t0 + LABEL_MAX_DUR_SEC
+        # 컷 경계 클램프(갭 10) — 절대초 폴백 경로도 그 시각이 속한 클립을 넘지 않는다(앵커
+        # 경로는 resolve_label_anchor 가 이미 가둔다). 인물 지목·지시형은 컷의 사실과 대조.
+        _clip_i = None
+        if clips:
+            _c = _clip_at(t0, clips)
+            if _c is not None:
+                _clip_i = _c.get("clip")
+                if t1 > _c["end"] + 1e-6:
+                    if _c["end"] - t0 < LABEL_MIN_DUR_SEC:
+                        notes.append(f"라벨 {text!r} 컷 끝에 걸림 — 드롭")
+                        continue
+                    notes.append(f"라벨 {text!r} 컷 경계로 자름 {t1:.2f}→{_c['end']:.2f}")
+                    t1 = _c["end"]
+        if label_facts is not None and _clip_i is not None:
+            if kind == "pointer" and _clip_i not in (label_facts.get("screen_clips") or set()):
+                notes.append(f"라벨 {text!r} 지시형인데 그 컷(C{_clip_i})에 화면 글자가 없다 — 드롭")
+                continue
+            if kind == "identity":
+                _who = str(item.get("person") or "").strip()
+                _chars = (label_facts.get("clip_characters") or {}).get(_clip_i) or []
+                if _who and _chars and _who not in _chars:
+                    notes.append(f"라벨 {text!r} 인물 지목({_who})인데 그 컷(C{_clip_i})엔 {'/'.join(_chars)} — 드롭")
+                    continue
         try:
             x, y = float(item.get("x")), float(item.get("y"))
         except (TypeError, ValueError):
@@ -595,6 +646,10 @@ def validate_style_response(resp: Any, n_beats: int,
                  "start_sec": round(t0, 3), "end_sec": round(t1, 3),
                  "x": round(cx, 3), "y": round(cy, 3),
                  "rotate": round(cr, 1), "color": color, "fx": fx}
+        if kind != "reaction":
+            entry["kind"] = kind                  # additive — 감사 기록(갭 10)
+            if kind == "irony":
+                entry["register_id"] = str(item.get("register_id"))
         if anchored:
             entry["anchor"] = anchor_id           # additive — 감사 기록("라벨 ← 이벤트")
         authored_out.append(entry)
@@ -717,6 +772,8 @@ STYLE_PROMPT = """당신은 쇼츠 아트디렉터다. 첨부한 영상은 리�
    - `rotate`(-8~8°, 시계방향 +): 감정이 튀는 라벨만 살짝(3~6°). 차분한 라벨은 0.
    - `color`: {palette_names} 중 하나 — **배경과의 대비가 우선이다.** 화면이 그 색 계열이면 쓰지 마라(붉은 조명 위 red 는 글자가 사라진다). 확신이 없으면 white·yellow. 연달아 나오면 서로 다른 색.
    - `fx`: `pop`(기본 — 띠용) · `glow`(**어두운 화면 전용** — 밝거나 같은 색 계열 배경에서는 외곽선이 사라져 안 보인다) · `shake`(충격·놀람) · `none`(차분).
+   - `kind`: `reaction`(기본 — 심리·행동) · `identity`(인물 지목 — `person` 에 그 인물 이름, **그 인물이 화면에 있는 컷**에서만){kind_extra}
+   - ⚠ **판정 동사 금지**: 거짓말·불륜·살인·범인·바람 같은 단정은 화면이 보여주기 전엔 쓰지 마라(드롭된다). 보이는 것·표정·행동으로만.
 1. 자막 가독성: 화면 하단이 밝거나 복잡하면 subtitle_color/외곽선 대비, 필요시 subtitle_y_margin 조정.
 2. 제목 밴드: 기본 유지 — 화면과 무관(검정 밴드 위)이라 특별한 사유 없으면 손대지 않는다.
 3. 비트별: crop(인물이 왼/오른쪽에 쏠린 구간 → left/right, 기본 center) · pop(팝인 강도 none/soft/strong — **실제 컷 리듬을 보고**: 컷이 잦고 호흡 빠른 비트만 soft+) · sfx(리듬 전환점의 효과음 큐 한 줄, 필수 아님).
@@ -735,7 +792,8 @@ def build_style_prompt(preset: dict, story_doc: dict, reject_note: str = "",
                        windows: list[dict] | None = None,
                        labels: list[dict] | None = None,
                        band: tuple[float, float] = (0.231, 0.769),
-                       events: list[dict] | None = None) -> str:
+                       events: list[dict] | None = None,
+                       label_facts: dict | None = None) -> str:
     if windows:
         # draft 는 편집본 좌표 — 원본 절대초(b.time)를 보여주면 영상 속 시각과 어긋난다
         by_beat = {w["beat"]: w for w in windows}
@@ -759,7 +817,16 @@ def build_style_prompt(preset: dict, story_doc: dict, reject_note: str = "",
             f"- {float(sg['start_sec']):.1f}~{float(sg['end_sec']):.1f}s 「{sg['text']}」"
             for sg in dialogue or []) or "- (대사 없음)"
         cuts_block = "(없음 — 타임라인 미제공)"
-    return STYLE_PROMPT.format(
+    kind_extra = ""
+    if label_facts and label_facts.get("screen_clips"):
+        kind_extra += (" · `pointer`(지시형 — 화면 글자를 가리키는 **대괄호** 라벨 `[딸 폰에 빨간 하트]`, "
+                       f"글자가 보이는 컷 {', '.join(f'C{i}' for i in sorted(label_facts['screen_clips'])[:8])} 에서만)")
+    if label_facts and label_facts.get("register"):
+        regs = "; ".join(f"{r['id']}: 「{(r.get('setup') or {}).get('quote', '')[:24]}」→「{(r.get('payoff') or {}).get('quote', '')[:24]}」"
+                         for r in label_facts["register"][:6])
+        kind_extra += (" · `irony`(아이러니 주석 — 드라마가 심어 둔 설정↔회수를 가리키는 것만, `register_id` 필수: "
+                       f"{regs})")
+    return STYLE_PROMPT.format(kind_extra=kind_extra,
         dialogue_block=dialogue_block, cuts_block=cuts_block,
         preset_block=json.dumps(preset, ensure_ascii=False, indent=1),
         beats_block=beats_block,
@@ -836,6 +903,7 @@ def run_style(gemini, draft_path: Path, story_doc: dict, *,
               band: tuple[float, float] | None = None,
               timeline: list[dict] | None = None,
               probe_ask=None,
+              label_facts: dict | None = None,
               log=print) -> tuple[dict, dict]:
     """Stage 4 실행 → (style 문서, 감사 기록). 소진 시 프리셋 폴백 — 렌더는 항상 간다.
     timeline 을 주면 라벨은 **앵커 어휘**(label_events)로 받고 앵커된 라벨은 프로브로 프레임을
@@ -859,7 +927,8 @@ def run_style(gemini, draft_path: Path, story_doc: dict, *,
     for attempt in range(1 + MAX_REASKS):
         prompt = build_style_prompt(preset, story_doc, reject_note,
                                     dialogue=dialogue, windows=windows,
-                                    labels=labels, band=band, events=events)
+                                    labels=labels, band=band, events=events,
+                                    label_facts=label_facts)
         log(f"  [v3/style] Flash vision 요청 (시도 {attempt + 1}/{1 + MAX_REASKS}, "
             f"draft {STYLE_SAMPLE_FPS:g}fps 표본)")
         t0 = time.time()
@@ -869,7 +938,7 @@ def run_style(gemini, draft_path: Path, story_doc: dict, *,
             resp = _call_style_model(gemini, draft_path, prompt)
             styled, problems, notes = validate_style_response(
                 resp, n_beats, band=band, labels=labels, preset=preset,
-                duration=duration, events=events, clips=clips)
+                duration=duration, events=events, clips=clips, label_facts=label_facts)
         except ValueError as e:
             styled, problems = None, [f"응답 오류: {e}"]
         audit["attempts"].append({"attempt": attempt + 1,
