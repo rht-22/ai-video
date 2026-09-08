@@ -490,8 +490,13 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
             _apply_edit_overrides(output_dir=output_dir,
                                   overrides_path=Path(edit_overrides_path),
                                   grid=grid, step=step, log=log)
-            # 사람 수정이 timeline 을 움직였으니 draft·style·렌더는 재구성이 맞다
-            from_step = "draft_render"
+            # 사람 수정이 **클립**을 움직였을 때만 draft 부터 강제 재구성한다(2026-09-08).
+            # 종전엔 자막만 고친 오버라이드에도 강제해 초안·watch_trim 캐시가 전부 무시됐고,
+            # 그래서 재렌더마다 Flash 가 컷을 새로 정해(비결정) 승인한 라벨이 증발했다.
+            # 자막·제목·cue 수정은 타임라인이 그대로라 지문(draft/watch_trim/style)이 알아서
+            # 판단한다 — 클립 수정은 지문도 바뀌지만 명시 강제를 남겨 종전 의도를 지킨다.
+            if (_read_json(Path(edit_overrides_path)).get("clips") or None) is not None:
+                from_step = "draft_render"
 
         # ── M4: draft_render → style → render → validate ──────────────────
         if skip_stage4:
