@@ -125,6 +125,11 @@ LABEL_ROTATE_LIMIT = 8.0       # 기울기 상한(°, 시계방향 +) — 넘으
 LABEL_PALETTE = {"white": "#FFFFFF", "red": "#FF5540", "yellow": "#FFE94A",
                  "blue": "#7ED0FF", "orange": "#FFB637"}
 LABEL_COLOR_CYCLE = ("#FF5540", "#FFE94A", "#7ED0FF", "#FFB637")  # 미지정 시 순환
+# 강조 자막 팔레트(2026-09-08 사용자 지시 "내레이션이랑 대사 자막 색이 안 겹쳐") — 노랑은
+# 내레이션 자막 색(RECAP tts_color #FFE94A)이라 대사 강조에서 뺀다. 라벨은 화면 위쪽 별개
+# 요소라 그대로(v10 도 라벨은 노랑).
+NARRATION_RESERVED_COLOR = "yellow"
+EMPH_PALETTE = {k: v for k, v in LABEL_PALETTE.items() if k != NARRATION_RESERVED_COLOR}
 # 라벨 저작(M16, 2026-09-01) — Stage 4 가 초안을 보며 문구·시각·위치를 직접 쓴다.
 # 라벨의 재료는 화면(표정·행동·구도)인데 종전에는 화면을 못 보는 Stage 3 이 문구와
 # 시각을 정했다 — 배치를 잘해도 문구·시각이 장면과 안 물리는 실사고(사용자 지적).
@@ -139,6 +144,20 @@ LABEL_FX = ("pop", "glow", "shake", "none")
 # 이미 초안을 본다. 지시형([…])은 화면 글자가 있는 컷에서만, 아이러니 주석은 레지스터(설정↔회수)를
 # 가리키는 것만, 인물 지목은 그 인물이 화면에 있는 구간만(Stage 2 characters), 판정 동사 금지.
 LABEL_KINDS = ("reaction", "identity", "pointer", "irony")
+# 편집 연출 3종(2026-09-08, 사용자 지시 "규칙이 아니라 Stage 4 LLM 이 정한다" — build12 이식):
+# 강조 자막(줄 단위 색·크기·강한 팝인) · 계단식 줌인(클립 단위 배율·앵커·시작 오프셋) ·
+# 정보 화면 전체 맞춤(fit). 값은 모델이 고르고 코드는 범위·상한·id 만 본다.
+EMPH_MAX_COUNT = 6             # 편당 강조 줄 상한(60초 편 실측 3~5줄이 적정 — E15 의 10 보다 좁힘)
+EMPH_SCALE_RANGE = (1.05, 1.45)   # 자막 기준 크기 대비 배율(build12: 76/62 = 1.23)
+EMPH_DEFAULT_SCALE = 1.23
+EMPH_DEFAULT_COLOR = "#FF3E3E"    # build12 EMPH_COLOR
+EMPH_ZOOM_FACTOR = 1.2            # 강조 줄인데 모델이 줌을 안 냈을 때 코드가 채우는 배율(v9 1.14~1.30 · v10 1.12~1.22)
+EMPH_ZOOM_TOL_SEC = 0.35          # 강조 줄 시작과 줌 단계 경계가 이 안이면 같은 자리
+ZOOM_MAX_COUNT = 4
+ZOOM_FACTOR_RANGE = (1.1, 1.6)    # build12 실측 1.45
+ZOOM_MIN_PART_SEC = 0.3           # 단계 경계로 쪼갠 뒤 남는 조각 하한(이보다 짧으면 앞 단계에 흡수)
+ZOOM_MAX_STAGES = 3               # 한 컷 안 단계 수 상한(build11 S9: 1.0→1.10→1.22 세 단)
+FIT_MAX_COUNT = 3
 LABEL_JUDGMENT_WORDS = ("거짓말", "불륜", "살인", "범인", "바람", "사기", "살해", "배신", "가짜", "진범",
                         "유죄", "죄인", "악녀", "악마")   # 단정 — is_claim 규율(화면이 보여주기 전엔 금지)
 # 라벨 앵커 + 프로브(2026-09-04, 지금불륜 EP01 '(영혼 탈곡됨)' 실사고 — 모델이 6fps 초안을
@@ -736,11 +755,167 @@ def validate_style_response(resp: Any, n_beats: int,
         if b.get("pop") is not None and b.get("pop") not in POP_LEVELS:
             notes.append(f"beat{num} pop {b.get('pop')!r} → none 보정")
         beats_out.append({"number": num, "crop": crop, "pop": pop, "sfx_cue": sfx})
+    edits = validate_edit_fx(resp, events=events, clips=clips, notes=notes)
     if problems:
         return None, problems, notes
     return {"design": design, "beats": beats_out,
             "labels": authored_out + labels_out,
+            **edits,
             "notes": str(resp.get("notes") or "").strip()[:400]}, [], notes
+
+
+def validate_edit_fx(resp: dict, *, events: list[dict] | None, clips: list[dict] | None,
+                     notes: list[str]) -> dict:
+    """강조 자막·줌·fit(2026-09-08) — 라벨과 같은 규율: **항목 단위 드롭+노트**, 플랜 반려 없음.
+    id 는 프롬프트 표의 L(대사 줄)·C(클립)만. 표(events/clips)가 없으면(구 호출) 전부 드롭.
+    반환 {emphasis, zooms, fits} — 셋 다 비면 빈 목록(style 문서에 키는 늘 있다)."""
+    line_ids = {e["id"]: e for e in (events or []) if e.get("kind") == "line"}
+    clip_ids = {f"C{c['clip']}": c for c in (clips or [])}
+    emph: list[dict] = []
+    seen_lines: set[str] = set()
+    for k, it in enumerate(resp.get("emphasis") or []):
+        if not isinstance(it, dict):
+            continue
+        lid = str(it.get("line") or "").strip().upper()
+        ev = line_ids.get(lid)
+        if ev is None:
+            notes.append(f"강조 {lid!r} — 대사 표에 없는 줄 — 드롭")
+            continue
+        if lid in seen_lines:
+            continue
+        if len(emph) >= EMPH_MAX_COUNT:
+            notes.append(f"강조 {EMPH_MAX_COUNT}줄 초과 — {lid} 드롭")
+            continue
+        try:
+            scale = float(it.get("scale") if it.get("scale") is not None else EMPH_DEFAULT_SCALE)
+        except (TypeError, ValueError):
+            scale = EMPH_DEFAULT_SCALE
+        if not math.isfinite(scale):
+            scale = EMPH_DEFAULT_SCALE
+        scale = min(max(scale, EMPH_SCALE_RANGE[0]), EMPH_SCALE_RANGE[1])
+        _cname = str(it.get("color") or "").strip().lower()
+        if _cname == NARRATION_RESERVED_COLOR:
+            notes.append(f"강조 {lid} — {_cname} 은 내레이션 색 — 기본색으로 대체")
+        color = EMPH_PALETTE.get(_cname) or EMPH_DEFAULT_COLOR
+        seen_lines.add(lid)
+        emph.append({"line": lid, "index": int(lid[1:]), "scale": round(scale, 3), "color": color,
+                     "start_sec": ev["start"], "end_sec": ev["end"], "text": ev.get("text", "")[:40]})
+    zooms: list[dict] = []
+    zoomed: set[int] = set()
+    for k, it in enumerate(resp.get("zooms") or []):
+        if not isinstance(it, dict):
+            continue
+        cid = str(it.get("clip") or "").strip().upper()
+        c = clip_ids.get(cid)
+        if c is None:
+            notes.append(f"줌 {cid!r} — 클립 표에 없는 컷 — 드롭")
+            continue
+        if c["clip"] in zoomed:
+            continue
+        if len(zooms) >= ZOOM_MAX_COUNT:
+            notes.append(f"줌 {ZOOM_MAX_COUNT}컷 초과 — {cid} 드롭")
+            continue
+        length = float(c["end"]) - float(c["start"])
+        raw_stages = it.get("stages") if isinstance(it.get("stages"), list) else \
+            [{"from_sec": it.get("from_sec") or 0.0, "factor": it.get("factor"), "anchor": it.get("anchor")}]
+        stages: list[dict] = []
+        bad = False
+        for st in raw_stages[:ZOOM_MAX_STAGES + 1]:
+            if not isinstance(st, dict):
+                continue
+            try:
+                factor = float(st.get("factor") or 0.0)
+                from_sec = max(0.0, float(st.get("from_sec") or 0.0))
+            except (TypeError, ValueError):
+                bad = True
+                break
+            if not (math.isfinite(factor) and math.isfinite(from_sec)):
+                bad = True
+                break
+            if factor != 1.0 and (factor < ZOOM_FACTOR_RANGE[0] or factor > ZOOM_FACTOR_RANGE[1]):
+                notes.append(f"줌 {cid} factor {factor:.2f} → {ZOOM_FACTOR_RANGE} 클램프")
+                factor = min(max(factor, ZOOM_FACTOR_RANGE[0]), ZOOM_FACTOR_RANGE[1])
+            anchor = st.get("anchor") if st.get("anchor") in CROP_ANCHORS else \
+                (it.get("anchor") if it.get("anchor") in CROP_ANCHORS else "center")
+            stages.append({"from_sec": round(from_sec, 3), "factor": round(factor, 3), "anchor": anchor})
+        if bad or not stages:
+            notes.append(f"줌 {cid} factor/from_sec 형식 오류 — 드롭")
+            continue
+        stages.sort(key=lambda x: x["from_sec"])
+        if len(stages) > ZOOM_MAX_STAGES:
+            notes.append(f"줌 {cid} 단계 {len(stages)} → {ZOOM_MAX_STAGES}단(앞부터)")
+            stages = stages[:ZOOM_MAX_STAGES]
+        # 단계 경계 정리: 첫 단계는 0 에서 시작(1.0 이면 '원래 크기' 구간), 조각 하한 미만 경계는 앞 단계에 흡수
+        kept: list[dict] = []
+        for st in stages:
+            if not kept:
+                if st["from_sec"] > 0 and st["from_sec"] < ZOOM_MIN_PART_SEC:
+                    st = {**st, "from_sec": 0.0}
+                kept.append(st)
+                continue
+            if st["from_sec"] - kept[-1]["from_sec"] < ZOOM_MIN_PART_SEC or length - st["from_sec"] < ZOOM_MIN_PART_SEC:
+                notes.append(f"줌 {cid} 단계 {st['from_sec']:.2f}s — 조각이 {ZOOM_MIN_PART_SEC}s 미만 → 앞 단계에 흡수")
+                kept[-1] = {**kept[-1], "factor": max(kept[-1]["factor"], st["factor"]) if kept[-1]["factor"] == 1.0 else kept[-1]["factor"]}
+                continue
+            kept.append(st)
+        if all(st["factor"] == 1.0 for st in kept):
+            notes.append(f"줌 {cid} 배율이 전부 1.0 — 드롭")
+            continue
+        if kept[0]["from_sec"] > 0 and (kept[0]["from_sec"] < ZOOM_MIN_PART_SEC or length - kept[0]["from_sec"] < ZOOM_MIN_PART_SEC):
+            kept[0] = {**kept[0], "from_sec": 0.0}
+        zoomed.add(c["clip"])
+        first = kept[0]
+        zooms.append({"clip": c["clip"], "factor": first["factor"], "anchor": first["anchor"],
+                      "from_sec": first["from_sec"], "stages": kept})
+    fits: list[int] = []
+    for k, it in enumerate(resp.get("fits") or []):
+        cid = str((it.get("clip") if isinstance(it, dict) else it) or "").strip().upper()
+        c = clip_ids.get(cid)
+        if c is None:
+            notes.append(f"fit {cid!r} — 클립 표에 없는 컷 — 드롭")
+            continue
+        if c["clip"] in fits:
+            continue
+        if c["clip"] in zoomed:
+            notes.append(f"fit {cid} — 같은 컷에 줌이 있다 → fit 드롭(줌 우선)")
+            continue
+        if len(fits) >= FIT_MAX_COUNT:
+            notes.append(f"fit {FIT_MAX_COUNT}컷 초과 — {cid} 드롭")
+            continue
+        fits.append(c["clip"])
+    # 강조↔줌 짝 채움(2026-09-08, v9/v10 규칙): 강조 줄이 있는 컷에 그 줄 시작 시각의 줌 단계가 없으면 채운다.
+    # 모델 판단을 대체하는 게 아니라 빠진 반쪽을 보태는 것 — 채운 것은 note 로 남긴다. fit 컷은 제외(줌과 배타).
+    clip_by_idx = {c["clip"]: c for c in (clips or [])}
+    zoom_by_clip = {z["clip"]: z for z in zooms}
+    for e in emph:
+        c = _clip_at(float(e["start_sec"]), clips or [])
+        if c is None or c["clip"] in fits:
+            continue
+        rel = round(max(0.0, float(e["start_sec"]) - float(c["start"])), 3)
+        length = float(c["end"]) - float(c["start"])
+        z = zoom_by_clip.get(c["clip"])
+        if z is None:
+            if len(zooms) >= ZOOM_MAX_COUNT:
+                notes.append(f"강조 {e['line']} 줌 짝 — 줌 상한({ZOOM_MAX_COUNT})이라 못 채움")
+                continue
+            fs = rel if (rel >= ZOOM_MIN_PART_SEC and length - rel >= ZOOM_MIN_PART_SEC) else 0.0
+            z = {"clip": c["clip"], "factor": EMPH_ZOOM_FACTOR, "anchor": "center", "from_sec": fs,
+                 "stages": [{"from_sec": fs, "factor": EMPH_ZOOM_FACTOR, "anchor": "center"}]}
+            zooms.append(z)
+            zoom_by_clip[c["clip"]] = z
+            notes.append(f"강조 {e['line']}「{e['text'][:12]}」 — 줌 짝 채움(C{c['clip']} {fs:.2f}s ×{EMPH_ZOOM_FACTOR})")
+            continue
+        if any(abs(st["from_sec"] - rel) <= EMPH_ZOOM_TOL_SEC for st in z["stages"]):
+            continue
+        if len(z["stages"]) >= ZOOM_MAX_STAGES or rel < ZOOM_MIN_PART_SEC or length - rel < ZOOM_MIN_PART_SEC:
+            continue
+        last = max(z["stages"], key=lambda st: st["from_sec"])
+        factor = min(ZOOM_FACTOR_RANGE[1], round(max(last["factor"], 1.0) + 0.1, 3))
+        z["stages"].append({"from_sec": rel, "factor": factor, "anchor": last.get("anchor") or "center"})
+        z["stages"].sort(key=lambda st: st["from_sec"])
+        notes.append(f"강조 {e['line']}「{e['text'][:12]}」 — 줌 단계 추가(C{c['clip']} {rel:.2f}s ×{factor})")
+    zooms.sort(key=lambda z: z["clip"])
+    return {"emphasis": emph, "zooms": zooms, "fits": fits}
 
 
 def style_diff(preset: dict, design: dict) -> dict:
@@ -777,6 +952,9 @@ STYLE_PROMPT = """당신은 쇼츠 아트디렉터다. 첨부한 영상은 리�
 1. 자막 가독성: 화면 하단이 밝거나 복잡하면 subtitle_color/외곽선 대비, 필요시 subtitle_y_margin 조정.
 2. 제목 밴드: 기본 유지 — 화면과 무관(검정 밴드 위)이라 특별한 사유 없으면 손대지 않는다.
 3. 비트별: crop(인물이 왼/오른쪽에 쏠린 구간 → left/right, 기본 center) · pop(팝인 강도 none/soft/strong — **실제 컷 리듬을 보고**: 컷이 잦고 호흡 빠른 비트만 soft+) · sfx(리듬 전환점의 효과음 큐 한 줄, 필수 아님).
+5. **강조 자막**(`emphasis`, 0~{emph_max}줄): 사건을 뒤집는 한마디·펀치라인·훅 대사 줄만 골라 `line`(위 표의 L id) · `color`({emph_palette_names} — yellow 는 내레이션 자막 색이라 못 쓴다) · `scale`(자막 기준 크기 대비 {emph_lo:.2f}~{emph_hi:.2f}). 강조 줄은 붉게·크게·강한 팝인으로 나가고 **그 줄이 시작하는 순간 화면도 한 단계 당겨진다(줌) + 타격음** — 강조·줌·효과음은 한 쌍이다. 그러니 강조 줄이 있는 컷에는 그 줄 시작 시각을 단계 경계로 하는 줌(6번)을 함께 내라(안 내면 코드가 {emph_zoom:.2f}배로 채운다). 연달아 강조하지 마라(전부 강조 = 강조 없음). 없으면 빈 배열.
+6. **줌인**(`zooms`, 0~{zoom_max}컷): 줌은 시청자의 시선을 좁히는 장치다 — 카메라가 안 한 일을 편집이 한다. 쓰는 자리: ① 감정이 한 단계 오르는 순간(의심→확신, 태연→굳음)에 얼굴로 당긴다 ② 강조 대사가 떨어지는 순간에 말하는 인물로 당긴다 ③ 글자를 읽혀야 하는 화면은 글자 쪽으로 당긴다. 한 컷 안에서 **단계**(`stages`, ≤{zoom_stages}단)로 계단식으로 들어간다 — 단계 경계는 대사 줄이 바뀌거나 감정이 꺾이는 시각(클립 시작 기준 초). 예: 「내가 이 나이 들어가지고 / 무슨 스캔들이 다 나네」 → 1.0(첫 줄) → 1.10(둘째 줄) → 1.22(강조 대사). `factor`({zoom_lo:.1f}~{zoom_hi:.1f}, 1.0 은 원래 크기 — 첫 단계로만 허용) · `anchor`(left/center/right — 인물·글자가 있는 쪽). 연속한 컷마다 줌하지 마라(어지럽다). 단계 하나뿐이면 `stages` 대신 `factor`·`from_sec` 로 적어도 된다.
+7. **정보 화면 전체 맞춤**(`fits`, 0~{fit_max}컷): 카톡·기사·문서·검색창처럼 **글자가 정보인 화면**은 가로 크롭에서 이름과 문장 끝이 잘린다 — 그런 컷은 `clip`(C id)을 적어라. 그림 전체를 밴드 폭에 넣고 위아래는 흐린 배경으로 채운다. 줌과 같은 컷에 두지 마라.
 4. 허용 design 키(이 밖은 금지): {allowed_keys}
    ⚠ **제목을 굵게 하지 마라** — `title_bold`·`title_bold2` 는 쓸 수 없다(보내면 그 키만 버려진다). 제목 폰트가 이미 굵어서 볼드를 얹으면 글자 속이 메워진다.
 {reject_block}
@@ -784,6 +962,10 @@ STYLE_PROMPT = """당신은 쇼츠 아트디렉터다. 첨부한 영상은 리�
 {{"design": {{"subtitle_color": "#FFFFFF"}},
  "beats": [{{"number": 0, "crop": "center", "pop": "soft", "sfx": null}}],
  "labels": [{{"text": "(…)", "anchor": "G7", "offset_sec": 0.2, "duration_sec": 1.5, "x": 0.72, "y": 0.36, "rotate": -4, "color": "yellow", "fx": "pop"}}],
+ "emphasis": [{{"line": "L12", "color": "red", "scale": 1.23}}],
+ "zooms": [{{"clip": "C3", "stages": [{{"from_sec": 0.0, "factor": 1.0}}, {{"from_sec": 1.3, "factor": 1.1, "anchor": "left"}}, {{"from_sec": 2.5, "factor": 1.22, "anchor": "left"}}]}},
+           {{"clip": "C9", "factor": 1.45, "anchor": "center", "from_sec": 0.9}}],
+ "fits": [{{"clip": "C7"}}],
  "notes": "판단 근거 한두 문장"}}"""
 
 
@@ -827,12 +1009,18 @@ def build_style_prompt(preset: dict, story_doc: dict, reject_note: str = "",
         kind_extra += (" · `irony`(아이러니 주석 — 드라마가 심어 둔 설정↔회수를 가리키는 것만, `register_id` 필수: "
                        f"{regs})")
     return STYLE_PROMPT.format(kind_extra=kind_extra,
+                               emph_max=EMPH_MAX_COUNT, emph_lo=EMPH_SCALE_RANGE[0], emph_hi=EMPH_SCALE_RANGE[1],
+                               emph_zoom=EMPH_ZOOM_FACTOR,
+                               zoom_max=ZOOM_MAX_COUNT, zoom_lo=ZOOM_FACTOR_RANGE[0], zoom_hi=ZOOM_FACTOR_RANGE[1],
+                               zoom_stages=ZOOM_MAX_STAGES,
+                               fit_max=FIT_MAX_COUNT,
         dialogue_block=dialogue_block, cuts_block=cuts_block,
         preset_block=json.dumps(preset, ensure_ascii=False, indent=1),
         beats_block=beats_block,
         band_lo=band[0] + LABEL_BAND_MARGIN, band_hi=band[1] - LABEL_BAND_MARGIN,
         band_mid=LABEL_Y_FALLBACK,
         palette_names=" · ".join(LABEL_PALETTE),
+        emph_palette_names=" · ".join(EMPH_PALETTE),
         allowed_keys=", ".join(sorted(STYLE_ALLOWED)),
         reject_block=reject_block)
 
@@ -951,6 +1139,7 @@ def run_style(gemini, draft_path: Path, story_doc: dict, *,
     if styled is None:
         log("  [v3/style] ⚠ 재질의 소진 — 프리셋 그대로(스타일 무변경 폴백)")
         styled = {"design": {}, "beats": [], "labels": [],
+                  "emphasis": [], "zooms": [], "fits": [],
                   "notes": "재질의 소진 — 프리셋 폴백"}
         audit["fallback"] = True
 
@@ -971,6 +1160,10 @@ def run_style(gemini, draft_path: Path, story_doc: dict, *,
         "diff": style_diff(preset, styled["design"]),
         "v3_style": {"beats": styled["beats"],
                      "labels": styled.get("labels") or [],
+                     # 편집 연출 3종(2026-09-08) — 없으면 빈 목록(렌더는 종전과 동일)
+                     "emphasis": styled.get("emphasis") or [],
+                     "zooms": styled.get("zooms") or [],
+                     "fits": styled.get("fits") or [],
                      "notes": styled["notes"]},
     }
     audit["diff_keys"] = sorted(doc["diff"])

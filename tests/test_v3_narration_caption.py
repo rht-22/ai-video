@@ -15,4 +15,5 @@ def test_strips_commas_and_final_period_only():
 def test_tts_ass_uses_caption_text():
     import pathlib
     src = pathlib.Path("app/v3/finalize.py").read_text(encoding="utf-8")
-    assert 'narration_caption(str(f["cue"]["text"])) for f in cue_files' in src
+    # 2026-09-08: 캡션 뒤에 2줄 균형 분할(balance_narration_lines)이 감싼다 — 캡션 호출 자체는 그대로
+    assert 'balance_narration_lines(narration_caption(str(f["cue"]["text"]))' in src

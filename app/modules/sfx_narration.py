@@ -288,3 +288,51 @@ def drop_label_collisions(narration: list[dict], labels: list[dict], *,
         else:
             keep.append(lb)
     return keep, dropped
+
+
+EMPHASIS_TAG = "emphasis_soft"
+
+
+def place_emphasis_sfx(lines: list[dict], *, app_root: Path, run_dir: Path, seed: str,
+                       speed: float = 1.0) -> list[dict[str, Any]]:
+    """강조 자막 줄(Stage 4 `emphasis`, 2026-09-08) → 줄 시작에 타격음. v9/v10 수작업의 규칙
+    "강조 줄 = 줌 단계 = 효과음 한 쌍"의 소리 쪽. 매니페스트 `emphasis` 절이 없거나 꺼져 있으면 빈 리스트.
+    lines: [{start_sec, text}] (편집본 좌표)."""
+    mf = load_narration_manifest(app_root)
+    if not mf or not lines:
+        return []
+    cfg = (mf["config"].get("emphasis") or {}) if isinstance(mf["config"], dict) else {}
+    if not cfg.get("enabled"):
+        return []
+    gain_db = float(cfg.get("gain_db", -6.0))
+    no_repeat = int(cfg.get("no_repeat_window", 3))
+    src_dir = Path(app_root) / "assets" / SFX_DIR_NAME
+    dest_dir = Path(run_dir) / STAGE_SUBDIR
+    out: list[dict[str, Any]] = []
+    recent: list[str] = []
+    for step, ln in enumerate(lines):
+        try:
+            at = float(ln["start_sec"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        it = _pick(mf["items"], EMPHASIS_TAG, seed, step, recent, no_repeat) \
+            or _pick(mf["items"], LABEL_TAG, seed, step, recent, no_repeat)
+        if it is None:
+            continue
+        src = src_dir / it["file"]
+        if not src.is_file():
+            print(f"  [sfx-emphasis] 번들에 파일이 없어 건너뜀: {it['file']}")
+            continue
+        peak = float(it.get("peak_sec", 0.0))
+        start = max(0.0, at - peak * speed)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = (dest_dir / src.name).resolve()
+        if not dest.exists():
+            shutil.copy2(src, dest)
+        out.append({"path": dest, "start_sec": round(start, 3), "gain_db": gain_db,
+                    "_label": {"id": it["id"], "family": it.get("family"), "quiet": False,
+                               "at": round(at, 3), "text": str(ln.get("text") or "")[:20],
+                               "peak_sec": peak, "kind": "emphasis"}})
+        recent.append(it.get("family") or it["id"])
+    return out
+

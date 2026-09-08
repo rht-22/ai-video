@@ -2341,10 +2341,35 @@ subtitle_skip_singing}}`. **명시한 플래그가 템플릿을 이긴다**(None
   재료는 `pipeline.label_facts_for`(LLM 0콜). 6번째 호출 없음.
 - **검출기·화자 추적(갭 12)**: `reframe.resolve_face_detector`(`FACE_DETECTOR` haar 기본 | yunet ONNX 번들
   `app/assets/models/`) · `build_crop_timeline(detector=, crop_size=)` · v3 `finalize.speaker_crop_map` —
-  **design 키 `speaker_tracking=on`(v3 전용) 일 때만**, 기본 꺼짐(회귀 0). 실렌더 A/B 는 미실시.
+  design 키 `speaker_tracking`(v3 전용) — 처음엔 기본 꺼짐이었으나 **2026-09-08 같은 날 기본 on·yunet 으로 바뀜**
+  (아래 「v3 화자 추적 실측·교정」 절).
 - `scripts/edit_plan_to_xml.py`: edit_plan → 프리미어 xmeml + SRT(참조용 — 렌더 정본 아님).
 - 회귀 가드: `tests/test_v3_stage2.py`(+10) · `test_v3_story_flow.py`(+4) · `test_v3_episode_map.py`(8) ·
   `test_v3_plan.py`(7) · `test_v3_gap_extras.py`(10). 전체 2132 통과.
+
+## Stage 4 편집 연출 3종 — 강조 자막·계단식 줌·정보 화면 맞춤 (2026-09-08, 사용자 지시)
+
+> "이런 편집적인 요소를 규칙으로 정하는 건 말이 안돼. Stage 4 에서 LLM 이 스타일 단계에서 같이 정하게 해줘."
+
+`~/premiere_claude/builders/build12.py`(수작업 v9~v12)의 세 기법을 Stage 4 응답 어휘로 옮겼다. 정하는 것은
+모델, 코드는 범위·상한·id 표만 본다. **6번째 호출 없음**(같은 응답에 실린다). 없으면 렌더 종전과 바이트 동일.
+
+- `emphasis[]` `{line: L<n>, color(팔레트), scale 1.05~1.45}` 상한 6줄 — 자막 세그먼트 idx 로 풀려 줄 style
+  `{size, color, fx: pop_strong}` 로 나간다(화자색·비트 pop 을 덮는다). build12 값: 76/62=1.23·#FF3E3E·EPOP.
+- `zooms[]` `{clip: C<k>, factor 1.1~1.6, anchor, from_sec}` 상한 4컷 — **렌더러 무변경**: 크롭 창을 1/factor 로
+  줄이면 밴드로 키우는 렌더러가 곧 줌이다(`finalize.zoom_crop_rows` — 피사체/화자 맵이 있으면 그 중심 유지).
+  `from_sec>0` 이면 `apply_zoom_splits` 가 그 지점(프레임 격자 반올림)에서 클립을 쪼갠 **렌더 타임라인**을
+  만든다 — 총 프레임 불변이라 자막·cue·라벨 편집본 좌표는 그대로. 뮤트 창·피사체/화자 맵도 렌더 타임라인 기준.
+  조각 0.3s 미만이면 통째 줌. 연속 컷 줌 금지는 프롬프트 지시(코드 강제 아님).
+- `fits[]` `{clip: C<k>}` 상한 3컷 — 글자가 정보인 화면(카톡·기사)을 그림 사각형째 밴드 폭에 넣고 위아래는 같은
+  프레임 블러(build12 `fit_filter`). `StoryClip.fit_picture`(additive, None=종전) → 렌더러 [3] 분기. 줌과 같은
+  컷이면 fit 드롭(줌 우선). 크롭 맵과 배타.
+- 검증은 라벨 규율 그대로 **항목 단위 드롭+노트**(플랜 반려 없음). 표(events/clips)가 없는 구 호출은 전부 드롭.
+  기록: run_log render `edit_fx` {zooms, fits, emphasis} + stdout `[v3/render] 편집 연출 …`.
+- ⚠ `--from-step style` 재실행이라도 **정독 패스가 새 장면을 읽으면 stage2.json 이 바뀌어** 지도→plan→story 가
+  연쇄 재구성된다(지문 규율의 정상 동작 — 실측 2026-09-08). 편성을 고정한 채 연출만 다시 보려면 정독 사이드카가
+  전 장면을 덮은 뒤여야 한다.
+- 회귀 가드: `tests/test_v3_edit_fx.py`(6건).
 
 ### 저확신 전사 → Stage 2 청취 우선 (2026-09-08, 사용자 지시 · 가왕쇼 ep7ex02 실사고)
 
@@ -2360,6 +2385,49 @@ subtitle_skip_singing}}`. **명시한 플래그가 템플릿을 이긴다**(None
 - 드라이런: 가왕쇼 7화 12/579 · 지금불륜 EP01 14/625 span 채택 — 목표 span(sp1202·sp1203) 포함.
   기록: stdout `[v3/자막] 저확신 span 청취 채택 …` + run_log 자막 교정 목록(kind heard·mean_prob).
 - 회귀 가드: `tests/test_v3_heard_priority.py`(2건).
+
+## 수작업(premiere_claude) 규칙 이식 2차 — 정지 금지·컷 쌓기·다단 줌·훅 회수·10전략·접착 (2026-09-08, 사용자 결정)
+
+`~/premiere_claude/guides/*_v14.txt`·`builders/build11~12.py` 대조 후 사용자가 고른 항목. 편집 테이블 내보내기와
+오디오 모드별 볼륨은 **보류**(프리미어 연결이 목표가 아니다 · 볼륨은 테스트용이었다).
+
+- **정지화면 규칙**: "자료화면이면 정지 가능, 아닌 걸 정지시키지 마라". `cover.choose_cover` 의 hold 는
+  `is_info_screen`(Stage 2 가 글자를 읽었거나 있다고 한 조각)일 때만. 다른 화면에 모델이 `hold` 를 달면 무시
+  +로그. 걸음 4 프롬프트도 같은 말. 지정 화면이 L 에 못 미치면 **컷 쌓기**(`stack_window` — 같은 씬 미사용
+  조각을 앵커에 가까운 순으로 이어 L 을 채움, 조각 ≥0.6s·≤4개, 마지막 조각은 남는 만큼)로 간다. 덮개
+  `parts[]`(additive) → assemble 이 조각마다 `cover` 클립, `beat_duration` 은 parts 합, `apply_cover_to_beats`
+  는 parts 마다 뺀다. 재료가 모자라면 종전 후보(lead_in→B-roll→spill→mute)로.
+- **내레이션 접착**: `NAR_PAD_SEC` 0.25→0.15(꼬리 0.05) + 프롬프트 "끝나자마자 대사가 치고 들어온다".
+- **훅 구조**(사용자 정의, 같은 날 교정): "관심을 끄는 장면을 hook 으로 맨 앞에 두고, 그 장면이 어쩌다 나오게
+  됐는지를 원본 순서로 보여준다". 걸음 1 이 `hook_line{speaker,text}` 을 내고, `validate_beats` 정렬은 **hook 맨 앞
+  (원본 순서 무관) · 나머지 원본 순서 · hook_return 은 원본 순서상 그 장면의 제자리**(맨 뒤 강제 아님 — 훅 뒷장면이
+  훅 앞으로 밀리던 실사고). `compute_jumps` 는 되감기(다음 비트가 원본에서 앞)를 언제나 점프로 세어 다리
+  내레이션을 요구한다. 재료표의 `[무성·인물 없음]` 은 사실 표시일 뿐 — 단서·물건·흔적 조각은 남기라고 지시한다.
+- **리빌딩 10전략**(`select.STRATEGIES`): 걸음 1 이 `strategy`(1~10)를 고르고 걸음 2·3 프롬프트에 그 구조를
+  싣는다(`strategy_line`). 코드는 id 만 검증(1~10 밖은 반려). story `flow.strategy`·`flow.hook_line` 기록.
+- **다단 줌**: Stage 4 `zooms[].stages[{from_sec, factor, anchor}]`(≤3단 · 1.0 은 첫 단계 '원래 크기'만 ·
+  경계 조각 0.3s 미만은 앞 단계 흡수). 프롬프트가 줌의 역할(시선 좁히기 — 감정 상승·강조 대사·글자)과 단계
+  경계(대사 줄·감정이 꺾이는 시각)를 설명한다. `finalize.apply_zoom_splits` 가 단계마다 클립을 쪼개고 배율
+  1.0 조각은 크롭 맵을 안 낸다. 단일 `factor/from_sec` 는 그대로 받는다(하위 호환).
+- **무관 인서트**: `watch_trim.PROMPT` 기준 추가(늘어짐이 아니어도 사건과 안 붙는 사물·작업·풍경 컷은 지목) +
+  재료표 `[무성 인서트 — 대사·내레이션 없음]`/`[내레이션 덮개]` 표시. 걸음 3 재료표는 인물·글자 없는 무성 조각에
+  `[무성 인서트]` 를 달고 skip 을 권한다. Stage 2 시각 귀속 벨트 표본 4→8(분위수 앞뒤 고르게), 반려 3/8.
+  실측: EP01 42~46s 공사현장 인서트가 "사건 전개와 무관한 공사 현장 해머 타격 인서트"로 잘렸다.
+- 회귀 가드: `tests/test_v3_story_flow.py`(정지 금지·컷 쌓기), `test_v3_edit_fx.py`(다단 줌·무관 인서트·표본 8),
+  `test_v3_plan.py`(훅 선행·되감기 점프·전략). 전체 2146 통과.
+
+### 뒤죽박죽 전개 교정 3건 (2026-09-08, EP01 ep01s2 실사고 — 통화 상대의 「고소해버릴 거야」가 남편의 선언으로)
+
+- **화자는 인용과 한 몸**: `episode_map.span_table` 에 `speakers`, ⚠claim 표시·레지스터 setup/payoff 인용에 `speaker`,
+  `register_block` 이 「화자: 인용」으로 싣는다. 걸음 1 `hook_line` 은 `{speaker, text}`(또는 "화자: 문장") —
+  화자 없음·`HOOK_SPEAKER_BANNED`(통화 상대·미상·상대방)는 **반려**(화면에 없는 사람의 말로 편을 열지 않는다).
+  걸음 2 제목 프롬프트에 "대사의 화자를 틀리지 마라" + 훅 화자 명시.
+- **되감기 상한** `REWIND_MAX=1`: 훅 선행(hook→다음)·훅 회수를 뺀 원본 역행이 2번 이상이면 반려. 10전략은
+  "훅 앞세우기 + 되감기 한 번"으로 쓴다.
+- **비트 안 긴 무대사 구간**(`split_at_silent_runs`, ≥`SILENT_BEAT_MIN_SEC` 6s)은 제 비트(`silent`)로 떼어 내고,
+  `run_story_flow` 가 그 앞 내레이션을 **필수**로 요구하며 자기 화면 위에 얹는다(`available_covers(include_silent_beats=True)`
+  가 이제 항상 켜짐 — 무대사 편 전용이던 갭 3 경로의 일반화). 편성표에 "⚠ 무대사 구간 — 내레이션 필수" 표시.
+- 회귀 가드: `tests/test_v3_plan.py`(+2). 전체 2148 통과.
 
 ### 노래 창 가장자리 보강 `singing.bridge_windows` (2026-09-08, 네 번째 편 실측)
 
@@ -2404,3 +2472,100 @@ subtitle_skip_singing}}`. **명시한 플래그가 템플릿을 이긴다**(None
 - 기록: stdout `[v3/label-face]` + run_log render `label_face_avoid`(겹친 라벨만). 실측(ep7ex03):
   "(단호한 거절)" 위로, "(내 파트였는데)" 아래로(클로즈업 얼굴이 넓어 옆은 7px 부족).
 - 회귀 가드: `tests/test_v3_label_faces.py`(4건 — 좌표 환산 수계산·위/옆/불가·초안 부재 no-op).
+
+## V3 자막 텍스트 스타일 — v10 대조 + 자막 오프셋 결함 (2026-09-08, 사용자 지시)
+
+참고 쇼츠 v10(`~/premiere_claude/shorts_ep01_v9`·`v10`, build10.py)과 파이프라인 완성본을 같은 자리끼리
+프레임으로 대조했다. 크기·색·위치는 거의 같았고 **글자가 얇아 보이는 원인은 외곽선(8px vs 3px)** 이었다.
+`finalize.py` 상단 상수 + `subtitle._LINE_FX` + `config` 폰트 맵. v1 경로는 전부 불변(회귀 0 — 새 fx 이름·
+새 폰트 이름·TTS fx 태그는 style 이 있을 때만).
+
+- **폰트 Noto Sans CJK KR Black** (`V3_TEXT_FONT="NotoSansCJKkr-Black"`): notofonts/noto-cjk 공식 OTF(OFL,
+  17.8MB) 를 `app/assets/fonts/` 에 번들. `get_font_path` 가 `.ttf` 다음 `.otf` 도 찾는다. 번들 NotoSansJP 는
+  **한글이 .notdef** 라(PIL 실측) 못 쓴다. v3 `design_from_style` 이 채널 `subtitle_font` 미지정일 때 이 폰트를
+  기본으로(대사·내레이션·라벨 공통 — 라벨 dict 에 `font`). 채널 명시(가왕쇼 템플릿 JalnanGothic)는 그대로 이긴다.
+  ⚠ ASS Fontname 은 **"Noto Sans CJK KR Black"**(nameID 1)이다 — libass 는 nameID 1·4 만 보고 typographic
+  family(16, "Noto Sans CJK KR")는 안 본다. 첫 재렌더에서 "Noto Sans CJK KR" 로 넣어 Helvetica→Apple SD Gothic
+  으로 조용히 대체됐다(`ffmpeg -loglevel trace … fontselect:` 로 잡았다 — 폰트 매칭은 이 로그로 확인할 것).
+  글자 폭은 Jalnan 1.0em → Noto 0.92em 이라 `LABEL_CHAR_W`(0.80)는 그대로 안전하다.
+- **외곽선 `SUB_OUTLINE_PX` 8**(대사·내레이션 공통, v10 ow=8·강조 9). 라벨은 이미 bord7.
+- **팝 `pop_snap`/`pop_snap_strong`**: v10 POP/EPOP 프레임 표(1.30→0.92→1.06→1.00 / 1.44→0.90→1.10→1.00,
+  30fps 3프레임 ≈ 100ms) — "크게 튀어나왔다 제자리". 종전 pop_soft/strong(작게 시작해 220ms 커짐)은 v1 편집실
+  어휘라 값 불변. `POP_TO_FX`·`EMPHASIS_FX`·`NARRATION_FX` 가 새 이름을 쓴다.
+- **내레이션**: ① `build_tts_ass` 가 `seg.style["fx"]` 를 받아 팝 태그(회전 태그와 한 묶음) ② 2줄은
+  `balance_narration_lines`(어절 경계 · 길이 차 제곱 최소 · 대사와 같은 경계 벌점 · 동점은 앞줄 긴 쪽) —
+  종전 `_wrap_for_ass` 는 앞줄을 꽉 채워 '뒤를 / 쫓는데' 꽁다리 ③ 채널이 `tts_y_margin`·밴드 오프셋을 안 줬으면
+  **아랫줄을 대사 자막과 같은 margin_v** 로(v10 은 둘 다 SUB_Y). RECAP 프리셋 580 은 이제 대사 518 을 따른다.
+- **색 분리**: 노랑(#FFE94A)은 내레이션 색 — `assemble.SPEAKER_PALETTE` 에서 빼고(주황·하늘·빨강만),
+  Stage 4 강조는 `EMPH_PALETTE`(yellow 제외)로 검증·프롬프트 명시, yellow 를 내면 기본 빨강 + 노트.
+  라벨 팔레트는 그대로(화면 위쪽 별개 요소 — v10 도 라벨은 노랑).
+- 🛑 **자막 타이밍 결함(사용자 지적 "최근 쇼츠는 대사 자막 타이밍이 다 어긋나 있다")**: `assemble.word_subtitles`
+  의 편집본 오프셋 누적이 `c1 - c0` 라 **hold_sec 과 프레임 격자를 빼먹었다.** 붙잡은 덮개(ep01full 첫 클립 hold
+  1.835s) 뒤의 모든 대사 자막이 1.8초 일찍 나갔다 — whisper 재전사 대조로 확인(자막 「너 바람피니?」 자리에서
+  내레이션이 들림). 지금은 `clip_duration(clip_len(c), fps)` — cue(`edited_offsets`)·뮤트 창·라벨과 **같은 자**.
+  `fps` 인자 추가(정본·variant 두 호출 다 `plan["source_fps"]`).
+  ⚠ 자막 세그먼트는 소스 앵커가 없어(`start_sec/end_sec/text/speaker/color`) 사후 재매핑이 불가 — 좌표를
+  만드는 자가 곧 정본이다. 다른 좌표 소비자를 추가하면 반드시 `clip_len`·`clip_duration` 을 쓸 것.
+- 진단 도구(재사용 가치): 완성본 → 장면 전환(`select=gt(scene,0.12)`) vs 계획 경계 · whisper 단어 vs 자막 첫
+  어절 대조 스크립트(세션 scratchpad `sub_timing_diag.py` — 레포 밖). 필요하면 scripts/ 로 올린다.
+- ⚠ `--from-step resources` 재렌더도 **정독 패스가 남은 장면을 읽으면** stage2 → 지도 → plan → story 가 연쇄
+  재구성된다(위 Stage 4 절의 같은 경고 — 이번 검증 재렌더에서 실제로 발생, 예산 24/24 소진 잡).
+- 회귀 가드: `tests/test_v3_text_style.py`(7건 — hold/격자 오프셋·폰트 글리프·기본 폰트·상수·TTS fx 태그·
+  균형 분할·색 분리). `test_font_family` 는 `.otf` 도 훑는다.
+
+### v3 화자 추적 실측·교정 (2026-09-08, 「너 바람피니?」 경희 얼굴 실사고)
+
+사용자 지적: "yunet 썼으면 경희 얼굴이 보여야 하잖아". 실측으로 세 겹이었다:
+1. **게이트** — ep01full 은 `speaker_tracking`·`face_detector` 를 안 줬다. v3 는 기본이 꺼짐이라 클립 1 크롭 맵이
+   키프레임 하나(중앙 960)였고, 경희 얼굴(x≈1531)이 1000px 크롭(460~1460) 밖으로 잘렸다. Stage 2 `subject_pos`
+   앵커도 이 클립엔 없었다. **얼굴 좌표는 아무것도 안 썼다.**
+2. **검출기** — 같은 프레임에서 Haar 는 정면 작은 남편 얼굴만(85px), YuNet 은 둘 다(경희 275px, 옆으로 누운 얼굴)
+   잡았다. 기울어진 얼굴은 Haar 로는 못 잡는다 → 드라마는 `face_detector=yunet` 이 맞다.
+3. **추적 로직(v1 reframe 재사용의 함정)** — 켜고도 크롭 중심이 1028→971 로 **남편 쪽으로** 갔다. ① 직전 클립 끝
+   위치를 승계(`initial_x`)한 채 EMA 0.12 로 기어가 5초 클립 안에서 얼굴에 못 닿았다(컷 경계엔 연속성이 없다).
+   ② `_pick_speaker` 면적 항이 프레임 대비라 275px 얼굴도 0.036 — 가중 0.3 이 사실상 0 이고 중앙 항이 이겨 작은
+   얼굴을 골랐다. 교정은 **v3 경로만**(`speaker_crop_map` 이 넘기는 노브 — 기본값이면 v1 바이트 동일):
+   `snap_first=True`(클립 첫 얼굴에 즉시) · `ema_alpha=SPEAKER_EMA_ALPHA` 0.35(0.5s 표본용) · `area_relative=True`
+   (그 프레임 최대 얼굴 대비) · `initial_x/y=None`. 결과: 클립 1 크롭 중심 1420(클램프 상한) = 경희 얼굴.
+- `_detect_faces` 는 표본마다 seek 하지 않고 한 번 seek 뒤 `grab()` 으로 건너뛴다(같은 프레임 번호 — 산출 동일, 긴
+  소스에서 키프레임 재디코드 비용 제거). 클립당 키프레임이 적어 보이면 **렌더 타임라인**(줌 분할 뒤) 단위라 그렇다.
+- **기본값이 켜짐·YuNet 이다**(같은 날 사용자 결정 — `finalize.SPEAKER_TRACKING_DEFAULT`·`FACE_DETECTOR_DEFAULT`).
+  끄려면 `--design-speaker-tracking off`, Haar 로 돌리려면 `--design-face-detector haar`. 갭 12 절의 "기본 꺼짐"은
+  이 시점으로 끝났다. v1 경로(`reframe` 기본 haar·env FACE_DETECTOR)는 무관. ves 어댑터 어휘는 아직 없다.
+  design 키가 렌더 지문에 들어가므로 바꾸면 render 만 다시 돈다(Stage 4 캐시 유지 실측).
+- ffmpeg 로그의 `Hardware device setup failed … Cannot allocate memory` 는 렌더러가 d3d11va·cuda 하드웨어 디코드를
+  차례로 시도하다 소프트웨어로 떨어지는 **정상 소음**이다(맥에 그 장치가 없다) — 결함 아님.
+- 회귀 가드: `tests/test_v3_text_style.py` 화자 추적 절(2건) · `test_v3_gap_extras` speaker_map 기대값 갱신.
+
+### watch_trim 조각 흡수 `absorb_slivers` (2026-09-08, ep01full 32~34s "정체불명 짧은 장면")
+
+- 실사고: 운전 span(2831.9~2837.0, 5.13s) 가운데 3.3s 를 watch_trim 이 잘라 **꼬리 0.375s** 가 남았다. 컷 경계는
+  span 격자에 스냅되지만 **남는 조각 길이는 아무도 안 봤다.** 완성본에서 너무 빨리 지나가는 컷이 됐다.
+- 규칙(순수, `watch_trim.absorb_slivers`): 컷이 같은 클립 안에서 경계까지 `SLIVER_MIN_SEC`(0.8s — E20 의 "0.8초
+  미만 조각을 만들 컷은 접는다" 와 같은 자) 미만을 남기면 컷을 그 클립 경계까지 늘린다. ① 보호 구간(핵심 대사·
+  내레이션 창 **본체**)과 겹치면 안 늘린다 ② 다른 컷과 겹치면 안 늘린다 ③ 양쪽 다 짧아 클립이 통째로 사라지는
+  흡수는 안 한다. 늘린 컷은 `absorbed=[[구 시작, 구 끝]]` 기록 + stdout `[v3/watch-trim] 조각 흡수`.
+- ⚠ 내레이션 창 보호는 `GUARD_PAD_SEC`(0.2) 만큼 부풀려 있어 **다음 클립에서 시작하는 cue 의 패드**가 이 클립
+  꼬리에 걸친다 — 첫 판은 그 패드에 막혀 안 늘었다(실측). 흡수는 클립 경계까지만이라 cue 본체를 건드릴 수 없으므로
+  패드를 벗긴 창으로 판정한다(`guard_pad` 인자).
+- 자리: pipeline `_run_m4` 의 컷 적용 직전 — **캐시 재적용 경로도 지난다**(결정적). 타임라인·자막·cue 재매핑이
+  전부 흡수된 컷을 쓴다(한쪽만 쓰면 좌표가 갈린다). 실측: 조각 삭제 후 53.22s → 52.84s, 최소 클립 0.372 → 0.75
+  (남은 0.75 는 story 가 편성한 엔딩 리액션 컷 — 트림 산물이 아니다).
+- 회귀 가드: `tests/test_v3_watch_trim.py` 조각 흡수 절(1건 — 꼬리·머리·양쪽·보호 본체·패드만·다른 컷·하한 이상).
+
+### 계단식 화자 고정 `hold_keyframes` (2026-09-08, 사용자 지시 "카메라가 왔다갔다 하지 않았으면")
+
+- 기본 `speaker_tracking=on` 이 **계단식 고정**이다(`pan` = 종전 EMA 연속 추적, `off`). v9 `AUTO_CX` 방식: 발화
+  구간(같은 화자가 이어지는 자막 세그먼트, `utterances_from_segments` 가 편집본→소스로 환산)마다 크롭 x **하나**,
+  구간 경계에서 `(t−1/fps, 옛 x)·(t, 새 x)` 두 키프레임 = 렌더러 선형 보간 위의 한 프레임 점프. 렌더러 무변경.
+- run 의 화자 얼굴은 `rank_speaker_x` — 표본의 **모든** 얼굴(+입 움직임, `reframe._detect_faces(collect=)`)을
+  위치로 묶어 v9 autoframe 순위 talk×√w. 표본별 `_pick_speaker`(면적 가중)는 큰 얼굴을 고집해 남편 대사에서도
+  경희를 잡았다(실측). 움직임 전부 0 이면 큰 얼굴. **화자 기억**(`speaker_memory`, 60s·그림 폭 12%): 같은 이름의
+  화자가 직전 run 에서 잡힌 자리 근처 얼굴을 우선 — 상대의 큰 리액션이 talk×√w 를 뒤집던 것(「아니, 뭐 갑자기」
+  경희 x1625 → 남편 x600)을 막는다. 화자 이름은 Stage 2 자막 세그먼트의 것.
+- 흔들림 방지: 1s 미만 run("어?")은 앞 run 에 병합(첫 run 이면 뒤가 앞머리까지) · 새 x 가 직전과 그림 폭 15% 미만
+  차이면 재고정 안 함 · 대사 없는 앞머리는 첫 run 의 x 로 시작 · 발화 없는 클립은 얼굴 중앙값 하나로 고정.
+- 산출: `v3_crop_speaker_{i}.json`(계단) + `v3_crop_speaker_raw_{i}.json`(팬 표본 — 대조·감사). run_log render
+  `speaker_tracking.clips[].hold_runs[{speaker,start,end,x,method,people}]` + stdout `clipN … → x`.
+- 실측(ep01full 침실 대사 4클립): 팬 표본 10개 → 키프레임 4개, 경희 1572 고정 → 남편 609 점프 → 남편 600 유지.
+- 회귀 가드: `tests/test_v3_text_style.py` hold 절(5건 — 계단·병합·재고정 억제·무발화·talk×√w·기억).

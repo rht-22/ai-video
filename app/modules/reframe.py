@@ -38,9 +38,19 @@ def build_crop_timeline(
     initial_y: float | None = None,
     detector: str | None = None,
     crop_size: tuple[int, int] | None = None,
+    ema_alpha: float | None = None,
+    snap_first: bool = False,
+    area_relative: bool = False,
+    collect: list | None = None,
 ) -> list[CropKeyframe]:
     """detector(갭 12): "haar"(기본·종전) | "yunet". None 이면 env FACE_DETECTOR(기본 haar).
-    crop_size: 크롭 크기(w,h) 명시 — None 이면 종전 9:16 `_portrait_crop_size`(v1 그대로)."""
+    crop_size: 크롭 크기(w,h) 명시 — None 이면 종전 9:16 `_portrait_crop_size`(v1 그대로).
+
+    v3 화자 추적 노브(2026-09-08, 「너 바람피니?」 실사고 — 아래 셋 다 기본값이면 v1 과 바이트 동일):
+    ema_alpha: EMA 계수(None = 종전 0.12). snap_first: 클립 첫 얼굴에 **즉시** 맞춘다(컷 경계는
+    연속성이 없다 — 이전 클립 끝 위치에서 0.12 로 기어가면 5초짜리 클립이 끝나도 못 닿는다).
+    area_relative: 화자 점수의 면적 항을 프레임 대비가 아니라 **그 프레임 최대 얼굴 대비**로 —
+    프레임 대비면 275px 얼굴도 0.036 이라 면적 가중 0.3 이 사실상 0 이고 중앙 항이 이긴다."""
     if _has_cv2():
         keyframes = _detect_faces(
             clip_path, width, height, sample_interval_sec, start_sec, end_sec,
@@ -48,6 +58,8 @@ def build_crop_timeline(
             initial_x=initial_x,
             initial_y=initial_y,
             detector=detector,
+            ema_alpha=ema_alpha, snap_first=snap_first, area_relative=area_relative,
+            collect=collect,
         )
         if crop_size is not None:
             import dataclasses
@@ -79,14 +91,34 @@ def _has_cv2() -> bool:
 
     return importlib.util.find_spec("cv2") is not None
 
-def _pick_speaker(faces, gray, prev_gray, frame_w: int, frame_h: int, prev_x: float, prev_y: float):
-    """area + center + mouth-motion + sticky 가중 점수로 화자 후보 얼굴 선택."""
+def _mouth_motion(gray, prev_gray, x, y, fw, fh) -> float:
+    """얼굴 아래 40%(입 주변)의 직전 표본 대비 밝기 변화 평균 → 0~1. 직전 표본이 없으면 0."""
+    import cv2
+    if prev_gray is None:
+        return 0.0
+    frame_h, frame_w = gray.shape[:2]
+    my0 = int(y + fh * 0.6); my1 = min(int(y + fh), frame_h)
+    mx0 = max(int(x), 0);    mx1 = min(int(x + fw), frame_w)
+    if my1 <= my0 or mx1 <= mx0:
+        return 0.0
+    diff = cv2.absdiff(gray[my0:my1, mx0:mx1], prev_gray[my0:my1, mx0:mx1])
+    return min(float(diff.mean()) / 30.0, 1.0)
+
+
+def _pick_speaker(faces, gray, prev_gray, frame_w: int, frame_h: int, prev_x: float, prev_y: float,
+                  area_relative: bool = False):
+    """area + center + mouth-motion + sticky 가중 점수로 화자 후보 얼굴 선택.
+
+    area_relative(v3): 면적 항 = 얼굴 면적 ÷ 그 프레임 최대 얼굴 면적(가장 큰 얼굴 = 1.0).
+    기본 False 는 종전(프레임 면적 대비)과 바이트 동일."""
     import math
     import cv2
 
     cx_frame, cy_frame = frame_w / 2, frame_h / 2
     max_dist = math.hypot(cx_frame, cy_frame) or 1.0
     frame_area = float(frame_w * frame_h) or 1.0
+    if area_relative:
+        frame_area = float(max((int(f[2]) * int(f[3]) for f in faces), default=1) or 1)
     diag = math.hypot(frame_w, frame_h) or 1.0
 
     best_score = -1.0
@@ -208,7 +240,14 @@ def _detect_faces(
     initial_x: float | None = None,
     initial_y: float | None = None,
     detector: str | None = None,
+    ema_alpha: float | None = None,
+    snap_first: bool = False,
+    area_relative: bool = False,
+    collect: list | None = None,
 ) -> list[CropKeyframe]:
+    """collect(v3 hold, 2026-09-08): 리스트를 주면 표본마다 {"t", "faces": [(cx, cy, w, h, motion), …]} 를
+    담는다 — 선택된 얼굴 하나가 아니라 **모든** 얼굴과 입 움직임. 계단식 고정이 run 단위로 화자를
+    다시 고르는 재료(v9 autoframe 의 talk×√w 순위)."""
     import cv2
 
     video_path_str = str(Path(clip_path).resolve())
@@ -246,7 +285,8 @@ def _detect_faces(
     crop_w, crop_h = _portrait_crop_size(width, height)
 
     # EMA 스무딩 계수 (0에 가까울수록 부드럽고, 1에 가까울수록 즉각 반응)
-    ema_alpha = 0.12  # 0.25→0.12: 작은 변동을 더 부드럽게 흡수해 출렁임 감소
+    ema_alpha = 0.12 if ema_alpha is None else float(ema_alpha)  # 0.25→0.12: 작은 변동을 더 부드럽게 흡수해 출렁임 감소
+    _snapped = not snap_first          # snap_first 면 첫 검출에서 EMA 없이 바로 맞춘다
     # ⚠ 라운드 24 의 sticky(같은 인물이 이어지면 초반을 더 굳게 유지)는 2026-08-25 에
     #   지웠다 — 발동 조건이 `target_character` 와 `prev_target_character` 가 **둘 다**
     #   있는 것인데, 그 값은 face_identifier 가 있을 때만 채워졌고 그런 실행이 없었다.
@@ -255,9 +295,19 @@ def _detect_faces(
     prev_gray = None  # Phase 11: mouth-motion 계산용 직전 프레임
 
     # 3. 루프를 돌며 타임라인 데이터 생성
+    # 표본마다 `set(CAP_PROP_POS_FRAMES)` 로 다시 seek 하지 않는다(2026-09-08) — 시작 위치로 한 번
+    #   seek 한 뒤 grab() 으로 건너뛴다. 같은 프레임 번호를 읽으므로 산출은 종전과 같고(EP01 실측:
+    #   read 위치 56728·56739·… 동일), 긴 H.264 소스에서 표본마다 키프레임부터 다시 디코드하던 비용이 없다.
+    _pos = start_frame
     for current_frame in range(start_frame, end_frame, frame_step):
-        capture.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
+        while _pos < current_frame:
+            if not capture.grab():
+                break
+            _pos += 1
+        if _pos < current_frame:
+            break
         success, frame = capture.read()
+        _pos += 1
         if not success:
             break
 
@@ -268,12 +318,17 @@ def _detect_faces(
         faces = _det.detect(gray, frame)
 
         _det_face: tuple[float, float, int, int] | None = None   # E19-4: 이 표본의 raw 얼굴 박스
+        if collect is not None:
+            collect.append({"t": current_frame / fps,
+                            "faces": [(float(x + w / 2), float(y + h / 2), int(w), int(h),
+                                       _mouth_motion(gray, prev_gray, x, y, w, h))
+                                      for (x, y, w, h) in faces]})
         if len(faces) > 0:
             if enable_speaker_tracking:
                 best = _pick_speaker(
                     faces, gray, prev_gray,
                     frame_w=gray.shape[1], frame_h=gray.shape[0],
-                    prev_x=smooth_x, prev_y=smooth_y,
+                    prev_x=smooth_x, prev_y=smooth_y, area_relative=area_relative,
                 )
             else:
                 best = max(faces, key=lambda item: item[2] * item[3])
@@ -287,6 +342,8 @@ def _detect_faces(
             dz_x = gray.shape[1] * dead_zone_ratio
             dz_y = gray.shape[0] * dead_zone_ratio
             effective_alpha = ema_alpha
+            if not _snapped:
+                smooth_x, smooth_y, _snapped = target_x, target_y, True
             if abs(target_x - smooth_x) > dz_x:
                 smooth_x = effective_alpha * target_x + (1 - effective_alpha) * smooth_x
             if abs(target_y - smooth_y) > dz_y:

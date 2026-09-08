@@ -131,6 +131,9 @@ def build_parser() -> argparse.ArgumentParser:
         ch.add_argument(f"--design-{key.replace('_', '-')}", default=None, **kw)
     ch.add_argument("--no-reframe", action="store_true",
                     help="채널 face_tracking:false — 피사체 앵커 크롭을 끄고 중앙 고정")
+    ch.add_argument("--no-subtitles", action="store_true",
+                    help="채널 subtitles:false — 대사(어절) 자막을 안 그린다(내레이션 자막은 유지). "
+                         "소스에 자막이 번인된 채널(커리어데이)의 이중 표기 방지 — v1 과 같은 플래그")
     p.add_argument("--narration-original-db", type=float, default=NARRATION_ORIGINAL_DB,
                    help="내레이션 덮개 구간의 원본 볼륨(dB, 음수). 기본 -14 — 2026-09-04 "
                         "사용자 청취 선택(-6/-10/-14/-20 비교본). 완전 무음(종전)은 "
@@ -168,17 +171,19 @@ CHANNEL_DESIGN_ARGS: dict[str, dict] = {
     # v3 전용(2026-09-04) — 자막 블록 윗변을 '밴드 하단 + N px' 에 거는 상대 앵커.
     # 화면비·video_y 가 바뀌어도 채널이 margin 을 다시 잡지 않는다(음수 = 밴드 안쪽).
     "subtitle_band_offset": dict(type=int), "tts_band_offset": dict(type=int),
-    # 갭 12(2026-09-08) — v3 전용 · 기본 꺼짐(회귀 0 아님 — 실렌더 A/B 뒤 채널 단위로 켠다):
-    # 클립별 화자 추적 크롭(v1 reframe 기계 재사용) · 얼굴 검출기(haar 종전 | yunet ONNX)
-    "speaker_tracking": dict(type=str, choices=["on", "off"]),
+    # 갭 12(2026-09-08) — v3 전용 · **기본 on · yunet**(같은 날 사용자 결정, finalize.SPEAKER_TRACKING_DEFAULT):
+    # 클립별 화자 추적 크롭(v1 reframe 기계 재사용) · 얼굴 검출기(haar | yunet ONNX). off 로 끈다.
+    "speaker_tracking": dict(type=str, choices=["on", "off", "pan"]),   # on = 계단식 고정(기본) · pan = 종전 EMA 연속 추적
     "face_detector": dict(type=str, choices=["haar", "yunet"]),
+    # v3 전용(2026-09-08, 커리어데이 "효과 자막이 작다") — 라벨(효과 자막) 글자 크기 px. 미지정 = stage4.LABEL_SIZE.
+    "label_size": dict(type=int),
 }
 V3_ONLY_DESIGN_KEYS = frozenset({"subtitle_band_offset", "tts_band_offset",
-                                 "speaker_tracking", "face_detector"})
+                                 "speaker_tracking", "face_detector", "label_size"})
 
 
 CHANNEL_DESIGN_DIR = Path(__file__).resolve().parent.parent / "data" / "channel_designs"
-PRESET_OPTIONS = ("no_reframe", "subtitle_skip_singing")   # 템플릿이 켤 수 있는 불리언 스위치
+PRESET_OPTIONS = ("no_reframe", "subtitle_skip_singing", "no_subtitles")   # 템플릿이 켤 수 있는 불리언 스위치
 
 
 def load_design_preset(name: str, *, base_dir: Path | None = None) -> dict:
@@ -238,6 +243,8 @@ def channel_design_from_args(args: argparse.Namespace) -> dict:
             out["platform_image"], Path(__file__).resolve().parent.parent)
     if getattr(args, "no_reframe", False):
         out["face_tracking"] = False
+    if getattr(args, "no_subtitles", False):
+        out["subtitles"] = False
     return out
 
 

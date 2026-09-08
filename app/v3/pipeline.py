@@ -1344,6 +1344,21 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
                 resources=resources, segments=segments, importance=_imp,
                 span_index=_sidx, budget_deficit=_deficit, log=log)
         pre_fp = fingerprint
+        if cuts:
+            # 조각 흡수(2026-09-08) — 컷이 클립 가장자리에 0.8s 미만 조각을 남기면 경계까지 늘린다.
+            # 캐시 재적용 경로도 지난다(결정적 — 같은 컷·타임라인이면 같은 결과).
+            from app.v3.story import build_span_index as _bsi2
+            _sidx2, _ = _bsi2(_read_json(output_dir / "stage2.json"), grid)
+            _guards = wt.protected_intervals(
+                plan["timeline"], resources,
+                {sid: (sp["is_audio"], sp["importance"]) for sid, sp in _sidx2.items()}, grid)
+            _before = [(c["start"], c["end"]) for c in cuts]
+            cuts = wt.absorb_slivers(cuts, plan["timeline"], _guards)
+            for c in cuts:
+                for a, z in c.get("absorbed") or []:
+                    log(f"  [v3/watch-trim] 조각 흡수 — 컷 {a:.2f}~{z:.2f}s → {c['start']:.2f}~{c['end']:.2f}s "
+                        f"({wt.SLIVER_MIN_SEC:g}s 미만 조각이 남아 경계까지)")
+            wt_audit = {**wt_audit, "absorbed": [c for c in cuts if c.get("absorbed")]}
         removed_sec = round(sum(c["end"] - c["start"] for c in cuts), 2)
         if cuts:
             _anchors = {lb.get("span_id")

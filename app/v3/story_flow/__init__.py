@@ -174,8 +174,15 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
             research_block=research_block, sequence_block=seq_block,
             hint_block=_hint_block(stage1_doc), meaning_block=meaning_block,
             silent_block=silent_blk, exclude_block=exclude_blk, map_block=map_blk,
+            strategy_block=sl.strategy_block(),
             reject_block=rej), lambda r: sl.validate_topic(r, rows, excluded=excluded),
             gemini, audit, log, initial_reject=corr_note)
+    _strat = sl.strategy_line(topic.get("strategy"))
+    _hook_who = topic.get("hook_speaker") or ""
+    _hook_disp = (f"{_hook_who}: " if _hook_who else "") + f"「{topic['hook_line']}」" if topic.get("hook_line") else ""
+    if topic.get("strategy"):
+        log(f"  [v3/flow/topic] 전략 {topic['strategy']}. {sl.STRATEGIES[topic['strategy']][0]}"
+            + (f" · 훅 {_hook_disp}" if _hook_disp else ""))
     log(f"  [v3/flow/topic] {topic['topic']} (핵심 m{'/m'.join(f'{i:03d}' for i in topic['core_meanings'])})")
 
     # 2 씬 + 제목 — 주제 종류(event/contrast/irony)에 따라 쓰임 축이 다르다(4단계)
@@ -185,7 +192,9 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
         target_sec=target_sec, title_max=sl.TITLE_MAX_CHARS, work_title=work_title,
         research_block=research_block, meaning_block=meaning_block,
         silent_block=silent_blk, exclude_block=exclude_blk, map_block=map_blk,
-        purpose_axis=_axis, purpose_choices=_choices,
+        purpose_axis=_axis, purpose_choices=_choices, strategy_line=_strat,
+        hook_speaker_line=(f" 훅 대사 {_hook_disp} — 이 말의 화자는 {_hook_who or '재료 표기대로'}다."
+                           if _hook_disp else ""),
         reject_block=rej), lambda r: sl.validate_scenes(r, rows, excluded=excluded, purposes=_purposes),
         gemini, audit, log)
     scenes, title = scenes_doc["scenes"], scenes_doc["title"]
@@ -199,7 +208,10 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
     beats = _loop("lines", lambda rej: sl.LINES_PROMPT.format(
         topic=topic["topic"], title_line1=title["line1"], title_line2=title["line2"],
         budget_sec=budget, material_block=material, reject_block=rej,
-        skip_sec=sl.SKIP_MAX_VOICED_SEC, skip_lines=sl.SKIP_MAX_LINES),
+        skip_sec=sl.SKIP_MAX_VOICED_SEC, skip_lines=sl.SKIP_MAX_LINES,
+        strategy_line=_strat,
+        hook_line_block=(f"\n훅 후보(걸음 1 이 고른 한마디): {_hook_disp} — 재료에 있으면 hook 비트로, 끝에 hook_return 으로."
+                         if _hook_disp else "")),
         lambda r: sl.validate_beats(r, span_index, allowed, budget_sec=budget,
                                     floor_ratio=sl.BUDGET_FLOOR_RATIO,
                                     material_sec=sum(span_index[x]["t_out"] - span_index[x]["t_in"]
@@ -220,10 +232,15 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
     # 후보에 열고(길이가 늘지 않게 그 위에 얹는다), 곳 수 상한을 올리고, 견적 밀도 하한을 건다.
     silent_episode = not any(span_index[x]["is_audio"] for b in beats for x in b["span_ids"])
     audit["silent_episode"] = silent_episode
-    own_ids: set[str] = nr.silent_beat_ids(beats, span_index) if silent_episode else set()
+    # 무대사 비트(갭 3 편 전체 · 2026-09-08 비트 안 긴 무대사 구간을 떼어 낸 것)는 **자기 화면 위에**
+    # 내레이션을 얹는다 — 화면 재료로 열고(available), 그 앞 내레이션을 필수로 요구한다
+    own_ids: set[str] = nr.silent_beat_ids(beats, span_index)
     available = nr.available_covers(beats, scene_rows, span_index,
-                                    include_silent_beats=silent_episode)
-    required = {0} | {j["before_beat"] for j in jumps}
+                                    include_silent_beats=True)
+    silent_beat_idx = {i for i, b in enumerate(beats) if b.get("silent")}
+    required = {0} | {j["before_beat"] for j in jumps} | silent_beat_idx
+    if silent_beat_idx:
+        log(f"  [v3/flow/narration] 무대사 비트 {sorted(silent_beat_idx)} — 그 화면 위 내레이션 필수")
     max_n = max(nr.MAX_NARRATIONS, len(required) + 1)
     min_total: float | None = None
     silent_note = ""
@@ -324,7 +341,7 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
                         f"{capped['after_sec']:.1f}s (상한 {cv.HEAD_GAP_MAX_SEC}s · 조각 "
                         f"{len(capped['removed_span_ids'])}개 제거"
                         + (f" · 첫 조각 {capped['head_trim_sec']}s 부터" if capped['head_trim_sec'] else "") + ")")
-            placed.append((cover["t_in"], cover["t_out"]))
+            placed.extend([tuple(p) for p in (cover.get("parts") or [(cover["t_in"], cover["t_out"])])])
             beats[k]["covers"].append(cover)
             if cover.get("probe") and cover["probe"].get("text_matches") is False:
                 bad.append({"anchor": f"{kind}{k}", "text": " ".join(g["lines"]),
@@ -401,7 +418,10 @@ def beat_duration(b: dict, span_index: dict[str, dict]) -> float:
             if first["t_in"] < ht < first["t_out"]:
                 d -= ht - first["t_in"]
     for c in b.get("covers") or []:
-        d += c["t_out"] - c["t_in"] + float(c.get("hold_sec") or 0.0)
+        if c.get("parts"):
+            d += sum(float(z) - float(a) for a, z in c["parts"])
+        else:
+            d += c["t_out"] - c["t_in"] + float(c.get("hold_sec") or 0.0)
     return d
 
 
@@ -449,6 +469,9 @@ def build_story_doc(beats: list[dict], span_index: dict[str, dict], cues: list[d
         "flow": {"scenes": scenes, "core_meanings": topic.get("core_meanings"),
                  "jumps": list(jumps or []),
                  **({"kind": topic["kind"]} if topic.get("kind") and topic["kind"] != "event" else {}),
+                 **({"strategy": topic["strategy"]} if topic.get("strategy") else {}),
+                 **({"hook_line": topic["hook_line"]} if topic.get("hook_line") else {}),
+                 **({"hook_speaker": topic["hook_speaker"]} if topic.get("hook_speaker") else {}),
                  **({"setup": topic["setup"], "payoff": topic["payoff"]} if topic.get("setup") is not None else {})},
         # 사람 확인 목록(갭 2, 2026-09-08) — additive. 비면 빈 목록(키는 늘 있다).
         "review": review_items(beats, span_index),

@@ -333,7 +333,11 @@ def test_candidate_order_lead_in_first_then_scene_broll():
     assert kinds.count("lead_in") == 1 and "broll_scene" not in kinds
     assert "broll_any" in kinds and kinds.index("broll_any") > 0
     ivs = [(w["w0"], w["w1"]) for w in wins if w["kind"] == "broll_any"]
-    assert (0.0, 2.0) in ivs and (14.0, 17.0) in ivs
+    # 앵커(9.0) 뒤 화면(14~17)은 before 덮개 후보가 아니다 — 되감기 방지(2026-09-08 훅 구조 원칙)
+    assert (0.0, 2.0) in ivs and (14.0, 17.0) not in ivs
+    wins_after = cv.candidate_windows(("after", 1), _beats(), IDX, ROWS_BY, L=1.5)
+    ivs_after = [(w["w0"], w["w1"]) for w in wins_after if w["kind"].startswith("broll")]
+    assert (0.0, 2.0) not in ivs_after                          # after 덮개는 앞 화면을 안 쓴다
     # 앵커 바로 앞에 이미 덮개(8~9)가 놓였으면 lead_in 은 없고, 남은 같은 씬 구간
     # (6.5~8.0)이 B-roll 로 다른 씬보다 앞선다
     wins2 = cv.candidate_windows(("before", 1), _beats(), IDX, ROWS_BY, L=1.0,
@@ -721,13 +725,40 @@ def test_cover_auto_holds_screen_text_span(monkeypatch):
     logs = []
     c = cv.choose_cover(("before", 1), g, beats, idx, ROWS_BY, GRID, log=logs.append)
     assert c["kind"] == "hold" and c["t_in"] == 6.5 and c["t_out"] == 9.0
-    assert c["hold_sec"] == pytest.approx(0.75)
+    assert c["hold_sec"] == pytest.approx(3.0 + cv.NAR_PAD_SEC - 2.5)
     assert any("hold 자동 승격" in x for x in logs)
-    # 글자 없는 화면은 종전 그대로(이웃으로 넓히거나 다른 후보 — hold 아님)
+    # 자료화면이 아니면 모델이 hold 를 달아도 정지 금지(사용자 규칙 2026-09-08) — 컷 쌓기/다른 후보
     g2 = _group(("before", 1), ["카톡을 본다"], [3.0])
     g2["cover_ids"] = ["sp0003"]
-    c2 = cv.choose_cover(("before", 1), g2, beats, IDX, ROWS_BY, GRID, log=lambda *a: None)
-    assert c2["kind"] != "hold"
+    g2["hold"] = True
+    logs2 = []
+    c2 = cv.choose_cover(("before", 1), g2, beats, IDX, ROWS_BY, GRID, log=logs2.append)
+    assert c2["kind"] != "hold" and "hold_sec" not in c2
+    assert any("정지 금지" in x for x in logs2)
+
+
+def test_stack_window_stacks_same_scene_unused_pieces():
+    # 지정 화면 sp0003(6.5~9.0, 2.5s) < L 4.0 · 자료화면 아님 → 같은 씬(m001: sp0003~sp0005)의
+    # 미사용 조각을 이어 붙인다. sp0004·sp0005 는 대사로 쓰였고, 씬 m000 의 sp0000(0~2)은 다른 씬.
+    beats = [{"scene": 0, "role": "hook", "span_ids": ["sp0001", "sp0002"]},
+             {"scene": 1, "role": "climax", "span_ids": ["sp0005"]}]      # sp0004 미사용
+    st = cv.stack_window(["sp0003"], beats, IDX, ROWS_BY, 4.0, scene=1)
+    assert st == {"kind": "stack", "parts": [(6.5, 9.0), (9.0, 10.5)]}
+    # 재료가 모자라면 None(다른 후보로)
+    assert cv.stack_window(["sp0003"], beats, IDX, ROWS_BY, 9.0, scene=1) is None
+    # 지정 화면이 이미 L 이상이면 그 안에서 L 만큼
+    assert cv.stack_window(["sp0003"], beats, IDX, ROWS_BY, 2.0, scene=1) == {"kind": "stack", "parts": [(6.5, 8.5)]}
+    # 편성 산출: parts 마다 클립 · 비트 길이는 parts 합
+    b = {"scene": 1, "role": "climax", "span_ids": ["sp0005"], "covers": [
+        {"position": "before", "kind": "stack", "t_in": 6.5, "t_out": 10.5, "parts": [[6.5, 9.0], [9.0, 10.5]],
+         "span_ids": ["sp0003", "sp0004"], "L": 4.0}]}
+    assert sf.beat_duration(b, IDX) == pytest.approx(4.0 + 2.0)
+    doc = sf.build_story_doc([b], IDX, [], topic={"topic": "t"}, title={"line1": "a", "line2": "b"},
+                             scenes=[], target_sec=20, max_sec=30)
+    plan = assemble.assemble_edit_plan(doc, IDX, video_path="v.mp4", work_title="T")
+    cov = [c for c in plan["timeline"] if c.get("cover")]
+    assert [(c["clip_start_sec"], c["clip_end_sec"]) for c in cov] == [(6.5, 9.0), (9.0, 10.5)]
+    assert all(c["use_original_audio"] is False for c in cov)
 
 
 def test_validate_beats_flags_diegesis_on_gate_roles_only():
@@ -751,3 +782,45 @@ def test_validate_beats_flags_diegesis_on_gate_roles_only():
     assert "diegesis_flags" not in doc["beats"][0]
     assert sf.build_story_doc(_beats(), IDX, [], topic={"topic": "t"}, title={"line1": "a", "line2": "b"},
                               scenes=[], target_sec=20, max_sec=30)["review"] == []
+
+
+# ── 연속 발화 사슬 · Stage 2 청취 구두점 증인 (2026-09-08, 커리어데이 11회 실사고) ──────────
+
+def test_long_continuation_chain_is_note_not_rejection():
+    """인터뷰 독백은 0.5초 침묵이 없어 44자 조각이 사슬로 묶인다(실측 21조각). 사슬이
+    CONT_CHAIN_HARD_MAX 를 넘으면 어디선가 끊을 수밖에 없다 — 반토막은 반려가 아니라 메모."""
+    n = st.CONT_CHAIN_HARD_MAX + 2
+    grid = _mk_grid([(i * 2.0, i * 2.0 + 1.95, True, f"조각{i} 이어지는 말") for i in range(n)]
+                    + [(n * 2.0 + 1.0, n * 2.0 + 3.0, True, "끝.")])
+    s2 = _mk_stage2(grid, [(0, n, 4, "x")])
+    idx, _ = st.build_span_index(s2, grid)
+    assert idx["sp0000"]["cont_chain"] == n
+    assert idx[f"sp{n:04d}"]["cont_chain"] == 1
+    allowed = {k: 0 for k in idx}
+    obj, pr, notes = sl.validate_beats(
+        {"beats": [{"role": "hook", "first": "sp0001", "last": "sp0002"}]}, idx, allowed,
+        budget_sec=30)
+    assert obj is not None and not any("반토막" in p for p in pr)
+    assert any("반토막" in x for x in notes)
+    # 짧은 사슬(진짜 한 문장)은 종전대로 반려
+    grid2 = _mk_grid([(0.0, 2.0, True, "받아야"), (2.05, 4.0, True, "사업도 확장하고."),
+                      (4.0, 6.0, True, "끝.")])
+    idx2, _ = st.build_span_index(_mk_stage2(grid2, [(0, 2, 4, "x")]), grid2)
+    assert idx2["sp0000"]["cont_chain"] == 2
+    obj2, pr2, _ = sl.validate_beats(
+        {"beats": [{"role": "hook", "first": "sp0000", "last": "sp0000"}]}, idx2,
+        {k: 0 for k in idx2}, budget_sec=30)
+    assert obj2 is None and any("반토막" in p for p in pr2)
+
+
+def test_stage2_heard_punctuation_ends_continuation():
+    """whisper 가 구두점을 안 찍어도 Stage 2 청취 텍스트가 '.' 로 끝나면 문장 끝 — ↪ 아님."""
+    grid = _mk_grid([(0.0, 2.0, True, "저를 발견하게 되거든요"), (2.05, 4.0, True, "항상 그런 얘기를 해요"),
+                     (4.05, 6.0, True, "끝.")])
+    s2 = _mk_stage2(grid, [(0, 2, 4, "x")])
+    idx, _ = st.build_span_index(s2, grid)
+    assert idx["sp0000"]["continues_to"] == "sp0001"          # 증인 없음 → 갭 규칙
+    s2["sequences"][0]["chunks"][0]["meanings"][0]["spans"][0]["heard_text"] = "저를 발견하게 되거든요."
+    idx2, _ = st.build_span_index(s2, grid)
+    assert idx2["sp0000"]["continues_to"] is None
+    assert idx2["sp0001"]["continues_to"] == "sp0002"

@@ -1380,13 +1380,29 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
             pin_v = f",tpad=stop_mode=clone:stop_duration={_hold:.3f},setpts=PTS-STARTPTS"
             pin_a = f"apad,atrim=end={_len:.6f},asetpts=PTS-STARTPTS"
 
-        v_filter = (
-            f"[{i}:v]{crop_filter}"
-            f"scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=increase,"
-            f"setsar=1,"
-            f"crop={scaled_w}:{scaled_h},"
-            f"pad={W}:{H}:{pad_x}:{overlay_y}:color=#0D0011{pin_v}[v{i}]"
-        )
+        _fit = getattr(clip, "fit_picture", None)
+        if _fit:
+            # 정보 화면 전체 맞춤(2026-09-08, v3 Stage 4 `fits`): 그림 사각형을 밴드 폭에 통째로
+            # 넣고(글자가 잘리지 않게) 남는 위아래는 같은 프레임을 흐리고 어둡게 깔아 밴드를 채운다
+            # — 밴드 크기가 컷마다 흔들리지 않는다(build12 fit_filter 이식). fit 이 없는 클립은
+            # 아래 종전 체인 그대로.
+            _px, _py, _pw, _ph = (int(v) for v in _fit)
+            v_filter = (
+                f"[{i}:v]crop={_pw}:{_ph}:{_px}:{_py},split=2[bg{i}][fg{i}];"
+                f"[bg{i}]scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=increase,"
+                f"crop={scaled_w}:{scaled_h},boxblur=28:2,eq=brightness=-0.16:saturation=0.5[b{i}];"
+                f"[fg{i}]scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=decrease[f{i}];"
+                f"[b{i}][f{i}]overlay=(W-w)/2:(H-h)/2,setsar=1,"
+                f"pad={W}:{H}:{pad_x}:{overlay_y}:color=#0D0011{pin_v}[v{i}]"
+            )
+        else:
+            v_filter = (
+                f"[{i}:v]{crop_filter}"
+                f"scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=increase,"
+                f"setsar=1,"
+                f"crop={scaled_w}:{scaled_h},"
+                f"pad={W}:{H}:{pad_x}:{overlay_y}:color=#0D0011{pin_v}[v{i}]"
+            )
         filters.append(v_filter)
         filters.append(f"[{i}:a]{pin_a}[a{i}]")
 

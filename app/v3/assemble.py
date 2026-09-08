@@ -554,7 +554,9 @@ def _lines_from_text(text: str, t_in: float, t_out: float) -> list[dict]:
 # 화자별 자막색 — 정본은 가왕쇼 템플릿(template.json dialogue_captions.colors):
 # w 주연/기본 · o 상대역 · y 질문·리액션 · b 썰전달자 · r 강조.
 SPEAKER_DEFAULT_COLOR = "#FFFFFF"
-SPEAKER_PALETTE = ("#FFB637", "#FFE94A", "#7ED0FF", "#FF5540")
+# 노랑(#FFE94A)은 내레이션 자막 색이라 화자색에서 뺐다(2026-09-08 사용자 지시 — 대사와
+# 내레이션 색이 겹치면 안 된다). 빨강도 강조 자막 색이라 마지막 순위.
+SPEAKER_PALETTE = ("#FFB637", "#7ED0FF", "#FF5540")
 UNKNOWN_SPEAKERS = frozenset({"미상", "?", "unknown", "unknown speaker"})
 
 
@@ -627,8 +629,14 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                    cast_names: list[str] | None = None,
                    name_fix_log: list[dict] | None = None,
                    skip_windows: list[tuple[float, float]] | None = None,
-                   skip_log: list[dict] | None = None) -> list[dict]:
+                   skip_log: list[dict] | None = None,
+                   fps: float | None = None) -> list[dict]:
     """채택 유성 span(뮤트 제외) → 어절 자막 세그먼트(**편집본 좌표** — C6).
+
+    ⚠ 편집본 오프셋 누적은 `clip_duration(clip_len(c), fps)` — 다른 좌표 소비자(cue·뮤트 창·
+    라벨)와 **같은 자**다. 종전 `c1 - c0` 누적은 덮개의 hold_sec 과 프레임 격자를 빼먹어, 붙잡은
+    덮개(hold 1.835s) 뒤의 **모든 대사 자막이 1.8초 일찍** 나갔다(2026-09-08 ep01full 실측 —
+    "대사 자막 타이밍이 다 어긋나있어"). fps 를 안 주면 격자 없이 hold_sec 만 더한다.
 
     skip_windows(2026-09-07): 자막을 내지 않을 **소스** 구간(노래 — `singing`). 줄의
     소스 중점이 창 안이면 그 줄을 버리고 skip_log 에 건별 기록한다. None/빈 = 종전 동일.
@@ -649,7 +657,7 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
         elif mw:
             audible = [(a, z) for a, z, on in split_by_windows(c0, c1, mw) if on]
         if not audible:
-            off += c1 - c0
+            off += clip_duration(clip_len(c), fps)
             continue
         for sid in c.get("span_ids") or []:
             sp = span_index[sid]
@@ -718,7 +726,7 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                             break
                 segments.append({"start_sec": e0, "end_sec": e1, "text": ln["text"],
                                  "speaker": l_spk, "color": l_color})
-        off += c1 - c0
+        off += clip_duration(clip_len(c), fps)
     segments.sort(key=lambda s: (s["start_sec"], s["end_sec"]))
     return segments
 

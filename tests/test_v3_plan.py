@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_v3_story_flow import GRID, IDX, ROWS, _allowed  # noqa: E402
 
 from app.v3 import assemble, plan as pl  # noqa: E402
+from app.v3.story_flow import narration as nr  # noqa: E402
 from app.v3.story_flow import select as sl  # noqa: E402
 
 REG = [{"id": "r001", "kind": "claim", "setup": {"meaning": 0, "t": 0.0, "quote": "x"},
@@ -112,8 +113,9 @@ def test_hook_return_reuses_hook_once_and_sorts_last():
                       {"first": "sp0004", "last": "sp0005", "role": "climax"},
                       {"first": "sp0001", "last": "sp0001", "role": "hook_return"}]}
     beats, pr, notes = sl.validate_beats(resp, IDX, allowed, budget_sec=30)
-    assert pr == [] and [b["role"] for b in beats] == ["hook", "climax", "hook_return"]
-    assert beats[-1]["reuse_of"] == "hook" and beats[-1]["span_ids"] == ["sp0001"]
+    # hook_return 은 맨 뒤 강제가 아니라 **원본 순서상 제자리**(훅 조각 sp0001 은 climax 앞) — 2026-09-08 교정
+    assert pr == [] and [b["role"] for b in beats] == ["hook", "hook_return", "climax"]
+    assert beats[1]["reuse_of"] == "hook" and beats[1]["span_ids"] == ["sp0001"]
     # 훅보다 길면 · 훅 밖 조각이면 · 두 번째면 · 다른 role 의 재사용이면 반려
     resp["beats"][2] = {"first": "sp0004", "last": "sp0004", "role": "hook_return"}
     assert sl.validate_beats(resp, IDX, allowed, budget_sec=30)[0] is None
@@ -163,3 +165,67 @@ def test_cli_and_pipeline_wiring():
     assert a.plan_shorts == 3 and a.plan_slot == 2 and a.from_step == "plan"
     src = (Path(__file__).resolve().parents[1] / "app" / "v3" / "pipeline.py").read_text(encoding="utf-8")
     assert "topic_override=_topic_override" in src and "--plan-slot 은 --story-flow human 전용" in src
+
+
+def test_hook_first_regardless_of_source_order_and_rewind_is_a_jump():
+    allowed = _allowed()
+    # hook 이 원본에서 뒤(sp0004~5)인데 build(sp0001~2)보다 앞으로 온다 · 되감기는 점프(다리 필수)
+    resp = {"beats": [{"first": "sp0001", "last": "sp0002", "role": "build"},
+                      {"first": "sp0004", "last": "sp0005", "role": "hook"},
+                      {"first": "sp0004", "last": "sp0004", "role": "hook_return"}]}
+    beats, pr, notes = sl.validate_beats(resp, IDX, allowed, budget_sec=30)
+    # hook(sp0004~5) 맨 앞 → build(sp0001~2, 되감기) → hook_return(sp0004, 원본 순서상 제자리)
+    assert pr == [] and [b["role"] for b in beats] == ["hook", "build", "hook_return"]
+    jumps = sl.compute_jumps(beats, IDX, gap_sec=0.5)
+    assert [j["before_beat"] for j in jumps] == [1, 2] and all(j["gap_sec"] > 0 for j in jumps)
+    assert "hook 이 맨 앞" in sl.LINES_PROMPT and "hook_return" in sl.LINES_PROMPT
+    # 전략 어휘·검증
+    assert len(sl.STRATEGIES) == 10 and "1. 결말 선공개형" in sl.strategy_block()
+    obj, pr = sl.validate_topic({"topic": "t", "core_meanings": ["m001"], "strategy": 3,
+                                 "hook_line": {"speaker": "박경희", "text": "너 바람피니?"}}, ROWS)
+    assert obj["strategy"] == 3 and obj["hook_line"] == "너 바람피니?" and obj["hook_speaker"] == "박경희"
+    # 화자 없는 훅 문장은 반려(화자를 적어라)
+    assert sl.validate_topic({"topic": "t", "core_meanings": ["m001"], "hook_line": "너 바람피니?"}, ROWS)[0] is None
+    assert sl.validate_topic({"topic": "t", "core_meanings": ["m001"], "strategy": 11}, ROWS)[0] is None
+    assert sl.strategy_line(None) == "" and "감정 폭발형" in sl.strategy_line(3)
+
+
+
+def test_hook_line_carries_speaker_and_register_quotes_keep_speaker():
+    # 「고소해버릴 거야」 실사고(2026-09-08): 통화 상대의 말이 화자 없이 인용돼 남편의 선언으로 둔갑
+    # 통화 상대·미상의 말은 훅이 될 수 없다(반려) — 화면에 없는 사람의 말로 편을 열지 않는다
+    obj, pr = sl.validate_topic({"topic": "t", "core_meanings": ["m001"],
+                                 "hook_line": {"speaker": "통화 상대", "text": "싹 다 고소해버릴 거야"}}, ROWS)
+    assert obj is None and any("화면에 있는 인물" in p for p in pr)
+    obj2, _ = sl.validate_topic({"topic": "t", "core_meanings": ["m001"], "hook_line": "박경희: 너 바람피니?"}, ROWS)
+    assert obj2["hook_speaker"] == "박경희" and obj2["hook_line"] == "너 바람피니?"
+    assert "화자를 틀리지 마라" in sl.SCENES_PROMPT and "{hook_speaker_line}" in sl.SCENES_PROMPT
+    from app.v3 import episode_map as em
+    from test_v3_episode_map import BY, SPANS, S2
+    assert SPANS["sp0000"]["speakers"] == ["갑"]
+    assert "⚠claim 갑: 「" in em.span_block_for(SPANS, 0)
+    resp = {"facts": [], "beliefs": [], "characters": {}, "open_questions": [],
+            "register": [{"kind": "claim", "setup": {"meaning": "m000", "quote": "쌩깔 거야", "speaker": "통화 상대"}}],
+            "diegesis": {}}
+    o, pr, _ = em.validate_forward(resp, seq=0, rows_by_idx=BY, spans=SPANS, register_ids=set())
+    assert pr == [] and o["register"][0]["setup"]["speaker"] == "통화 상대"
+    m = em.empty_map("fp"); em.merge_forward(m, 0, o, SPANS)
+    assert "통화 상대: 「쌩깔 거야」" in em.register_block(m)
+
+
+def test_rewind_cap_and_silent_run_split():
+    allowed = _allowed()
+    # 되감기 2번(훅 선행 제외): build(sp0004~5) → build(sp0001~2) 는 원본 역행 1번 → 허용, 그 뒤 또 역행이면 반려
+    resp = {"beats": [{"first": "sp0004", "last": "sp0005", "role": "climax"},
+                      {"first": "sp0001", "last": "sp0002", "role": "build"}]}
+    beats, pr, _ = sl.validate_beats(resp, IDX, allowed, budget_sec=30)
+    assert pr == [] and [b["role"] for b in beats] == ["build", "climax"]     # 원본 순서로 정렬되므로 되감기 0
+    # 무대사 런 분할: 유성-무성(≥6s)-유성 → 무성 런이 제 비트(silent)로
+    idx = {"a": {"t_in": 0, "t_out": 2, "is_audio": True, "pos": 0}, "b": {"t_in": 2, "t_out": 6, "is_audio": False, "pos": 1},
+           "c": {"t_in": 6, "t_out": 9, "is_audio": False, "pos": 2}, "d": {"t_in": 9, "t_out": 11, "is_audio": True, "pos": 3}}
+    pieces = sl.split_at_silent_runs({"scene": 0, "role": "climax", "span_ids": ["a", "b", "c", "d"], "hole_before": ["x"]}, idx)
+    assert [p["span_ids"] for p in pieces] == [["a"], ["b", "c"], ["d"]]
+    assert pieces[1].get("silent") is True and pieces[0]["hole_before"] == ["x"] and pieces[1]["hole_before"] is None
+    assert sl.split_at_silent_runs({"scene": 0, "role": "x", "span_ids": ["b", "c"]}, idx) == [{"scene": 0, "role": "x", "span_ids": ["b", "c"]}]
+    assert "무대사 구간" in nr.beats_block([{"scene": 0, "role": "climax", "span_ids": [], "silent": True}], {}, {0: {}}, [])
+

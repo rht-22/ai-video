@@ -38,6 +38,7 @@ SCAN_PROXY_HEIGHT = 480          # 전체 훑기용(2026-08-31 사용자 설정:
 SCAN_PROXY_FILE_FPS = 10.0       # 파일 자체 fps(2026-08-31: 1→10 — 표본 프레임의 시각 정밀)
 SCAN_SAMPLE_FPS = 1.0            # Gemini 표본 fps(video_metadata · 2026-08-31: 0.5→1)
 MAX_REASKS = 2                   # 반려·재질의 상한(기획서 §3)
+INTRO_MAX_SEC = 90.0             # intro 상한(2026-09-08 실사고: 콜드오픈·회상 3분45초를 intro 로 묶음) — 넘으면 반려
 BOUNDARY_CLUSTER_EPS = 1.0       # 인접 구간이 공유해야 할 경계의 허용 어긋남(스냅 전 정준화)
 PROMPT_SCENE_CUTS_CAP = 1500     # 프롬프트에 실을 장면 전환 어휘 상한(넘으면 결정적 솎음)
 NO_DIALOGUE_NOTABLE_SEC = 30.0   # 격자 요약에 적을 무발화 구간 하한
@@ -128,7 +129,8 @@ PROMPT_TEMPLATE = """당신은 방송 영상의 구조 분석가다. 첨부한 �
 ## 과제
 1. **sequences** — 영상을 이야기의 큰 맥락 단위로 나눠라. 각 sequence 에 "누가 무엇을 해서 무슨 일이 있었다" 한 문장(content). 길이 제한 없음.
 2. **chunks** — 10분(600초)을 넘는 sequence 만 의미 기준으로 10분 이하 chunk 들로 나눠라. 10분 이하 sequence 는 chunk 하나 = sequence 전체.
-3. **exception_sector** — 본편이 아닌 구간: intro(타이틀 시퀀스 — **방송 머리의 제공사·제작지원·등급 고지 카드**(검은 화면 위 로고·'제공'·'제작지원' 문구)도 intro 다)·recap(지난 화 요약)·teaser(다음 화 예고)·credit(엔딩 크레딧/스태프롤)·end(방송사 종료 화면 등 크레딧 이후 꼬리). 없는 항목은 null.
+3. **exception_sector** — 본편이 아닌 구간: intro(**방송 맨 머리의 제공사·제작지원·등급 고지 카드** — 검은 화면 위 로고·'제공' 문구, 보통 5~15초. 카드가 끝나고 첫 장면이 시작되면 거기서 intro 는 끝이다)·recap(지난 화 요약)·teaser(다음 화 예고)·credit(엔딩 크레딧/스태프롤)·end(방송사 종료 화면 등 크레딧 이후 꼬리). 없는 항목은 null.
+   ⚠ **콜드오픈·프롤로그·회상·몽타주는 본편이다.** 타이틀 시퀀스(제목 카드)가 몇 분 뒤에 나오더라도 그 앞의 장면들은 intro 가 아니다 — 타이틀 시퀀스 자체도 sequence 안에 두고 exception 으로 빼지 마라(실사고: 앞 3분 45초의 콜드오픈·회상·유튜브 몽타주를 intro 로 묶어 Stage 2 가 그 사건들을 통째로 못 봤다). intro 가 {intro_max:.0f}초를 넘으면 반려된다.
    **teaser 판별 신호** (M7 — 가왕쇼 6화 실사고 실측: 예고 시작을 50초 늦게 잡아 쇼츠 엔딩이 예고로 오염):
    - 화면에 콜라주/장식 프레임 테두리, 스태프롤·제작진 자막 병행, "다음 이야기/다음 화" 문구, 본편 흐름과 단절된 빠른 몽타주(장소·의상이 컷마다 바뀜)가 보이면 예고다.
    - ⚠ 예고의 **시작은 장식 프레임이 뜨는 순간이 아니다** — 본편 서사가 끝난 뒤 예고 소재(다른 날/다른 장소 장면의 나열)가 시작되는 **첫 컷**이다. 예고 몽타주는 종종 본편처럼 보이는 하이라이트 컷으로 문을 연다.
@@ -171,7 +173,7 @@ def build_prompt(grid: dict, *, research_context: str = "",
     reject_block = ""
     if reject_note:
         reject_block = f"\n## ⚠ 직전 제안 반려 사유 — 전부 고쳐서 다시 내라\n{reject_note}\n"
-    return PROMPT_TEMPLATE.format(research_block=research_block,
+    return PROMPT_TEMPLATE.format(intro_max=INTRO_MAX_SEC,research_block=research_block,
                                   grid_summary=summarize_grid(grid),
                                   hints_block=hints_block,
                                   reject_block=reject_block)
@@ -459,6 +461,10 @@ def run_seq_analyze(gemini, scan_proxy: Path, grid: dict, *,
                          for f in snap_failures]
             problems += chunk_problems
             problems += coverage
+            _intro = (snapped.get("exception_sector") or {}).get("intro")
+            if _intro and (_intro["end"] - _intro["start"]) > INTRO_MAX_SEC:
+                problems.append(f"intro 가 {_intro['end'] - _intro['start']:.0f}초 — 제공사·등급 카드(수십 초)만 intro 다. "
+                                "콜드오픈·회상·몽타주·타이틀 시퀀스는 본편(sequence)에 넣어라")
             audit["attempts"].append({
                 "attempt": attempt + 1,
                 "sequences": len(snapped["sequences"]),

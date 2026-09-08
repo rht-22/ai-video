@@ -121,7 +121,9 @@ def test_band_crop_size_and_speaker_map(tmp_path):
     rows = json.loads(m["hook_0"].read_text())
     assert rows[0]["x_center"] == 1420.0 and rows[0]["y_center"] == 540.0   # 그림 안으로 클램프
     assert audit[0]["subject_pos_conflict"] == "left" and audit[0]["side"] == "right"
-    assert calls[1]["initial_x"] == 1420.0                                  # 직전 클립 위치 승계
+    # 2026-09-08: 컷 경계에 연속성은 없다 — 직전 클립 위치를 승계하지 않고 첫 얼굴에 즉시 맞춘다
+    assert calls[1]["initial_x"] is None and calls[1]["snap_first"] is True
+    assert calls[1]["area_relative"] is True and calls[1]["ema_alpha"] == finalize.SPEAKER_EMA_ALPHA
 
 
 def test_speaker_tracking_gate_is_design_key_only():
@@ -131,7 +133,10 @@ def test_speaker_tracking_gate_is_design_key_only():
     assert cd == {"speaker_tracking": "on", "face_detector": "yunet"}
     assert {"speaker_tracking", "face_detector"} <= V3_ONLY_DESIGN_KEYS <= set(CHANNEL_DESIGN_ARGS)
     src = (Path(__file__).resolve().parents[1] / "app" / "v3" / "finalize.py").read_text(encoding="utf-8")
-    assert 'str(_cd.get("speaker_tracking") or "off").lower() == "on"' in src   # 기본 꺼짐 = 회귀 0
+    # 2026-09-08 사용자 결정: 기본 켜짐·YuNet — 끄는 길(off)은 남긴다
+    assert 'str(_cd.get("speaker_tracking") or SPEAKER_TRACKING_DEFAULT).lower() in ("on", "pan")' in src
+    assert finalize.SPEAKER_TRACKING_DEFAULT == "on" and finalize.FACE_DETECTOR_DEFAULT == "yunet"
+    assert 'detector=_cd.get("face_detector") or FACE_DETECTOR_DEFAULT' in src
 
 
 def test_edit_plan_to_xml_builds_parseable_sequence(tmp_path):
@@ -153,4 +158,6 @@ def test_edit_plan_to_xml_builds_parseable_sequence(tmp_path):
 
 def test_stage1_prompt_counts_provider_cards_as_intro():
     from app.v3.seq_analyze import PROMPT_TEMPLATE
-    assert "제공사·제작지원" in PROMPT_TEMPLATE and "intro 다" in PROMPT_TEMPLATE
+    from app.v3.seq_analyze import INTRO_MAX_SEC, build_prompt
+    assert "제공사·제작지원" in PROMPT_TEMPLATE and "콜드오픈·프롤로그·회상·몽타주는 본편이다" in PROMPT_TEMPLATE
+    assert INTRO_MAX_SEC == 90.0 and "{intro_max" in PROMPT_TEMPLATE

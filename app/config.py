@@ -273,10 +273,13 @@ def get_font_path(name: str, app_root: Path) -> str:
 
     safe_name = FONT_NAME_MAP.get(name, name.replace(" ", "_"))
 
+    # .ttf 우선, 없으면 .otf — Noto Sans CJK(2026-09-08)는 notofonts 공식 배포가 OTF(CFF)다.
+    # drawtext(freetype)·libass 둘 다 CFF 를 읽으므로 확장자만 넓힌다.
+    for ext in (".ttf", ".otf"):
+        file_path = font_dir / f"{safe_name}{ext}"
+        if file_path.exists():
+            return _ensure_ascii_font_path(file_path)
     file_path = font_dir / f"{safe_name}.ttf"
-
-    if file_path.exists():
-        return _ensure_ascii_font_path(file_path)
 
     url = REMOTE_FONTS.get(name)
     if url:
@@ -324,7 +327,10 @@ FONT_NAME_MAP = {
     "여기어때 잘난체 2 TTF": "Jalnan",
     "물마루": "mulmaru",
     "여기어때 잘난체 고딕 TTF": "JalnanGothic",
-    "그리운 경찰공평체": "Griun"
+    "그리운 경찰공평체": "Griun",
+    # v3 자막·내레이션·라벨 기본 폰트(2026-09-08 사용자 지시 — 참고 쇼츠 v10 의 NotoSansCJK-Black).
+    # notofonts/noto-cjk 공식 OTF(OFL) · 파일은 assets/fonts/NotoSansCJKkr-Black.otf
+    "Noto Sans CJK KR": "NotoSansCJKkr-Black",
 }
 
 # ASS 의 Fontname 은 **파일명이 아니라 폰트 내부 패밀리명**이라 별도 맵이 필요하다.
@@ -355,6 +361,14 @@ FONT_FAMILY_MAP = {
     "NotoSansJP-Medium": "Noto Sans JP",
     "NotoSansJP-Regular": "Noto Sans JP",
     "NotoSerifJP-Bold": "Noto Serif JP",
+    # 한국어 CJK Black(2026-09-08). 번들은 Black 한 웨이트뿐이라 패밀리명만으로 그 파일이 잡힌다
+    # (fontsdir 에 같은 패밀리의 다른 웨이트를 넣으면 libass 가 400 에 가까운 쪽을 고를 수 있다 — 넣지 말 것).
+    # ⚠ 값은 nameID 1(레거시 패밀리 "… Black")이다 — libass 는 nameID 1·4 만 보고 16(typographic
+    # family "Noto Sans CJK KR")은 안 본다. "Noto Sans CJK KR" 로 주면 Helvetica → Apple SD Gothic 으로
+    # 조용히 대체된다(2026-09-08 ffmpeg trace 실측 `fontselect: … -> Helvetica`). PIL getname() 은
+    # 16/17 을 돌려주므로 test_font_family 가 두 표기를 다 허용한다.
+    "NotoSansCJKkr-Black": "Noto Sans CJK KR Black",
+    "Noto Sans CJK KR": "Noto Sans CJK KR Black",
 }
 
 

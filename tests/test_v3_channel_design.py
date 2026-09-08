@@ -79,6 +79,19 @@ def test_flag_vocabulary_mirrors_v1_cli():
         assert dest in v1, dest
         assert v1[dest].type == kw["type"], dest
     assert "no_reframe" in v1
+    assert "no_subtitles" in v1                       # 채널 subtitles:false 스위치 — v1 과 같은 플래그
+
+
+def test_no_subtitles_switch_becomes_channel_design_key():
+    """--no-subtitles(2026-09-08, 커리어데이 11회 — 소스 번인 자막 위에 어절 자막이 한 번 더
+    그려짐) → channel_design {"subtitles": False}. 미지정이면 키 자체가 없다(회귀 0)."""
+    p = build_parser()
+    args = p.parse_args(["--video", "x.mp4", "--work-title", "w", "--no-subtitles"])
+    assert channel_design_from_args(args) == {"subtitles": False}
+    args = p.parse_args(["--video", "x.mp4", "--work-title", "w"])
+    assert "subtitles" not in channel_design_from_args(args)
+    from app.v3.cli import PRESET_OPTIONS
+    assert "no_subtitles" in PRESET_OPTIONS
 
 
 # ── finalize 병합 ──

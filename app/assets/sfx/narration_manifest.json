@@ -13,6 +13,12 @@
       "mode": "all",
       "mode_note": "all = 라벨마다 무조건(테스트) · quiet_only = 대사·내레이션이 없는 자리에만. 실측 2026-09-03: 소리 빈 구간은 편의 20~52%라 quiet_only 는 편당 2~7곳뿐이다.",
       "no_repeat_window": 3
+    },
+    "emphasis": {
+      "enabled": true,
+      "gain_db": -6.0,
+      "no_repeat_window": 3,
+      "note": "강조 자막(Stage 4 emphasis) 줄 시작에 타격음 — v9/v10 수작업 실측(강조 줄 = 줌 단계 = 효과음 한 쌍). 태그 emphasis_soft 우선, 없으면 label 풀."
     }
   },
   "sfx": [

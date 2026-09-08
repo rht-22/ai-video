@@ -415,6 +415,13 @@ _LINE_FX = {
                  "\\t(110,190,\\fscx100\\fscy100)"),
     "pop_strong": ("\\fscx62\\fscy62\\t(0,130,\\fscx112\\fscy112)"
                    "\\t(130,220,\\fscx100\\fscy100)"),
+    # v3 자막·내레이션(2026-09-08, 참고 쇼츠 v10 build10 POP/EPOP 프레임 표 — 30fps 3프레임):
+    # **크게 튀어나왔다가 제자리** — 위 두 개(작게 시작해 커짐)와 반대 방향이고 100ms 로 끝난다.
+    # POP  = 1.30 → 0.92 → 1.06 → 1.00,  EPOP = 1.44 → 0.90 → 1.10 → 1.00
+    "pop_snap": ("\\fscx130\\fscy130\\t(0,33,\\fscx92\\fscy92)"
+                 "\\t(33,66,\\fscx106\\fscy106)\\t(66,100,\\fscx100\\fscy100)"),
+    "pop_snap_strong": ("\\fscx144\\fscy144\\t(0,33,\\fscx90\\fscy90)"
+                        "\\t(33,66,\\fscx110\\fscy110)\\t(66,100,\\fscx100\\fscy100)"),
 }
 
 
@@ -643,11 +650,17 @@ def build_tts_ass(
             eff_margin = max(1, int(round((1.0 - min(max(float(_y), 0.0), 1.0)) * ASS_PLAY_RES_Y)))
             margin_field = str(eff_margin)
         tag = ""
+        # 등장 팝(2026-09-08, v3 내레이션) — seg.style["fx"] 가 _LINE_FX 이름이면 그 태그.
+        # 없으면 종전과 바이트 동일(v1 TTS 자막 불변).
+        _fx = (getattr(seg, "style", None) or {}).get("fx") if isinstance(
+            getattr(seg, "style", None), dict) else None
+        if _fx and str(_fx) in _LINE_FX:
+            tag = "{" + _LINE_FX[str(_fx)] + "}"
         if float(rotate_deg) != 0.0:
             n_lines = joined.count("\\N") + 1
             blk_h = n_lines * style.font_size * _ASS_LINE_HEIGHT_FACTOR
             org_y = int(round(ASS_PLAY_RES_Y - eff_margin - blk_h / 2))
-            tag = f"{{\\frz{-float(rotate_deg):g}\\org({ASS_PLAY_RES_X // 2},{org_y})}}"
+            tag = (tag[:-1] if tag else "{") + f"\\frz{-float(rotate_deg):g}\\org({ASS_PLAY_RES_X // 2},{org_y})}}"
         events += (f"Dialogue: 0,{_format_time(seg.start_sec)},{_format_time(seg.end_sec)},"
                    f"Default,,{margin_l},{margin_r},{margin_field},, {tag}{joined}\n")
     output_path.parent.mkdir(parents=True, exist_ok=True)

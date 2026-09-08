@@ -40,7 +40,7 @@ FORWARD_PROMPT = """당신은 드라마 회차의 **이야기 상태를 추적�
 규칙:
 - **사실**(facts): 시청자에게 확정적으로 제시된 것 — 대사(dialogue)·화면 글자(screen_text · 📄 표시)·행동(action). 화면 글자는 대사와 같은 급의 사실이다. 근거 meaning id 를 단다.
 - **믿음**(beliefs): 어떤 인물이 그렇다고 믿는 것(사실과 분리). holder 를 단다. 뒤에서 확인/번복될 수 있다.
-- **레지스터**(register): 드라마가 심어 둔 설정과 그 회수 — condition(조건·약속), phrase(반복될 말), object(물건), claim(단언 — ⚠claim 표시된 대사), symmetry(같은 구도의 반복·대칭). setup 은 이 시퀀스의 meaning, payoff 는 회수가 **이 시퀀스에서** 일어났을 때만. 앞 시퀀스의 항목(r001…)이 여기서 회수되면 `payoff_of` 에 그 id 를 적어라.
+- **레지스터**(register): 드라마가 심어 둔 설정과 그 회수 — condition(조건·약속), phrase(반복될 말), object(물건), claim(단언 — ⚠claim 표시된 대사), symmetry(같은 구도의 반복·대칭). setup 은 이 시퀀스의 meaning, payoff 는 회수가 **이 시퀀스에서** 일어났을 때만. 앞 시퀀스의 항목(r001…)이 여기서 회수되면 `payoff_of` 에 그 id 를 적어라. **인용(quote)에는 반드시 `speaker`(누가 한 말인지 — 표시 span 의 화자 그대로, 통화 상대·미상도 그대로)를 붙여라** — 화자 없는 인용은 뒤 단계가 엉뚱한 인물의 말로 쓴다.
 - **열린 질문**(open_questions): 이 시점에 시청자가 궁금한 것.
 - **diegesis**: 이 시퀀스의 span 중 실제 사건이 아닌 것(상상 imagined · 회상 recalled · 판단 불가 unclear)만 span id 로. 기록의 ⚠ 표시는 초벌 판정이다 — 앞뒤 사실로 판단이 서면 바꿔라, 확신 없으면 unclear.
 - 지어내지 마라. 기록에 없는 사실은 없다.
@@ -60,8 +60,8 @@ FORWARD_PROMPT = """당신은 드라마 회차의 **이야기 상태를 추적�
   "beliefs": [{{"holder": "인물", "text": "…", "meanings": ["m013"]}}],
   "characters": {{"인물": {{"knows": ["…"], "believes": ["…"], "wants": ["…"]}}}},
   "open_questions": ["…"],
-  "register": [{{"kind": "condition", "setup": {{"meaning": "m020", "quote": "…"}}, "payoff": null, "what_flipped": ""}},
-               {{"kind": "claim", "payoff_of": "r001", "payoff": {{"meaning": "m037", "quote": "…"}}, "what_flipped": "…"}}],
+  "register": [{{"kind": "condition", "setup": {{"meaning": "m020", "quote": "…", "speaker": "인물"}}, "payoff": null, "what_flipped": ""}},
+               {{"kind": "claim", "payoff_of": "r001", "payoff": {{"meaning": "m037", "quote": "…", "speaker": "인물"}}, "what_flipped": "…"}}],
   "diegesis": {{"sp1175": "imagined"}}}}"""
 
 BACKWARD_PROMPT = """당신은 드라마 회차의 **이야기 상태를 되짚는 기록가**다. 영상은 볼 수 없다 — 기록이 정본이다.
@@ -123,6 +123,9 @@ def span_table(stage2_doc: dict) -> dict[str, dict]:
                         "is_claim": bool(s.get("is_claim")),
                         "screen_text": s.get("screen_text") or None,
                         "text": " / ".join(str(a.get("line") or "") for a in s.get("audio_script") or []),
+                        # 화자(2026-09-08, 「고소해버릴 거야」 실사고: 통화 상대의 말이 인용만 남아 남편의
+                        # 선언으로 둔갑) — 인용은 언제나 화자와 한 몸이다
+                        "speakers": [str(a.get("speaker") or "미상") for a in s.get("audio_script") or []],
                         "scene_script": s.get("scene_script") or "",
                     }
     return out
@@ -151,7 +154,8 @@ def span_block_for(spans: dict[str, dict], seq: int) -> str:
         if sp.get("screen_text"):
             tags.append(f'📄 "{sp["screen_text"][:80]}"')
         if sp.get("is_claim"):
-            tags.append(f"⚠claim 「{sp['text'][:60]}」")
+            who = "/".join(dict.fromkeys(sp.get("speakers") or [])) or "미상"
+            tags.append(f"⚠claim {who}: 「{sp['text'][:60]}」")
         if sp.get("diegesis") and sp["diegesis"] != "actual":
             tags.append(f"⚠ 초벌 {sp['diegesis']}: {sp['scene_script'][:60]}")
         if tags:
@@ -294,7 +298,8 @@ def validate_forward(resp: Any, *, seq: int, rows_by_idx: dict[int, dict],
             if pid not in seq_meanings:
                 problems.append(f"register[{k}] payoff 는 이 시퀀스의 meaning 이어야 한다(m{pid:03d} 는 다른 시퀀스)")
                 continue
-            payoff = {"meaning": pid, "t": round(t_of[pid], 3), "quote": _quote(r["payoff"].get("quote"))}
+            payoff = {"meaning": pid, "t": round(t_of[pid], 3), "quote": _quote(r["payoff"].get("quote")),
+                      **({"speaker": _quote(r["payoff"].get("speaker"))[:40]} if r["payoff"].get("speaker") else {})}
         pof = r.get("payoff_of")
         if pof:
             pof = str(pof).strip()
@@ -319,7 +324,8 @@ def validate_forward(resp: Any, *, seq: int, rows_by_idx: dict[int, dict],
             problems.append(f"register[{k}] setup(m{sid_:03d}) 이 payoff(m{payoff['meaning']:03d}) 보다 뒤다")
             continue
         register.append({"kind": kind,
-                         "setup": {"meaning": sid_, "t": round(t_of[sid_], 3), "quote": _quote(setup.get("quote"))},
+                         "setup": {"meaning": sid_, "t": round(t_of[sid_], 3), "quote": _quote(setup.get("quote")),
+                                   **({"speaker": _quote(setup.get("speaker"))[:40]} if setup.get("speaker") else {})},
                          "payoff": payoff, "what_flipped": _quote(r.get("what_flipped"))})
     dieg: dict[str, str] = {}
     din = resp.get("diegesis")
@@ -653,8 +659,10 @@ def register_block(map_doc: dict | None, rows_by_idx: dict[int, dict] | None = N
     lines = []
     for r in map_doc["register"]:
         s, p = r["setup"], r.get("payoff")
-        lines.append(f"- {r['id']} {r['kind']}: 설정 m{s['meaning']:03d}({fmt_t(s['t'])}) 「{s.get('quote', '')[:60]}」"
-                     + (f" → 회수 m{p['meaning']:03d}({fmt_t(p['t'])}) 「{p.get('quote', '')[:60]}」"
+        def _q(x):
+            return (f"{x['speaker']}: " if x.get("speaker") else "") + f"「{x.get('quote', '')[:60]}」"
+        lines.append(f"- {r['id']} {r['kind']}: 설정 m{s['meaning']:03d}({fmt_t(s['t'])}) {_q(s)}"
+                     + (f" → 회수 m{p['meaning']:03d}({fmt_t(p['t'])}) {_q(p)}"
                         + (f" — {r['what_flipped'][:60]}" if r.get("what_flipped") else "")
                         if p else " → 회수 없음(열린 설정)"))
     return ("\n## 드라마가 이미 만들어 둔 설정↔회수 (레지스터 — 단언↔번복·조건↔결과·대칭)\n"

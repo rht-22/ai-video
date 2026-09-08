@@ -44,15 +44,18 @@ def test_clip_len_and_offsets_include_hold():
 
 
 def test_choose_cover_holds_short_designated_screen():
-    """지정 화면 sp0003(2.5s) < L(3.0+pad) 이고 hold → 이웃으로 안 넓히고 붙잡는다."""
+    """지정 화면 sp0003(2.5s) < L(3.0+pad) 이고 hold + **자료화면**(글자) → 이웃으로 안 넓히고 붙잡는다.
+    자료화면이 아니면 hold 는 무시된다(2026-09-08 사용자 규칙 — test_v3_story_flow 의 정지 금지 절)."""
+    import copy
+    idx = copy.deepcopy(IDX)
+    idx["sp0003"]["screen_text"] = "오빠랑 같이 해서 너무 좋았어"
     g = _group(("before", 1), ["카톡을 열어보는데,"], [3.0], refers="메시지 화면")
     g["cover_ids"] = ["sp0003"]; g["hold"] = True
-    cover = cv.choose_cover(("before", 1), g, _beats(), IDX, ROWS_BY, GRID)
+    cover = cv.choose_cover(("before", 1), g, _beats(), idx, ROWS_BY, GRID)
     assert cover["kind"] == "hold" and (cover["t_in"], cover["t_out"]) == (6.5, 9.0)
     assert cover["hold_sec"] == pytest.approx(cover["L"] - 2.5, abs=1e-3) and cover["probe"] is None
-    # hold 가 아니면 종전대로 지정 창을 넓혀 쓴다(붙잡기 없음)
-    g2 = dict(g, hold=False)
-    cover2 = cv.choose_cover(("before", 1), g2, _beats(), IDX, ROWS_BY, GRID)
+    # 자료화면이 아니면(글자 없음) hold 를 달아도 붙잡지 않는다(정지 금지)
+    cover2 = cv.choose_cover(("before", 1), g, _beats(), IDX, ROWS_BY, GRID)
     assert cover2["kind"] != "hold" and "hold_sec" not in cover2
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.v3.story import CONT_CHAIN_HARD_MAX
 from app.v3 import schemas
 
 MAX_REASKS = 2               # 걸음마다 반려·재질의 상한(seq_analyze 와 같은 값)
@@ -128,12 +129,16 @@ def span_row(sid: str, sp: dict) -> str:
         elif conf is not None and conf < 0.5:
             tag = f" [저확신 {conf:.2f}]"
         if sp.get("continues_to"):
-            tag += " ↪다음과 한 문장"
+            tag += (" ↪이어짐(연속 발화)" if int(sp.get("cont_chain") or 1) > CONT_CHAIN_HARD_MAX
+                    else " ↪다음과 한 문장")
         elif sp.get("pause_cont_from"):
             tag += " ↪앞 조각에서 이어졌을 수 있음"
         return (f"{sid} | 유성 {dur:.1f}s | imp {sp['importance']}{tag} | {speech}"
                 + screen_text_tag(sp.get("screen_text")) + diegesis_tag(sp.get("diegesis")))
-    return (f"{sid} | 무성 {dur:.1f}s | imp {sp['importance']} | {sp.get('scene_script', '')}"
+    # 인물·글자 없는 무성 조각(2026-09-08) — 사실 표시만(판단은 모델: 단서 장면이면 남기고, 낮은 importance
+    # 의 무관한 컷이면 걸음 3 의 skip). '인서트' 라는 이름은 판단을 앞지르므로 쓰지 않는다.
+    insert = " [무성·인물 없음]" if not (sp.get("characters") or []) and not sp.get("screen_text") else ""
+    return (f"{sid} | 무성 {dur:.1f}s{insert} | imp {sp['importance']} | {sp.get('scene_script', '')}"
             + screen_text_tag(sp.get("screen_text")) + diegesis_tag(sp.get("diegesis")))
 
 

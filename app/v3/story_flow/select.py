@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.v3.story import CONT_CHAIN_HARD_MAX
 from app.v3.story_flow.common import (
     fmt_t,
     meaning_table,
@@ -28,6 +29,31 @@ PURPOSES = ("배경", "맥락", "과정", "결과", "반응")
 # 4단계(2026-09-08, 갭 5·9·11): 대비형(contrast)·아이러니형(irony) 주제는 씬의 쓰임 축이 다르다 —
 # 선언(설정) · 경과 · 반전(회수). event(기본)는 종전 축 그대로.
 TOPIC_KINDS = ("event", "contrast", "irony")
+# 리빌딩 프로토콜 v14 의 10가지 바이럴 전략(2026-09-08, 사용자 지시 — ~/premiere_claude/guides).
+# 걸음 1 이 편마다 하나 고르고(모델), 걸음 2·3 프롬프트에 그 구조를 실어 준다. 코드는 id 만 본다.
+STRATEGIES: dict[int, tuple[str, str]] = {
+    1: ("결말 선공개형", "[결말/최고조 대사] → [발단] → [전개] → [위기]"),
+    2: ("충격 폭로형", "[결정적 폭로/망언] → [주변인 경악 리액션] → [사건의 전말(과거)] → [결말]"),
+    3: ("감정 폭발형", "[가장 분노/오열/웃는 대사] → [왜 이렇게 됐는지] → [결말]"),
+    4: ("인지부조화/급발진형", "[가장 평온한 대사] → [0.1초 만에 파국/갈등 대사] → [발단]"),
+    5: ("미스터리 떡밥형", "[의문스러운 한마디] → [내레이션의 추리/질문] → [진실 폭로(하이라이트)]"),
+    6: ("제3자 관찰자/리액션 먼저형", "[주변인의 황당한 리액션] → [메인 화자들의 갈등] → [일침/결론]"),
+    7: ("타임어택 카운트다운형", "[파국 직전의 긴박한 대사] → [내레이션: 정확히 X시간 전] → [점층적 갈등 고조]"),
+    8: ("시점 교차/핑퐁형", "[A의 변명/주장] → [B의 반박] → [내레이션 개입] → [진짜 팩트 폭로]"),
+    9: ("사이다/참교육형", "[답답한 빌런/고구마 발언] → [참다못한 사이다 일침] → [당황하는 리액션]"),
+    10: ("만약에/분기점형", "[파국 결말] → [내레이션: 이때 이 말을 안 했다면?] → [결정적 말실수] → [나비효과 폭발]"),
+}
+
+
+def strategy_block() -> str:
+    return "\n".join(f"  {k}. {name}: {shape}" for k, (name, shape) in STRATEGIES.items())
+
+
+def strategy_line(sid: int | None) -> str:
+    if not sid or sid not in STRATEGIES:
+        return ""
+    name, shape = STRATEGIES[sid]
+    return f"\n적용 전략: {sid}. {name} — {shape}. 이 순서가 비트의 뼈대다(선형 서사 금지, 훅이 먼저)."
 CONTRAST_PURPOSES = ("선언", "경과", "반전")
 ROLES = ("hook", "build", "turn", "climax", "reaction", "ending",
          "setup", "payoff", "hook_return")   # 뒤 셋은 4단계 추가(hook_return 은 훅 조각 재사용 1회)
@@ -45,12 +71,19 @@ JUMP_GAP_SEC = 5.0            # 비트 사이 원본 간격이 이보다 크면 
 SILENT_RUN_MIN_SEC = 6.0      # 무대사 구간 목록의 하한(수작업 실측 자 — EP01 48개·1,195초)
 SILENT_BLOCK_MAX = 30         # 프롬프트에 싣는 무대사 구간 수 상한(긴 것부터)
 EXCLUDE_OVERLAP_RATIO = 0.5   # 제외 구간과 사건 단위가 이 비율 이상 겹치면 그 사건은 제외(2026-09-07)
+# 훅 화자 금지 목록(2026-09-08, 「고소해버릴 거야」 실사고): 화면에 없는 사람의 말로 편을 열면 시청자가 누구
+# 말인지 모른다. 통화 상대·미상은 훅이 될 수 없다(반려 — 다른 한마디를 골라라).
+HOOK_SPEAKER_BANNED = ("통화 상대", "상대방", "전화 상대", "미상", "unknown", "?", "")
+REWIND_MAX = 1                # 훅 선행·훅 회수를 뺀 되감기(다음 비트가 원본에서 앞) 상한
+SILENT_BEAT_MIN_SEC = 6.0     # 비트 안 무대사 구간이 이 이상이면 제 비트로 떼어 내레이션 자리를 만든다
 
 TOPIC_PROMPT = """당신은 리캡 쇼츠 편집자다. 아래는 한 회차의 구조 기록이다(영상은 볼 수 없고 볼 필요도 없다 — 기록이 정본이다).
 
 ## 1단계 — 주제 정하기
 이 회차에서 쇼츠 한 편(목표 {target_sec:.0f}초)으로 만들 **사건 하나**를 고른다.
-기준: 작품을 모르는 사람이 한 번 보고 따라갈 수 있는 사건 · 시작부터 결과(또는 떡밥)까지가 {max_sec:.0f}초 안에 닫힌다 · **대사가 촘촘한 구간**이 유리하다. 단, **행동 또는 화면 속 글자만으로 뜻이 닫히는 구간**(도구를 꺼낸다·숨긴다·따라간다·몰래 읽는다 / 기사·메시지·게시글·문서 같은 자료화면과 그것을 보는 인물의 반응)은 대사가 없어도 주 재료가 될 수 있다 — 이때는 내레이션이 뼈대를 맡는다 · 앞뒤 회차 전개와 인과·아이러니로 이어지는 사건이면 더 좋다.
+기준: 작품을 모르는 사람이 한 번 보고 따라갈 수 있는 사건 · 시작부터 결과(또는 떡밥)까지가 {max_sec:.0f}초 안에 닫힌다 · **대사가 촘촘한 구간**이 유리하다.
+사건과 함께 **리빌딩 전략**(아래 10가지 중 하나, `strategy` 번호)을 고른다 — 원본의 시간 순서를 그대로 따르지 않는다. 오프닝 3초에 결말·하이라이트·가장 충격적인 한마디를 앞세우고, 그 한마디가 편 끝에서 되풀이되면(훅 회수) 가장 강하다.
+{strategy_block} 단, **행동 또는 화면 속 글자만으로 뜻이 닫히는 구간**(도구를 꺼낸다·숨긴다·따라간다·몰래 읽는다 / 기사·메시지·게시글·문서 같은 자료화면과 그것을 보는 인물의 반응)은 대사가 없어도 주 재료가 될 수 있다 — 이때는 내레이션이 뼈대를 맡는다 · 앞뒤 회차 전개와 인과·아이러니로 이어지는 사건이면 더 좋다.
 
 ## 작품
 {work_title}{research_block}
@@ -63,14 +96,16 @@ TOPIC_PROMPT = """당신은 리캡 쇼츠 편집자다. 아래는 한 회차의 
 {silent_block}{exclude_block}{map_block}{reject_block}
 ## 출력 (JSON 만)
 {{"topic": "이 쇼츠가 무엇에 관한 이야기인지 한 문장", "why": "고른 이유 한 문장",
-  "core_meanings": ["m012", "m013"], "title_draft": {{"line1": "상황", "line2": "후킹"}}}}"""
+  "core_meanings": ["m012", "m013"], "strategy": 3,
+  "hook_line": {{"speaker": "그 말을 한 인물(재료 그대로 — 통화 상대·미상이면 그대로)", "text": "편을 여는 가장 강한 한마디(원문 그대로)"}},
+  "title_draft": {{"line1": "상황", "line2": "후킹"}}}}"""
 
 SCENES_PROMPT = """당신은 리캡 쇼츠 편집자다. 영상은 볼 수 없다 — 기록이 정본이다.
 
 ## 2단계 — 사용 씬 고르기
-주제: {topic}
+주제: {topic}{strategy_line}
 이 사건을 **작품을 모르는 사람이 봐도 다 이해하고 재미있으려면** 어떤 씬을 보여줘야 하나. 각 씬의 쓰임을 정하라 — {purpose_axis}. 필요한 것만 {min_scenes}~{max_scenes}개, **원본 시간 순서**로. 씬 = 아래 사건 단위(id). 길이 감각: 완성본 {target_sec:.0f}초이고 씬 원본 합계는 그 2~3배까지 허용된다(다음 단계에서 대사를 골라 줄인다).
-제목 두 줄도 정하라 — line1(위) = 상황·도입, line2(아래) = 후킹. 각 {title_max}자 이내, 이어 읽어 한 호흡. 결말을 다 말하지 마라(읽은 사람이 '그래서?'를 묻게). 아랫줄이 사건의 **결과·반전 자체**(누가 무엇을 했다/당했다)를 말해버리면 볼 이유가 사라진다 — 결과 대신 그 직전의 질문·위기를 남겨라. `title_review.line2_reveals_ending` 에 네 판정을 적고, true 면 고쳐서 내라.
+제목 두 줄도 정하라 — line1(위) = 상황·도입, line2(아래) = 후킹. 각 {title_max}자 이내, 이어 읽어 한 호흡. **대사의 화자를 틀리지 마라** — 어떤 말을 누가 했는지는 재료 기록(화자 표기)이 정본이다. '통화 상대'·'미상'으로 표기된 말을 화면 속 인물의 말로 쓰면 제목이 거짓이 된다.{hook_speaker_line} 결말을 다 말하지 마라(읽은 사람이 '그래서?'를 묻게). 아랫줄이 사건의 **결과·반전 자체**(누가 무엇을 했다/당했다)를 말해버리면 볼 이유가 사라진다 — 결과 대신 그 직전의 질문·위기를 남겨라. `title_review.line2_reveals_ending` 에 네 판정을 적고, true 면 고쳐서 내라.
 
 ## 작품
 {work_title}{research_block}
@@ -86,18 +121,20 @@ SCENES_PROMPT = """당신은 리캡 쇼츠 편집자다. 영상은 볼 수 없�
 LINES_PROMPT = """당신은 리캡 쇼츠 편집자다. 영상은 볼 수 없다 — 기록이 정본이다.
 
 ## 3단계 — 쓸 대사 고르기
-주제: {topic}
-제목: {title_line1} / {title_line2}
+주제: {topic}{strategy_line}
+제목: {title_line1} / {title_line2}{hook_line_block}
 씬마다 보여줄 **대화 구간**을 비트로 잡아라. 비트 = `first`(첫 조각) ~ `last`(마지막 조각)이고 **사이 조각은 전부 들어간다** — 사람이 편집하듯 대화의 어디서 시작해 어디서 끝낼지를 정하는 것이다. 무슨 일이 왜 일어나는지를 말하는 대사가 뼈대다 — 감탄사·리액션 조각만 모으면 시청자는 무슨 얘기인지 모른다.
 규칙:
 - 구간 안에서 없어도 맥락이 이어지는 **짧은 추임새**는 `skip` 에 넣어 빼라(호흡을 당긴다). 단 뺀 자리의 대사가 유성 {skip_sec:.0f}초·{skip_lines}줄을 넘으면 코드가 그 자리를 비트 경계로 나누고 다음 단계가 내레이션 다리를 놓는다 — 그러니 **멀리 떨어진 대사를 한 비트에 붙이지 마라**, 비트를 새로 열어라.
-- 문장 중간에서 끊지 마라 — ↪ 표시된 조각은 first/last 로 가르지 마라.
+- 문장 중간에서 끊지 마라 — ↪ 표시된 조각은 first/last 로 가르지 마라. `↪이어짐(연속 발화)` 로 길게 이어지는 독백은 사슬째 넣을 수 없으니 **문장이 끝나는 조각**(…습니다/…거든요/…고요 뒤)에서 끊어라.
+- `[무성·인물 없음]` 조각(사물·작업·풍경 컷)이 구간 **안**에 끼어 있고 **importance 가 낮고 사건과 안 붙으면** `skip` 에 넣어라. 단서·물건·흔적·발견·자료화면처럼 이야기의 정보가 되는 무성 조각은 인물이 없어도 남긴다 — 묘사와 importance 로 판단하라.
 - **주고받음이 보여야 한다**: 질문·비난이 들어가면 상대의 답도 구간 안에 있어야 한다.
 - 화면만으로 뜻이 오는 무성 장면(리빌·행동)도 구간으로 잡을 수 있다(first·last 가 무성 조각). 결정적 무성 장면은 잘게 썰지 말고 이어지는 구간 하나로.
 - 내레이션 자리는 여기서 만들지 않는다 — 다음 단계가 따로 만든다.
 - 예산: 구간 길이 합(skip 제외) ≤ **{budget_sec:.0f}초** — 길이 열을 더해 가며 짜라. **예산을 채워라** — 85% 미만이면 반려한다(얇은 편은 다듬을 여유가 없다). 초안을 본 뒤 코드가 늘어지는 곳을 몇 초 잘라내므로 조금 넉넉한 게 맞다.
-- 비트 역할: hook(사건 한복판에서 시작 — 인사·자기소개·상황 설명 대사 금지) · build · turn · climax(핵심 대사는 통째로) · reaction · ending(펀치·선언·떡밥 대사 직후 뚝 — 해소·정리 장면 금지).
-- 비트는 원본 시간 순서, 구간끼리 겹치지 않게.
+- 비트 역할: hook(관심을 끄는 장면 — 인사·자기소개·상황 설명 대사 금지) · build · turn · climax(핵심 대사는 통째로) · reaction · ending(펀치·선언·떡밥 대사 직후 뚝 — 해소·정리 장면 금지) · **hook_return**(훅 장면을 원본 순서상 제자리에서 한 번 더 — 선택).
+- **훅 구조**: 관심을 끌 장면(질문·선언·폭로 — 그 한마디만 들어도 사건이 보이는 줄)을 hook 으로 **맨 앞**에 두고, 나머지 비트는 **원본 순서**로 "그 장면이 어쩌다 나오게 됐는지"를 보여준다. 훅이 원본에서 뒤에 있으면 앞으로 가져오고(되감기는 내레이션이 잇는다), 원본 순서가 그 장면에 다시 닿으면 `hook_return` 으로 한 번 더 보여줄 수 있다(훅 조각만 · 1회 · 길이 ≤ 훅). 훅 뒤에 오는 장면은 훅 뒤에 두어야 자연스럽다 — 순서를 뒤섞지 마라.
+- 비트는 **hook 이 맨 앞**(원본에서 뒤여도 — 코드가 앞으로 옮기고 되감기는 내레이션이 잇는다), 나머지는 원본 시간 순서(hook_return 포함). 구간끼리 겹치지 않게.
 
 ## 재료 (씬별 · id | 유성/무성 길이 | importance | 내용)
 {material_block}
@@ -151,6 +188,27 @@ def validate_topic(resp: Any, rows: list[dict], *,
             core.sort()
     if not core:
         problems.append("core_meanings 에 아는 사건 단위 id 가 없다(m012 형식)")
+    strategy = None
+    if resp.get("strategy") is not None:
+        try:
+            strategy = int(resp.get("strategy"))
+        except (TypeError, ValueError):
+            strategy = None
+        if strategy not in STRATEGIES:
+            problems.append(f"strategy {resp.get('strategy')!r} — 1~10 중 하나")
+    hl = resp.get("hook_line")
+    hook_speaker = ""
+    _hook_given = bool(hl)
+    if isinstance(hl, dict):
+        hook_speaker = str(hl.get("speaker") or "").strip()[:40]
+        hook_line = str(hl.get("text") or "").strip()[:80]
+    else:
+        hook_line = str(hl or "").strip()[:80]
+        if ":" in hook_line and len(hook_line.split(":", 1)[0]) <= 12:
+            hook_speaker, hook_line = (x.strip() for x in hook_line.split(":", 1))
+    if _hook_given and (hook_speaker.strip() in HOOK_SPEAKER_BANNED or not hook_speaker.strip()):
+        problems.append(f"hook_line 의 화자가 {hook_speaker!r} — 훅은 **화면에 있는 인물**의 말이어야 한다(통화 상대·미상 불가). "
+                        "화자를 재료 표기대로 적고, 그런 화자면 다른 한마디를 골라라")
     if problems:
         return None, problems
     return {"topic": topic, "why": str(resp.get("why") or "").strip(),
@@ -158,6 +216,9 @@ def validate_topic(resp: Any, rows: list[dict], *,
             "title_draft": {"line1": str(td.get("line1") or "").strip(),
                             "line2": str(td.get("line2") or "").strip()},
             "kind": kind,
+            **({"strategy": strategy} if strategy else {}),
+            **({"hook_line": hook_line} if hook_line else {}),
+            **({"hook_speaker": hook_speaker} if hook_speaker else {}),
             **({"setup": setup, "payoff": payoff} if kind != "event" else {})}, []
 
 
@@ -284,6 +345,41 @@ def split_at_holes(beat: dict, span_index: dict[str, dict],
     return out
 
 
+def split_at_silent_runs(beat: dict, span_index: dict[str, dict],
+                         *, min_sec: float = SILENT_BEAT_MIN_SEC) -> list[dict]:
+    """비트 안 연속 무성 조각 합이 min_sec 이상이면 그 런을 **제 비트**(role 유지 · silent=True)로 떼어 낸다 —
+    내레이션 앵커가 비트 앞뿐이라, 긴 무대사 화면 위에 말을 얹으려면 비트 경계가 있어야 한다
+    (EP01 실사고: 게시판·SNS 14초 무대사에 내레이션 2.3초). 순수. hole_before 는 첫 조각이 갖는다."""
+    ids = beat["span_ids"]
+    if not ids or not any(span_index[x]["is_audio"] for x in ids):
+        return [beat]                       # 통째 무대사 비트는 그대로(갭 3 경로)
+    runs: list[tuple[int, int]] = []
+    i = 0
+    while i < len(ids):
+        if span_index[ids[i]]["is_audio"]:
+            i += 1
+            continue
+        j = i
+        while j < len(ids) and not span_index[ids[j]]["is_audio"]:
+            j += 1
+        dur = sum(span_index[x]["t_out"] - span_index[x]["t_in"] for x in ids[i:j])
+        if dur >= min_sec:
+            runs.append((i, j))
+        i = j
+    if not runs:
+        return [beat]
+    out: list[dict] = []
+    cur = 0
+    for a, z in runs:
+        if a > cur:
+            out.append({**beat, "span_ids": ids[cur:a], "hole_before": beat.get("hole_before") if not out else None})
+        out.append({**beat, "span_ids": ids[a:z], "silent": True, "hole_before": None if out else beat.get("hole_before")})
+        cur = z
+    if cur < len(ids):
+        out.append({**beat, "span_ids": ids[cur:], "hole_before": None})
+    return out
+
+
 def compute_jumps(beats: list[dict], span_index: dict[str, dict],
                   *, gap_sec: float = JUMP_GAP_SEC) -> list[dict]:
     """비트 사이 '점프'(다리 내레이션이 필요한 자리) — 원본 간격 > gap_sec 이거나
@@ -295,6 +391,9 @@ def compute_jumps(beats: list[dict], span_index: dict[str, dict],
             continue
         gap = span_index[b["span_ids"][0]]["t_in"] - span_index[a["span_ids"][-1]]["t_out"]
         hole = b.get("hole_before") or []
+        # 되감기(다음 비트가 원본에서 앞이다 — 훅 선공개·훅 회수)는 언제나 점프: 다리 내레이션 필수
+        if gap < 0:
+            gap = abs(span_index[a["span_ids"][0]]["t_in"] - span_index[b["span_ids"][-1]]["t_out"])
         if gap > gap_sec or hole:
             skipped = [x for x in hole if span_index[x]["is_audio"]]
             jumps.append({"before_beat": i, "gap_sec": round(gap, 2),
@@ -375,10 +474,12 @@ def validate_beats(resp: Any, span_index: dict[str, dict], allowed: dict[str, in
         for x in keep:
             sp = span_index[x]
             nxt, prv = sp.get("continues_to"), sp.get("continues_from")
+            # 긴 사슬(연속 발화 — 인터뷰 독백)은 어디선가 끊을 수밖에 없다 → 메모(story.CONT_CHAIN_HARD_MAX)
+            _sink = notes if int(sp.get("cont_chain") or 1) > CONT_CHAIN_HARD_MAX else problems
             if nxt and nxt in span_index and nxt not in keep:
-                problems.append(f"beats[{k}] 문장 반토막: {x} 는 {nxt} 로 이어진다 — 짝을 함께 넣거나 둘 다 빼라")
+                _sink.append(f"beats[{k}] 문장 반토막: {x} 는 {nxt} 로 이어진다 — 짝을 함께 넣거나 둘 다 빼라")
             if prv and prv in span_index and prv not in keep and prv not in used:
-                problems.append(f"beats[{k}] 문장 반토막: {x} 는 {prv} 에서 이어진다 — 짝을 함께 넣거나 둘 다 빼라")
+                _sink.append(f"beats[{k}] 문장 반토막: {x} 는 {prv} 에서 이어진다 — 짝을 함께 넣거나 둘 다 빼라")
         if not hook_return:
             used.update(rng)
         role = role_in
@@ -397,15 +498,35 @@ def validate_beats(resp: Any, span_index: dict[str, dict], allowed: dict[str, in
                           **({"reuse_of": "hook"} if hook_return else {})})
     if not raw_beats:
         return None, problems + ["beats 가 비었다"], notes
-    # hook_return 은 원본 순서와 무관하게 **맨 뒤**(회수는 편의 끝에 온다)
-    raw_beats.sort(key=lambda b: (1 if b.get("reuse_of") else 0, span_index[b["range_ids"][0]]["pos"]))
+    # 훅 구조(2026-09-08 사용자 정의): 관심을 끄는 장면을 **맨 앞**에 두고, 그 장면이 어쩌다 나오게 됐는지를
+    # 원본 순서로 보여준다. hook_return(훅 장면 되풀이)은 **원본 순서상 그 장면이 오는 자리**에 놓이고 그 뒤
+    # 장면은 그대로 이어진다(맨 뒤 강제 아님 — 훅 뒷장면이 훅 앞으로 밀리던 실사고). 훅만 예외로 맨 앞.
+    raw_beats.sort(key=lambda b: (0 if b["role"] == "hook" else 1,
+                                  span_index[b["range_ids"][0]]["pos"],
+                                  0 if b.get("reuse_of") else 1))
+    # 되감기 상한(2026-09-08): 훅 선행(hook→다음)과 훅 회수는 빼고, 그 밖에 다음 비트가 원본에서 앞이면 되감기.
+    # 두 번 이상 되감으면 다리 내레이션 한 줄로는 못 잇는다(EP01 실사고: 41:02→39:30→…→41:02→44:42).
+    rewinds = 0
+    for i in range(1, len(raw_beats)):
+        a, b = raw_beats[i - 1], raw_beats[i]
+        if b.get("reuse_of") or a["role"] == "hook":
+            continue
+        if span_index[b["range_ids"][0]]["pos"] < span_index[a["range_ids"][-1]]["pos"]:
+            rewinds += 1
+    if rewinds > REWIND_MAX:
+        problems.append(f"되감기가 {rewinds}번 — 훅 선행·훅 회수 말고는 {REWIND_MAX}번까지다. 나머지 비트는 원본 순서대로")
     beats: list[dict] = []
     for rb in raw_beats:
         pieces = split_at_holes(rb, span_index)
         if len(pieces) > 1:
             notes.append(f"{rb['role']} 비트 안 긴 구멍 {len(pieces) - 1}곳 → 비트 {len(pieces)}개로 나눔"
                          "(다리 내레이션 자리)")
-        beats.extend(pieces)
+        for pc in pieces:
+            sub_pieces = split_at_silent_runs(pc, span_index)
+            if len(sub_pieces) > 1:
+                notes.append(f"{rb['role']} 비트 안 {SILENT_BEAT_MIN_SEC:.0f}초 이상 무대사 구간 → 제 비트로 떼어 냄"
+                             "(내레이션이 화면 위에 얹힐 자리)")
+            beats.extend(sub_pieces)
     total = sum(span_index[x]["t_out"] - span_index[x]["t_in"]
                 for b in beats for x in b["span_ids"])
     if total > budget_sec * BUDGET_TOLERANCE:

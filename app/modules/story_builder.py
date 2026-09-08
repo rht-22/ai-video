@@ -18,6 +18,9 @@ class StoryClip:
     tts_draft: str = ""
     # 2026-09-03 정보 화면 붙잡기 — 소스 구간 뒤에 마지막 프레임을 이만큼 유지(초). 0 = 종전
     hold_sec: float = 0.0
+    # 2026-09-08 정보 화면 전체 맞춤(v3 Stage 4 `fits`) — (x, y, w, h) 소스 그림 사각형을 밴드 폭에
+    # 통째로 넣고 남는 위아래를 같은 프레임 블러로 채운다. None = 종전 크롭 경로(v1 바이트 동일).
+    fit_picture: tuple[int, int, int, int] | None = None
 
 
 @dataclass(frozen=True)

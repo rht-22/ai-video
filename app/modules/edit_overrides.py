@@ -154,7 +154,7 @@ TEXT_FX = ("none", "pop", "shake", "glow")
 # 번들 4종은 전부 한글 전용이라(mulmaru 만 가나가 있고 한자는 넷 다 없다, fontTools 실측)
 # 일본어가 두부(□)로 나간다. 화이트리스트에 없으면 그 재렌더가 통째로 거절된다.
 # KR 경로에서 이 값을 쓸 일은 없다(편집실 폰트 선택지는 번들 4종뿐).
-TEXT_FONTS = ("Jalnan", "JalnanGothic", "mulmaru", "Griun", "ArialUnicode")
+TEXT_FONTS = ("Jalnan", "JalnanGothic", "mulmaru", "Griun", "ArialUnicode", "NotoSansCJKkr-Black")
 TEXT_SIZE_RANGE = (12, 400)                  # 캔버스(1080×1920) 기준 폰트 px
 TEXT_MAX_CHARS = 60                          # 한 오브젝트의 글자 수 상한(줄바꿈 포함)
 TEXT_DEFAULTS = {"size": 72, "color": "#FFFFFF", "stroke": "dark", "fx": "none",

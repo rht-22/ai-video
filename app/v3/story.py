@@ -103,6 +103,7 @@ NARRATION_SPEED_LADDER = (("fast", 1.1), ("very_fast", 1.2))
 TAIL_PAD_MAX_SEC = 0.25      # 유성 꼬리 클리핑 보정(Whisper 단어 끝이 빡빡함) 상한
 MUTE_MAX_IMPORTANCE = 3      # ⓑ: 이 이하 유성 span 만 뮤트 후보(ⓒ: ≥4 는 절대 불가)
 TITLE_MAX_CHARS = 16         # 상단 밴드 2줄 각각의 실측 상한(템플릿 폭 990px)
+CONT_CHAIN_HARD_MAX = 3      # ↪ 사슬이 이 조각 수를 넘으면 연속 발화 — 반토막은 메모(build_span_index 참조)
 # 대화 페이싱(2026-09-01, 사용자 편집 지침) — "같은 장면이어도 대사만 바로바로
 # 이어서 보여주느라 컷을 한다. 한 장면을 길게 보여주면 루즈하다." 사람 편집 실측
 # (리플레이 하네스 614편)의 클립 중앙 4.8s 가 그 리듬이다. 비트 안 대사 사이의
@@ -128,6 +129,18 @@ def build_span_index(stage2_doc: dict, grid: dict) -> tuple[dict[str, dict], lis
     # 이어진다. 자연스러운 문장 경계는 0.5초 침묵 규칙으로 갈리므로 이 갭이 안
     # 나온다. 종결부호가 있으면(Whisper 는 드물게 찍는다) 문장 끝으로 믿는다.
     # 재료 표에 ↪ 로 표시하고, 검증이 "한쪽만 고른 편성"을 반려한다.
+    # 두 번째 증인(2026-09-08, 커리어데이 11회 실사고): Stage 2 청취 텍스트는 구두점을
+    # 찍는다 — whisper 가 안 찍은 문장 끝을 여기서 잡는다("…발견하게 되거든요." 가
+    # ↪ 로 묶여 걸음 3 이 재질의 소진). 인터뷰 독백은 0.5초 침묵이 거의 없어 갭 규칙만
+    # 으로는 44자 조각이 20개씩 사슬로 묶인다.
+    _heard_end: dict[str, bool] = {}
+    for _sq in stage2_doc.get("sequences") or []:
+        for _ch in _sq.get("chunks") or []:
+            for _m in _ch.get("meanings") or []:
+                for _s in _m.get("spans") or []:
+                    _h = str(_s.get("heard_text") or "").strip()
+                    if _h and isinstance(_s.get("span_id"), str):
+                        _heard_end[_s["span_id"]] = _h[-1] in ".?!…"
     _cont: dict[str, str] = {}
     _pause_pair: dict[str, str] = {}   # 쉼-조각: b ← a ("큰일 … 날 뻔했네요" 실사고)
     for a, b in zip(_gspans, _gspans[1:]):
@@ -136,6 +149,8 @@ def build_span_index(stage2_doc: dict, grid: dict) -> tuple[dict[str, dict], lis
         gap = float(b["t_in"]) - float(a["t_out"])
         txt = str(a.get("text") or "").strip()
         no_end = bool(txt) and txt[-1] not in ".?!…\"'」』)]"
+        if _heard_end.get(a["id"]):
+            no_end = False
         if gap < 0.12 and no_end:
             _cont[a["id"]] = b["id"]
         elif gap < 2.0 and no_end and len(txt.split()) <= 2:
@@ -143,6 +158,18 @@ def build_span_index(stage2_doc: dict, grid: dict) -> tuple[dict[str, dict], lis
             # 쉼으로 쪼개졌을 수 있다. 확정 불가라 반려가 아니라 재료 표 마커+
             # 프롬프트 지시로만 민다(2026-09-02 "큰일" 절단 실사고).
             _pause_pair[b["id"]] = a["id"]
+    # 사슬 길이(2026-09-08): ↪ 로 묶인 연속 조각 수. CONT_CHAIN_HARD_MAX 를 넘는 사슬은
+    # '한 문장'이 아니라 연속 발화라(인터뷰 독백 실측 21조각 ≈ 90초) 검증기가 반토막을
+    # 반려 대신 메모로 낮춘다 — 그 사슬 안에서는 어디선가 끊을 수밖에 없다.
+    _chain_len: dict[str, int] = {}
+    _heads = [a for a in _cont if a not in set(_cont.values())]
+    for _h in _heads:
+        _members, _x = [_h], _h
+        while _x in _cont:
+            _x = _cont[_x]
+            _members.append(_x)
+        for _mid in _members:
+            _chain_len[_mid] = len(_members)
 
     index: dict[str, dict] = {}
     mi = -1                       # 전역 meaning 번호 — 다리(내레이션) 점프 판정의 단위
@@ -188,6 +215,7 @@ def build_span_index(stage2_doc: dict, grid: dict) -> tuple[dict[str, dict], lis
                         "continues_to": _cont.get(sid),
                         "continues_from": next(
                             (a for a, t in _cont.items() if t == sid), None),
+                        "cont_chain": _chain_len.get(sid, 1),
                         "pause_cont_from": _pause_pair.get(sid),
                     }
     # 미분석 무성 계층(2026-09-02, 사용자 결정 ⓑ) — 내레이션 창이 모자랄 때
@@ -346,6 +374,12 @@ def validate_story_response(resp: Any, span_index: dict[str, dict],
                      if span_index[x].get("continues_from")
                      and span_index[x]["continues_from"] in pos_of
                      and span_index[x]["continues_from"] not in ids]
+            _long = [x for x in half + front
+                     if int(span_index[x].get("cont_chain") or 1) > CONT_CHAIN_HARD_MAX]
+            if _long:
+                notes.append(f"beats[{k}] 연속 발화 사슬 안에서 끊음 {_long[:3]}")
+                half = [x for x in half if x not in _long]
+                front = [x for x in front if x not in _long]
             if half or front:
                 problems.append(
                     f"beats[{k}] 문장 반토막: "

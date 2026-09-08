@@ -311,6 +311,59 @@ def remap_edited(t: float, cuts: list[dict]) -> float:
     return round(new, 3)
 
 
+SLIVER_MIN_SEC = 0.8         # 컷이 클립에 남기는 조각 하한 — E20 "0.8초 미만 조각을 만들 컷은 접는다" 와 같은 자
+
+
+def absorb_slivers(cuts: list[dict], timeline: list[dict],
+                   guards: list[tuple[float, float, str]] | None = None,
+                   min_piece: float = SLIVER_MIN_SEC,
+                   guard_pad: float = GUARD_PAD_SEC) -> list[dict]:
+    """컷이 클립 가장자리에 남기는 **짧은 조각(< min_piece)** 을 컷에 흡수한다(순수 — 새 목록 반환).
+
+    2026-09-08 실사고(ep01full 32~34s): 운전 span 5.1s 의 가운데 3.3s 를 잘라 꼬리 0.375s 가 남았고,
+    완성본에서 "너무 빨리 지나가는 정체불명 장면"이 됐다. 컷 경계는 span 격자에 스냅되지만 조각 길이는
+    아무도 안 봤다. 규칙: 컷 양쪽에서 같은 클립의 경계까지 남는 길이가 min_piece 미만이면 컷을 그
+    경계까지 늘린다 — 단 ① 늘어난 구간이 보호 구간(내레이션 창·핵심 대사)과 겹치면 안 늘리고 ② 다른
+    컷과 겹치지 않으며 ③ 클립 전체가 사라지는 흡수(양쪽 다)는 하지 않는다(그 클립이 통째로 짧으면
+    이미 편성의 뜻이다). 편집본 좌표. 늘린 컷은 `absorbed=[[a,z],…]` 기록을 단다."""
+    if not cuts:
+        return []
+    bounds: list[tuple[float, float]] = []
+    off = 0.0
+    for c in timeline:
+        d = clip_len(c)
+        bounds.append((off, off + d))
+        off += d
+    # 내레이션 창 보호는 GUARD_PAD_SEC 만큼 부풀려 있다(모델 경계가 흐려 창을 스치는 것 방지). 흡수는
+    # 클립 **경계까지만** 늘리므로 다음 클립에서 시작하는 cue 의 여유 패드가 이 클립 꼬리에 걸쳐도 cue
+    # 본체는 손대지 않는다 → 패드를 벗긴 창으로 판정한다(ep01full 실측: 패드 0.2 가 꼬리 0.29s 를 막았다).
+    guards = [((g0 + guard_pad, g1 - guard_pad, n) if n == "내레이션 창" else (g0, g1, n))
+              for g0, g1, n in (guards or [])]
+    out = [dict(c) for c in sorted(cuts, key=lambda c: c["start"])]
+    for i, cut in enumerate(out):
+        s0, e0 = float(cut["start"]), float(cut["end"])
+        others = [(float(o["start"]), float(o["end"])) for j, o in enumerate(out) if j != i]
+        for (cs, ce) in bounds:
+            if not (cs < e0 and ce > s0):
+                continue
+            new_s, new_e = float(cut["start"]), float(cut["end"])
+            head = max(0.0, s0 - cs)          # 컷 앞에 남는 조각(같은 클립 안)
+            tail = max(0.0, ce - e0)          # 컷 뒤에 남는 조각
+            if s0 > cs and head < min_piece and not (tail < min_piece and tail > 0):
+                if not any(g0 < s0 and g1 > cs for g0, g1, _ in guards) \
+                        and not any(a < s0 and z > cs for a, z in others):
+                    new_s = min(new_s, cs)
+            if e0 < ce and tail < min_piece and not (head < min_piece and head > 0):
+                if not any(g0 < ce and g1 > e0 for g0, g1, _ in guards) \
+                        and not any(a < ce and z > e0 for a, z in others):
+                    new_e = max(new_e, ce)
+            if new_s != float(cut["start"]) or new_e != float(cut["end"]):
+                cut.setdefault("absorbed", []).append([round(float(cut["start"]), 3), round(float(cut["end"]), 3)])
+                cut["start"], cut["end"] = round(new_s, 3), round(new_e, 3)
+                s0, e0 = new_s, new_e
+    return out
+
+
 def apply_cuts_to_timeline(timeline: list[dict], cuts: list[dict], grid: dict,
                            label_anchors: set[str]) -> list[dict]:
     """편집본 좌표 제거 구간 → 새 timeline. 컷이 span 경계라 조각 경계도 span 경계다.
@@ -425,8 +478,9 @@ def remap_resources(resources: dict, cuts: list[dict],
 
 PROMPT = """너는 쇼츠의 최종 검수 편집자다. 첨부 영상은 렌더된 **초안**이다 — 시각은 전부 이 영상 자체의 시계다(첫 프레임 = 0초).
 
-과제: 시청자가 이탈할 만큼 **늘어지는 구간**이 있으면 0~{max_cuts}개 지목하라.
+과제: 시청자가 이탈할 만큼 **늘어지는 구간**, 또는 **이야기와 이어지지 않는 인서트**가 있으면 0~{max_cuts}개 지목하라.
 - 늘어짐 = 소리도 정보도 없는 대기 시간, 같은 화면의 무의미한 지속, 이야기에 기여 없는 반복.
+- 무관한 인서트 = 대사도 내레이션도 없는데 앞뒤 사건과 안 붙는 사물·작업·풍경 컷(재료표에 `[무성 — 대사·내레이션 없음]` 으로 표시된 클립이 후보다 — 인물의 사건과 무관하면 늘어지지 않아도 지목하라). 인물의 반응·발견·단서(물건·흔적·자료화면) 컷은 인서트가 아니다.
 - **여운과 구분하라**: 감정이 남는 정지(놀란 얼굴, 발견 직후)는 편집이다 — 자르지 마라.
 - 자르면 안 되는 것: 내레이션이 흐르는 시간, 핵심 대사, 엔딩. (어차피 코드가 거부하지만, 지목 자체를 아껴라.)
 - **확신이 없으면 지목하지 마라 — 빈 배열이 정답인 판이 많다.**
@@ -452,11 +506,25 @@ BUDGET_BLOCK = """
 
 def build_material_block(timeline: list[dict], segments: list[dict],
                          resources: dict) -> str:
+    """재료표 — 클립마다 대사·내레이션이 하나도 안 걸리는 **무성 인서트**를 표시한다(2026-09-08,
+    EP01 42~46s 벽 파쇄 인서트 실사고: 모델이 봤지만 '늘어짐' 기준에 안 걸려 남겼다)."""
     lines = []
     off = 0.0
+    cues = [(float(f["cue"]["start_sec"]), float(f["cue"]["end_sec"]))
+            for f in resources.get("tts_cue_files") or []
+            if (f.get("cue") or {}).get("start_sec") is not None]
+    segs = [(float(sg["start_sec"]), float(sg["end_sec"])) for sg in segments or []]
     for i, c in enumerate(timeline):
         dur = clip_len(c)
-        lines.append(f"클립{i:02d} {off:.1f}~{off + dur:.1f}s [{c.get('role')}]")
+        a, z = off, off + dur
+        talk = any(s0 < z - 1e-6 and s1 > a + 1e-6 for s0, s1 in segs)
+        nar = any(s0 < z - 1e-6 and s1 > a + 1e-6 for s0, s1 in cues)
+        tag = ""
+        if not talk and not nar and not c.get("cover"):
+            tag = " [무성 — 대사·내레이션 없음]"
+        elif c.get("cover"):
+            tag = " [내레이션 덮개]"
+        lines.append(f"클립{i:02d} {off:.1f}~{off + dur:.1f}s [{c.get('role')}]{tag}")
         off += dur
     for sg in segments or []:
         lines.append(f"  대사 {float(sg['start_sec']):.1f}~"

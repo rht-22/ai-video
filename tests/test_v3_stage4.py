@@ -395,7 +395,7 @@ def test_beat_pop_reaches_subtitle_lines():
     style = {"v3_style": {"beats": [{"number": 0, "pop": "none"},
                                     {"number": 1, "pop": "strong"}]}}
     win = finalize.subtitle_fx_windows(story, style, tl)
-    assert win == [(4.0, 8.0, "pop_strong")]          # none 은 창을 만들지 않는다
+    assert win == [(4.0, 8.0, "pop_snap_strong")]          # none 은 창을 만들지 않는다
     # 엔진 쪽 통로도 확인 — fx 가 없으면 태그가 붙지 않아야 한다(v1 회귀 0)
     from app.modules.subtitle import _line_style_overrides
     assert "fscx" in _line_style_overrides({"fx": "pop_strong"}, 2)[0]
@@ -549,4 +549,4 @@ def test_render_final_wires_subject_crop_map():
     import app.v3.finalize as _fin
     src = _P(_fin.__file__).read_text("utf-8")
     assert "crop_timeline_map=crop_map" in src
-    assert "subject_crop_map(plan[\"timeline\"]" in src
+    assert "subject_crop_map(render_tl" in src      # 2026-09-08: 줌 분할 렌더 타임라인(줌·fit 없으면 plan 과 동일)

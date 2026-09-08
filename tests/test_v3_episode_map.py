@@ -206,7 +206,7 @@ def test_run_episode_map_forward_then_backward_with_reask():
     fwd1 = next(p for p in answers if "이 시퀀스 1 " in p)
     assert '📄 "오빠랑' in fwd1 and "⚠claim 「" not in fwd1 and "r001" in fwd1
     fwd0 = next(p for p in answers if "이 시퀀스 0 " in p)
-    assert "⚠claim 「먼저 인사해도" in fwd0 and "첫 시퀀스" in fwd0
+    assert "⚠claim 갑: 「먼저 인사해도" in fwd0 and "첫 시퀀스" in fwd0
     # 재질의 소진은 크게 실패
     with pytest.raises(ValueError, match="재질의 소진"):
         em.run_episode_map(object(), S2, GRID, work_title="T", call=lambda g, p: {"facts": [{"text": "x", "meanings": ["m099"]}]},
@@ -230,7 +230,7 @@ def test_story_flow_consumption_blocks_and_diegesis_override():
     # 게이트: 지도 없음 = 프롬프트에 블록 없음(placeholder 만)
     p = sl.TOPIC_PROMPT.format(target_sec=50, max_sec=60, work_title="T", research_block="", sequence_block="",
                                hint_block="", meaning_block="", silent_block="", exclude_block="",
-                               map_block="", reject_block="")
+                               map_block="", strategy_block="", reject_block="")
     assert "레지스터" not in p and "{map_block}" in sl.TOPIC_PROMPT and "{map_block}" in sl.SCENES_PROMPT
     c = em.correction_entry("narration", "문장·화면 모순", t=12.345, span_id="sp0003", frame_path=None)
     assert c == {"stage": "narration", "reason": "문장·화면 모순",

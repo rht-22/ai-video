@@ -244,3 +244,32 @@ def test_free_zones_and_sparse_silent_cut_is_kept():
     from app.v3 import assemble
     belt = assemble.verify_edit_plan({"timeline": new}, grid)
     assert belt["pct"] == 100.0 and belt["violations"] == []
+
+
+# ── 조각 흡수(2026-09-08, ep01full 32~34s 실사고) ─────────────────────────────
+
+def test_absorb_slivers_extends_cut_to_clip_edge():
+    tl = [{"clip_start_sec": 100.0, "clip_end_sec": 103.0, "span_ids": []},
+          {"clip_start_sec": 200.0, "clip_end_sec": 205.133, "span_ids": []},   # 운전 span 5.13s
+          {"clip_start_sec": 300.0, "clip_end_sec": 303.0, "span_ids": []}]
+    # 편집본 3.0~8.133 이 두 번째 클립. 4.46~7.76 을 자르면 꼬리 0.375s 가 남는다(실사고 수치)
+    cuts = [{"start": 4.461, "end": 7.758, "reason": "운전"}]
+    out = wt.absorb_slivers(cuts, tl, [])
+    assert out[0]["end"] == pytest.approx(8.133, abs=1e-3) and out[0]["start"] == 4.461
+    assert out[0]["absorbed"] == [[4.461, 7.758]]
+    assert cuts[0]["end"] == 7.758                                  # 순수 — 입력 불변
+    # 머리 조각도 같은 규칙, 양쪽 다 짧으면(클립 증발) 손대지 않는다
+    assert wt.absorb_slivers([{"start": 3.4, "end": 6.0}], tl, [])[0]["start"] == 3.0
+    both = wt.absorb_slivers([{"start": 3.4, "end": 7.8}], tl, [])[0]
+    assert (both["start"], both["end"]) == (3.4, 7.8)
+    # 보호 구간(내레이션 창 본체)이 꼬리에 걸리면 안 늘린다 · 다른 컷과 겹쳐도 안 늘린다
+    g = wt.absorb_slivers(cuts, tl, [(7.9 - wt.GUARD_PAD_SEC, 8.1 + wt.GUARD_PAD_SEC, "내레이션 창")])
+    assert g[0]["end"] == 7.758 and "absorbed" not in g[0]
+    # 다음 클립에서 시작하는 cue 의 **패드만** 꼬리에 걸친 경우는 늘린다(실사고: 창 36.887 · 패드 0.2 · 꼬리 0.29)
+    pad_only = wt.absorb_slivers(cuts, tl, [(8.133 + 0.017 - wt.GUARD_PAD_SEC, 11.0, "내레이션 창")])
+    assert pad_only[0]["end"] == pytest.approx(8.133, abs=1e-3)
+    two = wt.absorb_slivers([{"start": 4.461, "end": 7.758}, {"start": 7.9, "end": 8.133}], tl, [])
+    assert two[0]["end"] == 7.758
+    # 조각이 하한 이상이면 그대로(1.46s 머리)
+    assert wt.absorb_slivers([{"start": 4.461, "end": 8.133}], tl, [])[0]["start"] == 4.461
+    assert wt.absorb_slivers([], tl, []) == []

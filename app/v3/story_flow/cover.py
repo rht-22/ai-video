@@ -26,7 +26,7 @@ from typing import Any
 
 from app.v3.story_flow.common import fmt_t
 
-NAR_PAD_SEC = 0.25           # 합성 길이에 더하는 여유(머리 0.1 · 꼬리 0.15)
+NAR_PAD_SEC = 0.15           # 합성 길이에 더하는 여유(머리 0.1 · 꼬리 0.05 — 2026-09-08 접착제 규칙: 끝나자마자 대사)
 NAR_HEAD_PAD_SEC = 0.10      # 엔딩 덮개 — 머리 여유만(내레이션 끝 = 컷)
 JOIN_GAP_SEC = 0.6           # 덮개 끝~앵커 틈이 이보다 짧으면 덮개를 앵커까지 늘려 잇는다
 SNAP_TOL_SEC = 0.30          # 프로브 답을 장면 전환·grid 경계에 붙이는 관용
@@ -34,6 +34,8 @@ PROBE_MIN_SLACK_SEC = 1.0    # 창 − L 이 이보다 작으면 고를 게 없�
 PROBE_MAX_WINDOW_SEC = 30.0  # 프로브 클립 상한(넘으면 지정 화면 중심으로 자른다)
 FLASH_BUDGET = 10            # 편당 덮개 프로브 호출 상한(refine 과 같은 규율)
 MIN_FREE_SEC = 0.5
+STACK_MIN_PART_SEC = 0.6     # 컷 쌓기 조각 하한(지침서: 1.5초짜리 컷을 쌓는다 — 너무 짧으면 깜빡임)
+STACK_MAX_PARTS = 4
 
 PROBE_PROMPT = """당신은 쇼츠 편집자다. 첨부 클립은 원본 {t0}~{t1} 구간이다(클립 0초 = 원본 {t0}). 이 클립의 **화면 위에** 내레이션을 얹을 것이다 — 소리는 끄고 화면만 쓴다.
 내레이션: 「{text}」 ({L:.1f}초)
@@ -172,6 +174,8 @@ def candidate_windows(anchor: tuple[str, int], beats: list[dict],
                     if z - a >= L:
                         frees.append((abs((a + z) / 2 - anchor_t), a, z))
             for _d, a, z in sorted(frees):
+                if z > anchor_t + 1e-6:
+                    continue                      # 앵커 뒤 화면은 before 덮개가 될 수 없다(되감기 방지)
                 if not any(abs(w["w0"] - a) < 1e-6 and abs(w["w1"] - z) < 1e-6 for w in out):
                     out.append({"kind": scope, "w0": a, "w1": z, "attach": "start"})
         if spill:
@@ -200,6 +204,8 @@ def candidate_windows(anchor: tuple[str, int], beats: list[dict],
                     if z - a >= L:
                         frees.append((abs((a + z) / 2 - last_t), a, z))
             for _d, a, z in sorted(frees):
+                if a < last_t - 1e-6:
+                    continue                      # 앵커 앞 화면은 after 덮개가 될 수 없다(되감기 방지)
                 if not any(abs(w["w0"] - a) < 1e-6 and abs(w["w1"] - z) < 1e-6 for w in out):
                     out.append({"kind": scope, "w0": a, "w1": z, "attach": "start"})
         if spill:
@@ -384,6 +390,59 @@ def run_probe(gemini, video: Path, out_dir: Path, tag: str, win: dict, L: float,
 
 # ── 덮개 확정 ──────────────────────────────────────────────────────────────
 
+def is_info_screen(ids: list[str], span_index: dict[str, dict]) -> bool:
+    """자료화면(글자가 정보인 화면) 판정 — Stage 2 가 글자를 읽었거나 있다고 표시한 조각."""
+    return any((span_index.get(x) or {}).get("screen_text") or (span_index.get(x) or {}).get("has_text")
+               for x in ids)
+
+
+def stack_window(cover_ids: list[str], beats: list[dict], span_index: dict[str, dict],
+                 rows_by_idx: dict[int, dict], L: float, *, scene: int,
+                 extra_used: list[tuple[float, float]] | None = None,
+                 allow_ids: set[str] | None = None) -> dict | None:
+    """컷 쌓기(지침서 제2원칙 · 사용자 규칙 "자료화면이 아니면 정지시키지 마라", 2026-09-08):
+    지정 화면이 L 에 못 미치고 정지도 못 쓰면, **같은 씬의 미사용 조각**을 앵커에 가까운 순으로
+    이어 붙여 L 을 채운다(정배속 · 컷 여러 개 · 마지막 조각은 남는 만큼 잘라 L 에 맞춘다).
+    반환 {kind:'stack', parts:[(a,z)…]} | None(재료 부족). 순수."""
+    ids = [x for x in cover_ids if x in span_index]
+    if not ids:
+        return None
+    if allow_ids:
+        beats = [{**b, "span_ids": [x for x in b.get("span_ids") or [] if x not in allow_ids]}
+                 for b in beats]
+    used = _merge(used_intervals(beats, span_index) + list(extra_used or []))
+    ids.sort(key=lambda x: span_index[x]["pos"])
+    f0, f1 = span_index[ids[0]]["t_in"], span_index[ids[-1]]["t_out"]
+    if any(a < f1 - 1e-6 and z > f0 + 1e-6 for a, z in used):
+        return None
+    parts: list[tuple[float, float]] = [(f0, f1)]
+    got = f1 - f0
+    if got >= L - 1e-6:
+        return {"kind": "stack", "parts": [(f0, f0 + L)]}
+    row = rows_by_idx.get(scene)
+    if row is None:
+        return None
+    occupied = _merge(used + [(f0, f1)])
+    frees = [(abs((a + z) / 2 - (f0 + f1) / 2), a, z)
+             for a, z in subtract((row["t0"], row["t1"]), occupied)
+             if z - a >= STACK_MIN_PART_SEC]
+    for _d, a, z in sorted(frees):
+        if len(parts) >= STACK_MAX_PARTS:
+            break
+        need = L - got
+        if need <= 1e-6:
+            break
+        take = min(z - a, need)
+        if take < STACK_MIN_PART_SEC and need > STACK_MIN_PART_SEC:
+            continue
+        parts.append((a, a + take))
+        got += take
+    if got < L - 1e-6:
+        return None
+    parts.sort()
+    return {"kind": "stack", "parts": [(round(a, 3), round(z, 3)) for a, z in parts]}
+
+
 def choose_cover(anchor: tuple[str, int], group: dict, beats: list[dict],
                  span_index: dict[str, dict], rows_by_idx: dict[int, dict],
                  grid: dict, *, gemini=None, video: Path | None = None,
@@ -404,15 +463,35 @@ def choose_cover(anchor: tuple[str, int], group: dict, beats: list[dict],
     # 인접 미사용 조각으로 넓힌다. 이 창이 후보 0순위다(내레이션이 가리키는 그 장면).
     wins: list[dict] = []
     focus: tuple[float, float] | None = None
+    # 시간 방향(2026-09-08 사용자 원칙 "훅 뒤 장면은 훅 뒤에"): before 덮개는 그 비트의 첫 조각보다 **앞**,
+    # after 덮개는 마지막 조각보다 **뒤**의 화면이어야 한다 — 지정 화면이 반대쪽이면 되감기가 생기므로
+    # 지정을 버리고(기록) 같은 방향의 후보로 간다. 무대사 편의 자기 비트 화면(allow_ids)은 예외.
+    _ids_k = beats[k]["span_ids"]
+    _beat_t0 = span_index[_ids_k[0]]["t_in"] if _ids_k else None
+    _beat_t1 = span_index[_ids_k[-1]]["t_out"] if _ids_k else None
     if group.get("cover_ids"):
         dw = designated_window(group["cover_ids"], beats, span_index, L, extra_used=placed,
                                allow_ids=allow_ids)
-        # 글자 화면은 자동 hold(갭 1, 2026-09-08): Stage 2 가 screen_text 를 읽은 조각을 짚었으면
-        # 모델이 hold 를 안 달았어도 붙잡는다 — 읽을 글자가 있는 화면을 넓혀 얼굴 컷을 섞지 않는다.
-        auto_hold = any((span_index.get(x) or {}).get("screen_text") for x in group["cover_ids"])
-        if auto_hold and not group.get("hold"):
+        if dw is not None and not allow_ids:
+            if kind == "before" and _beat_t0 is not None and dw["focus0"] > _beat_t0 + 1e-6:
+                log(f"  [v3/cover] {tag}: 지정 화면({fmt_t(dw['focus0'])})이 비트 첫 조각({fmt_t(_beat_t0)})보다 뒤 — "
+                    "되감기 방지, 앞쪽 후보로")
+                group = {**group, "cover_ids": []}
+                dw = None
+            elif kind == "after" and _beat_t1 is not None and dw["focus1"] < _beat_t1 - 1e-6:
+                log(f"  [v3/cover] {tag}: 지정 화면({fmt_t(dw['focus1'])})이 비트 마지막 조각({fmt_t(_beat_t1)})보다 앞 — "
+                    "되감기 방지, 뒤쪽 후보로")
+                group = {**group, "cover_ids": []}
+                dw = None
+        # 정지(hold)는 **자료화면에만**(사용자 규칙 2026-09-08: "자료화면이면 가능, 아닌 걸 정지시키지
+        # 마라"). Stage 2 가 글자를 읽은/있다고 한 조각이 자료화면이다. 모델이 다른 화면에 hold 를
+        # 달면 무시하고, 글자 화면이면 안 달았어도 붙잡는다.
+        info = is_info_screen(group["cover_ids"], span_index)
+        if group.get("hold") and not info:
+            log(f"  [v3/cover] {tag}: hold 요청이지만 자료화면이 아니다 — 정지 금지, 컷 쌓기로")
+        elif info and not group.get("hold"):
             log(f"  [v3/cover] {tag}: 지정 화면에 글자(📄) — hold 자동 승격")
-        if dw is not None and (group.get("hold") or auto_hold) and dw["focus1"] - dw["focus0"] < L - 1e-6:
+        if dw is not None and info and dw["focus1"] - dw["focus0"] < L - 1e-6:
             # 정보 화면 붙잡기(2026-09-03): 모델이 '글자가 있는 화면'이라 판정한 지정 화면이
             # 내레이션보다 짧으면, 이웃 조각으로 넓히지 않고 **마지막 프레임을 붙잡는다**
             # (넓히면 얼굴 컷이 섞여 정보가 사라진다 — EP01 카톡 화면 0.1초 실사고).
@@ -429,6 +508,20 @@ def choose_cover(anchor: tuple[str, int], group: dict, beats: list[dict],
         if dw is not None:
             wins.append(dw)
             focus = (dw["focus0"], dw["focus1"])
+        elif not info:
+            # 지정 화면이 L 에 못 미치고 정지도 못 쓴다 → 같은 씬 미사용 조각을 이어 붙인다(컷 쌓기)
+            st = stack_window(group["cover_ids"], beats, span_index, rows_by_idx, L,
+                              scene=beats[k]["scene"], extra_used=placed, allow_ids=allow_ids)
+            if st is not None and len(st["parts"]) > 1:
+                parts = st["parts"]
+                note = (f"컷 쌓기 — 지정 화면 {parts[0][1] - parts[0][0]:.1f}s 에 같은 씬 조각 "
+                        f"{len(parts) - 1}개를 이어 {L:.1f}s (정지 대신 정배속 컷)")
+                log(f"  [v3/cover] {tag}: {note}")
+                return {"position": kind, "kind": "stack",
+                        "t_in": parts[0][0], "t_out": parts[-1][1], "parts": [list(p) for p in parts],
+                        "span_ids": [x for a, z in parts for x in spans_overlapping(a, z, span_index)],
+                        "probe": None, "note": note,
+                        "window": [parts[0][0], parts[-1][1]], "L": L}
     wins += candidate_windows(anchor, beats, span_index, rows_by_idx, L,
                               extra_used=placed)
     for win in wins:
@@ -487,12 +580,13 @@ def apply_cover_to_beats(cover: dict, beats: list[dict], span_index: dict[str, d
     """덮개가 재생하는 구간을 비트에서 뺀다(같은 화면 두 번 금지). 덮개 끝이 span
     중간이면 그 span 은 head_trim 으로 시작을 당긴다. 반환: 뺀 span id."""
     t_in, t_out = cover["t_in"], cover["t_out"]
+    parts = [tuple(p) for p in (cover.get("parts") or [(t_in, t_out)])]
     removed: list[str] = []
     for bi, b in enumerate(beats):
         keep: list[str] = []
         for x in b["span_ids"]:
             sp = span_index[x]
-            if sp["t_in"] >= t_in - 1e-6 and sp["t_out"] <= t_out + 1e-6:
+            if any(sp["t_in"] >= a - 1e-6 and sp["t_out"] <= z + 1e-6 for a, z in parts):
                 removed.append(x)
                 continue
             # 대사 머리 뮤트 덮개는 비트 머리(앵커 앞 무성)를 대신한다 — 덮개가

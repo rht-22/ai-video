@@ -18,11 +18,18 @@ from app.modules.subtitle import SubtitleStyle, _ass_header
 from app.modules.subtitle_styles import SUBTITLE_PRESETS
 
 FONTS_DIR = Path(__file__).resolve().parent.parent / "app" / "assets" / "fonts"
-BUNDLED = sorted(FONTS_DIR.glob("*.ttf"))
+BUNDLED = sorted([*FONTS_DIR.glob("*.ttf"), *FONTS_DIR.glob("*.otf")])
 
 
 def _family_of(path: Path) -> str:
     return ImageFont.truetype(str(path), 20).getname()[0]
+
+
+def _ass_names_of(path: Path) -> set[str]:
+    """libass 가 매칭하는 이름 후보 — PIL 은 typographic family(nameID 16)를 돌려주지만 libass 는
+    nameID 1(레거시 패밀리, 웨이트가 붙을 수 있다)·4 만 본다. 둘 다 허용(Noto Sans CJK KR Black)."""
+    fam, style = ImageFont.truetype(str(path), 20).getname()
+    return {fam, f"{fam} {style}"} if style and style.lower() != "regular" else {fam}
 
 
 def test_fonts_are_bundled():
@@ -33,7 +40,7 @@ def test_fonts_are_bundled():
 @pytest.mark.parametrize("path", BUNDLED, ids=lambda p: p.stem)
 def test_file_stem_maps_to_actual_family(path):
     """파일명 stem 을 넣으면 그 폰트의 실제 패밀리명이 나와야 한다."""
-    assert to_font_family(path.stem) == _family_of(path), (
+    assert to_font_family(path.stem) in _ass_names_of(path), (
         f"{path.name}: 실제 패밀리명은 {_family_of(path)!r} 인데 "
         f"to_font_family({path.stem!r}) 가 {to_font_family(path.stem)!r} 를 돌려줍니다. "
         f"config.FONT_FAMILY_MAP 에 추가하세요.")
@@ -43,7 +50,7 @@ def test_file_stem_maps_to_actual_family(path):
 def test_actual_family_passes_through(path):
     """이미 올바른 패밀리명을 준 경우 훼손하지 않아야 한다."""
     fam = _family_of(path)
-    assert to_font_family(fam) == fam
+    assert to_font_family(fam) in _ass_names_of(path)
 
 
 def test_all_presets_resolve_to_a_bundled_family():
@@ -51,7 +58,7 @@ def test_all_presets_resolve_to_a_bundled_family():
 
     프리셋은 파일명 stem 을 쓰고 있어(JalnanGothic 등) 맵을 거치지 않으면 전부 대체 폰트가 된다.
     """
-    families = {_family_of(p) for p in BUNDLED}
+    families = {n for p in BUNDLED for n in _ass_names_of(p)}
     for pid, style in SUBTITLE_PRESETS.items():
         got = to_font_family(style.font_name)
         assert got in families, f"프리셋 {pid}: {style.font_name!r} → {got!r} 가 번들 폰트에 없습니다"
@@ -75,7 +82,7 @@ def test_unknown_font_passes_through():
 def test_map_has_no_self_referential_filename_entries():
     """맵의 값이 실제 패밀리명인지 — 파일명 stem 을 값으로 잘못 넣는 실수 방지."""
     stems = {p.stem for p in BUNDLED}
-    families = {_family_of(p) for p in BUNDLED}
+    families = {n for p in BUNDLED for n in _ass_names_of(p)}
     for key, value in FONT_FAMILY_MAP.items():
         assert value not in stems or value in families, (
             f"FONT_FAMILY_MAP[{key!r}] = {value!r} 는 파일명 stem 으로 보입니다 — 패밀리명이어야 합니다")
