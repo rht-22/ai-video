@@ -24,6 +24,7 @@ from typing import Any
 from app.v3 import assemble
 
 HANDLED_KEYS = ("schema", "clips", "title", "subtitles", "design")
+HOLD_OVERSHOOT_TOL = 0.5   # cue 소스 끝이 클립 끝을 이만큼 넘는 것은 hold 덮개의 꼬리(편집본 길이 보존)
 
 
 SUB_ANCHOR_GAP_TOL_SEC = 0.15   # 자막 앵커가 클립 머리 직전 이만큼의 틈에 있으면 그 클립 머리로
@@ -169,6 +170,13 @@ def apply_overrides_to_plan(ov: dict, plan: dict, grid: dict,
         # 끝 좌표는 kind="end"((s, e] 반개구간) — 덮개 클립처럼 cue 끝이 클립 끝과 동률이면
         # 시작용 [s, e) 로는 못 찾아 엔딩 내레이션이 통째로 드랍됐다(2026-09-07 실사고).
         e1 = assemble.to_edited_sec(src_end, offsets, kind="end")
+        if e0 is not None and e1 is None:
+            # 옛 cue(source_end_sec 없음)가 붙잡은 덮개 위에 있으면 start+duration 이 hold_sec 만큼 클립 끝을
+            # 넘는다 — 시작이 든 클립 끝을 넘는 양이 HOLD_OVERSHOOT_TOL 이내면 편집본 길이를 보존한다.
+            _clip = next(((cs, ce, off) for cs, ce, off in offsets
+                          if cs <= float(cue["source_time_sec"]) < ce), None)
+            if _clip and src_end - _clip[1] <= HOLD_OVERSHOOT_TOL:
+                e1 = round(e0 + float(cue.get("duration_sec") or (src_end - float(cue["source_time_sec"]))), 3)
         if e0 is None or e1 is None or e1 <= e0:
             record["cues_dropped"].append(
                 {"source_time_sec": cue["source_time_sec"],

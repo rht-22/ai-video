@@ -79,8 +79,18 @@ def test_cue_inherit_uses_source_end_sec_for_hold_cover():
     res = {"tts_cue_files": [{"cue_index": 0, "path": "x.mp3", "cue": cue}]}
     _p, _s, new_res, rec = ov.apply_overrides_to_plan({"schema": "edit_overrides/v3", "subtitles": []}, plan, grid, [], res)
     assert rec["cues_dropped"] == [] and len(new_res["tts_cue_files"]) == 1
-    # source_end_sec 없는 옛 cue 는 종전 규칙(start+duration) 그대로 — 이 경우엔 클립 밖이라 드랍
+    # source_end_sec 없는 옛 cue: hold 꼬리만큼(≤0.5s) 넘는 건 편집본 길이 보존으로 살린다 · 크게 넘으면 드랍
     old = {**cue}; old.pop("source_end_sec")
     _p, _s, new_res2, rec2 = ov.apply_overrides_to_plan({"schema": "edit_overrides/v3", "subtitles": []}, plan, grid, [],
                                                        {"tts_cue_files": [{"cue_index": 0, "path": "x.mp3", "cue": old}]})
-    assert len(rec2["cues_dropped"]) == 1 and new_res2["tts_cue_files"] == []
+    assert rec2["cues_dropped"] == [] and new_res2["tts_cue_files"][0]["cue"]["duration_sec"] == 1.952
+    far = {**old, "duration_sec": 5.0}
+    _p, _s, new_res3, rec3 = ov.apply_overrides_to_plan({"schema": "edit_overrides/v3", "subtitles": []}, plan, grid, [],
+                                                       {"tts_cue_files": [{"cue_index": 0, "path": "x.mp3", "cue": far}]})
+    assert len(rec3["cues_dropped"]) == 1 and new_res3["tts_cue_files"] == []
+    # finalize_cues 가 source_end_sec 을 싣는다(resources 사본에 남아야 승계가 정본 경로를 탄다)
+    from app.v3 import assemble
+    fin = assemble.finalize_cues([{"text": "t", "source_time_sec": 2619.74, "source_end_sec": 2621.56, "beat": 0,
+                                  "mode": "cover", "muted_span_ids": []}], plan["timeline"], voice="ko_female", speed="fast",
+                                 fps=30.0)
+    assert fin[0].get("source_end_sec") == 2621.56

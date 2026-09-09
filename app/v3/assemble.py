@@ -966,6 +966,9 @@ def finalize_cues(narration_cues: list[dict], timeline: list[dict], *,
         fin = {
             "text": cue["text"],
             "source_time_sec": cue["source_time_sec"],
+            # 소스 창 끝도 신원의 일부(2026-09-09, additive): 오버라이드 cue 승계가 hold 덮개 위 cue 의 끝을
+            # start+duration 으로 재면 클립 밖이 되어 드랍된다 — 계획의 창 끝을 그대로 싣는다.
+            "source_end_sec": cue.get("source_end_sec"),
             "start_sec": e0, "end_sec": e1,
             "duration_sec": round(e1 - e0, 3),
             # 배속 사다리(2026-09-02) — 계획이 cue 별로 고른 speed 가 기본값을 이긴다
