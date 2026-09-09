@@ -154,6 +154,12 @@ def apply_overrides_to_plan(ov: dict, plan: dict, grid: dict,
         if dropped_subs:
             record["dropped_subtitles"] = dropped_subs
         new_segments = sorted(anchored, key=lambda x: (x["start_sec"], x["end_sec"]))
+        # 겹침 제거(2026-09-09 ep8ex02 실사고): 손으로 쓴 줄이 다음 줄 시작을 0.05s 넘치면 libass 가 충돌 회피로
+        # 그 줄을 **위로 밀어** 자막이 위아래로 튄다(ASS 에는 위치 태그가 없는데도). 편집실도 같은 함정이므로 여기서
+        # 끝을 다음 줄 시작으로 자른다(엔진 자막 생성은 원래 겹치지 않는다).
+        for a, b in zip(new_segments, new_segments[1:]):
+            if a["end_sec"] > b["start_sec"] > a["start_sec"]:
+                a["end_sec"] = round(b["start_sec"], 3)
     new_files = []
     for f in resources.get("tts_cue_files") or []:
         cue = dict(f.get("cue") or {})

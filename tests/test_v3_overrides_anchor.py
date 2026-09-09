@@ -94,3 +94,16 @@ def test_cue_inherit_uses_source_end_sec_for_hold_cover():
                                   "mode": "cover", "muted_span_ids": []}], plan["timeline"], voice="ko_female", speed="fast",
                                  fps=30.0)
     assert fin[0].get("source_end_sec") == 2621.56
+
+
+def test_override_subtitles_overlap_is_clamped():
+    """손편집 자막이 다음 줄과 0.05s 겹치면 libass 충돌 회피로 줄이 위로 밀린다(ep8ex02 "자막이 위아래로") — 끝을 다음 시작으로."""
+    from app.v3 import overrides as ov
+    plan = {"timeline": [{"clip_start_sec": 10.0, "clip_end_sec": 20.0, "use_original_audio": True, "span_ids": ["a"]}],
+            "source_fps": 30.0}
+    grid = {"span_candidates": [{"id": "a", "t_in": 10.0, "t_out": 20.0}]}
+    subs = [{"start_sec": 0.0, "end_sec": 1.5, "text": "하나", "source_time_sec": 10.0},
+            {"start_sec": 1.45, "end_sec": 3.0, "text": "둘", "source_time_sec": 11.45},
+            {"start_sec": 3.0, "end_sec": 4.0, "text": "셋", "source_time_sec": 13.0}]
+    _p, segs, _r, _rec = ov.apply_overrides_to_plan({"schema": "edit_overrides/v3", "subtitles": subs}, plan, grid, [], {})
+    assert [(s["start_sec"], s["end_sec"]) for s in segs] == [(0.0, 1.45), (1.45, 3.0), (3.0, 4.0)]
