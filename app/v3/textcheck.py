@@ -414,6 +414,52 @@ def scene_stem(piece_text: str, scene_script: str, span_text: str,
     return None
 
 
+_DIGIT_READ = "영일이삼사오육칠팔구"
+_UNIT_READ = ["", "십", "백", "천"]
+
+
+def read_digits_ko(text: str) -> str:
+    """어절 안 숫자를 한국어 읽기로(「300장」→「삼백장」·「30분」→「삼십분」·「5호」→「오호」·「15분」→「십오분」).
+    4자리까지 자릿수 읽기, 그 이상은 자리마다. 순수 — 발음 대조용이라 '일백'·'일십'은 안 붙인다."""
+    def _num(m):
+        s = m.group(0)
+        if len(s) > 4 or s.startswith("0"):
+            return "".join(_DIGIT_READ[int(c)] for c in s)
+        out = []
+        for i, c in enumerate(s):
+            d = int(c); pos = len(s) - 1 - i
+            if d == 0:
+                continue
+            out.append(("" if (d == 1 and pos > 0) else _DIGIT_READ[d]) + _UNIT_READ[pos])
+        return "".join(out) or "영"
+    return _re.sub(r"\d+", _num, str(text or ""))
+
+
+def jamo_seq(text: str) -> str:
+    """어절 → 자모 나열(발음 대조용). 숫자는 한국어 읽기로 먼저 바꾼다. 한글 아닌 글자는 그대로."""
+    out: list[str] = []
+    for ch in read_digits_ko(text):
+        j = _jamo(ch)
+        if j is None:
+            out.append(ch)
+            continue
+        cho, jung, jong = j
+        out.append(chr(0x1100 + cho)); out.append(chr(0x1161 + jung))
+        if jong:
+            out.append(chr(0x11A7 + jong))          # 종성 없음(0)은 비운다
+    return "".join(out)
+
+
+def phonetic_sim(a: str, b: str) -> float:
+    """두 어절의 자모 나열 유사도(difflib ratio). 「꼬물들밖에」↔「고무줄밖에」 0.8 · 「산맥장」↔「300장」 0.8 ·
+    「남은」↔「여러분」 0.2."""
+    import difflib
+    ja, jb = jamo_seq(a.strip(_STRIP)), jamo_seq(b.strip(_STRIP))
+    if not ja or not jb:
+        return 0.0
+    return difflib.SequenceMatcher(None, ja, jb).ratio()
+
+
 def arbitrate_scene(token: str, piece: dict | None, *, scene_script: str, span_text: str,
                     exclude: set[str] | frozenset[str] | None = None) -> tuple[str, str] | None:
     """화면 묘사 증인(2026-09-09, 가왕쇼 8화 「꼬무줄」 실사고) — 정렬로 찾은 청취 조각이 자모 차이

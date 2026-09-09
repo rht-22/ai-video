@@ -159,7 +159,13 @@ def apply_overrides_to_plan(ov: dict, plan: dict, grid: dict,
         if cue.get("source_time_sec") is None:
             continue
         e0 = assemble.to_edited_sec(float(cue["source_time_sec"]), offsets)
-        src_end = float(cue["source_time_sec"]) + float(cue.get("duration_sec") or 0)
+        # 소스 끝은 cue 가 든 source_end_sec 이 정본(2026-09-09 ep8ex01 실사고): 붙잡은 덮개(hold)는 편집본
+        # 길이(duration_sec)가 소스 창보다 hold_sec 만큼 길어 start+duration 이 클립 끝을 넘고, kind="end"
+        # 조회가 None → 훅 내레이션이 통째로 드랍됐다(자막 한 줄 고친 재렌더에서 첫 내레이션이 사라짐).
+        if cue.get("source_end_sec") is not None:
+            src_end = float(cue["source_end_sec"])
+        else:
+            src_end = float(cue["source_time_sec"]) + float(cue.get("duration_sec") or 0)
         # 끝 좌표는 kind="end"((s, e] 반개구간) — 덮개 클립처럼 cue 끝이 클립 끝과 동률이면
         # 시작용 [s, e) 로는 못 찾아 엔딩 내레이션이 통째로 드랍됐다(2026-09-07 실사고).
         e1 = assemble.to_edited_sec(src_end, offsets, kind="end")

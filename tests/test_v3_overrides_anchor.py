@@ -62,3 +62,25 @@ def test_subtitle_anchor_in_small_gap_before_clip_snaps_to_clip_head():
     far = [{"start_sec": 0.0, "end_sec": 1.0, "text": "먼 앵커", "source_time_sec": 99.0}]      # 1.0s 앞 — 드랍
     _, segs, _, rec = apply_overrides_to_plan(_ov(far), plan, GRID, [], {"tts_cue_files": []})
     assert segs == [] and rec["dropped_subtitles"]
+
+
+def test_cue_inherit_uses_source_end_sec_for_hold_cover():
+    """붙잡은 덮개(hold) 위 cue: 편집본 길이(duration_sec)가 소스 창보다 hold_sec 만큼 길다 — start+duration 으로
+    끝을 재면 클립 밖이 되어 훅 내레이션이 드랍됐다(2026-09-09 ep8ex01). source_end_sec 이 있으면 그것이 소스 끝."""
+    from app.v3 import overrides as ov
+    plan = {"timeline": [{"clip_start_sec": 2619.64, "clip_end_sec": 2621.56, "use_original_audio": False,
+                          "span_ids": ["a", "b"], "cover": "hold", "hold_sec": 0.032, "role": "hook"},
+                         {"clip_start_sec": 2630.0, "clip_end_sec": 2634.0, "use_original_audio": True, "span_ids": ["c"]}],
+            "source_fps": 30.0}
+    grid = {"span_candidates": [{"id": "a", "t_in": 2619.64, "t_out": 2620.5}, {"id": "b", "t_in": 2620.5, "t_out": 2621.56},
+                                {"id": "c", "t_in": 2630.0, "t_out": 2634.0}]}
+    cue = {"text": "게릴라 홍보 마감 직전,", "source_time_sec": 2619.74, "source_end_sec": 2621.56,
+           "duration_sec": 1.952, "start_sec": 0.1, "end_sec": 2.052}
+    res = {"tts_cue_files": [{"cue_index": 0, "path": "x.mp3", "cue": cue}]}
+    _p, _s, new_res, rec = ov.apply_overrides_to_plan({"schema": "edit_overrides/v3", "subtitles": []}, plan, grid, [], res)
+    assert rec["cues_dropped"] == [] and len(new_res["tts_cue_files"]) == 1
+    # source_end_sec 없는 옛 cue 는 종전 규칙(start+duration) 그대로 — 이 경우엔 클립 밖이라 드랍
+    old = {**cue}; old.pop("source_end_sec")
+    _p, _s, new_res2, rec2 = ov.apply_overrides_to_plan({"schema": "edit_overrides/v3", "subtitles": []}, plan, grid, [],
+                                                       {"tts_cue_files": [{"cue_index": 0, "path": "x.mp3", "cue": old}]})
+    assert len(rec2["cues_dropped"]) == 1 and new_res2["tts_cue_files"] == []

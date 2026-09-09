@@ -537,10 +537,15 @@ SCENE_SIM_MIN = 0.5
 SCENE_SIM_MIN_MULTI = 0.35   # 화면 어간 2개 이상 · whisper ≤3어절 · 청취 ≤2배 일 때
 
 
+PHONETIC_ANCHOR_MIN = 0.5    # 청취 어간 어절 ↔ whisper 어절 자모 유사도 하한(발음 닻, 3음절+)
+PHONETIC_ANCHOR_MIN_SHORT = 0.6   # 2음절 이하 — 짧은 어절은 한 음절만 겹쳐도 0.5 를 넘는다(「시간」↔「세계란에」 0.57 · 「남은」↔「나왔습니다」 0.44)
+
+
 def scene_backed_heard(words: list[dict], heard: str, scene_script: str, *,
                        min_len_ratio: float = HEARD_PREFER_MIN_LEN_RATIO,
                        min_similarity: float = SCENE_SIM_MIN,
-                       exclude: set[str] | frozenset[str] | None = None) -> dict | None:
+                       exclude: set[str] | frozenset[str] | None = None,
+                       missed_words: bool = False) -> dict | None:
     """화면 묘사가 뒷받침하는 청취 판정 — 채택이면 {whisper, heard, stem, similarity}, 아니면 None. 순수.
     조건: whisper 단어 ≥2 · 청취·화면 묘사 비어 있지 않음 · 공백 제거 텍스트가 다르되 유사도 ≥
     min_similarity(단어 시비이지 문장 교체가 아니다) · 청취가 요약이 아님(길이 비율) · 청취 어절 중
@@ -560,12 +565,25 @@ def scene_backed_heard(words: list[dict], heard: str, scene_script: str, *,
     if a == b or len(b) < len(a) * min_len_ratio:
         return None
     sim = difflib.SequenceMatcher(None, a, b).ratio()
-    from app.v3.textcheck import scene_stem
+    from app.v3.textcheck import phonetic_sim, read_digits_ko, scene_stem
+    # 발음 닻(2026-09-09 ep8ex01 「15분」 실사고): 청취 「남은 홍보 시간 15분 남았습니다」는 실제 발화 「자 여러분 이제
+    # 15분 남았습니다 15분 안에」의 **요약**인데, 화면 묘사가 같은 모델의 같은 요약(「남은 홍보 시간이 15분이라고
+    # 알리자」)이라 어간 남은·홍보·시간이 전부 '증거'로 잡혔다 — 청취와 화면 묘사는 같은 호출의 산물이라 서술어에서는
+    # 독립 증인이 아니다. 화면 증인은 whisper 가 **잘못 들은** 단어를 바로잡는 것이지 모델의 다른 문장을 들이는 게
+    # 아니므로, 어간을 든 청취 어절은 whisper 어절 중 **발음이 닮은 것**(자모 유사도 ≥ PHONETIC_ANCHOR_MIN)이 있어야
+    # 한다(꼬물들↔고무줄 · 산맥장↔삼백장 · 오호↔홍보). 예외는 missed_words(whisper 가 말을 통째로 놓쳐 바로 앞이
+    # 무성 조각 — 「저희 300장 들고」): 닮은 어절이 있을 리 없다.
     stems: list[str] = []
+    wtoks = [str(w["text"]).strip() for w in ws]
     for tok in heard.split():
         stem = scene_stem(_HEARD_CMP_STRIP.sub("", tok), scene, wtxt, exclude)
-        if stem and stem not in stems:
-            stems.append(stem)
+        if not stem or stem in stems:
+            continue
+        _syl = len(read_digits_ko(_HEARD_CMP_STRIP.sub("", tok)))
+        _need = PHONETIC_ANCHOR_MIN if _syl >= 3 else PHONETIC_ANCHOR_MIN_SHORT
+        if not missed_words and max((phonetic_sim(tok, wt) for wt in wtoks), default=0.0) < _need:
+            continue
+        stems.append(stem)
     if not stems:
         return None
     # 짧은 span(whisper ≤3어절)은 단어 둘만 달라도 유사도가 0.4 대로 떨어진다(「5호 30초입니다」↔「홍보 30분
@@ -837,10 +855,14 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                     # span 폴백은 **교정 전** whisper 로 잰다(어절 교정이 「홍보」를 넣고 나면 그 어간이 증거에서
                     # 빠져 「홍보 30초입니다」 반쪽 교정으로 끝난다). 어절 교정이 있었으면 어간 2개 이상일 때만
                     # span 채택이 이긴다(하나면 타임코드 보존 쪽이 낫다).
-                    _word_fixed = any(f.get("kind") == "scene" for f in _fx)
-                    _sb = scene_backed_heard(_raw_span, _heard, _neighbor_scene(sid), exclude=_scene_excl)
-                    if _sb is not None and _word_fixed and not (
-                            len(_raw_span) <= 3 and len(_sb.get("stems") or []) >= 2):
+                    _n_word_scene = sum(1 for f in _fx if f.get("kind") == "scene")
+                    _sb = scene_backed_heard(_raw_span, _heard, _neighbor_scene(sid), exclude=_scene_excl,
+                                             missed_words=(_lead_in is not None and nospace_len(_heard)
+                                                           > nospace_len(" ".join(w["text"] for w in _raw_span))))
+                    # 어절 교정이 있었으면: 짧은 span(≤3어절)에서 화면 증거가 둘 이상(어절 교정 + span 어간 합산 —
+                    # 「홍보」는 어절 단위가, 「30분」은 span 단위가 잡는다)일 때만 span 채택이 이긴다.
+                    if _sb is not None and _n_word_scene and not (
+                            len(_raw_span) <= 3 and _n_word_scene + len(_sb.get("stems") or []) >= 2):
                         _sb = None            # 긴 span 은 어절 교정(타임코드 보존)이 이긴다
                     if True:
                         if _sb is not None:
@@ -848,7 +870,7 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                             if name_fix_log is not None:
                                 name_fix_log.append({"kind": "scene_span", "span_id": sid,
                                                      "from": _sb["whisper"], "to": _sb["heard"],
-                                                     "stem": _sb["stem"],
+                                                     "stem": _sb["stem"], "stems": _sb.get("stems"),
                                                      "similarity": _sb["similarity"]})
             if src == "heard":
                 # 창 확장(2026-09-09): 청취가 whisper 보다 길고 바로 앞이 무성으로 잡힌 조각이면 whisper 가

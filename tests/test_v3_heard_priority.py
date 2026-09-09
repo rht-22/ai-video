@@ -203,7 +203,9 @@ def test_scene_witness_digit_words_and_short_span_multi_stem():
     pieces = tc.align_tokens_to_heard([w["text"] for w in ws], heard)
     assert tc.arbitrate_scene("5호", pieces[0], scene_script=scene, span_text="5호 30초입니다.") == ("홍보", "홍보")
     hit = assemble.scene_backed_heard(ws, heard, scene)
-    assert hit and hit["similarity"] < 0.5 and set(hit["stems"]) >= {"홍보", "30분"}
+    # 「홍보」는 발음 닻(오호↔홍보 0.44 < 0.6)에 걸려 span 어간이 아니다 — 어절 단위(위)가 잡고, span 단위는 「30분」
+    # (삼십분↔삼십초입니다 0.5)·「남았습니다」 를 든다. 둘을 합쳐 짧은 span 의 '증거 2개'가 된다.
+    assert hit and hit["similarity"] < 0.5 and "30분" in hit["stems"] and "홍보" not in hit["stems"]
     # 어간 하나뿐이면 0.5 하한 그대로 · 긴 span(4어절+)은 완화 없음 · 청취가 2배 넘게 길면 완화 없음
     assert assemble.scene_backed_heard(ws, heard, "제작진이 홍보 시간을 알린다.") is None
     assert assemble.scene_backed_heard(_words(0, 2, "5호 30초입니다 빨리 뿌리세요", 0.6), "홍보 30분 남았습니다 빨리 뿌리세요",
@@ -226,3 +228,20 @@ def test_scene_witness_digit_words_and_short_span_multi_stem():
     out = assemble.word_subtitles(tl, idx, grid["words"], name_fix_log=log)
     assert " ".join(s["text"] for s in out).startswith("홍보 30분 남았습니다") and "30초" not in " ".join(s["text"] for s in out)
     assert [f["kind"] for f in log] == ["scene", "scene_span"]
+
+
+def test_span_fallback_needs_phonetic_anchor_unless_words_missed():
+    """발음 닻(2026-09-09 ep8ex01 「15분」): 청취 「남은 홍보 시간 15분 남았습니다」는 모델의 요약이고 화면 묘사도 같은
+    요약이라 어간이 전부 '증거'로 잡혔다. 어간을 든 청취 어절은 whisper 어절과 발음이 닮아야 한다(3음절+ 0.5 · 2음절 0.6).
+    whisper 가 말을 통째로 놓친 경우(missed_words)만 예외."""
+    from app.v3 import textcheck as tc
+    ws = _words(0, 4, "여러분 이제 15분 나왔습니다 세계란에 빨리 다 뿌리셔야 돼요.", 0.7)
+    heard = "남은 홍보 시간 15분 남았습니다. 빨리 다 뿌리셔야 돼요."
+    scene = "제작진이 남은 홍보 시간이 15분이라고 알리자 두 사람이 다급해진다."
+    assert assemble.scene_backed_heard(ws, heard, scene) is None                       # 요약 — 닻 없음
+    assert assemble.scene_backed_heard(ws, heard, scene, missed_words=True) is not None  # 놓친 말이면 예외
+    # 닮은 어절이 있는 진짜 오인식은 그대로 잡힌다
+    assert assemble.scene_backed_heard(_words(0, 2, "저희 산맥장 글고 왔어요!", 0.8), "저희 300장 들고 왔어요",
+                                       "홍지윤이 300장을 들고 왔는데 다 나갔다며 감탄한다.")["stems"][0] == "300장"
+    assert tc.phonetic_sim("산맥장", "300장") >= 0.5 and tc.phonetic_sim("시간", "세계란에") < 0.6
+    assert tc.read_digits_ko("300장 15분 5호") == "삼백장 십오분 오호"
