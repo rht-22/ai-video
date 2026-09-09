@@ -178,12 +178,14 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
             reject_block=rej), lambda r: sl.validate_topic(r, rows, excluded=excluded),
             gemini, audit, log, initial_reject=corr_note)
     _strat = sl.strategy_line(topic.get("strategy"))
+    _reveal = topic.get("reveal") or "front"
     _hook_who = topic.get("hook_speaker") or ""
     _hook_disp = (f"{_hook_who}: " if _hook_who else "") + f"「{topic['hook_line']}」" if topic.get("hook_line") else ""
     if topic.get("strategy"):
         log(f"  [v3/flow/topic] 전략 {topic['strategy']}. {sl.STRATEGIES[topic['strategy']][0]}"
             + (f" · 훅 {_hook_disp}" if _hook_disp else ""))
-    log(f"  [v3/flow/topic] {topic['topic']} (핵심 m{'/m'.join(f'{i:03d}' for i in topic['core_meanings'])})")
+    log(f"  [v3/flow/topic] {topic['topic']} (핵심 m{'/m'.join(f'{i:03d}' for i in topic['core_meanings'])})"
+        f" · reveal={_reveal}({'결말 선공개' if _reveal == 'front' else '결말 유보 — 결과는 마지막'})")
 
     # 2 씬 + 제목 — 주제 종류(event/contrast/irony)에 따라 쓰임 축이 다르다(4단계)
     _purposes, _axis, _choices = sl.purpose_axis(topic.get("kind") or "event")
@@ -195,7 +197,9 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
         purpose_axis=_axis, purpose_choices=_choices, strategy_line=_strat,
         hook_speaker_line=(f" 훅 대사 {_hook_disp} — 이 말의 화자는 {_hook_who or '재료 표기대로'}다."
                            if _hook_disp else ""),
-        reject_block=rej), lambda r: sl.validate_scenes(r, rows, excluded=excluded, purposes=_purposes),
+        reveal_line=sl.reveal_line(_reveal),
+        reject_block=rej), lambda r: sl.validate_scenes(r, rows, excluded=excluded, purposes=_purposes,
+                                                        reveal=_reveal),
         gemini, audit, log)
     scenes, title = scenes_doc["scenes"], scenes_doc["title"]
     log("  [v3/flow/scenes] " + " → ".join(f"m{s['meaning']:03d}[{s['purpose']}]" for s in scenes)
@@ -203,6 +207,8 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
 
     # 3 대사
     material, allowed = sl.lines_material(scenes, rows, span_index)
+    _scene_purposes = {s["meaning"]: s["purpose"] for s in scenes}
+    _result_scenes = {k for k, p in _scene_purposes.items() if p in sl.RESULT_PURPOSES}
     n_hint = max(2, len(scenes))
     budget = max(20.0, max_sec + TRIM_HEADROOM_SEC - NARRATION_ALLOWANCE_SEC * (n_hint + 1))
     beats = _loop("lines", lambda rej: sl.LINES_PROMPT.format(
@@ -210,10 +216,13 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
         budget_sec=budget, material_block=material, reject_block=rej,
         skip_sec=sl.SKIP_MAX_VOICED_SEC, skip_lines=sl.SKIP_MAX_LINES,
         strategy_line=_strat,
-        hook_line_block=(f"\n훅 후보(걸음 1 이 고른 한마디): {_hook_disp} — 재료에 있으면 hook 비트로, 끝에 hook_return 으로."
-                         if _hook_disp else "")),
+        hook_line_block=(f"\n훅 후보(걸음 1 이 고른 한마디): {_hook_disp} — 재료에 있으면 hook 비트로"
+                         + ("." if _reveal == "end" else ", 끝에 hook_return 으로.")
+                         if _hook_disp else ""),
+        reveal_block=sl.reveal_block(_reveal, _result_scenes)),
         lambda r: sl.validate_beats(r, span_index, allowed, budget_sec=budget,
                                     floor_ratio=sl.BUDGET_FLOOR_RATIO,
+                                    reveal=_reveal, scene_purposes=_scene_purposes,
                                     material_sec=sum(span_index[x]["t_out"] - span_index[x]["t_in"]
                                                      for x in allowed if x in span_index)),
         gemini, audit, log, initial_reject=corr_note)
@@ -470,6 +479,7 @@ def build_story_doc(beats: list[dict], span_index: dict[str, dict], cues: list[d
                  "jumps": list(jumps or []),
                  **({"kind": topic["kind"]} if topic.get("kind") and topic["kind"] != "event" else {}),
                  **({"strategy": topic["strategy"]} if topic.get("strategy") else {}),
+                 **({"reveal": topic["reveal"]} if topic.get("reveal") else {}),
                  **({"hook_line": topic["hook_line"]} if topic.get("hook_line") else {}),
                  **({"hook_speaker": topic["hook_speaker"]} if topic.get("hook_speaker") else {}),
                  **({"setup": topic["setup"], "payoff": topic["payoff"]} if topic.get("setup") is not None else {})},

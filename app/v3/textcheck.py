@@ -382,13 +382,74 @@ def arbitrate_aligned(token: str, piece: dict | None, *,
     return head + heard_piece + tail
 
 
-def fix_span_words(words: list[dict], names: list[str], heard_text: str
+SCENE_STEM_MIN_CHARS = 2   # 화면 묘사 증인의 어간 최소 길이(어절 앞부분, 긴 쪽부터)
+
+
+def scene_stem(piece_text: str, scene_script: str, span_text: str,
+               exclude: set[str] | frozenset[str] | None = None) -> str | None:
+    """청취 어절(piece_text)의 어간 중 **화면 묘사에는 있고 whisper span 텍스트에는 없는** 것.
+    순수. 어간 = 앞부분 길이 ≥SCENE_STEM_MIN_CHARS, 긴 쪽부터. 지시어·감탄사(ALIGNED_STOPWORDS)와
+    exclude(인물 이름 — 화면 묘사에는 인명이 거의 늘 있어 증거가 못 된다)는 어간으로 안 친다.
+    양쪽에 다 있는 단어(「티켓」)는 증거가 아니다."""
+    t = str(piece_text or "").strip(_STRIP)
+    scene = "".join(str(scene_script or "").split())
+    span = "".join(str(span_text or "").split())
+    if len(t) < SCENE_STEM_MIN_CHARS or not scene:
+        return None
+    banned = set(ALIGNED_STOPWORDS)
+    for nm in exclude or ():
+        nm = str(nm or "").strip()
+        if nm:
+            # 이름의 모든 부분 문자열(≥2) — 「전유진」의 「유진」·「유진이」처럼 부르는 이름도 막는다
+            banned.update(nm[i:j] for i in range(len(nm)) for j in range(i + SCENE_STEM_MIN_CHARS, len(nm) + 1))
+    if t in banned or any(t.startswith(b) for b in banned if len(b) >= SCENE_STEM_MIN_CHARS and b not in ALIGNED_STOPWORDS):
+        return None
+    for n in range(len(t), SCENE_STEM_MIN_CHARS - 1, -1):
+        stem = t[:n]
+        if stem in banned:
+            return None
+        if stem in scene and stem not in span:
+            return stem
+    return None
+
+
+def arbitrate_scene(token: str, piece: dict | None, *, scene_script: str, span_text: str,
+                    exclude: set[str] | frozenset[str] | None = None) -> tuple[str, str] | None:
+    """화면 묘사 증인(2026-09-09, 가왕쇼 8화 「꼬무줄」 실사고) — 정렬로 찾은 청취 조각이 자모 차이
+    상한(③)을 넘어 arbitrate_aligned 가 거절해도, 그 조각의 어간이 **같은 조각의 Stage 2 화면 묘사**에
+    있으면(whisper 에는 없음) 각색이 아니라 화면이 뒷받침하는 단어다 → 뒤집는다. 반환 (새 어절, 어간).
+    whisper 「꼬물들밖에」 · 청취 「고무줄밖에」(자모 차이 4) · 화면 「티켓을 묶어놨던 고무줄만 남았다」.
+    어절 단위라 whisper 어절 타임코드가 산다(span 단위 청취 채택은 균등 배분이 된다).
+    조건: ①② 는 arbitrate_aligned 와 같다(한글 · 2음절+ · 같은 길이 · 다름 · 지시어 아님 · 청취 어절
+    경계에서 시작). 자모 차이·어미 규칙·prob 은 안 본다 — 화면이 증인이다."""
+    raw = token.strip(_STRIP)
+    if not raw or not piece:
+        return None
+    heard_piece, at_start, at_end = piece["piece"], piece["at_start"], piece.get("at_end", True)
+    # at_end 도 본다(aligned 와 다른 점): 조각이 청취 어절 **가운데**에서 끝나면 「왠지 내」→「왠지내」처럼
+    # 두 어절을 붙인 글자가 되어 어절 하나로 못 쓴다(드라이런 가사 구간 3건).
+    if raw == heard_piece or len(raw) < 2 or raw in ALIGNED_STOPWORDS or not at_start or not at_end:
+        return None
+    if not (_is_hangul(raw) and _is_hangul(heard_piece)) or len(raw) != len(heard_piece):
+        return None
+    stem = scene_stem(heard_piece, scene_script, span_text, exclude)
+    if not stem:
+        return None
+    head = token[:len(token) - len(token.lstrip(_STRIP))]
+    tail = token[len(token.rstrip(_STRIP)):]
+    return head + heard_piece + tail, stem
+
+
+def fix_span_words(words: list[dict], names: list[str], heard_text: str,
+                   scene_script: str = "", exclude: set[str] | frozenset[str] | None = None
                    ) -> tuple[list[dict], list[dict]]:
     """span 의 whisper 단어 목록에 arbitrate_name(인명) → arbitrate_latin(영문 오인식) →
-    arbitrate_spelling(맞춤법)을 적용한 사본 + 교정 기록(인명 외는 kind 표시).
-    names 가 비어도 latin·spelling 대조는 돈다."""
+    arbitrate_spelling(맞춤법) → arbitrate_aligned(정렬) → arbitrate_scene(화면 묘사 증인)을 적용한
+    사본 + 교정 기록(인명 외는 kind 표시). names 가 비어도 latin·spelling 대조는 돈다.
+    scene_script 가 비면 화면 묘사 증인은 돌지 않는다(종전과 동일)."""
     out, fixes = [], []
     pieces = align_tokens_to_heard([str(w.get("text") or "") for w in words], heard_text)
+    span_text = " ".join(str(w.get("text") or "") for w in words)
     for i, w in enumerate(words):
         text = str(w.get("text") or "")
         new, kind = arbitrate_name(text, names, heard_text), "name"
@@ -402,10 +463,18 @@ def fix_span_words(words: list[dict], names: list[str], heard_text: str
             new, kind = arbitrate_spelling(text, heard_text, prob=w.get("prob")), "spelling"
         if not new:
             new, kind = arbitrate_aligned(text, pieces[i], prob=w.get("prob")), "aligned"
+        stem = None
+        if not new and scene_script:
+            sc = arbitrate_scene(text, pieces[i], scene_script=scene_script, span_text=span_text,
+                                 exclude=exclude)
+            if sc:
+                (new, stem), kind = sc, "scene"
         if new and new != w.get("text"):
             rec = {"at": round(float(w.get("t0", 0)), 2), "from": w.get("text"), "to": new}
             if kind != "name":                  # 인명 기록 모양은 종전 그대로(additive)
                 rec["kind"] = kind
+            if stem:
+                rec["stem"] = stem
             fixes.append(rec)
             w = dict(w, text=new, _fixed=True)
         pre = recover_missing_prefix(str(w.get("text") or ""), pieces[i], prob=w.get("prob"))

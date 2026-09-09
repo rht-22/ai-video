@@ -1094,18 +1094,28 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
                                        skip_windows=_skip_win, skip_log=_skip_log,
                                        fps=plan.get("source_fps"))
     if subtitle_skip_singing:
-        for f in _skip_log:
+        _dropped = [f for f in _skip_log if not f.get("kept")]
+        _kept_in = [f for f in _skip_log if f.get("kept")]
+        for f in _dropped:
             log(f"  [v3/자막] 노래 구간 자막 제외 {f['span_id']} "
                 f"{f['src_start']:.2f}~{f['src_end']:.2f}s {f['text']!r}")
+        for f in _kept_in:
+            # 화면 묘사 증인(2026-09-09) — 창 안이지만 조각 기록에 노래 근거가 없어 살린 줄
+            log(f"  [v3/자막] 노래 창 안이지만 유지 {f['span_id']} "
+                f"{f['src_start']:.2f}~{f['src_end']:.2f}s {f['text']!r} (사건 단위·화면 묘사에 노래 근거 없음)")
         step("subtitle_skip_singing", windows=[list(w) for w in (_skip_win or [])],
-             dropped=len(_skip_log), kept=len(segments),
-             details=[{k: f[k] for k in ("span_id", "src_start", "text")} for f in _skip_log])
-        log(f"  [v3/자막] 노래 구간 {len(_skip_win or [])}개 — 자막 {len(_skip_log)}줄 제외 · {len(segments)}줄 유지")
+             dropped=len(_dropped), kept=len(segments), kept_in_window=len(_kept_in),
+             details=[{k: f[k] for k in ("span_id", "src_start", "text")} for f in _dropped],
+             kept_details=[{k: f[k] for k in ("span_id", "src_start", "text")} for f in _kept_in])
+        log(f"  [v3/자막] 노래 구간 {len(_skip_win or [])}개 — 자막 {len(_dropped)}줄 제외 · {len(segments)}줄 유지"
+            + (f" · 창 안 유지 {len(_kept_in)}줄" if _kept_in else ""))
     _WHY = {"latin": ("어절", "모델 청취(영문 오인식 → 한글)"),
             "spelling": ("맞춤법", "모델 청취(초성 동일·모음/받침 차이)"),
             "aligned": ("맞춤법", "모델 청취(공백 제거 정렬 · 자모 차이 ≤2~3)"),
             "merge": ("어절 병합", "모델 청취가 한 어절 — whisper 가 끊은 단어를 합침"),
-            "heard": ("저확신 span 청취 채택", "whisper 평균 확신 < 0.6 · 청취가 요약이 아님")}
+            "heard": ("저확신 span 청취 채택", "whisper 평균 확신 < 0.6 · 청취가 요약이 아님"),
+            "scene": ("화면 묘사 증인", "정렬된 청취 어절의 어간이 같은 조각의 Stage 2 화면 묘사에 있음"),
+            "scene_span": ("화면 묘사 증인 span 청취 채택", "정렬 밖 청취 단어를 화면 묘사가 뒷받침 · 유사도 ≥0.5")}
     for f in _name_arb:
         _what, _why = _WHY.get(f.get("kind") or "", ("인명", "모델 청취 + 인물표"))
         log(f"  [v3/자막] {_what} 대조 교정 {f.get('span_id')} {f['from']!r} → {f['to']!r} "

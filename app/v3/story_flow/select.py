@@ -53,7 +53,31 @@ def strategy_line(sid: int | None) -> str:
     if not sid or sid not in STRATEGIES:
         return ""
     name, shape = STRATEGIES[sid]
-    return f"\n적용 전략: {sid}. {name} — {shape}. 이 순서가 비트의 뼈대다(선형 서사 금지, 훅이 먼저)."
+    return f"\n적용 전략: {sid}. {name} — {shape}. 이 순서가 비트의 뼈대다(선형 서사 금지, 훅이 먼저 — 결과를 앞세울지는 reveal 이 정한다)."
+
+
+def reveal_line(reveal: str | None) -> str:
+    """걸음 2 프롬프트 덧붙임 — 제목이 훅과 같은 약속을 지키게. None/모름이면 빈 문자열(종전 바이트 동일)."""
+    if reveal == "front":
+        return (" 이 편은 **결말 선공개(reveal=front)** 다 — 훅이 결과를 보여주므로 아랫줄은 그 결과를 묻는 "
+                "질문(…가능할까·…될까)이 될 수 없다. '어떻게/왜 그렇게 됐나'를 궁금하게 하는 서술로 써라.")
+    if reveal == "end":
+        return (" 이 편은 **결말 유보(reveal=end)** 다 — 아랫줄이 결과를 묻는 질문이어도 좋다. 대신 결과 장면은 "
+                "마지막에 온다. 결과 씬(쓰임 '결과'/'반전')을 반드시 하나 포함하라.")
+    return ""
+
+
+def reveal_block(reveal: str | None, result_scenes: set[int] | None = None) -> str:
+    """걸음 3 프롬프트 덧붙임 — 결과 씬의 자리를 형식으로 알린다(검증기 `validate_beats(reveal=)` 와 한 벌)."""
+    if reveal == "end":
+        rs = ", ".join(f"m{k:03d}" for k in sorted(result_scenes or ())) or "(쓰임 '결과' 씬)"
+        return (f"\n- **결말 유보(reveal=end)**: 결과 씬({rs})의 조각은 hook 이 될 수 없고, 결과 씬의 비트가 "
+                "**마지막**이어야 한다(그 뒤에는 반응 씬만). hook_return 은 쓰지 않는다 — 결과는 한 번만, 끝에. "
+                "훅은 위기·각오·의문의 한마디(결과를 답하지 않는 줄)로 연다.")
+    if reveal == "front":
+        return ("\n- **결말 선공개(reveal=front)**: 훅이 결과 장면이다. 마지막 비트에서 같은 결과를 다른 조각으로 "
+                "또 보여주지 마라 — 되풀이하려면 hook_return(훅 조각 그대로) 한 번, 아니면 위기·펀치 대사로 끝내라.")
+    return ""
 CONTRAST_PURPOSES = ("선언", "경과", "반전")
 ROLES = ("hook", "build", "turn", "climax", "reaction", "ending",
          "setup", "payoff", "hook_return")   # 뒤 셋은 4단계 추가(hook_return 은 훅 조각 재사용 1회)
@@ -75,6 +99,17 @@ EXCLUDE_OVERLAP_RATIO = 0.5   # 제외 구간과 사건 단위가 이 비율 이
 # 말인지 모른다. 통화 상대·미상은 훅이 될 수 없다(반려 — 다른 한마디를 골라라).
 HOOK_SPEAKER_BANNED = ("통화 상대", "상대방", "전화 상대", "미상", "unknown", "?", "")
 REWIND_MAX = 1                # 훅 선행·훅 회수를 뺀 되감기(다음 비트가 원본에서 앞) 상한
+# 결과를 어디서 보여줄지(2026-09-09, 가왕쇼 8화 실사고): 훅은 「300장 다 끝났어요!」로 결과를 보여주고
+# 제목은 「완판 가능할까」로 결과를 숨겼다 — 제목이 던진 질문에 화면이 3초 만에 답하고, 마지막 비트가 같은
+# 결과 장면이라 결과가 두 번 나왔다. 걸음 1 의 "결말을 앞세워라"와 걸음 2 의 "결말을 말하지 마라"가
+# 따로 놀던 것. 훅과 제목은 **한 약속**이다 — 걸음 1 이 `reveal` 을 한 번 정하고 2·3 이 그것을 따른다.
+#   front = 결말 선공개(훅이 결과) → 제목 아랫줄은 그 결과를 묻는 질문일 수 없다(어떻게/왜를 궁금하게).
+#   end   = 결말 유보(제목이 결과를 묻는다) → 훅은 결과를 답하지 않는 위기·각오·의문, 결과 씬은 마지막 비트.
+REVEAL_MODES = ("front", "end")
+REVEAL_FRONT_STRATEGIES = {1, 2, 3, 4, 10}   # 전략 모양이 결말·파국·폭로로 여는 것들
+REVEAL_END_STRATEGIES = {5, 7, 8, 9}         # 의문·긴박·핑퐁·고구마로 열고 결말을 뒤에 두는 것들
+RESULT_PURPOSES = ("결과", "반전")            # '결과 씬' = 이 쓰임의 씬(event 축 결과 · contrast 축 반전)
+QUESTION_ENDINGS = ("까", "까?", "?")          # 결과를 묻는 제목 아랫줄의 흔한 꼴(…가능할까 · …될까)
 SILENT_BEAT_MIN_SEC = 6.0     # 비트 안 무대사 구간이 이 이상이면 제 비트로 떼어 내레이션 자리를 만든다
 
 TOPIC_PROMPT = """당신은 리캡 쇼츠 편집자다. 아래는 한 회차의 구조 기록이다(영상은 볼 수 없고 볼 필요도 없다 — 기록이 정본이다).
@@ -82,8 +117,11 @@ TOPIC_PROMPT = """당신은 리캡 쇼츠 편집자다. 아래는 한 회차의 
 ## 1단계 — 주제 정하기
 이 회차에서 쇼츠 한 편(목표 {target_sec:.0f}초)으로 만들 **사건 하나**를 고른다.
 기준: 작품을 모르는 사람이 한 번 보고 따라갈 수 있는 사건 · 시작부터 결과(또는 떡밥)까지가 {max_sec:.0f}초 안에 닫힌다 · **대사가 촘촘한 구간**이 유리하다.
-사건과 함께 **리빌딩 전략**(아래 10가지 중 하나, `strategy` 번호)을 고른다 — 원본의 시간 순서를 그대로 따르지 않는다. 오프닝 3초에 결말·하이라이트·가장 충격적인 한마디를 앞세우고, 그 한마디가 편 끝에서 되풀이되면(훅 회수) 가장 강하다.
-{strategy_block} 단, **행동 또는 화면 속 글자만으로 뜻이 닫히는 구간**(도구를 꺼낸다·숨긴다·따라간다·몰래 읽는다 / 기사·메시지·게시글·문서 같은 자료화면과 그것을 보는 인물의 반응)은 대사가 없어도 주 재료가 될 수 있다 — 이때는 내레이션이 뼈대를 맡는다 · 앞뒤 회차 전개와 인과·아이러니로 이어지는 사건이면 더 좋다.
+사건과 함께 **리빌딩 전략**(아래 10가지 중 하나, `strategy` 번호)을 고른다 — 원본의 시간 순서를 그대로 따르지 않는다. 오프닝 3초에는 그 한마디만 들어도 사건이 보이는 줄(훅)을 앞세운다.
+{strategy_block}
+결과를 어디서 보여줄지 먼저 정하라(`reveal`) — **훅 한마디와 제목 아랫줄은 한 약속이다.** 훅이 제목의 질문에 답해 버리면 시청자는 3초 뒤에 떠난다.
+- "front" (결말 선공개 — 전략 1·2·3·4·10): 훅이 결과·최고조 한마디다. 이때 제목 아랫줄은 그 결과를 묻는 질문(…가능할까·…될까)이 될 수 없다 — "어떻게/왜 그렇게 됐나"를 궁금하게 하는 줄로 쓴다. 그 한마디가 편 끝에서 되풀이되면(훅 회수) 가장 강하다.
+- "end" (결말 유보 — 전략 5·7·8·9): 제목 아랫줄이 결과를 묻는 질문이면 이쪽이다. 훅은 결과를 답하지 않는 위기·각오·의문의 한마디여야 하고, 결과 장면은 **마지막 비트**에 한 번만 온다. 단, **행동 또는 화면 속 글자만으로 뜻이 닫히는 구간**(도구를 꺼낸다·숨긴다·따라간다·몰래 읽는다 / 기사·메시지·게시글·문서 같은 자료화면과 그것을 보는 인물의 반응)은 대사가 없어도 주 재료가 될 수 있다 — 이때는 내레이션이 뼈대를 맡는다 · 앞뒤 회차 전개와 인과·아이러니로 이어지는 사건이면 더 좋다.
 
 ## 작품
 {work_title}{research_block}
@@ -96,7 +134,7 @@ TOPIC_PROMPT = """당신은 리캡 쇼츠 편집자다. 아래는 한 회차의 
 {silent_block}{exclude_block}{map_block}{reject_block}
 ## 출력 (JSON 만)
 {{"topic": "이 쇼츠가 무엇에 관한 이야기인지 한 문장", "why": "고른 이유 한 문장",
-  "core_meanings": ["m012", "m013"], "strategy": 3,
+  "core_meanings": ["m012", "m013"], "strategy": 3, "reveal": "front",
   "hook_line": {{"speaker": "그 말을 한 인물(재료 그대로 — 통화 상대·미상이면 그대로)", "text": "편을 여는 가장 강한 한마디(원문 그대로)"}},
   "title_draft": {{"line1": "상황", "line2": "후킹"}}}}"""
 
@@ -105,7 +143,7 @@ SCENES_PROMPT = """당신은 리캡 쇼츠 편집자다. 영상은 볼 수 없�
 ## 2단계 — 사용 씬 고르기
 주제: {topic}{strategy_line}
 이 사건을 **작품을 모르는 사람이 봐도 다 이해하고 재미있으려면** 어떤 씬을 보여줘야 하나. 각 씬의 쓰임을 정하라 — {purpose_axis}. 필요한 것만 {min_scenes}~{max_scenes}개, **원본 시간 순서**로. 씬 = 아래 사건 단위(id). 길이 감각: 완성본 {target_sec:.0f}초이고 씬 원본 합계는 그 2~3배까지 허용된다(다음 단계에서 대사를 골라 줄인다).
-제목 두 줄도 정하라 — line1(위) = 상황·도입, line2(아래) = 후킹. 각 {title_max}자 이내, 이어 읽어 한 호흡. **대사의 화자를 틀리지 마라** — 어떤 말을 누가 했는지는 재료 기록(화자 표기)이 정본이다. '통화 상대'·'미상'으로 표기된 말을 화면 속 인물의 말로 쓰면 제목이 거짓이 된다.{hook_speaker_line} 결말을 다 말하지 마라(읽은 사람이 '그래서?'를 묻게). 아랫줄이 사건의 **결과·반전 자체**(누가 무엇을 했다/당했다)를 말해버리면 볼 이유가 사라진다 — 결과 대신 그 직전의 질문·위기를 남겨라. `title_review.line2_reveals_ending` 에 네 판정을 적고, true 면 고쳐서 내라.
+제목 두 줄도 정하라 — line1(위) = 상황·도입, line2(아래) = 후킹. 각 {title_max}자 이내, 이어 읽어 한 호흡. **대사의 화자를 틀리지 마라** — 어떤 말을 누가 했는지는 재료 기록(화자 표기)이 정본이다. '통화 상대'·'미상'으로 표기된 말을 화면 속 인물의 말로 쓰면 제목이 거짓이 된다.{hook_speaker_line} 결말을 다 말하지 마라(읽은 사람이 '그래서?'를 묻게). 아랫줄이 사건의 **결과·반전 자체**(누가 무엇을 했다/당했다)를 말해버리면 볼 이유가 사라진다 — 결과 대신 그 직전의 질문·위기를 남겨라. `title_review.line2_reveals_ending` 에 네 판정을 적고, true 면 고쳐서 내라.{reveal_line} `title_review.hook_answers_title` 에는 **훅 한마디가 제목 아랫줄의 질문에 답하는가**를 적고, true 면 아랫줄을 고쳐서 내라(훅은 걸음 1 이 정했다 — 제목이 맞춘다).
 
 ## 작품
 {work_title}{research_block}
@@ -116,7 +154,7 @@ SCENES_PROMPT = """당신은 리캡 쇼츠 편집자다. 영상은 볼 수 없�
 ## 출력 (JSON 만)
 {{"scenes": [{{"meaning": "m012", "purpose": "{purpose_choices}", "why": "이 씬이 하는 일 한 줄"}}],
   "title": {{"line1": "…", "line2": "…"}},
-  "title_review": {{"line2_reveals_ending": false}}}}"""
+  "title_review": {{"line2_reveals_ending": false, "hook_answers_title": false}}}}"""
 
 LINES_PROMPT = """당신은 리캡 쇼츠 편집자다. 영상은 볼 수 없다 — 기록이 정본이다.
 
@@ -134,7 +172,7 @@ LINES_PROMPT = """당신은 리캡 쇼츠 편집자다. 영상은 볼 수 없다
 - 예산: 구간 길이 합(skip 제외) ≤ **{budget_sec:.0f}초** — 길이 열을 더해 가며 짜라. **예산을 채워라** — 85% 미만이면 반려한다(얇은 편은 다듬을 여유가 없다). 초안을 본 뒤 코드가 늘어지는 곳을 몇 초 잘라내므로 조금 넉넉한 게 맞다.
 - 비트 역할: hook(관심을 끄는 장면 — 인사·자기소개·상황 설명 대사 금지) · build · turn · climax(핵심 대사는 통째로) · reaction · ending(펀치·선언·떡밥 대사 직후 뚝 — 해소·정리 장면 금지) · **hook_return**(훅 장면을 원본 순서상 제자리에서 한 번 더 — 선택).
 - **훅 구조**: 관심을 끌 장면(질문·선언·폭로 — 그 한마디만 들어도 사건이 보이는 줄)을 hook 으로 **맨 앞**에 두고, 나머지 비트는 **원본 순서**로 "그 장면이 어쩌다 나오게 됐는지"를 보여준다. 훅이 원본에서 뒤에 있으면 앞으로 가져오고(되감기는 내레이션이 잇는다), 원본 순서가 그 장면에 다시 닿으면 `hook_return` 으로 한 번 더 보여줄 수 있다(훅 조각만 · 1회 · 길이 ≤ 훅). 훅 뒤에 오는 장면은 훅 뒤에 두어야 자연스럽다 — 순서를 뒤섞지 마라.
-- 비트는 **hook 이 맨 앞**(원본에서 뒤여도 — 코드가 앞으로 옮기고 되감기는 내레이션이 잇는다), 나머지는 원본 시간 순서(hook_return 포함). 구간끼리 겹치지 않게.
+- 비트는 **hook 이 맨 앞**(원본에서 뒤여도 — 코드가 앞으로 옮기고 되감기는 내레이션이 잇는다), 나머지는 원본 시간 순서(hook_return 포함). 구간끼리 겹치지 않게.{reveal_block}
 
 ## 재료 (씬별 · id | 유성/무성 길이 | importance | 내용)
 {material_block}
@@ -209,13 +247,29 @@ def validate_topic(resp: Any, rows: list[dict], *,
     if _hook_given and (hook_speaker.strip() in HOOK_SPEAKER_BANNED or not hook_speaker.strip()):
         problems.append(f"hook_line 의 화자가 {hook_speaker!r} — 훅은 **화면에 있는 인물**의 말이어야 한다(통화 상대·미상 불가). "
                         "화자를 재료 표기대로 적고, 그런 화자면 다른 한마디를 골라라")
+    # reveal(2026-09-09): 없으면 전략에서 유도(front 계열/end 계열), 그마저 없으면 front(종전 동작).
+    # 전략과 reveal 이 서로 반대면 반려 — 결말 선공개형 전략에 결말 유보는 뼈대가 안 맞는다.
+    reveal_raw = str(resp.get("reveal") or "").strip().lower()
+    if reveal_raw and reveal_raw not in REVEAL_MODES:
+        problems.append(f"reveal {reveal_raw!r} — front/end 중 하나")
+        reveal_raw = ""
+    if not reveal_raw:
+        reveal = "end" if strategy in REVEAL_END_STRATEGIES else "front"
+    else:
+        reveal = reveal_raw
+        if strategy in REVEAL_FRONT_STRATEGIES and reveal == "end":
+            problems.append(f"전략 {strategy}({STRATEGIES[strategy][0]})은 결말을 앞세우는 모양인데 reveal=end 다 — "
+                            "결말을 뒤에 둘 거면 전략 5·7·8·9 중에서 고르고, 아니면 reveal=front 로")
+        elif strategy in REVEAL_END_STRATEGIES and reveal == "front":
+            problems.append(f"전략 {strategy}({STRATEGIES[strategy][0]})은 결말을 뒤에 두는 모양인데 reveal=front 다 — "
+                            "결말을 앞세울 거면 전략 1·2·3·4·10 중에서 고르고, 아니면 reveal=end 로")
     if problems:
         return None, problems
     return {"topic": topic, "why": str(resp.get("why") or "").strip(),
             "core_meanings": sorted(core),
             "title_draft": {"line1": str(td.get("line1") or "").strip(),
                             "line2": str(td.get("line2") or "").strip()},
-            "kind": kind,
+            "kind": kind, "reveal": reveal,
             **({"strategy": strategy} if strategy else {}),
             **({"hook_line": hook_line} if hook_line else {}),
             **({"hook_speaker": hook_speaker} if hook_speaker else {}),
@@ -237,8 +291,11 @@ def purpose_axis(kind: str) -> tuple[tuple[str, ...], str, str]:
 def validate_scenes(resp: Any, rows: list[dict], *,
                     title_max: int = TITLE_MAX_CHARS,
                     excluded: set[int] | None = None,
-                    purposes: tuple[str, ...] = PURPOSES) -> tuple[dict | None, list[str], list[str]]:
-    """purposes(4단계): 주제 종류별 쓰임 축 — 기본은 종전 PURPOSES(폴백 '과정'), contrast 는 '경과'."""
+                    purposes: tuple[str, ...] = PURPOSES,
+                    reveal: str | None = None) -> tuple[dict | None, list[str], list[str]]:
+    """purposes(4단계): 주제 종류별 쓰임 축 — 기본은 종전 PURPOSES(폴백 '과정'), contrast 는 '경과'.
+    reveal(2026-09-09): front 면 아랫줄 질문형(…까) 반려 + 모델 판정 hook_answers_title 반려,
+    end 면 결과 씬(RESULT_PURPOSES) 필수. None = 종전과 동일."""
     if not isinstance(resp, dict):
         return None, ["응답이 객체가 아니다"], []
     problems: list[str] = []
@@ -289,6 +346,14 @@ def validate_scenes(resp: Any, rows: list[dict], *,
     if tr.get("line2_reveals_ending") is True:
         problems.append(f"제목 아랫줄이 결말을 말한다(네 판정) — 결과 대신 직전의 질문·위기로 "
                         f"다시 써라: {l2!r}")
+    if tr.get("hook_answers_title") is True:
+        problems.append(f"훅 한마디가 제목 아랫줄의 질문에 답한다(네 판정) — 훅은 정해졌으니 아랫줄을 "
+                        f"훅이 답하지 않는 궁금증으로 다시 써라: {l2!r}")
+    if reveal == "front" and l2 and l2.rstrip("!…. ").endswith(QUESTION_ENDINGS):
+        problems.append(f"결말 선공개(reveal=front) 편인데 제목 아랫줄이 결과를 묻는 질문형이다 — 훅이 3초 만에 "
+                        f"답해 버린다. '어떻게/왜'를 궁금하게 하는 서술형으로: {l2!r}")
+    if reveal == "end" and scenes and not any(s["purpose"] in RESULT_PURPOSES for s in scenes):
+        problems.append("결말 유보(reveal=end) 편인데 결과 씬이 없다(쓰임 '결과'/'반전') — 마지막에 보여줄 결과 씬을 넣어라")
     if problems:
         return None, problems, notes
     return {"scenes": scenes, "title": {"line1": l1, "line2": l2}}, [], notes
@@ -404,10 +469,15 @@ def compute_jumps(beats: list[dict], span_index: dict[str, dict],
 
 def validate_beats(resp: Any, span_index: dict[str, dict], allowed: dict[str, int],
                    *, budget_sec: float, floor_ratio: float | None = None,
-                   material_sec: float | None = None, require_dialogue: bool = False
+                   material_sec: float | None = None, require_dialogue: bool = False,
+                   reveal: str | None = None, scene_purposes: dict[int, str] | None = None
                    ) -> tuple[list[dict] | None, list[str], list[str]]:
     """allowed: span id → 씬(meaning idx). 반환 비트: {scene, role, span_ids, skipped,
-    hole_before, action}. 구간은 grid 순(pos)으로 펼치고 긴 구멍은 나눈다."""
+    hole_before, action}. 구간은 grid 순(pos)으로 펼치고 긴 구멍은 나눈다.
+    reveal + scene_purposes(2026-09-09): end 면 결과 씬(RESULT_PURPOSES)의 조각은 hook 이 될 수 없고
+    hook_return 금지, 결과 씬 비트가 있어야 하며 그 뒤는 반응 씬만(형식으로 막는다 — 텍스트 지시만으로는
+    모델이 가장 강한 한마디인 결과로 되돌아온다). front 면 훅 씬을 마지막에 또 보여주는 것을 메모.
+    None = 종전과 동일."""
     if not isinstance(resp, dict):
         return None, ["응답이 객체가 아니다"], []
     problems: list[str] = []
@@ -515,6 +585,34 @@ def validate_beats(resp: Any, span_index: dict[str, dict], allowed: dict[str, in
             rewinds += 1
     if rewinds > REWIND_MAX:
         problems.append(f"되감기가 {rewinds}번 — 훅 선행·훅 회수 말고는 {REWIND_MAX}번까지다. 나머지 비트는 원본 순서대로")
+    # 결과 자리 게이트(2026-09-09) — 걸음 1 의 reveal 약속을 형식으로 지킨다
+    result_scenes = {k for k, p in (scene_purposes or {}).items() if p in RESULT_PURPOSES}
+    if reveal == "end" and result_scenes:
+        def _m(k: int) -> str:
+            return f"m{k:03d}"
+        hooks = [b for b in raw_beats if b["role"] == "hook"]
+        for b in hooks:
+            if b["scene"] in result_scenes:
+                problems.append(f"결말 유보(reveal=end)인데 hook 이 결과 씬 {_m(b['scene'])} 의 조각이다 — 훅은 결과를 "
+                                "답하지 않는 위기·각오·의문의 한마디로, 결과 씬은 마지막에")
+        if any(b.get("reuse_of") for b in raw_beats):
+            problems.append("결말 유보(reveal=end)에서는 hook_return 을 쓰지 않는다 — 결과는 한 번만, 끝에")
+        res_pos = [i for i, b in enumerate(raw_beats) if b["scene"] in result_scenes]
+        if not res_pos:
+            problems.append("결말 유보(reveal=end)인데 결과 씬(" + "/".join(_m(k) for k in sorted(result_scenes))
+                            + ")의 비트가 없다 — 마지막 비트로 결과 장면을 넣어라")
+        else:
+            trailing = [b for b in raw_beats[res_pos[-1] + 1:]
+                        if (scene_purposes or {}).get(b["scene"]) != "반응"]
+            if trailing:
+                problems.append("결말 유보(reveal=end)인데 결과 씬 뒤에 "
+                                + "/".join(f"{_m(b['scene'])}[{(scene_purposes or {}).get(b['scene'])}]" for b in trailing)
+                                + " 이 온다 — 결과 다음에는 반응 씬만 두거나 그 비트를 빼라")
+    elif reveal == "front" and len(raw_beats) >= 2 and raw_beats[0]["role"] == "hook":
+        last = raw_beats[-1]
+        if last["scene"] == raw_beats[0]["scene"] and not last.get("reuse_of"):
+            notes.append(f"⚠ 결말 선공개인데 마지막 비트가 훅 씬 m{last['scene']:03d} 의 다른 조각 — 결과가 두 번 나온다"
+                         "(되풀이는 hook_return 으로)")
     beats: list[dict] = []
     for rb in raw_beats:
         pieces = split_at_holes(rb, span_index)

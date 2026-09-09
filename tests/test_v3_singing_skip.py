@@ -101,7 +101,7 @@ GRID = _mk_grid([
     (2.0, 5.0, True, "올래 올래 튕기지 말고"),   # sp0001 노래
     (5.0, 7.0, True, "고맙습니다"),              # sp0002 말
 ])
-S2 = _mk_stage2(GRID, [(0, 2, 4, "무대")])
+S2 = _mk_stage2(GRID, [(0, 2, 4, "무대에서 노래를 부른다")])   # 사건 단위 문장에 노래 근거(줄 단위 증인)
 IDX, ORDER = st.build_span_index(S2, GRID)
 # _mk_grid 는 words 를 비워 둔다 — 어절 자막은 단어 타임코드에서 나오므로 span 텍스트를
 # 어절 단위로 균등 배치해 채운다(중점 소속 규율 그대로)
@@ -239,3 +239,31 @@ def test_bridge_windows_joins_gaps_inside_singing_meaning_and_only_extends():
     assert singing.bridge_windows([(37.0, 130.0)], rows2) == [(37.0, 130.0)]
     assert singing.bridge_windows([], rows) == []
     assert singing.bridge_windows([(5.0, 15.0)], rows) == [(5.0, 15.0)]     # 근거 없는 단위는 불변
+
+
+def test_skip_window_keeps_lines_whose_stage2_record_has_no_singing_evidence():
+    """화면 묘사 증인(2026-09-09, 「솔드아웃!」 실사고): 창 안이라도 조각의 사건 단위 문장·화면 묘사에
+    노래 근거가 없으면 자막을 살린다(기록 kept). 화면 묘사가 노래를 말하면 단위 문장이 없어도 버린다."""
+    s2 = _mk_stage2(GRID, [(0, 0, 4, "MC 멘트"), (1, 2, 4, "티켓 완판을 알린다")])   # 노래 근거 없는 단위
+    idx, _ = st.build_span_index(s2, GRID)
+    log: list[dict] = []
+    out = assemble.word_subtitles(TL, idx, GRID["words"], skip_windows=[(2.0, 5.0)], skip_log=log)
+    assert [x["text"] for x in out] == ["여러분 기다리셨습니다", "올래 올래 튕기지 말고", "고맙습니다"]
+    assert len(log) == 1 and log[0]["span_id"] == "sp0001" and log[0].get("kept") is True
+    # 조각 화면 묘사가 노래를 말하면(단위 경계가 어긋나 옆 단위로 넘어간 가사) 버린다
+    for seq in s2["sequences"]:
+        for ch in seq["chunks"]:
+            for m in ch["meanings"]:
+                for sp in m["spans"]:
+                    if sp["span_id"] == "sp0001":
+                        sp["scene_script"] = "가수가 무대에서 '올래'를 열창한다"
+    idx2, _ = st.build_span_index(s2, GRID)
+    log2: list[dict] = []
+    out2 = assemble.word_subtitles(TL, idx2, GRID["words"], skip_windows=[(2.0, 5.0)], skip_log=log2)
+    assert [x["text"] for x in out2] == ["여러분 기다리셨습니다", "고맙습니다"]
+    assert len(log2) == 1 and "kept" not in log2[0]
+    assert assemble.span_sings({"meaning_content": "듀엣 무대", "scene_script": ""})
+    assert not assemble.span_sings({"meaning_content": "티켓 완판", "scene_script": "가방을 열어 보인다"})
+    # 배선: 파이프라인이 kept 줄을 따로 세고 기록한다
+    src = (Path(__file__).resolve().parents[1] / "app" / "v3" / "pipeline.py").read_text(encoding="utf-8")
+    assert "kept_in_window=len(_kept_in)" in src and "노래 창 안이지만 유지" in src

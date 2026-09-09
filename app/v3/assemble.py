@@ -518,6 +518,70 @@ def prefer_heard(words: list[dict], heard: str, *, max_prob: float = HEARD_PREFE
     return {"mean_prob": round(mean, 2), "whisper": wtxt, "heard": heard}
 
 
+# ── 화면 묘사 증인(2026-09-09, 가왕쇼 8화 「꼬무줄」 실사고) ──────────────────────────────
+# whisper 「꼬물들밖에」 · Stage 2 청취 「고무줄밖에」 · Stage 2 화면 묘사 「티켓을 묶어놨던 고무줄만
+# 남았다」. 청취가 맞았는데 세 안전장치가 전부 놓쳤다: 각색 복원은 차이(0.545)가 커서 whisper 편,
+# 어절 정렬은 자모 차이 4 로 상한 초과, 저확신 우선은 평균 prob 0.70 으로 임계 미달.
+# Stage 2 가 영상을 보며 적어 둔 화면 묘사(`scene_script`)를 세 번째 증인으로 쓴다 — 청취에서
+# whisper 와 다른 어절의 어간이 **같은 조각의 화면 묘사**에 있으면 각색이 아니라 화면이 뒷받침하는
+# 단어다(모델이 문장을 지어냈다면 화면 묘사에 그 단어가 같이 들어갈 확률은 낮다). 영상을 다시 보지
+# 않는다 — 이미 있는 텍스트 두 칸의 대조다. 어간 = 어절 앞부분(길이 ≥2, 긴 쪽부터), whisper 텍스트에
+# 없는 것만(「티켓」처럼 양쪽에 다 있는 단어는 증거가 아니다). 지시어·감탄사는 textcheck 와 같은 목록으로 뺀다.
+# 어간 규칙(길이·지시어·인명 제외)은 `textcheck.scene_stem` 한 곳 — 어절 단위(arbitrate_scene)와
+# span 단위(여기)가 같은 자로 잰다.
+# 문장 유사도 하한(공백 제거 difflib ratio) — 이 규칙은 **단어 하나의 시비**를 화면으로 가리는 것이지
+# 문장 전체를 갈아끼우는 것이 아니다. 드라이런(가왕쇼 8화 808 span)에서 유사도 가드 없이 150건이 걸렸고
+# 그중 「인천의 아들입니다」→「전유진 많이 투표해 주세요」처럼 전혀 다른 문장(청취가 옆 조각을 들었거나
+# 요약)이 섞여 있었다. 0.5 는 「꼬물들」 span(0.68)은 지나고 위 사례(0.1대)는 막는 자리.
+SCENE_SIM_MIN = 0.5
+
+
+def scene_backed_heard(words: list[dict], heard: str, scene_script: str, *,
+                       min_len_ratio: float = HEARD_PREFER_MIN_LEN_RATIO,
+                       min_similarity: float = SCENE_SIM_MIN,
+                       exclude: set[str] | frozenset[str] | None = None) -> dict | None:
+    """화면 묘사가 뒷받침하는 청취 판정 — 채택이면 {whisper, heard, stem, similarity}, 아니면 None. 순수.
+    조건: whisper 단어 ≥2 · 청취·화면 묘사 비어 있지 않음 · 공백 제거 텍스트가 다르되 유사도 ≥
+    min_similarity(단어 시비이지 문장 교체가 아니다) · 청취가 요약이 아님(길이 비율) · 청취 어절 중
+    어간(≥SCENE_STEM_MIN_CHARS)이 화면 묘사에는 있고 whisper 에는 없는 것이 하나 이상.
+    exclude: 어간으로 치지 않을 단어(인물 이름 — 화면 묘사에는 인명이 거의 늘 있어 증거가 못 된다.
+    인명은 별도 인명 대조 규칙의 몫)."""
+    import difflib
+    ws = [w for w in words or [] if str(w.get("text") or "").strip()]
+    heard = str(heard or "").strip()
+    scene = str(scene_script or "").strip()
+    if len(ws) < 2 or not heard or not scene:
+        return None
+    wtxt = " ".join(str(w["text"]).strip() for w in ws)
+    a, b = _HEARD_CMP_STRIP.sub("", wtxt), _HEARD_CMP_STRIP.sub("", heard)
+    if a == b or len(b) < len(a) * min_len_ratio:
+        return None
+    sim = difflib.SequenceMatcher(None, a, b).ratio()
+    if sim < min_similarity:
+        return None
+    from app.v3.textcheck import scene_stem
+    for tok in heard.split():
+        stem = scene_stem(_HEARD_CMP_STRIP.sub("", tok), scene, wtxt, exclude)
+        if stem:
+            return {"whisper": wtxt, "heard": heard, "stem": stem, "similarity": round(sim, 2)}
+    return None
+
+
+def span_sings(sp: dict) -> bool:
+    """이 조각이 노래인가 — Stage 2 의 두 기록(사건 단위 문장 · 조각 화면 묘사) 중 하나라도 노래
+    근거(`singing.SING_HINT`)를 말하면 참. 순수.
+
+    2026-09-09 가왕쇼 8화 실사고: 음향 창(29:04~29:32)이 「촉이 와요」 사건 단위와 겹쳐 창 전체가
+    확정됐는데, 노래는 29:09 에 끝났고 나머지 22초는 완판 사건 단위였다 — 「솔드아웃!」「300장 들고
+    왔어요!」 4줄이 가사로 분류돼 사라졌다. 창은 창대로 두고(전유진 편에서 창을 단위 경계에서 자르다
+    노래를 잘라먹은 이력) **줄 단위**로 두 번째 증인을 본다: 조각이 속한 사건 단위 문장이나 조각의
+    화면 묘사에 노래 근거가 있어야 버린다. 관객 컷 위의 가사는 사건 단위 문장이 잡고, 단위 경계가
+    어긋나 옆 단위로 넘어간 가사는 화면 묘사(「…를 열창한다」)가 잡는다."""
+    from app.v3.singing import SING_HINT
+    return bool(SING_HINT.search(str(sp.get("meaning_content") or ""))
+                or SING_HINT.search(str(sp.get("scene_script") or "")))
+
+
 def _lines_from_text(text: str, t_in: float, t_out: float) -> list[dict]:
     """어절 타임코드 없는 텍스트(M9-C heard) → span 구간 균등 배분 라인. 순수.
 
@@ -681,21 +745,37 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                 if name_fix_log is not None:
                     name_fix_log.append({"kind": "heard", "span_id": sid, "from": _ph["whisper"],
                                          "to": _ph["heard"], "mean_prob": _ph["mean_prob"]})
+            _scene_excl = (set(sp.get("characters") or []) | set(sp.get("meaning_characters") or [])
+                           | set(cast_names or []))
+            if src != "heard":
+                # 화면 묘사 증인(2026-09-09, 「꼬물들」→「고무줄」): ① 어절 단위 — 정렬된 청취 조각의
+                # 어간이 화면 묘사에 있으면 그 어절만 뒤집는다(whisper 타임코드 보존, fix_span_words
+                # 안 arbitrate_scene). ② 정렬로 못 잡은 경우(whisper 가 어절을 빠뜨리거나 길이가 다른
+                # 「산맥장」→「300장」)만 span 단위 폴백(scene_backed_heard) — 청취 문장을 균등 배분.
+                _heard = str(sp.get("heard_text") or "")
+                if cast_names or _heard:
+                    from app.v3.textcheck import fix_span_words
+                    in_span, _fx = fix_span_words(in_span, cast_names or [], _heard,
+                                                  scene_script=str(sp.get("scene_script") or ""),
+                                                  exclude=_scene_excl)
+                    if _fx and name_fix_log is not None:
+                        name_fix_log.extend(dict(f, span_id=sid) for f in _fx)
+                    if not any(f.get("kind") == "scene" for f in _fx):
+                        _sb = scene_backed_heard(in_span, _heard, sp.get("scene_script"),
+                                                 exclude=_scene_excl)
+                        if _sb is not None:
+                            src = "heard"
+                            if name_fix_log is not None:
+                                name_fix_log.append({"kind": "scene_span", "span_id": sid,
+                                                     "from": _sb["whisper"], "to": _sb["heard"],
+                                                     "stem": _sb["stem"],
+                                                     "similarity": _sb["similarity"]})
             if src == "heard":
                 lines = _lines_from_text(str(sp.get("heard_text") or ""),
                                          sp["t_in"], sp["t_out"])
             else:
-                # 인명 대조(2026-09-03): whisper 어절이 인물표 이름과 가깝고 모델
-                # 청취(heard_text)에 그 이름이 정확히 있으면 그 이름으로 — 두 증인
-                # 일치 시에만. cast_names 없으면 종전과 동일.
-                # 2026-09-04: 영문 약어 오인식('RC가'←'날씨가')도 같은 대조를 탄다 —
-                # 인물표가 없어도 모델 청취가 있으면 돈다(cast_names 는 인명 절에만).
-                _heard = str(sp.get("heard_text") or "")
-                if cast_names or _heard:
-                    from app.v3.textcheck import fix_span_words
-                    in_span, _fx = fix_span_words(in_span, cast_names or [], _heard)
-                    if _fx and name_fix_log is not None:
-                        name_fix_log.extend(dict(f, span_id=sid) for f in _fx)
+                # 인명·영문·맞춤법·정렬·화면 묘사 대조는 위 블록(fix_span_words)이 이미 돌았다 —
+                # 어절 타임코드 보존 경로. (2026-09-03 인명 대조 · 09-04 영문 오인식 · 09-09 화면 증인)
                 lines = _lines_for_span(in_span, sp["t_in"], sp["t_out"])
             speaker = span_speaker(sp)
             color = colors.get(speaker, SPEAKER_DEFAULT_COLOR)
@@ -710,11 +790,16 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                 if not any(a <= mid < z for a, z in audible):
                     continue                      # 뮤트 창 안 — 소리가 없으니 자막도 없다
                 if skip_windows and any(a <= mid < z for a, z in skip_windows):
+                    _sings = span_sings(sp)
                     if skip_log is not None:
                         skip_log.append({"span_id": sid, "src_start": round(ln["start"], 3),
                                          "src_end": round(ln["end"], 3), "edit_start": e0,
-                                         "text": ln["text"]})
-                    continue                      # 노래 구간 — 가사 자막을 내지 않는다
+                                         "text": ln["text"],
+                                         **({} if _sings else {"kept": True})})
+                    if _sings:
+                        continue                  # 노래 구간 — 가사 자막을 내지 않는다
+                    # 창 안이지만 이 조각의 Stage 2 기록에 노래 근거가 없다(위 span_sings) —
+                    # 창이 옆 사건 단위로 흘러든 대사다. 자막을 살리고 기록만 남긴다.
                 # speaker·color 는 additive — 옛 소비자는 세 키만 읽는다(C6).
                 # 다화자 span 이면 이 줄의 첫 단어가 속한 화자의 색을 쓴다.
                 l_spk, l_color = speaker, color

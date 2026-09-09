@@ -2569,3 +2569,56 @@ subtitle_skip_singing}}`. **명시한 플래그가 템플릿을 이긴다**(None
   `speaker_tracking.clips[].hold_runs[{speaker,start,end,x,method,people}]` + stdout `clipN … → x`.
 - 실측(ep01full 침실 대사 4클립): 팬 표본 10개 → 키프레임 4개, 경희 1572 고정 → 남편 609 점프 → 남편 600 유지.
 - 회귀 가드: `tests/test_v3_text_style.py` hold 절(5건 — 계단·병합·재고정 억제·무발화·talk×√w·기억).
+
+## 가왕쇼 8화 첫 실런 후속 3건 — reveal 약속 · 화면 묘사 증인 · 노래 창 줄 단위 판정 (2026-09-09, 사용자 지시)
+
+### 훅과 제목은 한 약속이다 — `reveal` (`story_flow/select.py`)
+
+실사고: 훅 「저희 300장이 50분 만에 다 끝났어요!」(결과) + 제목 「티켓 300장 완판 가능할까」(질문) — 제목이 던진
+질문에 화면이 3초 만에 답하고, 마지막 비트가 같은 결과 장면이라 결과가 두 번 나왔다. 걸음 1 의 "결말을 앞세워라"와
+걸음 2 의 "결말을 말하지 마라"가 따로 놀던 것.
+- 걸음 1 이 `reveal` 을 정한다: **front**(결말 선공개 — 전략 1·2·3·4·10) / **end**(결말 유보 — 전략 5·7·8·9).
+  전략 모양과 반대면 반려. 없으면 전략에서 유도, 그마저 없으면 front(종전 동작 — legacy·plan 경로 회귀 0).
+- 걸음 2: front 면 아랫줄이 질문형(`QUESTION_ENDINGS` …까/?)일 때 반려 + 모델 자기점검 `title_review.hook_answers_title`
+  true 면 반려(훅은 정해졌으니 제목이 맞춘다). end 면 질문형 허용, 대신 쓰임 `RESULT_PURPOSES`(결과/반전) 씬 필수.
+- 걸음 3(형식 게이트, `validate_beats(reveal=, scene_purposes=)`): end 면 결과 씬 조각은 hook 불가 · hook_return 금지 ·
+  결과 씬 비트 필수 · 그 뒤는 반응 씬만. front 면 훅 씬을 마지막에 다른 조각으로 또 보여주면 메모(반려 아님).
+- 기록: `flow.reveal`. 실측(8화 r2): 모델이 다시 front 를 골라 제목이 서술형(「상인들 홀려버린 버스킹 비결」)으로 바뀜.
+  "결과가 마지막" 판을 강제할 오버라이드(`--reveal end` 류)는 아직 없다 — 사용자 결정 대기.
+- 회귀 가드: `tests/test_v3_story_flow.py` reveal 절(3건).
+
+### 화면 묘사 증인 — Stage 2 `scene_script` 로 청취 vs 전사 시비를 가린다 (`textcheck.arbitrate_scene` · `assemble.scene_backed_heard`)
+
+실사고 「꼬무줄」: whisper 「꼬물들밖에」 · Stage 2 청취 「고무줄밖에」 · Stage 2 화면 묘사 「티켓을 묶어놨던 고무줄만
+남았다」. 청취가 맞았는데 세 안전장치가 전부 놓쳤다(각색 복원 diff 0.545 → whisper 편 · 어절 정렬 자모 차이 4 초과 ·
+저확신 우선 평균 prob 0.70). **영상을 다시 보지 않는다** — Stage 2 가 이미 적어 둔 텍스트 두 칸(heard_text·scene_script)의
+대조다.
+- 어간 규칙은 `textcheck.scene_stem` 한 곳: 청취 어절의 앞부분(≥2자, 긴 쪽부터)이 **화면 묘사에는 있고 whisper span
+  텍스트에는 없는** 것. 지시어(`ALIGNED_STOPWORDS`)·**인물 이름의 모든 부분 문자열**(「전유진」→「유진」「유진이」 —
+  화면 묘사에는 인명이 거의 늘 있어 증거가 못 된다, 인명은 인명 대조의 몫)은 제외. 양쪽에 다 있는 단어(「티켓」)는
+  증거가 아니다.
+- **두 층**: ① 어절 단위 `arbitrate_scene`(fix_span_words 다섯 번째 — aligned 가 자모 상한으로 거절한 뒤) — 정렬된
+  청취 조각(같은 길이·청취 어절 경계 시작 **·끝**)의 어간이 화면에 있으면 그 어절만 뒤집는다 → **whisper 타임코드 보존**.
+  ② 정렬로 못 잡은 경우만(whisper 가 어절을 빠뜨리거나 길이가 다른 「산맥장」→「300장」) span 단위 폴백
+  `scene_backed_heard` — 문장 유사도(difflib, 공백 제거) ≥ `SCENE_SIM_MIN` 0.5 일 때만 청취 문장을 균등 배분(타이밍 잃음).
+  유사도 가드 없이는 「인천의 아들입니다」→「전유진 많이 투표해 주세요」(0.1대) 같은 문장 교체가 섞였다.
+- 드라이런(8화 808 유성 span): 어절 단위 34 · span 폴백 63(7.8% — 이만큼은 균등 배분 타이밍). 7화: 3 · 22.
+  기록 kind `scene`(stem) · `scene_span`(stem·similarity), stdout `[v3/자막] 화면 묘사 증인 …`.
+- 회귀 가드: `tests/test_v3_heard_priority.py`(+3).
+
+### 노래 창 안에서도 줄 단위로 다시 본다 (`assemble.span_sings`)
+
+실사고 「솔드아웃!」: 음향 창 29:04~29:32 가 「촉이 와요」 사건 단위(m031, ~29:09)와 겹쳐 **창 전체가 확정**됐는데 나머지
+22초는 완판 사건 단위(m032)였다 — 「솔드아웃!」「300장 들고 왔어요!」 4줄이 가사로 분류돼 사라졌다. 창은 창대로 둔다
+(전유진 편에서 창을 단위 경계에서 자르다 노래를 잘라먹은 이력, `bridge_windows` 주석) — **줄 단위 두 번째 증인**:
+조각이 속한 사건 단위 문장(`meaning_content`) **또는** 조각 화면 묘사(`scene_script`)에 `SING_HINT` 가 있어야 버린다.
+관객 컷 위의 가사는 단위 문장이, 단위 경계가 어긋나 옆 단위로 넘어간 가사는 화면 묘사(「…를 열창한다」)가 잡는다.
+- 살린 줄은 skip_log 에 `kept:true` 로, stdout `노래 창 안이지만 유지`, run_log `subtitle_skip_singing.kept_in_window`·
+  `kept_details`. 드라이런: 8화 4줄 유지(그 4줄) · 7화 ep7ex04 2줄(「여러분들 다같이 즐거우신 분들만 박수와」 MC 멘트).
+- ⚠ 테스트 픽스처 `test_v3_singing_skip.S2` 의 사건 단위 문장에 노래 근거를 넣었다(없으면 가사 줄이 살아남는 것이 이제 정상).
+- 회귀 가드: `tests/test_v3_singing_skip.py`(+1).
+- ⚠ **대조 기준으로 쓴 static Stage 2 기록도 틀린다**(사용자 확인, 신병4 13:05~13:31 복도 장면):
+  화자는 최일구인데 기록은 강찬석, 대사는 「탈영하고」인데 자막은 whisper 「타령하고」. 모델 heard_text
+  는 「탈영」으로 맞았지만 whisper prob 0.93 + 편집거리 <0.35(소정정)라 전사가 이겼고, 어절 정렬 교정도
+  prob<0.90 조건에 막힌다 — **고확신 whisper 동음 오인식이 맞는 청취를 이기는 구멍**(별건 후보).
+  인물 이름은 어떤 벨트도 대조하지 않는다. A/B 의 '✓' 는 전사·기록 일치이지 사실 일치가 아니다.

@@ -824,3 +824,105 @@ def test_stage2_heard_punctuation_ends_continuation():
     idx2, _ = st.build_span_index(s2, grid)
     assert idx2["sp0000"]["continues_to"] is None
     assert idx2["sp0001"]["continues_to"] == "sp0002"
+
+
+# ── reveal(결과 자리) 약속 — 훅과 제목은 한 약속 (2026-09-09, 가왕쇼 8화 실사고) ─────────────────
+
+def test_reveal_topic_parse_default_and_strategy_conflict():
+    ok = {"topic": "t", "core_meanings": ["m001"], "hook_line": {"speaker": "갑", "text": "x"}}
+    # 명시
+    assert sl.validate_topic({**ok, "strategy": 5, "reveal": "end"}, ROWS)[0]["reveal"] == "end"
+    assert sl.validate_topic({**ok, "strategy": 1, "reveal": "front"}, ROWS)[0]["reveal"] == "front"
+    # 없으면 전략에서 유도(end 계열 → end · 그 외 → front) · 전략도 없으면 front(종전 동작)
+    assert sl.validate_topic({**ok, "strategy": 7}, ROWS)[0]["reveal"] == "end"
+    assert sl.validate_topic({**ok, "strategy": 3}, ROWS)[0]["reveal"] == "front"
+    assert sl.validate_topic(ok, ROWS)[0]["reveal"] == "front"
+    # 전략 모양과 반대면 반려 · 모르는 값 반려
+    obj, pr = sl.validate_topic({**ok, "strategy": 1, "reveal": "end"}, ROWS)
+    assert obj is None and any("결말을 앞세우는 모양" in p for p in pr)
+    obj, pr = sl.validate_topic({**ok, "strategy": 9, "reveal": "front"}, ROWS)
+    assert obj is None and any("결말을 뒤에 두는 모양" in p for p in pr)
+    assert sl.validate_topic({**ok, "reveal": "middle"}, ROWS)[0] is None
+    # 프롬프트 어휘
+    assert '"reveal"' in sl.TOPIC_PROMPT and "한 약속" in sl.TOPIC_PROMPT
+    assert "{reveal_line}" in sl.SCENES_PROMPT and "hook_answers_title" in sl.SCENES_PROMPT
+    assert "{reveal_block}" in sl.LINES_PROMPT
+    assert sl.reveal_line(None) == "" and sl.reveal_block(None) == ""
+    assert "결말 유보" in sl.reveal_line("end") and "m001" in sl.reveal_block("end", {1})
+    assert "reveal 이 정한다" in sl.strategy_line(1)
+
+
+def test_reveal_scenes_title_gate():
+    base = {"scenes": [{"meaning": "m000", "purpose": "배경"}, {"meaning": "m001", "purpose": "결과"}],
+            "title": {"line1": "시장에 뜬 홍지윤 빈예서", "line2": "티켓 300장 완판 가능할까"},
+            "title_review": {"line2_reveals_ending": False, "hook_answers_title": False}}
+    # reveal 없음 = 종전 그대로 통과
+    assert sl.validate_scenes(base, ROWS)[0] is not None
+    # front + 질문형 아랫줄 = 반려 (훅이 3초 만에 답한다)
+    obj, pr, _ = sl.validate_scenes(base, ROWS, reveal="front")
+    assert obj is None and any("질문형" in p for p in pr)
+    # front + 서술형 = 통과
+    ok = {**base, "title": {"line1": "시장에 뜬 홍지윤 빈예서", "line2": "50분 만에 완판한 비결"}}
+    assert sl.validate_scenes(ok, ROWS, reveal="front")[0] is not None
+    # end + 질문형 = 통과(결과는 마지막에 온다)
+    assert sl.validate_scenes(base, ROWS, reveal="end")[0] is not None
+    # end 인데 결과 씬이 없다 = 반려
+    no_res = {**base, "scenes": [{"meaning": "m000", "purpose": "배경"}, {"meaning": "m001", "purpose": "과정"}]}
+    obj, pr, _ = sl.validate_scenes(no_res, ROWS, reveal="end")
+    assert obj is None and any("결과 씬이 없다" in p for p in pr)
+    # 모델 자기 판정 hook_answers_title=true 는 reveal 과 무관하게 반려
+    bad = {**ok, "title_review": {"line2_reveals_ending": False, "hook_answers_title": True}}
+    obj, pr, _ = sl.validate_scenes(bad, ROWS)
+    assert obj is None and any("훅 한마디가 제목" in p for p in pr)
+
+
+def test_reveal_beats_gate_end_and_front():
+    allowed = _allowed()                       # m000(sp0000~2)=배경 · m001(sp0003~5)=결과
+    purposes = {0: "배경", 1: "결과"}
+    # end: hook 이 결과 씬 조각 → 반려
+    resp = {"beats": [{"first": "sp0004", "last": "sp0005", "role": "hook"},
+                      {"first": "sp0001", "last": "sp0002", "role": "build"}]}
+    beats, pr, _ = sl.validate_beats(resp, IDX, allowed, budget_sec=30, reveal="end", scene_purposes=purposes)
+    assert beats is None and any("hook 이 결과 씬 m001" in p for p in pr)
+    # end: hook_return 금지
+    resp = {"beats": [{"first": "sp0001", "last": "sp0001", "role": "hook"},
+                      {"first": "sp0004", "last": "sp0005", "role": "climax"},
+                      {"first": "sp0001", "last": "sp0001", "role": "hook_return"}]}
+    beats, pr, _ = sl.validate_beats(resp, IDX, allowed, budget_sec=30, reveal="end", scene_purposes=purposes)
+    assert beats is None and any("hook_return 을 쓰지 않는다" in p for p in pr)
+    # end: 결과 씬 비트가 없다 → 반려
+    resp = {"beats": [{"first": "sp0001", "last": "sp0001", "role": "hook"},
+                      {"first": "sp0002", "last": "sp0002", "role": "build"}]}
+    beats, pr, _ = sl.validate_beats(resp, IDX, allowed, budget_sec=30, reveal="end", scene_purposes=purposes)
+    assert beats is None and any("결과 씬(m001)의 비트가 없다" in p for p in pr)
+    # end: 결과 씬 뒤에 과정 씬 → 반려 (반응 씬은 허용)
+    purposes3 = {0: "배경", 1: "결과", 2: "과정"}
+    _mat, allowed3 = sl.lines_material([{"meaning": 0, "purpose": "배경"}, {"meaning": 1, "purpose": "결과"},
+                                        {"meaning": 2, "purpose": "과정"}], ROWS, IDX)
+    resp = {"beats": [{"first": "sp0001", "last": "sp0001", "role": "hook"},
+                      {"first": "sp0004", "last": "sp0005", "role": "climax"},
+                      {"first": "sp0006", "last": "sp0006", "role": "build"}]}
+    beats, pr, _ = sl.validate_beats(resp, IDX, allowed3, budget_sec=30, reveal="end", scene_purposes=purposes3)
+    assert beats is None and any("결과 씬 뒤에 m002[과정]" in p for p in pr)
+    beats, pr, _ = sl.validate_beats(resp, IDX, allowed3, budget_sec=30, reveal="end",
+                                     scene_purposes={**purposes3, 2: "반응"})
+    assert pr == [] and [b["scene"] for b in beats] == [0, 1, 2]
+    # end 정상형: 위기 훅(배경 씬) → 결과 씬 마지막
+    resp = {"beats": [{"first": "sp0001", "last": "sp0002", "role": "hook"},
+                      {"first": "sp0004", "last": "sp0005", "role": "climax"}]}
+    beats, pr, _ = sl.validate_beats(resp, IDX, allowed, budget_sec=30, reveal="end", scene_purposes=purposes)
+    assert pr == [] and [b["role"] for b in beats] == ["hook", "climax"]
+    # front: 훅 씬을 마지막에 다른 조각으로 또 → 메모(반려 아님)
+    resp = {"beats": [{"first": "sp0005", "last": "sp0005", "role": "hook"},
+                      {"first": "sp0001", "last": "sp0002", "role": "build"},
+                      {"first": "sp0004", "last": "sp0004", "role": "build"}]}
+    beats, pr, notes = sl.validate_beats(resp, IDX, allowed, budget_sec=30, reveal="front", scene_purposes=purposes)
+    assert pr == [] and any("결과가 두 번" in n for n in notes)
+    # reveal 없음 = 종전과 동일(위 end 반려 케이스가 통과)
+    resp = {"beats": [{"first": "sp0004", "last": "sp0005", "role": "hook"},
+                      {"first": "sp0001", "last": "sp0002", "role": "build"}]}
+    assert sl.validate_beats(resp, IDX, allowed, budget_sec=30)[1] == []
+    # 배선
+    src = (Path(__file__).resolve().parents[1] / "app" / "v3" / "story_flow" / "__init__.py").read_text(encoding="utf-8")
+    assert "reveal_line=sl.reveal_line(_reveal)" in src and "reveal=_reveal, scene_purposes=_scene_purposes" in src
+    assert '"reveal": topic["reveal"]' in src
