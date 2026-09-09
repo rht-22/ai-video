@@ -173,3 +173,4 @@ def test_render_fingerprint_covers_subtitles_and_cues():
     head = src[:i]
     assert '_fp_parts.append({"subtitles":' in head and '_fp_parts.append({"cues": _cue_sig})' in head
     assert "hashlib.sha1(Path(_cp).read_bytes())" in head
+    assert '_fp_parts.append({"title":' in head          # 제목 아랫줄만 고친 재실행도 다시 그린다

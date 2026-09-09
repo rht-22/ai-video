@@ -1495,6 +1495,8 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
             _digest = None
         _cue_sig.append([(_e.get("cue") or {}).get("text"), (_e.get("cue") or {}).get("start_sec"), _digest])
     _fp_parts.append({"cues": _cue_sig})
+    # 제목도 렌더 재료다(같은 날 — 제목 아랫줄만 고친 재실행이 캐시를 지나쳤다)
+    _fp_parts.append({"title": (story_doc.get("title") or {}), "top_title": (plan.get("layout") or {}).get("top_title")})
     render_fp = hashlib.sha1(json.dumps(_fp_parts, sort_keys=True,
                                         ensure_ascii=False).encode()).hexdigest()[:16]
     if final_path.exists() and _sidecar_ok("render_fingerprint.json", render_fp) \
