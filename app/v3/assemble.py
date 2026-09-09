@@ -550,7 +550,9 @@ def scene_backed_heard(words: list[dict], heard: str, scene_script: str, *,
     ws = [w for w in words or [] if str(w.get("text") or "").strip()]
     heard = str(heard or "").strip()
     scene = str(scene_script or "").strip()
-    if len(ws) < 2 or not heard or not scene:
+    # 단어 1개 span 도 본다(prefer_heard 와 다른 점 — 「왔잖아요?」 하나만 남은 span 의 청취
+    # 「저희 300장 들고 왔잖아요」: whisper 가 앞 단어들을 놓쳤다. 유사도·어간 증거가 가드다)
+    if len(ws) < 1 or not heard or not scene:
         return None
     wtxt = " ".join(str(w["text"]).strip() for w in ws)
     a, b = _HEARD_CMP_STRIP.sub("", wtxt), _HEARD_CMP_STRIP.sub("", heard)
@@ -565,6 +567,30 @@ def scene_backed_heard(words: list[dict], heard: str, scene_script: str, *,
         if stem:
             return {"whisper": wtxt, "heard": heard, "stem": stem, "similarity": round(sim, 2)}
     return None
+
+
+# 메아리 조각(2026-09-09, 가왕쇼 8화 「들고」 실사고): 「저희 300장 들고 왔어요」 바로 뒤에 whisper 가
+# 확신 0.10 짜리 단어 하나(「들고」)를 따로 span 으로 냈다 — 앞 줄의 꼬리를 되풀이한 조각이고 화자 색까지
+# 달라(빈예서) 화면에 노란 「들고」가 혼자 떴다. 단어 1개 · 극저확신 · 직전 유성 span 텍스트에 이미 있는
+# 단어 · 틈 ≤1s 일 때만 버린다(감탄사 「와!」「어?」는 앞 줄에 없으니 산다 — E14 규율).
+from app.v3.story_flow.common import nospace_len  # noqa: E402  (창 확장 판정)
+
+ECHO_MAX_PROB = 0.2
+ECHO_GAP_SEC = 1.0
+
+
+def is_echo_fragment(words: list[dict], prev_text: str, gap_sec: float, *,
+                     max_prob: float = ECHO_MAX_PROB, max_gap: float = ECHO_GAP_SEC) -> bool:
+    """단어 1개짜리 span 이 직전 유성 span 의 메아리인가. 순수."""
+    ws = [w for w in words or [] if str(w.get("text") or "").strip()]
+    if len(ws) != 1 or not prev_text or gap_sec is None or gap_sec > max_gap:
+        return False
+    if float(ws[0].get("prob", 1.0)) >= max_prob:
+        return False
+    t = _HEARD_CMP_STRIP.sub("", str(ws[0]["text"]))
+    # 어절 단위 완전 일치(부분 문자열이면 「어?」가 '…어…' 아무 데나 붙어 감탄사가 죽는다 — 드라이런 2건)
+    prev_toks = {_HEARD_CMP_STRIP.sub("", x) for x in str(prev_text).split()}
+    return len(t) >= 1 and t in prev_toks
 
 
 def span_sings(sp: dict) -> bool:
@@ -712,7 +738,23 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
     # 뮤트 클립이라도 내레이션 창 **밖**은 원음이 살아 있다(finalize 의 muted_windows
     # 와 같은 계산) — 그 구간 대사는 자막이 있어야 한다. 창을 모르면 종전대로 전부 제외.
     mw = list(mute_windows or [])
+    # 이웃 화면 묘사(2026-09-09): span 단위 화면 증인은 같은 사건 단위의 앞뒤 조각 화면 묘사도 본다 —
+    # whisper 가 놓친 말("저희 300장 들고")은 대개 **앞 조각**(무성으로 잡힌 자리)의 화면에 적혀 있다.
+    _by_pos = {sp.get("pos"): sid for sid, sp in span_index.items() if sp.get("pos") is not None}
+
+    def _neighbor_scene(sid: str) -> str:
+        sp = span_index[sid]
+        parts = [str(sp.get("scene_script") or "")]
+        for d in (-1, 1):
+            nb = _by_pos.get((sp.get("pos") or 0) + d)
+            if nb and span_index[nb].get("meaning_idx") == sp.get("meaning_idx"):
+                parts.append(str(span_index[nb].get("scene_script") or ""))
+        return " ".join(p for p in parts if p)
     off = 0.0
+    # 직전 유성 span(텍스트, t_out) — 메아리 판정. 클립을 넘어도 유지한다: 편성이 같은 대화를 클립 둘로
+    # 재단하는 일이 흔하고(「들고」는 앞 줄과 0.02s 차이인데 다른 클립이었다), 판정은 **소스 시각** 틈으로
+    # 하므로 점프 뒤에는 틈이 커서 안 걸린다.
+    _prev_audio: tuple[str, float] | None = None
     for c in timeline:
         c0, c1 = float(c["clip_start_sec"]), float(c["clip_end_sec"])
         audible: list[tuple[float, float]] = []
@@ -723,9 +765,12 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
         if not audible:
             off += clip_duration(clip_len(c), fps)
             continue
+        _silent_lead: float | None = None                # 직전 연속 무성 조각의 시작 — 놓친 말의 자리
         for sid in c.get("span_ids") or []:
             sp = span_index[sid]
             if not sp["is_audio"]:
+                if _silent_lead is None:
+                    _silent_lead = sp["t_in"]
                 continue
             # M9-C 전사 판정을 자막에 반영(리뷰 확정 critical — 판정이 stage2
             # 기록에만 남고 화면에는 깨진 전사가 그대로 나가던 결함):
@@ -734,10 +779,20 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
             #           균등 배치한다(어절 타임코드가 없으므로 팝인 대신 균등).
             src = sp.get("text_source")
             if src == "none":
+                _silent_lead = None
                 continue
             in_span = [w for w in grid_words
                        if sp["t_in"] <= (float(w["t0"]) + float(w["t1"])) / 2
                        < sp["t_out"]]
+            if _prev_audio is not None and is_echo_fragment(in_span, _prev_audio[0], sp["t_in"] - _prev_audio[1]):
+                if name_fix_log is not None:
+                    name_fix_log.append({"kind": "echo", "span_id": sid,
+                                         "from": " ".join(str(w["text"]) for w in in_span), "to": ""})
+                _prev_audio = (" ".join(str(w.get("text") or "") for w in in_span), sp["t_out"])
+                _silent_lead = None
+                continue
+            _lead_in = _silent_lead if (_silent_lead is not None and sp["t_in"] - _silent_lead <= 3.0) else None
+            _silent_lead = None
             # 저확신 전사 → 청취 우선(위 prefer_heard). 판정은 span 단위·순수, 건별 기록.
             _ph = None if src == "heard" else prefer_heard(in_span, sp.get("heard_text"))
             if _ph is not None:
@@ -761,7 +816,7 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                     if _fx and name_fix_log is not None:
                         name_fix_log.extend(dict(f, span_id=sid) for f in _fx)
                     if not any(f.get("kind") == "scene" for f in _fx):
-                        _sb = scene_backed_heard(in_span, _heard, sp.get("scene_script"),
+                        _sb = scene_backed_heard(in_span, _heard, _neighbor_scene(sid),
                                                  exclude=_scene_excl)
                         if _sb is not None:
                             src = "heard"
@@ -771,12 +826,18 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                                                      "stem": _sb["stem"],
                                                      "similarity": _sb["similarity"]})
             if src == "heard":
-                lines = _lines_from_text(str(sp.get("heard_text") or ""),
-                                         sp["t_in"], sp["t_out"])
+                # 창 확장(2026-09-09): 청취가 whisper 보다 길고 바로 앞이 무성으로 잡힌 조각이면 whisper 가
+                # 거기서 말을 놓친 것(「저희 300장 들고」 = 앞 조각 0.86s) — 청취 문장을 그 조각 시작부터 편다.
+                _t_in = sp["t_in"]
+                if _lead_in is not None and nospace_len(str(sp.get("heard_text") or "")) > nospace_len(
+                        " ".join(str(w.get("text") or "") for w in in_span)):
+                    _t_in = max(c0, _lead_in)
+                lines = _lines_from_text(str(sp.get("heard_text") or ""), _t_in, sp["t_out"])
             else:
                 # 인명·영문·맞춤법·정렬·화면 묘사 대조는 위 블록(fix_span_words)이 이미 돌았다 —
                 # 어절 타임코드 보존 경로. (2026-09-03 인명 대조 · 09-04 영문 오인식 · 09-09 화면 증인)
                 lines = _lines_for_span(in_span, sp["t_in"], sp["t_out"])
+            _prev_audio = (" ".join(str(w.get("text") or "") for w in in_span), sp["t_out"])
             speaker = span_speaker(sp)
             color = colors.get(speaker, SPEAKER_DEFAULT_COLOR)
             wspk = None if src == "heard" else _word_speakers(sp, in_span)

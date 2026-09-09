@@ -1115,7 +1115,8 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
             "merge": ("어절 병합", "모델 청취가 한 어절 — whisper 가 끊은 단어를 합침"),
             "heard": ("저확신 span 청취 채택", "whisper 평균 확신 < 0.6 · 청취가 요약이 아님"),
             "scene": ("화면 묘사 증인", "정렬된 청취 어절의 어간이 같은 조각의 Stage 2 화면 묘사에 있음"),
-            "scene_span": ("화면 묘사 증인 span 청취 채택", "정렬 밖 청취 단어를 화면 묘사가 뒷받침 · 유사도 ≥0.5")}
+            "scene_span": ("화면 묘사 증인 span 청취 채택", "정렬 밖 청취 단어를 화면 묘사가 뒷받침 · 유사도 ≥0.5"),
+            "echo": ("메아리 조각 제외", "단어 1개 · 확신 <0.2 · 직전 줄에 있는 단어 · 틈 ≤1s")}
     for f in _name_arb:
         _what, _why = _WHY.get(f.get("kind") or "", ("인명", "모델 청취 + 인물표"))
         log(f"  [v3/자막] {_what} 대조 교정 {f.get('span_id')} {f['from']!r} → {f['to']!r} "
@@ -1479,6 +1480,21 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
     _picture = finalize.read_picture_area(output_dir)
     if _picture:
         _fp_parts.append({"letterbox_picture": _picture})
+    # 자막 세그먼트 + cue(문구·합성 파일)도 렌더 재료다(2026-09-09 실사고): 자막 규칙만 바뀌거나 내레이션을
+    # 재합성한 `--from-step resources` 재실행이 "지문 일치" 로 옛 최종본을 그대로 내보냈다 — 위 상류 지문은
+    # 타임라인·라벨만 본다. 파일 바이트 sha1 이라 같은 문구를 같은 목소리로 다시 합성해도(바이트가 다르면)
+    # 다시 그린다 — 렌더 10초가 옛 소리보다 싸다. ⚠ 이 항목이 생기며 기존 잡은 다음 재개에서 한 번 다시 렌더된다.
+    _fp_parts.append({"subtitles": [[s.get("start_sec"), s.get("end_sec"), s.get("text"), s.get("speaker"),
+                                     s.get("color"), s.get("style")] for s in (segments or [])]})
+    _cue_sig = []
+    for _e in (resources.get("tts_cue_files") or []):
+        _cp = _e.get("path")
+        try:
+            _digest = hashlib.sha1(Path(_cp).read_bytes()).hexdigest()[:12] if _cp and Path(_cp).is_file() else None
+        except OSError:
+            _digest = None
+        _cue_sig.append([(_e.get("cue") or {}).get("text"), (_e.get("cue") or {}).get("start_sec"), _digest])
+    _fp_parts.append({"cues": _cue_sig})
     render_fp = hashlib.sha1(json.dumps(_fp_parts, sort_keys=True,
                                         ensure_ascii=False).encode()).hexdigest()[:16]
     if final_path.exists() and _sidecar_ok("render_fingerprint.json", render_fp) \

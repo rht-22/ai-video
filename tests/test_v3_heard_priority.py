@@ -127,3 +127,68 @@ def test_word_subtitles_uses_scene_witness_word_level_then_span_fallback():
     kinds = [(f["kind"], f["span_id"]) for f in log]
     assert ("scene", "sp0000") in kinds and ("scene_span", "sp0001") in kinds
     assert not any(k == "scene_span" and s == "sp0000" for k, s in kinds)         # 어절 단위가 잡으면 span 폴백 없음
+
+
+def test_echo_fragment_dropped_across_clips_but_interjections_live():
+    """메아리 조각(2026-09-09, 「들고」 실사고): 단어 1개·확신 <0.2·직전 유성 span 의 어절과 완전 일치·틈 ≤1s 이면
+    버린다 — 클립이 갈려도(소스 시각 틈으로 판정). 앞 줄에 없는 감탄사(「와!」)와 확신 높은 조각은 산다."""
+    assert assemble.is_echo_fragment(_words(5, 5.4, "들고", 0.1), "저희 300장 들고 왔어요", 0.02)
+    assert not assemble.is_echo_fragment(_words(5, 5.4, "들고", 0.5), "저희 300장 들고 왔어요", 0.02)   # 확신
+    assert not assemble.is_echo_fragment(_words(5, 5.4, "들고", 0.1), "저희 300장 들고 왔어요", 1.5)    # 틈
+    assert not assemble.is_echo_fragment(_words(5, 5.4, "와!", 0.05), "저희 300장 들고 왔어요", 0.02)   # 앞 줄에 없음
+    assert not assemble.is_echo_fragment(_words(5, 5.4, "어?", 0.05), "어제 왔어요", 0.02)              # 부분 문자열은 안 침
+    grid = _mk_grid([(0.0, 2.0, True, "저희 300장 들고 왔어요"), (2.02, 2.4, True, "들고"), (2.5, 4.0, True, "고맙습니다")])
+    grid["words"] = _words(0, 2, "저희 300장 들고 왔어요", 0.9) + _words(2.02, 2.4, "들고", 0.1) + _words(2.5, 4, "고맙습니다", 0.95)
+    s2 = _mk_stage2(grid, [(0, 2, 4, "완판")])
+    for seq in s2["sequences"]:
+        for ch in seq["chunks"]:
+            for m in ch["meanings"]:
+                for sp in m["spans"]:
+                    sp["text_source"] = "transcript"; sp["heard_text"] = sp["audio_script"][0]["line"]
+    idx, _ = st.build_span_index(s2, grid)
+    # 「들고」가 다른 클립에 있어도 버린다(실사고 그대로: 앞 줄과 0.02s 차이인데 클립이 갈렸다)
+    tl = [{"clip_start_sec": 0.0, "clip_end_sec": 2.0, "use_original_audio": True, "span_ids": ["sp0000"]},
+          {"clip_start_sec": 2.02, "clip_end_sec": 4.0, "use_original_audio": True, "span_ids": ["sp0001", "sp0002"]}]
+    log: list[dict] = []
+    out = assemble.word_subtitles(tl, idx, grid["words"], name_fix_log=log)
+    assert " ".join(s["text"] for s in out) == "저희 300장 들고 왔어요 고맙습니다"    # 「들고」 조각 없음
+    assert [(f["kind"], f["span_id"]) for f in log] == [("echo", "sp0001")]
+
+
+def test_single_word_span_uses_neighbor_scene_and_extends_into_missed_silent_lead():
+    """「왔잖아요?」 실사고: whisper 가 「저희 300장 들고」를 놓쳐 그 자리를 무성으로 잡고 「왔잖아요?」만 남겼다.
+    청취 「저희 300장 들고 왔잖아요」의 어간(300장)은 **앞 조각**(무성)의 화면 묘사에 있다 → 이웃 화면으로 채택하고,
+    줄은 그 무성 조각 시작부터 편다(창 확장)."""
+    grid = _mk_grid([(0.0, 0.9, False, ""), (0.9, 1.5, True, "왔잖아요?"), (1.6, 3.0, True, "한 시간도 안 돼서")])
+    grid["words"] = _words(0.9, 1.5, "왔잖아요?", 0.91) + _words(1.6, 3.0, "한 시간도 안 돼서", 0.9)
+    s2 = _mk_stage2(grid, [(0, 2, 4, "완판")])
+    for seq in s2["sequences"]:
+        for ch in seq["chunks"]:
+            for m in ch["meanings"]:
+                for sp in m["spans"]:
+                    sp["text_source"] = "transcript" if sp["is_audio"] else None
+                    if sp["span_id"] == "sp0000":
+                        sp["scene_script"] = "빈예서가 300장을 다 나눠줬다며 대단하다고 말한다."
+                    elif sp["span_id"] == "sp0001":
+                        sp["heard_text"] = "저희 300장 들고 왔잖아요"
+                        sp["scene_script"] = "홍지윤이 한 시간도 안 돼서 끝났다며 놀라워한다."
+                    else:
+                        sp["heard_text"] = "한 시간도 안 돼서"
+    idx, _ = st.build_span_index(s2, grid)
+    tl = [{"clip_start_sec": 0.0, "clip_end_sec": 3.0, "use_original_audio": True,
+           "span_ids": ["sp0000", "sp0001", "sp0002"]}]
+    log: list[dict] = []
+    out = assemble.word_subtitles(tl, idx, grid["words"], name_fix_log=log)
+    assert [f["kind"] for f in log] == ["scene_span"] and log[0]["stem"] == "300장"
+    first = [s for s in out if "300장" in s["text"]][0]
+    assert first["start_sec"] == 0.0 and out[-1]["text"] == "한 시간도 안 돼서"      # 무성 조각 시작(0.0)부터
+    # 단어 1개 폴백은 유사도·어간 증거가 가드 — 화면에 근거 없으면 종전(「왔잖아요?」 그대로)
+    for seq in s2["sequences"]:
+        for ch in seq["chunks"]:
+            for m in ch["meanings"]:
+                for sp in m["spans"]:
+                    if sp["span_id"] == "sp0000":
+                        sp["scene_script"] = "시장 골목."
+    idx2, _ = st.build_span_index(s2, grid)
+    out2 = assemble.word_subtitles(tl, idx2, grid["words"])
+    assert out2[0]["text"] == "왔잖아요?"

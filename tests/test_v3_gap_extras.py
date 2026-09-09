@@ -161,3 +161,15 @@ def test_stage1_prompt_counts_provider_cards_as_intro():
     from app.v3.seq_analyze import INTRO_MAX_SEC, build_prompt
     assert "제공사·제작지원" in PROMPT_TEMPLATE and "콜드오픈·프롤로그·회상·몽타주는 본편이다" in PROMPT_TEMPLATE
     assert INTRO_MAX_SEC == 90.0 and "{intro_max" in PROMPT_TEMPLATE
+
+
+
+def test_render_fingerprint_covers_subtitles_and_cues():
+    """렌더 캐시 지문(2026-09-09 실사고): 자막 규칙만 바뀌거나 내레이션을 재합성한 재실행이 '지문 일치'로
+    옛 최종본을 재사용했다 — 상류 지문은 타임라인·라벨만 본다. 자막 세그먼트와 cue(문구·파일 sha1)가 지문에 든다."""
+    from pathlib import Path as _P
+    src = (_P(__file__).resolve().parents[1] / "app" / "v3" / "pipeline.py").read_text(encoding="utf-8")
+    i = src.index("render_fp = hashlib.sha1")
+    head = src[:i]
+    assert '_fp_parts.append({"subtitles":' in head and '_fp_parts.append({"cues": _cue_sig})' in head
+    assert "hashlib.sha1(Path(_cp).read_bytes())" in head

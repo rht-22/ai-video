@@ -456,14 +456,18 @@ def compute_jumps(beats: list[dict], span_index: dict[str, dict],
             continue
         gap = span_index[b["span_ids"][0]]["t_in"] - span_index[a["span_ids"][-1]]["t_out"]
         hole = b.get("hole_before") or []
-        # 되감기(다음 비트가 원본에서 앞이다 — 훅 선공개·훅 회수)는 언제나 점프: 다리 내레이션 필수
-        if gap < 0:
+        # 되감기(다음 비트가 원본에서 앞이다 — 훅 선공개·훅 회수)는 언제나 점프: 다리 내레이션 필수.
+        # rewind 표지(2026-09-09): 걸음 4 가 "시간을 되돌린다"는 말을 넣어야 한다 — 결과를 먼저 보여준 뒤
+        # 「신포시장으로 향하던 중,」만으로는 그것이 앞의 결과 **이전** 과정임이 시청자에게 안 닿는다(8화 실사고).
+        rewind = gap < 0
+        if rewind:
             gap = abs(span_index[a["span_ids"][0]]["t_in"] - span_index[b["span_ids"][-1]]["t_out"])
         if gap > gap_sec or hole:
             skipped = [x for x in hole if span_index[x]["is_audio"]]
             jumps.append({"before_beat": i, "gap_sec": round(gap, 2),
                           "skipped_ids": list(hole),
-                          "skipped_text": [span_text(span_index[x]) for x in skipped][:6]})
+                          "skipped_text": [span_text(span_index[x]) for x in skipped][:6],
+                          **({"rewind": True} if rewind else {})})
     return jumps
 
 

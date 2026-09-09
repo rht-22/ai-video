@@ -49,6 +49,7 @@ PROMPT = """당신은 리캡 쇼츠 구성작가다. 영상은 볼 수 없다 �
 - `cover`: 이 문장이 흐르는 동안 **보여줄 화면**을 아래 「쓸 수 있는 화면」에서 조각 id 로 골라라(1~3개, 이어지는 조각). 코드가 그 화면의 소리를 끄고 그 위에 얹는다. **내레이션이 가리키는 정보가 화면에 글자로 있으면(메시지·문서·검색창·자막 — 📄 표시된 자료화면) 그 화면을 짚고 `hold: true`** — 코드가 그 화면의 마지막 프레임을 내레이션 길이만큼 붙잡아 시청자가 읽게 한다. **자료화면이 아닌 화면은 절대 정지시키지 않는다** — 짚은 화면이 문장보다 짧으면 코드가 같은 씬의 다른 조각을 이어 붙여(컷 쌓기) 채우니, 그런 자리엔 hold 를 쓰지 말고 이어 보여도 어색하지 않은 조각을 짚어라. **문장은 그 화면이 보여주는 것을 말해야 한다** — 발장난을 말하려면 발장난 조각을 짚어라. 대사 중인 얼굴이라도 내레이션이 가리키는 장면이면 괜찮다. 짚을 화면이 없는 말은 쓰지 마라.
 - 화면 글자(📄)가 있는 조각은 그 문구를 근거로 쓸 수 있다(원문을 인용해도 된다). 글자 화면을 짚으면 `hold: true`.
 - ⚠ 표시된 장면(회상/상상/unclear)은 **사건으로 단정하는 문장을 쓰지 마라** — '~하는 상상을 한다'·'~했다고 믿는다'·'~를 떠올린다' 식으로 층위를 드러내라.
+- ⚠ **되감기** 자리(훅이 결과를 먼저 보여준 뒤 원본의 앞으로 돌아가는 점프)의 다리는 **시간을 되돌린다는 표지**를 문장에 넣어라 — "사실 이 완판, 시작은 몇 시간 전,", "이야기는 차 안에서 시작됐죠," 처럼. 장소만 말하면("신포시장으로 향하던 중,") 시청자는 그것이 방금 본 결과의 **이전** 과정인지 모른다.
 - 훅(before_beat: 0)은 **필수**. ⚠ 점프 자리도 **필수**. 엔딩 뒤 한 줄(after_last)은 선택 — 다음에 벌어질 일의 암시·떡밥(작품 정보·다른 씬 요약에 있는 사건은 화면 없이 말로 예고할 수 있다). 해소·정리 멘트 금지.
 - 최대 {max_n}곳.
 
@@ -124,9 +125,14 @@ def beats_block(beats: list[dict], span_index: dict[str, dict],
         j = jump_at.get(i)
         if j is not None:
             skipped = " / ".join(j.get("skipped_text") or [])
-            out.append(f"\n⚠ 점프: 비트 [{i - 1}] → [{i}] 사이 원본 {j['gap_sec']:.0f}초 건너뜀"
-                       + (f" · 건너뛴 대사: {skipped}" if skipped else "")
-                       + f" → **before_beat: {i} 내레이션 필수**")
+            if j.get("rewind"):
+                out.append(f"\n⚠ 되감기: 비트 [{i - 1}] → [{i}] — 원본에서 {j['gap_sec']:.0f}초 **앞으로** 돌아감"
+                           f" → **before_beat: {i} 내레이션 필수 · 시간을 되돌리는 표지 필수**"
+                           "(\"사실 시작은 몇 시간 전,\" / \"이야기는 …에서 시작됐죠,\")")
+            else:
+                out.append(f"\n⚠ 점프: 비트 [{i - 1}] → [{i}] 사이 원본 {j['gap_sec']:.0f}초 건너뜀"
+                           + (f" · 건너뛴 대사: {skipped}" if skipped else "")
+                           + f" → **before_beat: {i} 내레이션 필수**")
         r = rows_by_idx.get(b["scene"], {})
         # 인물 전환(2026-09-03): 앞 비트와 인물 구성이 다르면 표시만 — 쓸지·뭐라 쓸지는
         # 모델 몫(코드는 기록의 인물 목록이 달라졌다는 사실만 안다)
@@ -236,10 +242,24 @@ def split_sentences(text: str, max_chars: int = NAR_MAX_CHARS) -> list[str]:
     return out
 
 
+# 되감기 표지 어휘(2026-09-09): 되감기 점프의 다리 문장에 이 중 하나는 있어야 한다. 텍스트 지시만으로는
+# 모델이 장소 전환 문장으로 되돌아온다(형식으로 막는다 — reveal 규율과 같다). 넓게 잡되 '이전 시점'을
+# 말하는 표현만.
+REWIND_MARKERS = ("시간 전", "분 전", "일 전", "전으로", "앞서", "시작은", "시작된", "시작됐", "시작한",
+                  "거슬러", "사실", "처음", "그 전", "이야기는", "되돌", "돌아가", "돌아가면", "출발",
+                  "일찍이", "그날 아침", "그날 낮", "오전", "이 결과", "이 완판", "이 장면")
+
+
+def has_rewind_marker(text: str) -> bool:
+    t = " ".join(str(text or "").split())
+    return any(m in t for m in REWIND_MARKERS)
+
+
 def validate_narrations(resp: Any, n_beats: int, *,
                         max_chars: int = NAR_MAX_CHARS,
                         hard_max: int = NAR_HARD_MAX_CHARS,
                         required: set[int] | None = None,
+                        rewind: set[int] | None = None,
                         available: set[str] | None = None,
                         max_n: int = MAX_NARRATIONS,
                         min_total_sec: float | None = None,
@@ -305,6 +325,12 @@ def validate_narrations(resp: Any, n_beats: int, *,
         if ("before", bi) not in groups:
             problems.append(f"before_beat: {bi} 내레이션이 없다 — "
                             + ("도입(훅)은 필수" if bi == 0 else "점프 자리라 다리가 필수"))
+    for bi in sorted(rewind or ()):
+        g = groups.get(("before", bi))
+        if g is not None and not any(has_rewind_marker(ln) for ln in g["lines"]):
+            problems.append(f"before_beat: {bi} 는 되감기 자리인데 다리 문장에 시간을 되돌리는 표지가 없다 — "
+                            f"\"사실 시작은 몇 시간 전,\"·\"이야기는 …에서 시작됐죠,\" 처럼 이전 시점임을 말하라: "
+                            + " / ".join(repr(x) for x in g["lines"][:2]))
     if len(order) > max_n:
         notes.append(f"내레이션 {len(order)}곳 → 앞 {max_n}곳만")
         order = order[:max_n]

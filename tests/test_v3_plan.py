@@ -229,3 +229,35 @@ def test_rewind_cap_and_silent_run_split():
     assert sl.split_at_silent_runs({"scene": 0, "role": "x", "span_ids": ["b", "c"]}, idx) == [{"scene": 0, "role": "x", "span_ids": ["b", "c"]}]
     assert "무대사 구간" in nr.beats_block([{"scene": 0, "role": "climax", "span_ids": [], "silent": True}], {}, {0: {}}, [])
 
+
+
+def test_rewind_jump_requires_time_marker_in_bridge_narration():
+    """되감기 표지(2026-09-09, 가왕쇼 8화 실사고): 결과를 먼저 보여준 뒤 「신포시장으로 향하던 중,」만으로는
+    그것이 이전 과정임이 안 닿는다 — compute_jumps 가 되감기를 표시하고, 걸음 4 검증이 다리 문장의 시간 표지를 요구한다."""
+    allowed = _allowed()
+    resp = {"beats": [{"first": "sp0004", "last": "sp0005", "role": "hook"},
+                      {"first": "sp0001", "last": "sp0002", "role": "build"}]}
+    beats, pr, _ = sl.validate_beats(resp, IDX, allowed, budget_sec=30)
+    jumps = sl.compute_jumps(beats, IDX, gap_sec=0.5)
+    assert jumps and jumps[0]["before_beat"] == 1 and jumps[0].get("rewind") is True
+    # 앞으로 가는 점프에는 rewind 키가 없다
+    fwd, _, _ = sl.validate_beats({"beats": [{"first": "sp0001", "last": "sp0001", "role": "hook"},
+                                             {"first": "sp0004", "last": "sp0005", "role": "climax"}]},
+                                  IDX, allowed, budget_sec=30)
+    assert all("rewind" not in j for j in sl.compute_jumps(fwd, IDX, gap_sec=0.5))
+    # 편성표에 되감기 표지 요구가 실린다
+    blk = nr.beats_block(beats, IDX, {0: {}, 1: {}}, jumps)
+    assert "⚠ 되감기" in blk and "시간을 되돌리는 표지 필수" in blk
+    assert "되감기" in nr.PROMPT and "시작은 몇 시간 전" in nr.PROMPT
+    # 검증: 장소만 말하는 다리는 반려 · 시간 표지가 있으면 통과 · rewind 미지정이면 종전(회귀 0)
+    base = {"narrations": [{"before_beat": 0, "text": "완판 선언,", "closed": False},
+                           {"before_beat": 1, "text": "신포시장으로 향하던 중이었죠.", "closed": True}]}
+    obj, pr, _ = nr.validate_narrations(base, 2, required={0, 1}, rewind={1})
+    assert obj is None and any("되감기 자리" in p for p in pr)
+    ok = {"narrations": [{"before_beat": 0, "text": "완판 선언,", "closed": False},
+                         {"before_beat": 1, "text": "사실 시작은 몇 시간 전 차 안이었죠.", "closed": True}]}
+    assert nr.validate_narrations(ok, 2, required={0, 1}, rewind={1})[0] is not None
+    assert nr.validate_narrations(base, 2, required={0, 1})[0] is not None
+    assert nr.has_rewind_marker("이야기는 차 안에서 시작됐죠,") and not nr.has_rewind_marker("신포시장으로 향하던 중,")
+    src = (Path(__file__).resolve().parents[1] / "app" / "v3" / "story_flow" / "__init__.py").read_text(encoding="utf-8")
+    assert 'rewind={j["before_beat"] for j in (jumps or []) if j.get("rewind")}' in src

@@ -304,6 +304,7 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
                                                beat_ids=own_ids or None),
             tone_block=(f"\n{tone_block}\n" if tone_block else ""), reject_block=rej),
             lambda r: nr.validate_narrations(r, len(beats), required=required,
+                                             rewind={j["before_beat"] for j in (jumps or []) if j.get("rewind")},
                                              available=set(available), max_n=max_n,
                                              min_total_sec=min_total),
             gemini, audit, log, initial_reject=reask_note)
