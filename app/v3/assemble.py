@@ -620,7 +620,11 @@ def is_echo_fragment(words: list[dict], prev_text: str, gap_sec: float, *,
 
 
 import re as _re
-SPEECH_HINT = _re.compile(r"말한|말하|알린|알리|묻는|물어|대답|답한|설명|이야기|소리친|외친|외치|권한|안내|고지|제안|부탁|요청|인사|한숨|중얼")
+SPEECH_HINT = _re.compile(r"말한|말하|말을|알린|알리|묻는|물어|대답|답한|설명|이야기|소리친|외친|외치|권한|안내|고지|제안|부탁|요청|인사|"
+                          r"한숨|중얼|연호|유도|당부|응원|감사|호소|질문|멘트|진행")
+# 화면 묘사의 노래 근거는 **단어**만(따옴표 패턴 제외): 「관객들이 '최수호 최고다'를 연호」·「'전유진'을 외친다」의 따옴표가
+# 곡명으로 잡혀 무대 뒤 MC 멘트 8줄이 가사로 버려졌다(2026-09-09 ep8ex02). 곡명 패턴은 사건 단위 문장(창 확정)에서만.
+SCENE_SING_WORDS = _re.compile(r"부르|열창|노래|후렴|코러스|떼창|가창|듀엣|앙코르|곡|라이브|버스킹|가사")
 
 
 def span_sings(sp: dict) -> bool:
@@ -635,7 +639,7 @@ def span_sings(sp: dict) -> bool:
     어긋나 옆 단위로 넘어간 가사는 화면 묘사(「…를 열창한다」)가 잡는다."""
     from app.v3.singing import SING_HINT
     scene = str(sp.get("scene_script") or "")
-    if SING_HINT.search(scene):
+    if SCENE_SING_WORDS.search(scene):
         return True
     # 조각 화면 묘사가 발화(알린다·말한다·묻는다…)를 적고 노래 말이 없으면 노래 위 대사다 — 단위 문장이
     # 노래(즉석 라이브)라도 그 줄은 산다(ep8ex01 「남은 홍보 시간 15분 남았습니다」 제작진 고지가 무대 단위 안).

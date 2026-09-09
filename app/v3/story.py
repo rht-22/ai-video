@@ -207,6 +207,7 @@ def build_span_index(stage2_doc: dict, grid: dict) -> tuple[dict[str, dict], lis
                         "subject_pos": s.get("subject_pos"),
                         # 2단계 additive(2026-09-08, 갭 1·2·5) — 없으면 None/False
                         "screen_text": s.get("screen_text") or None,
+                        "screen_text_kind": s.get("screen_text_kind") or None,   # 정독 패스 종류(메시지/기사/댓글/문서/검색/기타)
                         "has_text": bool(s.get("has_text")),
                         "diegesis": s.get("diegesis") or None,
                         "is_claim": bool(s.get("is_claim")),

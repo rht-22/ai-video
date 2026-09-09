@@ -926,3 +926,17 @@ def test_reveal_beats_gate_end_and_front():
     src = (Path(__file__).resolve().parents[1] / "app" / "v3" / "story_flow" / "__init__.py").read_text(encoding="utf-8")
     assert "reveal_line=sl.reveal_line(_reveal)" in src and "reveal=_reveal, scene_purposes=_scene_purposes" in src
     assert '"reveal": topic["reveal"]' in src
+
+
+def test_hold_only_on_info_screen_kinds():
+    """정지(hold)는 자료화면 종류(메시지/기사/댓글/문서/검색)에만 — '기타'(방송 텔롭 「떡볶이 ♥너무 맛있어요♥」)는
+    정지 금지(2026-09-09 ep8ex02 훅 정지화면 실사고). 종류가 없는 초벌 조각은 종전대로 글자 유무."""
+    from app.v3.story_flow import cover as cv
+    idx = {"a": {"has_text": True, "screen_text": "떡볶이 / ♥너무 맛있어요♥", "screen_text_kind": "기타"},
+           "b": {"has_text": True, "screen_text": "엄마: 어디야?", "screen_text_kind": "메시지"},
+           "c": {"has_text": True, "screen_text": "…", "screen_text_kind": None},
+           "d": {"has_text": False, "screen_text": None, "screen_text_kind": None}}
+    assert not cv.is_info_screen(["a"], idx) and cv.is_info_screen(["b"], idx)
+    assert cv.is_info_screen(["c"], idx) and not cv.is_info_screen(["d"], idx) and cv.is_info_screen(["a", "b"], idx)
+    from app.v3 import story as st
+    assert "screen_text_kind" in (Path(__file__).resolve().parents[1] / "app" / "v3" / "story.py").read_text(encoding="utf-8")

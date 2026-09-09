@@ -278,3 +278,14 @@ def test_singing_hint_live_and_speech_scene_exception():
     assert assemble.span_sings({"meaning_content": unit, "scene_script": "상인과 윤수현이 옆에서 흥겹게 춤춘다."})   # 관객 컷 위 가사 — 단위가 잡는다
     assert not assemble.span_sings({"meaning_content": unit, "scene_script": "제작진이 홍보 시간이 15분 남았다고 알린다."})
     assert not assemble.span_sings({"meaning_content": "티켓 완판", "scene_script": ""})
+
+
+def test_scene_quotes_are_not_song_titles_and_chant_verbs_are_speech():
+    """ep8ex02(2026-09-09): 「관객들이 '최수호 최고다'를 연호하고 에녹이 마이크를 잡고 말한다」가 따옴표 패턴으로 노래 판정 →
+    무대 뒤 MC 멘트 8줄 증발. 화면 묘사는 단어 근거만 보고, 연호·유도·당부·응원·감사는 발화다."""
+    unit = "최수호가 '우연히'를 부르며 상인과 커플 댄스를 추고, 전원이 게릴라 콘서트 참석을 당부한다."
+    assert not assemble.span_sings({"meaning_content": unit, "scene_script": "관객들이 '최수호 최고다'를 연호하고 에녹이 마이크를 잡고 말한다."})
+    assert not assemble.span_sings({"meaning_content": unit, "scene_script": "에녹이 크게 한 번 더 외쳐보자고 유도한다."})
+    assert not assemble.span_sings({"meaning_content": unit, "scene_script": "전유진이 마이크를 잡고 진심 어린 감사를 표한다."})
+    assert assemble.span_sings({"meaning_content": unit, "scene_script": "최수호가 '우연히'를 부른다."})
+    assert assemble.span_sings({"meaning_content": unit, "scene_script": "세 사람이 손을 번쩍 들며 무대를 마무리한다."})   # 근거 없음 → 단위 문장

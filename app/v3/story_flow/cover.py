@@ -390,10 +390,23 @@ def run_probe(gemini, video: Path, out_dir: Path, tag: str, win: dict, L: float,
 
 # ── 덮개 확정 ──────────────────────────────────────────────────────────────
 
+# 정독 패스(screen_text.py)의 화면 종류 중 '자료화면'인 것 — 정지(hold)해서 읽게 할 가치가 있는 글자.
+# '기타'는 방송 텔롭·로고·예능 자막(「떡볶이 ♥너무 맛있어요♥」)이라 정지시키면 안 된다(2026-09-09 ep8ex02 훅 실사고:
+# 텔롭 위 0.7s 정지가 "첫 장면 뒷부분이 정지화면").
+INFO_SCREEN_KINDS = frozenset({"메시지", "기사", "댓글", "문서", "검색"})
+
+
 def is_info_screen(ids: list[str], span_index: dict[str, dict]) -> bool:
-    """자료화면(글자가 정보인 화면) 판정 — Stage 2 가 글자를 읽었거나 있다고 표시한 조각."""
-    return any((span_index.get(x) or {}).get("screen_text") or (span_index.get(x) or {}).get("has_text")
-               for x in ids)
+    """자료화면(글자가 정보인 화면) 판정 — Stage 2 가 글자를 읽었거나 있다고 표시한 조각 중, 정독 패스가 종류를
+    매겼으면 INFO_SCREEN_KINDS 만. 종류가 없는(초벌만 있는) 조각은 종전대로 글자 유무로 본다."""
+    for x in ids:
+        sp = span_index.get(x) or {}
+        if not (sp.get("screen_text") or sp.get("has_text")):
+            continue
+        kind = sp.get("screen_text_kind")
+        if kind is None or kind in INFO_SCREEN_KINDS:
+            return True
+    return False
 
 
 def stack_window(cover_ids: list[str], beats: list[dict], span_index: dict[str, dict],
