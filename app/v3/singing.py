@@ -116,7 +116,8 @@ def in_windows(t: float, windows) -> bool:
 # 음향 창은 **Stage 2 가 그 자리를 노래로 적었을 때만** 확정한다 — 음향이 경계를, 문장이
 # 정체를 댄다(textcheck 의 두 증인 규율). 노래 사건 단위는 거의 예외 없이 곡명('…')·
 # 열창·부른다·듀엣 을 적는다(실측 25/25 확정 창 전부 적중, BGM 대사 창 0 적중).
-SING_HINT = re.compile(r"부르|열창|노래|후렴|코러스|떼창|가창|듀엣|앙코르|곡|'[^']{1,30}'")
+# 2026-09-09 ep8ex01: 「즉석 라이브를 펼치며」로 적힌 노래 사건 단위가 근거 없음으로 기각돼 가사 2줄이 새어 나갔다.
+SING_HINT = re.compile(r"부르|열창|노래|후렴|코러스|떼창|가창|듀엣|앙코르|곡|라이브|버스킹|'[^']{1,30}'")
 
 
 def confirm_windows(windows, rows: list[dict]) -> tuple[list[tuple[float, float]], list[dict]]:

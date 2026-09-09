@@ -267,3 +267,14 @@ def test_skip_window_keeps_lines_whose_stage2_record_has_no_singing_evidence():
     # 배선: 파이프라인이 kept 줄을 따로 세고 기록한다
     src = (Path(__file__).resolve().parents[1] / "app" / "v3" / "pipeline.py").read_text(encoding="utf-8")
     assert "kept_in_window=len(_kept_in)" in src and "노래 창 안이지만 유지" in src
+
+
+def test_singing_hint_live_and_speech_scene_exception():
+    """ep8ex01(2026-09-09): 「즉석 라이브를 펼치며」 단위가 노래 근거 없음으로 기각돼 가사가 샜다 → SING_HINT 에
+    라이브·버스킹. 반대로 노래 단위 안의 제작진 고지(「15분 남았습니다」)는 조각 화면 묘사가 발화(알린다)를 적으면 산다."""
+    assert singing.SING_HINT.search("거리에서 신나는 즉석 라이브를 펼치며") and singing.SING_HINT.search("버스킹 무대")
+    unit = "박서진과 윤수현이 거리에서 신나는 즉석 라이브를 펼치며 호응을 이끌어낸다"
+    assert assemble.span_sings({"meaning_content": unit, "scene_script": "박서진이 '첫눈에 반해버린 사람아'를 부른다."})
+    assert assemble.span_sings({"meaning_content": unit, "scene_script": "상인과 윤수현이 옆에서 흥겹게 춤춘다."})   # 관객 컷 위 가사 — 단위가 잡는다
+    assert not assemble.span_sings({"meaning_content": unit, "scene_script": "제작진이 홍보 시간이 15분 남았다고 알린다."})
+    assert not assemble.span_sings({"meaning_content": "티켓 완판", "scene_script": ""})

@@ -534,6 +534,7 @@ def prefer_heard(words: list[dict], heard: str, *, max_prob: float = HEARD_PREFE
 # 그중 「인천의 아들입니다」→「전유진 많이 투표해 주세요」처럼 전혀 다른 문장(청취가 옆 조각을 들었거나
 # 요약)이 섞여 있었다. 0.5 는 「꼬물들」 span(0.68)은 지나고 위 사례(0.1대)는 막는 자리.
 SCENE_SIM_MIN = 0.5
+SCENE_SIM_MIN_MULTI = 0.35   # 화면 어간 2개 이상 · whisper ≤3어절 · 청취 ≤2배 일 때
 
 
 def scene_backed_heard(words: list[dict], heard: str, scene_script: str, *,
@@ -559,14 +560,21 @@ def scene_backed_heard(words: list[dict], heard: str, scene_script: str, *,
     if a == b or len(b) < len(a) * min_len_ratio:
         return None
     sim = difflib.SequenceMatcher(None, a, b).ratio()
-    if sim < min_similarity:
-        return None
     from app.v3.textcheck import scene_stem
+    stems: list[str] = []
     for tok in heard.split():
         stem = scene_stem(_HEARD_CMP_STRIP.sub("", tok), scene, wtxt, exclude)
-        if stem:
-            return {"whisper": wtxt, "heard": heard, "stem": stem, "similarity": round(sim, 2)}
-    return None
+        if stem and stem not in stems:
+            stems.append(stem)
+    if not stems:
+        return None
+    # 짧은 span(whisper ≤3어절)은 단어 둘만 달라도 유사도가 0.4 대로 떨어진다(「5호 30초입니다」↔「홍보 30분
+    # 남았습니다」 0.44). 어간이 **둘 이상** 화면에 있고 청취가 whisper 의 2배를 안 넘으면(긴 문장을 짧은
+    # 조각에 욱여넣는 「50표!」→8어절 방지) 하한을 SCENE_SIM_MIN_MULTI 로 낮춘다. 드라이런: 3건만 추가로 걸림.
+    multi = len(stems) >= 2 and len(ws) <= 3 and len(b) <= 2 * len(a)
+    if sim < (SCENE_SIM_MIN_MULTI if multi else min_similarity):
+        return None
+    return {"whisper": wtxt, "heard": heard, "stem": stems[0], "stems": stems, "similarity": round(sim, 2)}
 
 
 # 메아리 조각(2026-09-09, 가왕쇼 8화 「들고」 실사고): 「저희 300장 들고 왔어요」 바로 뒤에 whisper 가
@@ -593,6 +601,10 @@ def is_echo_fragment(words: list[dict], prev_text: str, gap_sec: float, *,
     return len(t) >= 1 and t in prev_toks
 
 
+import re as _re
+SPEECH_HINT = _re.compile(r"말한|말하|알린|알리|묻는|물어|대답|답한|설명|이야기|소리친|외친|외치|권한|안내|고지|제안|부탁|요청|인사|한숨|중얼")
+
+
 def span_sings(sp: dict) -> bool:
     """이 조각이 노래인가 — Stage 2 의 두 기록(사건 단위 문장 · 조각 화면 묘사) 중 하나라도 노래
     근거(`singing.SING_HINT`)를 말하면 참. 순수.
@@ -604,8 +616,14 @@ def span_sings(sp: dict) -> bool:
     화면 묘사에 노래 근거가 있어야 버린다. 관객 컷 위의 가사는 사건 단위 문장이 잡고, 단위 경계가
     어긋나 옆 단위로 넘어간 가사는 화면 묘사(「…를 열창한다」)가 잡는다."""
     from app.v3.singing import SING_HINT
-    return bool(SING_HINT.search(str(sp.get("meaning_content") or ""))
-                or SING_HINT.search(str(sp.get("scene_script") or "")))
+    scene = str(sp.get("scene_script") or "")
+    if SING_HINT.search(scene):
+        return True
+    # 조각 화면 묘사가 발화(알린다·말한다·묻는다…)를 적고 노래 말이 없으면 노래 위 대사다 — 단위 문장이
+    # 노래(즉석 라이브)라도 그 줄은 산다(ep8ex01 「남은 홍보 시간 15분 남았습니다」 제작진 고지가 무대 단위 안).
+    if scene and SPEECH_HINT.search(scene):
+        return False
+    return bool(SING_HINT.search(str(sp.get("meaning_content") or "")))
 
 
 def _lines_from_text(text: str, t_in: float, t_out: float) -> list[dict]:
@@ -810,14 +828,21 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                 _heard = str(sp.get("heard_text") or "")
                 if cast_names or _heard:
                     from app.v3.textcheck import fix_span_words
+                    _raw_span = list(in_span)
                     in_span, _fx = fix_span_words(in_span, cast_names or [], _heard,
                                                   scene_script=str(sp.get("scene_script") or ""),
                                                   exclude=_scene_excl)
                     if _fx and name_fix_log is not None:
                         name_fix_log.extend(dict(f, span_id=sid) for f in _fx)
-                    if not any(f.get("kind") == "scene" for f in _fx):
-                        _sb = scene_backed_heard(in_span, _heard, _neighbor_scene(sid),
-                                                 exclude=_scene_excl)
+                    # span 폴백은 **교정 전** whisper 로 잰다(어절 교정이 「홍보」를 넣고 나면 그 어간이 증거에서
+                    # 빠져 「홍보 30초입니다」 반쪽 교정으로 끝난다). 어절 교정이 있었으면 어간 2개 이상일 때만
+                    # span 채택이 이긴다(하나면 타임코드 보존 쪽이 낫다).
+                    _word_fixed = any(f.get("kind") == "scene" for f in _fx)
+                    _sb = scene_backed_heard(_raw_span, _heard, _neighbor_scene(sid), exclude=_scene_excl)
+                    if _sb is not None and _word_fixed and not (
+                            len(_raw_span) <= 3 and len(_sb.get("stems") or []) >= 2):
+                        _sb = None            # 긴 span 은 어절 교정(타임코드 보존)이 이긴다
+                    if True:
                         if _sb is not None:
                             src = "heard"
                             if name_fix_log is not None:

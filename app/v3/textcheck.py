@@ -383,6 +383,7 @@ def arbitrate_aligned(token: str, piece: dict | None, *,
 
 
 SCENE_STEM_MIN_CHARS = 2   # 화면 묘사 증인의 어간 최소 길이(어절 앞부분, 긴 쪽부터)
+_HANGUL_DIGIT = _re.compile(r"[가-힣0-9]+")
 
 
 def scene_stem(piece_text: str, scene_script: str, span_text: str,
@@ -430,7 +431,8 @@ def arbitrate_scene(token: str, piece: dict | None, *, scene_script: str, span_t
     # 두 어절을 붙인 글자가 되어 어절 하나로 못 쓴다(드라이런 가사 구간 3건).
     if raw == heard_piece or len(raw) < 2 or raw in ALIGNED_STOPWORDS or not at_start or not at_end:
         return None
-    if not (_is_hangul(raw) and _is_hangul(heard_piece)) or len(raw) != len(heard_piece):
+    # 한글·숫자 섞인 어절도 본다(「5호」↔「홍보」·「30초」↔「30분」 — aligned 의 한글 전용 조건과 다른 점)
+    if not (_HANGUL_DIGIT.fullmatch(raw) and _HANGUL_DIGIT.fullmatch(heard_piece)) or len(raw) != len(heard_piece):
         return None
     stem = scene_stem(heard_piece, scene_script, span_text, exclude)
     if not stem:

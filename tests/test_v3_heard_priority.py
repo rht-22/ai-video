@@ -192,3 +192,37 @@ def test_single_word_span_uses_neighbor_scene_and_extends_into_missed_silent_lea
     idx2, _ = st.build_span_index(s2, grid)
     out2 = assemble.word_subtitles(tl, idx2, grid["words"])
     assert out2[0]["text"] == "왔잖아요?"
+
+
+def test_scene_witness_digit_words_and_short_span_multi_stem():
+    """「5호 30초입니다」(2026-09-09 ep8ex01 훅 자막): 숫자 섞인 어절도 어절 단위 증인이 보고(「5호」→「홍보」), 짧은
+    span(≤3어절)에서 화면 어간이 둘(홍보·30분)이면 유사도 0.44 여도 span 채택이 어절 교정을 이긴다(반쪽 교정 방지)."""
+    from app.v3 import textcheck as tc
+    ws = _words(0, 1, "5호 30초입니다.", 0.6)
+    heard, scene = "홍보 30분 남았습니다.", "제작진이 홍보 시간이 30분 남았다고 알린다."
+    pieces = tc.align_tokens_to_heard([w["text"] for w in ws], heard)
+    assert tc.arbitrate_scene("5호", pieces[0], scene_script=scene, span_text="5호 30초입니다.") == ("홍보", "홍보")
+    hit = assemble.scene_backed_heard(ws, heard, scene)
+    assert hit and hit["similarity"] < 0.5 and set(hit["stems"]) >= {"홍보", "30분"}
+    # 어간 하나뿐이면 0.5 하한 그대로 · 긴 span(4어절+)은 완화 없음 · 청취가 2배 넘게 길면 완화 없음
+    assert assemble.scene_backed_heard(ws, heard, "제작진이 홍보 시간을 알린다.") is None
+    assert assemble.scene_backed_heard(_words(0, 2, "5호 30초입니다 빨리 뿌리세요", 0.6), "홍보 30분 남았습니다 빨리 뿌리세요",
+                                       scene)["similarity"] >= 0.5
+    assert assemble.scene_backed_heard(_words(0, 1, "50표!", 0.6), "홍지윤 씨는 뺏은 표가 총 50표 홍보 30분", scene) is None
+    # word_subtitles: span 채택이 이겨 「홍보 30분 남았습니다」 통째로(「홍보 30초입니다」 반쪽 금지)
+    grid = _mk_grid([(0.0, 1.0, True, "5호 30초입니다."), (1.0, 2.0, True, "우리 어떡하지?")])
+    grid["words"] = ws + _words(1, 2, "우리 어떡하지?", 0.9)
+    s2 = _mk_stage2(grid, [(0, 1, 4, "마감 고지")])
+    for seq in s2["sequences"]:
+        for ch in seq["chunks"]:
+            for m in ch["meanings"]:
+                for sp in m["spans"]:
+                    sp["text_source"] = "transcript"
+                    sp["heard_text"], sp["scene_script"] = ((heard, scene) if sp["span_id"] == "sp0000"
+                                                             else ("우리 어떡하지?", "윤수현이 한숨을 쉰다."))
+    idx, _ = st.build_span_index(s2, grid)
+    tl = [{"clip_start_sec": 0.0, "clip_end_sec": 2.0, "use_original_audio": True, "span_ids": ["sp0000", "sp0001"]}]
+    log: list[dict] = []
+    out = assemble.word_subtitles(tl, idx, grid["words"], name_fix_log=log)
+    assert " ".join(s["text"] for s in out).startswith("홍보 30분 남았습니다") and "30초" not in " ".join(s["text"] for s in out)
+    assert [f["kind"] for f in log] == ["scene", "scene_span"]
