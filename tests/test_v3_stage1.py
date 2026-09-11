@@ -380,3 +380,25 @@ def test_pipeline_grid_smoke(tmp_path, monkeypatch):
     assert "grid" in steps2 and "resume" in steps2        # 통째 덮어쓰기 금지(리뷰 high)
     assert next(s for s in rl2["steps"] if s["step"] == "grid")[
         "transcribe_failed_windows"] == [[3.0, 4.0]]
+
+
+def test_upload_video_retries_transient_files_api_failures(tmp_path):
+    """2026-09-10: Files API 가 같은 파일에 'failed to be processed'·500 을 간헐적으로 낸다 — max_retries(3)보다
+    많이(FILES_UPLOAD_ATTEMPTS) 재시도해 ACTIVE 를 받으면 성공, 전부 실패하면 종전 메시지로 실패."""
+    import types as _t
+    from app.v3 import seq_analyze as sa
+    clip = tmp_path / "c.mp4"; clip.write_bytes(b"x")
+    states = iter(["FAILED", "FAILED", "FAILED", "ACTIVE"])
+
+    class _F:
+        def __init__(self, st): self.state = _t.SimpleNamespace(name=st); self.name = "files/x"; self.uri = "u"
+    class _Files:
+        def upload(self, file): return _F(next(states))
+        def get(self, name): return _F("ACTIVE")
+    g = _t.SimpleNamespace(client=_t.SimpleNamespace(files=_Files()), config=_t.SimpleNamespace(max_retries=3))
+    sa.time.sleep = lambda *_: None
+    up = sa._upload_video(g, clip, log=lambda *a: None)
+    assert up.state.name == "ACTIVE" and sa.FILES_UPLOAD_ATTEMPTS >= 5
+    states = iter(["FAILED"] * 10)
+    with pytest.raises(RuntimeError, match="스캔 프록시 업로드 실패"):
+        sa._upload_video(g, clip, log=lambda *a: None)

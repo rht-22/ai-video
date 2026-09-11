@@ -341,12 +341,20 @@ def hint_mismatch(hints: dict, final_exc: dict) -> list[dict]:
 
 # ── Gemini 호출 ─────────────────────────────────────────────────────────────
 
+FILES_UPLOAD_ATTEMPTS = 6          # Files API 간헐 FAILED/5xx 대비(2026-09-10)
+FILES_UPLOAD_BACKOFF_MAX_SEC = 8
+
+
 def _upload_video(gemini, video_path: Path, *, log=print):
     """Files API 업로드 + PROCESSING 폴링 — analyze_chunk 인라인 패턴의 추출판."""
     safe_path, is_temp = _safe_upload_path(Path(video_path))
     try:
         last_err: Exception | None = None
-        for attempt in range(gemini.config.max_retries):
+        # 재시도 상한(2026-09-10): Files API 가 같은 파일을 두고도 'failed to be processed'(code 13)·폴링 500 을
+        # 간헐적으로 낸다(실측: 같은 300KB 프로브 클립 3회 중 2회 FAILED → 3회째 ACTIVE). 서버 쪽 흔들림이라
+        # max_retries(3)보다 길게, 짧은 간격으로 더 두드린다 — 한 번 실패가 watch_trim·덮개 프로브를 통째로 폴백시켰다.
+        attempts = max(int(gemini.config.max_retries), FILES_UPLOAD_ATTEMPTS)
+        for attempt in range(attempts):
             try:
                 uploaded = gemini.client.files.upload(file=str(safe_path))
                 while uploaded.state.name == "PROCESSING":
@@ -357,8 +365,8 @@ def _upload_video(gemini, video_path: Path, *, log=print):
                 return uploaded
             except Exception as e:  # noqa: BLE001
                 last_err = e
-                log(f"  [v3/stage1] 업로드 재시도 {attempt + 1}: {e}")
-                time.sleep(2 ** attempt)
+                log(f"  [v3/stage1] 업로드 재시도 {attempt + 1}/{attempts}: {e}")
+                time.sleep(min(2 ** attempt, FILES_UPLOAD_BACKOFF_MAX_SEC))
         raise RuntimeError(f"스캔 프록시 업로드 실패: {last_err}")
     finally:
         if is_temp:

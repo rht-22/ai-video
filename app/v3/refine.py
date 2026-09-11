@@ -381,6 +381,7 @@ def _cut_probe_clip(ffmpeg: str, video: Path, t0: float, t1: float,
     subprocess.run(
         [ffmpeg, "-y", "-ss", f"{t0:.3f}", "-to", f"{t1:.3f}", "-i", str(video),
          "-vf", f"scale=-2:{PROBE_HEIGHT},fps={PROBE_FPS}",
+         "-map", "0:v:0", "-dn",          # 데이터 스트림(tmcd 타임코드) 제외 — Files API 가 싫어할 여지 제거(2026-09-10)
          "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-an",
          str(out)], check=True, capture_output=True)
 

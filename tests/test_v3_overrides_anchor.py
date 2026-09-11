@@ -107,3 +107,21 @@ def test_override_subtitles_overlap_is_clamped():
             {"start_sec": 3.0, "end_sec": 4.0, "text": "셋", "source_time_sec": 13.0}]
     _p, segs, _r, _rec = ov.apply_overrides_to_plan({"schema": "edit_overrides/v3", "subtitles": subs}, plan, grid, [], {})
     assert [(s["start_sec"], s["end_sec"]) for s in segs] == [(0.0, 1.45), (1.45, 3.0), (3.0, 4.0)]
+
+
+def test_cue_inheritance_prefers_same_beat_clip_when_source_windows_overlap():
+    """2026-09-11 ep01x02 실사고: 비트 2 덮개(1529.96~1532.2)의 끝 1532.2 가 앞 비트 1 클립(1532.05~1539.0)에도
+    들어 있어, 전체 타임라인 첫 일치(편집본 앞쪽)를 끝으로 잡고 시작보다 앞서 cue 를 버렸다. beat 키로 같은
+    비트의 클립을 먼저 본다(finalize_cues 와 같은 규율)."""
+    from app.v3.overrides import apply_overrides_to_plan
+    tl = [{"clip_start_sec": 1532.05, "clip_end_sec": 1539.0, "use_original_audio": True, "beat": 1, "span_ids": ["a"]},
+          {"clip_start_sec": 1529.96, "clip_end_sec": 1532.2, "use_original_audio": False, "beat": 2, "cover": "designated", "span_ids": ["b"]}]
+    plan = {"timeline": tl, "source_fps": 24.0, "layout": {"top_title": "t"}}
+    grid = {"span_candidates": [{"id": "a", "t_in": 1532.05, "t_out": 1539.0}, {"id": "b", "t_in": 1529.96, "t_out": 1532.2}]}
+    cue = {"text": "앞집 수정의 인맥을 노렸죠,", "source_time_sec": 1530.06, "source_end_sec": 1532.2,
+           "start_sec": 7.05, "end_sec": 9.19, "duration_sec": 2.14, "beat": 2}
+    res = {"tts_cue_files": [{"path": "x.mp3", "cue": cue}]}
+    _, _, res2, rec = apply_overrides_to_plan({"schema": "edit_overrides/v3", "title": {"top_title": "n"}}, plan, grid, [], res)
+    assert rec["cues_dropped"] == [] and len(res2["tts_cue_files"]) == 1
+    c = res2["tts_cue_files"][0]["cue"]
+    assert abs(c["start_sec"] - (6.95 + 0.1)) < 0.05 and c["end_sec"] > c["start_sec"]   # 비트 2 클립(편집본 6.95~) 안

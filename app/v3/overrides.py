@@ -165,7 +165,14 @@ def apply_overrides_to_plan(ov: dict, plan: dict, grid: dict,
         cue = dict(f.get("cue") or {})
         if cue.get("source_time_sec") is None:
             continue
-        e0 = assemble.to_edited_sec(float(cue["source_time_sec"]), offsets)
+        # 같은 비트의 클립을 먼저 본다(2026-09-11 ep01x02 「앞집 수정의 인맥을」 드랍 실사고 — finalize_cues 와 같은 규율):
+        # 덮개 1529.96~1532.2 의 끝 1532.2 가 **앞 비트** 클립 1532.05~1539.0 에도 들어 있어 첫 일치(편집본 18s)를
+        # 끝으로 잡고 시작(25s)보다 앞서 버렸다. beat 키가 있으면 그 비트의 클립에서 먼저 찾고, 없을 때만 전체.
+        _own = [o for o, c in zip(offsets, new_plan["timeline"])
+                if cue.get("beat") is not None and c.get("beat") == cue.get("beat")]
+        e0 = (assemble.to_edited_sec(float(cue["source_time_sec"]), _own) if _own else None)
+        if e0 is None:
+            e0 = assemble.to_edited_sec(float(cue["source_time_sec"]), offsets)
         # 소스 끝은 cue 가 든 source_end_sec 이 정본(2026-09-09 ep8ex01 실사고): 붙잡은 덮개(hold)는 편집본
         # 길이(duration_sec)가 소스 창보다 hold_sec 만큼 길어 start+duration 이 클립 끝을 넘고, kind="end"
         # 조회가 None → 훅 내레이션이 통째로 드랍됐다(자막 한 줄 고친 재렌더에서 첫 내레이션이 사라짐).
@@ -175,7 +182,9 @@ def apply_overrides_to_plan(ov: dict, plan: dict, grid: dict,
             src_end = float(cue["source_time_sec"]) + float(cue.get("duration_sec") or 0)
         # 끝 좌표는 kind="end"((s, e] 반개구간) — 덮개 클립처럼 cue 끝이 클립 끝과 동률이면
         # 시작용 [s, e) 로는 못 찾아 엔딩 내레이션이 통째로 드랍됐다(2026-09-07 실사고).
-        e1 = assemble.to_edited_sec(src_end, offsets, kind="end")
+        e1 = (assemble.to_edited_sec(src_end, _own, kind="end") if _own else None)
+        if e1 is None:
+            e1 = assemble.to_edited_sec(src_end, offsets, kind="end")
         if e0 is not None and e1 is None:
             # 옛 cue(source_end_sec 없음)가 붙잡은 덮개 위에 있으면 start+duration 이 hold_sec 만큼 클립 끝을
             # 넘는다 — 시작이 든 클립 끝을 넘는 양이 HOLD_OVERSHOOT_TOL 이내면 편집본 길이를 보존한다.
