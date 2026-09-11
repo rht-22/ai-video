@@ -226,7 +226,12 @@ def assemble_edit_plan(story_doc: dict, span_index: dict[str, dict], *,
                 "clip_end_sec": round(t1, 3),
                 "subtitle": "",
                 "use_original_audio": group[0] not in muted,
-                "reframe": {"mode": "center"},
+                # 사람 크롭 고정(2026-09-11): 비트 `crop_x`(소스 px, 선택 `crop_y`)가 있으면 그 비트의 클립은
+                # 화자 추적·피사체 앵커 대신 그 자리를 본다(finalize 가 mode=fixed 를 소비). 검출이 못 잡는
+                # 멀리 있는 작은 인물(ep01x03 「너 바람피니?」 직후 남편, x≈570·얼굴 20px)을 사람이 지정하는 통로.
+                "reframe": ({"mode": "fixed", "x": float(beat["crop_x"]),
+                             **({"y": float(beat["crop_y"])} if beat.get("crop_y") is not None else {})}
+                            if beat.get("crop_x") is not None else {"mode": "center"}),
                 "span_ids": list(group),
                 "beat": _beat_no,      # additive(4단계) — 훅 회수 시 cue·자막 좌표의 클립 신원
             }

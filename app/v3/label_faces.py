@@ -113,14 +113,47 @@ def _overlaps(a, b, gap: float = FACE_GAP_PX) -> bool:
     return not (a[2] + gap <= b[0] or b[2] + gap <= a[0] or a[3] + gap <= b[1] or b[3] + gap <= a[1])
 
 
+def subtitle_obstacles(*, canvas_w: int, canvas_h: int, sub_margin_v: int, sub_size: int,
+                       tts_margin_v: int, tts_size: int, emph_scale: float = 1.45) -> list[tuple[float, float, float, float]]:
+    """자막·내레이션이 놓이는 전폭 띠(캔버스 px) — 라벨이 피해야 할 장애물(2026-09-10 「(눈물의 다짐)」 실사고:
+    얼굴 회피가 '아래' 후보로 옮기면서 강조 자막 「우리 졸라 잘 살자」 위에 얹혔다). 대사는 강조 배율 상한만큼 키운
+    한 줄, 내레이션은 두 줄 블록. margin_v 는 ASS 아래 여백(캔버스 하단 기준)."""
+    from app.modules.subtitle_region import estimate_subtitle_height
+    out = []
+    sub_h = estimate_subtitle_height(int(round(int(sub_size) * float(emph_scale))), lines=1)
+    out.append((0.0, float(canvas_h - int(sub_margin_v) - sub_h), float(canvas_w), float(canvas_h - int(sub_margin_v))))
+    tts_h = estimate_subtitle_height(int(tts_size), lines=2)
+    out.append((0.0, float(canvas_h - int(tts_margin_v) - tts_h), float(canvas_w), float(canvas_h - int(tts_margin_v))))
+    return out
+
+
 def avoid_faces(label: dict, faces: list[tuple[float, float, float, float]], geom, *,
-                canvas_w: int = 1080, canvas_h: int = 1920) -> tuple[dict, dict | None]:
+                canvas_w: int = 1080, canvas_h: int = 1920,
+                obstacles: list[tuple[float, float, float, float]] | None = None) -> tuple[dict, dict | None]:
     """라벨 하나를 얼굴 박스들(캔버스 px)에서 비켜 놓는다. 순수.
+    obstacles(2026-09-10): 자막·내레이션 띠 — 겹치면 얼굴과 같이 '겹침'으로 세고 후보 자리도 피한다.
     반환 (라벨, 기록|None). 기록 = {hit, moved, from, to, why}."""
+    obstacles = list(obstacles or [])
     box = label_box(label, canvas_w=canvas_w, canvas_h=canvas_h)
     hit = [f for f in faces if _overlaps(box, f)]
-    if not hit:
+    hit_obs = [o for o in obstacles if _overlaps(box, o)]
+    if not hit and not hit_obs:
         return label, None
+    if not hit:
+        # 얼굴은 안 겹치고 자막 띠만 겹친다 — 띠 바로 위로 올린다(밴드 안이면)
+        half_w, half_h = (box[2] - box[0]) / 2, (box[3] - box[1]) / 2
+        top = min(o[1] for o in hit_obs)
+        cy = top - FACE_GAP_PX - 2 - half_h
+        cx = (box[0] + box[2]) / 2
+        if geom.top + BAND_PAD_PX + half_h <= cy:
+            cand = (cx - half_w, cy - half_h, cx + half_w, cy + half_h)
+            if not any(_overlaps(cand, f) for f in faces) and not any(_overlaps(cand, o) for o in obstacles):
+                moved = {**label, "y": round(cy / canvas_h, 4)}
+                return moved, {"hit": 0, "hit_subtitle": len(hit_obs), "moved": True,
+                               "from": [label.get("x"), label.get("y")], "to": [moved["x"], moved["y"]],
+                               "why": "above-subtitle"}
+        return label, {"hit": 0, "hit_subtitle": len(hit_obs), "moved": False,
+                       "from": [label.get("x"), label.get("y")], "to": None, "why": "자막 띠 위 자리 없음 — 그대로 둠(기록)"}
     half_w, half_h = (box[2] - box[0]) / 2, (box[3] - box[1]) / 2
     lo_y, hi_y = geom.top + BAND_PAD_PX + half_h, geom.bottom - BAND_PAD_PX - half_h
     lo_x, hi_x = half_w, canvas_w - half_w
@@ -144,7 +177,7 @@ def avoid_faces(label: dict, faces: list[tuple[float, float, float, float]], geo
         if not (lo_y <= cy <= hi_y):
             continue
         cand = (cx - half_w, cy - half_h, cx + half_w, cy + half_h)
-        if any(_overlaps(cand, f) for f in faces):
+        if any(_overlaps(cand, f) for f in faces) or any(_overlaps(cand, o) for o in obstacles):
             continue
         moved = {**label, "x": round(cx / canvas_w, 4), "y": round(cy / canvas_h, 4)}
         return moved, {"hit": len(hit), "moved": True, "from": [label.get("x"), label.get("y")],
@@ -154,7 +187,9 @@ def avoid_faces(label: dict, faces: list[tuple[float, float, float, float]], geo
 
 
 def avoid_faces_for_labels(labels: list[dict], draft_path: Path, geom, *,
-                           canvas_w: int = 1080, canvas_h: int = 1920, log=print) -> tuple[list[dict], list[dict]]:
+                           canvas_w: int = 1080, canvas_h: int = 1920,
+                           obstacles: list[tuple[float, float, float, float]] | None = None,
+                           log=print) -> tuple[list[dict], list[dict]]:
     """렌더 직전 한 번 — 라벨마다 창 안 표본 프레임(시작 직후·중간)의 얼굴 합집합으로 회피.
     결정적(같은 초안·같은 라벨 = 같은 결과)이라 체크포인트에 안 남긴다. 반환 (라벨, 기록)."""
     if not labels:
@@ -171,7 +206,7 @@ def avoid_faces_for_labels(labels: list[dict], draft_path: Path, geom, *,
         for r in SAMPLE_OFFSETS:
             for f in face_boxes_at(Path(draft_path), a + (z - a) * r):
                 faces.append(draft_box_to_canvas(f, dw, dh, geom))
-        moved, rec = avoid_faces(lb, faces, geom, canvas_w=canvas_w, canvas_h=canvas_h)
+        moved, rec = avoid_faces(lb, faces, geom, canvas_w=canvas_w, canvas_h=canvas_h, obstacles=obstacles)
         out.append(moved)
         if rec:
             rec = {**rec, "text": lb.get("text"), "start_sec": a, "faces": len(faces)}

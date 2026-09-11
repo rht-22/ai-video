@@ -221,3 +221,26 @@ def test_emphasis_pairs_with_zoom_and_sfx(tmp_path):
     assert len(out) == 2 and all(Path(o["path"]).exists() for o in out)
     assert all(o["_label"]["kind"] == "emphasis" and abs(o["_label"]["at"] - o["start_sec"]) < 0.2 for o in out)
     assert "한 쌍이다" in stage4.build_style_prompt(stage4.RECAP_PRESET, {"beats": []})
+
+
+def test_fixed_crop_from_beat_crop_x(tmp_path):
+    """2026-09-11 ep01x03: 훅 직후 남편(먼 인물, 검출 0)에게 컷을 맞추려 비트 crop_x(소스 px) → 클립 reframe
+    mode=fixed → finalize.fixed_crop_map 이 고정 키프레임 맵을 낸다(그림 사각형·밴드 크롭 안 클램프)."""
+    import json
+    from app.v3 import finalize
+    tl = [{"role": "build", "clip_start_sec": 10.0, "clip_end_sec": 12.0, "reframe": {"mode": "fixed", "x": 570.0}},
+          {"role": "build", "clip_start_sec": 12.0, "clip_end_sec": 14.0, "reframe": {"mode": "center"}}]
+    (tmp_path / "checkpoint_probe.json").write_text(json.dumps({"width": 1920, "height": 1080}), encoding="utf-8")
+    m, audit = finalize.fixed_crop_map(tl, output_dir=tmp_path, aspect_ratio="24:23",
+                                       picture={"x": 0, "y": 60, "w": 1920, "h": 960}, video_path=tmp_path / "x.mp4", log=lambda *a: None)
+    assert list(m) == ["build_0"] and audit[0]["x"] == 570.0
+    rows = json.loads(m["build_0"].read_text(encoding="utf-8"))
+    assert [r["time_sec"] for r in rows] == [10.0, 12.0] and rows[0]["x_center"] == 570.0
+    assert rows[0]["crop_w"] / rows[0]["crop_h"] == pytest.approx(24 / 23, rel=0.01)
+    # x 가 그림 밖이면 크롭 반폭으로 클램프
+    tl2 = [{"role": "hook", "clip_start_sec": 0.0, "clip_end_sec": 1.0, "reframe": {"mode": "fixed", "x": 10.0}}]
+    m2, a2 = finalize.fixed_crop_map(tl2, output_dir=tmp_path, aspect_ratio="24:23",
+                                     picture={"x": 0, "y": 60, "w": 1920, "h": 960}, video_path=tmp_path / "x.mp4", log=lambda *a: None)
+    assert a2[0]["x"] == json.loads(m2["hook_0"].read_text())[0]["crop_w"] / 2
+    assert finalize.fixed_crop_map([{"role": "b", "clip_start_sec": 0, "clip_end_sec": 1}], output_dir=tmp_path,
+                                   aspect_ratio="24:23", picture=None, video_path=tmp_path / "x.mp4") == ({}, [])

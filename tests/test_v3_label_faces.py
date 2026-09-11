@@ -42,3 +42,27 @@ def test_avoid_faces_for_labels_without_draft_is_noop(tmp_path):
     labels = [{"text": "x", "start_sec": 0.0, "end_sec": 1.0, "x": 0.5, "y": 0.3}]
     out, rec = lf.avoid_faces_for_labels(labels, tmp_path / "none.mp4", GEOM, log=lambda *a: None)
     assert out == labels and rec == []
+
+
+def test_avoid_faces_treats_subtitle_band_as_obstacle():
+    """2026-09-10 「(눈물의 다짐)」 실사고: 얼굴 회피 '아래' 후보가 강조 자막 위에 얹혔다 — 자막·내레이션 띠는
+    장애물이다(후보 자리에서 피하고, 띠만 겹치는 라벨은 띠 위로 올린다)."""
+    from app.v3.label_faces import avoid_faces, label_box, subtitle_obstacles
+    obs = subtitle_obstacles(canvas_w=1080, canvas_h=1920, sub_margin_v=518, sub_size=90,
+                             tts_margin_v=518, tts_size=90)
+    assert len(obs) == 2 and all(o[0] == 0.0 and o[2] == 1080.0 for o in obs)
+    sub_top = min(o[1] for o in obs)
+    # 얼굴이 밴드 위쪽을 넓게 차지 → 종전엔 '아래'로 갔다. 이제 아래 후보가 자막 띠와 겹치면 건너뛴다.
+    lb = {"text": "(눈물의 다짐)", "x": 0.5, "y": 0.4, "size": 52, "start_sec": 0, "end_sec": 1}
+    faces = [(200.0, 440.0, 900.0, 1180.0)]          # 밴드 420~1166 대부분을 덮는 큰 얼굴
+    moved, rec = avoid_faces(lb, faces, GEOM, obstacles=obs)
+    assert rec is not None and rec["why"] != "below"
+    if rec["moved"]:
+        bx = label_box(moved)
+        assert bx[3] < sub_top                         # 옮겼다면 자막 띠 위에 있다
+    # 얼굴은 없고 자막 띠만 겹치는 라벨 → 띠 바로 위로
+    lb2 = {"text": "(눈물의 다짐)", "x": 0.5, "y": 0.70, "size": 52, "start_sec": 0, "end_sec": 1}
+    moved2, rec2 = avoid_faces(lb2, [], GEOM, obstacles=obs)
+    assert rec2["why"] == "above-subtitle" and label_box(moved2)[3] < sub_top
+    # 장애물 없음 = 종전과 동일(그대로)
+    assert avoid_faces(lb2, [], GEOM) == (lb2, None)

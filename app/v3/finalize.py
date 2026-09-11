@@ -693,6 +693,55 @@ def subject_crop_map(timeline: list[dict], *, video_path: Path,
         return {}
     if src_size is None:
         try:
+def fixed_crop_map(timeline: list[dict], *, output_dir: Path, aspect_ratio: str, picture: dict | None,
+                   video_path: Path, log=print) -> tuple[dict[str, Path], list[dict]]:
+    """클립 `reframe.mode == "fixed"`(x·선택 y, 소스 px) → 키프레임 둘짜리 고정 크롭 맵(2026-09-11).
+    사람이 지정한 자리라 검출과 무관하다 — 그림 사각형·밴드 크롭 안으로만 클램프한다. 없으면 빈 dict(회귀 0)."""
+    out: dict[str, Path] = {}
+    audit: list[dict] = []
+    want = [(i, c) for i, c in enumerate(timeline) if (c.get("reframe") or {}).get("mode") == "fixed"]
+    if not want:
+        return out, audit
+    src = None
+    pr = Path(output_dir) / "checkpoint_probe.json"
+    if pr.exists():
+        try:
+            pj = json.loads(pr.read_text(encoding="utf-8"))
+            if pj.get("width") and pj.get("height"):
+                src = (int(pj["width"]), int(pj["height"]))
+        except (OSError, ValueError):
+            src = None
+    if src is None:
+        try:
+            o = subprocess.run([find_ffmpeg_command("ffprobe"), "-v", "error", "-select_streams", "v:0",
+                                "-show_entries", "stream=width,height", "-of", "csv=p=0", str(video_path)],
+                               capture_output=True, text=True, check=True).stdout.strip()
+            w, h = o.split("\n")[0].split(",")[:2]
+            src = (int(w), int(h))
+        except Exception as e:  # noqa: BLE001
+            log(f"  [v3/render] ⚠ 고정 크롭 — 소스 해상도 프로브 실패, 생략: {e}")
+            return out, audit
+    geo = band_crop_size(aspect_ratio, src, picture)
+    if geo is None:
+        log("  [v3/render] ⚠ 고정 크롭 — 밴드 비율 크롭 불가, 생략")
+        return out, audit
+    crop_w, crop_h, pic_x, pic_y, pic_w, pic_h = geo
+    for i, c in want:
+        rf = c["reframe"]
+        x = min(max(float(rf["x"]), pic_x + crop_w / 2), pic_x + pic_w - crop_w / 2)
+        y = float(rf.get("y")) if rf.get("y") is not None else pic_y + pic_h / 2
+        y = min(max(y, pic_y + crop_h / 2), pic_y + pic_h - crop_h / 2)
+        s, e = float(c["clip_start_sec"]), float(c["clip_end_sec"])
+        rows = [{"time_sec": round(s, 3), "x_center": round(x, 1), "y_center": round(y, 1), "crop_w": crop_w, "crop_h": crop_h},
+                {"time_sec": round(e, 3), "x_center": round(x, 1), "y_center": round(y, 1), "crop_w": crop_w, "crop_h": crop_h}]
+        p = Path(output_dir) / f"v3_crop_fixed_{i}.json"
+        p.write_text(json.dumps(rows), encoding="utf-8")
+        out[f"{c.get('role') or 'build'}_{i}"] = p
+        audit.append({"clip": i, "x": round(x, 1), "y": round(y, 1)})
+        log(f"  [v3/render] 고정 크롭 clip{i} {s:.2f}~{e:.2f}s → x {x:.0f} (사람 지정)")
+    return out, audit
+
+
             out = subprocess.run(
                 [find_ffmpeg_command("ffprobe"), "-v", "error",
                  "-select_streams", "v:0", "-show_entries", "stream=width,height",
@@ -839,16 +888,29 @@ def rank_speaker_x(samples: list[dict], t0: float, t1: float, pic_w: float,
         if t < t0 - 1e-6 or t > t1 + 1e-6:
             continue
         n_samples += 1
-        for cx, cy, w, h, mot in smp.get("faces") or []:
+        faces_in = [tuple(f) for f in (smp.get("faces") or [])]
+        # 6번째 값(선명도)이 있으면 표본 안 최대값 대비 비율 — 없으면(구 표본) 1.0 = 판정 없음
+        sharp_max = max((float(f[5]) for f in faces_in if len(f) >= 6), default=0.0)
+        for f in faces_in:
+            cx, cy, w, h, mot = f[:5]
+            rel = (float(f[5]) / sharp_max) if (len(f) >= 6 and sharp_max > 0) else 1.0
             hit = next((p for p in people if abs(p["cx"] - cx) < pic_w * link_ratio
                         and abs(p["cy"] - cy) < pic_w * link_ratio * 2), None)
             if hit is None:
-                people.append({"cx": float(cx), "cy": float(cy), "w": float(w), "n": 1, "score": float(mot)})
+                people.append({"cx": float(cx), "cy": float(cy), "w": float(w), "n": 1, "score": float(mot),
+                               "sharp": rel})
             else:
                 k = hit["n"]
                 hit["cx"] = (hit["cx"] * k + cx) / (k + 1); hit["cy"] = (hit["cy"] * k + cy) / (k + 1)
                 hit["w"] = max(hit["w"], float(w)); hit["n"] = k + 1; hit["score"] += float(mot)
-    solid = [p for p in people if p["n"] >= max(1, int(n_samples * 0.3))] or people
+                hit["sharp"] = (hit["sharp"] * k + rel) / (k + 1)
+    import math as _math
+    solid = [p for p in people if p["n"] >= max(1, _math.ceil(n_samples * SPEAKER_PRESENCE_RATIO))] or people
+    # 초점 단서(2026-09-11, 「언제 밥 한 번」 실사고): 숏/리버스숏에서 초점 밖 전경(조여정 뒤통수·흐림)이 크고
+    # 입 움직임도 잡혀 talk×√w 와 화자 기억을 다 가져갔다. 초점 안 사람이 하나라도 있으면 흐린 사람은 후보에서 뺀다.
+    focused = [p for p in solid if p.get("sharp", 1.0) >= SPEAKER_FOCUS_RATIO]
+    if focused and len(focused) < len(solid):
+        solid = focused
     if not solid:
         return None, {"people": 0}
     for p in solid:
@@ -860,6 +922,13 @@ def rank_speaker_x(samples: list[dict], t0: float, t1: float, pic_w: float,
         near = [p for p in solid if abs(p["cx"] - prefer_x) < pic_w * SPEAKER_MEMORY_RATIO]
         if near:
             best = max(near, key=lambda p: (p["rank"], p["w"]))
+# run 의 화자 후보는 그 run 표본의 절반 이상에 있어야 한다(2026-09-10, 지금불륜 ep01x01 「대원 여러분」 실사고):
+# 와이드 숏(가족 셋 x≈1300 · 7초 내내)에서 마지막 1.5초에만 잡힌 촬영감독 뒤통수 "얼굴"(x≈360, 표본 4/15)이
+# talk×√w 로 이겨 크롭이 왼쪽 끝(500)에 붙고 말하는 가족은 오른쪽 가장자리로 밀렸다. 종전 0.3 은 15표본에서
+# 4개(=int(4.5)) 를 통과시켰다. 절반을 못 채우는 사람이 하나도 없을 때만 전원으로 폴백한다.
+SPEAKER_PRESENCE_RATIO = 0.5
+# 초점 단서(2026-09-11): 표본 안 가장 선명한 얼굴 대비 이 비율 미만이면 초점 밖(흐린 전경) — 실측 5.8/10.6 = 0.55.
+SPEAKER_FOCUS_RATIO = 0.6
             return best["cx"], {"people": len(solid), "talk": round(best["talk"], 3), "w": int(best["w"]),
                                 "method": "memory"}
     best = max(solid, key=lambda p: (p["rank"], p["w"]))
@@ -872,7 +941,8 @@ def hold_keyframes(rows: list[dict], utterances: list[tuple[float, float, str]],
                    min_hold_sec: float = SPEAKER_HOLD_MIN_SEC,
                    rehold_ratio: float = SPEAKER_REHOLD_MIN_RATIO,
                    samples: list[dict] | None = None,
-                   speaker_memory: dict[str, tuple[float, float]] | None = None) -> tuple[list[dict], list[dict]]:
+                   speaker_memory: dict[str, tuple[float, float]] | None = None,
+                   scene_cuts: list[float] | None = None) -> tuple[list[dict], list[dict]]:
     """표본 행(face_cx·face_w, 소스 시각) + 발화 구간 → 계단식(hold) 키프레임. 순수.
 
     - 발화 run = 같은 화자가 이어지는 구간(그 클립 안). min_hold_sec 미만 run 은 앞 run(없으면 뒤)에 병합.
@@ -910,6 +980,10 @@ def hold_keyframes(rows: list[dict], utterances: list[tuple[float, float, str]],
         if not merged and len(runs) > 1 and (r[1] - r[0]) < min_hold_sec:
             continue      # 첫 run 이 짧으면 다음 run 이 앞머리까지 맡는다
         merged.append(list(r))
+    scene_cuts(2026-09-10): 클립 안 장면 전환 시각(grid) — 발화 run 이 컷을 넘으면 컷에서 쪼갠다. 카메라 컷은
+    새 구도라 한 x 로 붙잡을 수 없다(클로즈업 → 와이드 안에서 같은 화자라도 얼굴 위치가 다르다). 컷에서 나뉜
+    조각은 짧아도 앞뒤와 합치지 않는다 — 실제 컷 자리의 한 프레임 점프는 보이지 않는다.
+
     audit: list[dict] = []
     if not merged or base is None:
         x = base if base is not None else (float(rows[0]["x_center"]) if rows else 0.0)
@@ -945,6 +1019,17 @@ def hold_keyframes(rows: list[dict], utterances: list[tuple[float, float, str]],
         tb = merged[i][0]
         if xs[i] == xs[i - 1]:
             continue
+    # 장면 전환에서 run 을 쪼갠다(컷 = 새 구도). 컷이 run 의 안쪽(양 끝 0.2s 제외)에 있을 때만.
+    if scene_cuts and merged:
+        _cuts = sorted(float(c) for c in scene_cuts if clip_start < float(c) < clip_end)
+        split: list[list] = []
+        for a, z, spk in merged:
+            cur = a
+            for c in _cuts:
+                if cur + 0.2 < c < z - 0.2:
+                    split.append([cur, c, spk]); cur = c
+            split.append([cur, z, spk])
+        merged = split
         kfs.append({"time_sec": round(tb - one, 3), "x_center": round(xs[i - 1], 1), **tpl})
         kfs.append({"time_sec": round(tb, 3), "x_center": round(xs[i], 1), **tpl})
     kfs.append({"time_sec": round(clip_end, 3), "x_center": round(xs[-1], 1), **tpl})
@@ -957,7 +1042,8 @@ def speaker_crop_map(timeline: list[dict], *, video_path: Path, aspect_ratio: st
                      detector: str | None = None, sample_interval_sec: float = 0.5,
                      build=None, hold: bool = True,
                      utterances: list[tuple[float, float, str]] | None = None,
-                     fps: float | None = None, log=print) -> tuple[dict[str, Path], list[dict]]:
+                     fps: float | None = None, scene_cuts: list[float] | None = None,
+                     log=print) -> tuple[dict[str, Path], list[dict]]:
     """갭 12(2026-09-08): 클립별 화자 추적 크롭 — v1 `reframe.build_crop_timeline`(입 움직임 0.3 ·
     0.5s 표본 · y 추적)을 v3 클립에 배선한다. 덮개(cover) 클립은 제외(피사체 앵커 맵이 맡는다).
     밴드 비율 크롭을 그림 사각형 안에 가둔다. Stage 2 `subject_pos` 와 교차 검증 — 모델이 left 라
@@ -987,6 +1073,23 @@ def speaker_crop_map(timeline: list[dict], *, video_path: Path, aspect_ratio: st
             # 즉시 맞추고(snap_first) 이후는 SPEAKER_EMA_ALPHA 로 따라간다. 면적 항은 프레임 최대 얼굴 대비.
             kfs = _build(Path(video_path), p, src_w, src_h, sample_interval_sec,
                          start_sec=s, end_sec=e, enable_speaker_tracking=True,
+def read_scene_cuts(output_dir: Path) -> list[float]:
+    """grid.json 의 장면 전환 시각(ffmpeg select=gt(scene,0.3)) — 없으면 빈 목록(종전 동작)."""
+    p = Path(output_dir) / "grid.json"
+    if not p.exists():
+        return []
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8")).get("scene_cuts") or []
+    except (OSError, ValueError):
+        return []
+    out: list[float] = []
+    for c in raw:
+        v = c if isinstance(c, (int, float)) else (c.get("t") if isinstance(c, dict) else None)
+        if isinstance(v, (int, float)):
+            out.append(float(v))
+    return sorted(out)
+
+
                          initial_x=None, initial_y=None, detector=detector,
                          crop_size=(crop_w, crop_h), ema_alpha=SPEAKER_EMA_ALPHA,
                          snap_first=True, area_relative=True, collect=_samples)
@@ -1004,7 +1107,8 @@ def speaker_crop_map(timeline: list[dict], *, video_path: Path, aspect_ratio: st
             _raw_faces = sum(1 for r in rows if float(r.get("face_w") or 0) > 0)
             rows, _runs = hold_keyframes(rows, utterances or [], clip_start=s, clip_end=e,
                                          fps=float(fps or 24000 / 1001), pic_w=float(pic_w),
-                                         samples=_samples or None, speaker_memory=_spk_mem)
+                                         samples=_samples or None, speaker_memory=_spk_mem,
+                                         scene_cuts=scene_cuts)
             rec["hold_runs"] = _runs
             rec["raw_faces"] = _raw_faces
         # 그림 사각형 안으로(레터박스) — x·y 모두
@@ -1466,7 +1570,7 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
         from app.v3 import label_faces as _lf
         labels, _label_face_records = _lf.avoid_faces_for_labels(
             labels, output_dir / "draft_480.mp4", _geom,
-            canvas_w=config.canvas_width, canvas_h=config.canvas_height, log=log)
+            canvas_w=config.canvas_width, canvas_h=config.canvas_height, obstacles=_obs, log=log)
         texts_path = output_dir / "v3_labels.ass"
         build_texts_ass(labels, texts_path)
 
@@ -1499,6 +1603,11 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                                     aspect_ratio=design.aspect_ratio,
                                     output_dir=output_dir, picture=picture,
                                     anchors=False, log=log)
+        # 자막·내레이션 띠도 장애물(2026-09-10 「(눈물의 다짐)」 — '아래' 후보가 강조 자막 위에 얹혔다)
+        _obs = _lf.subtitle_obstacles(canvas_w=config.canvas_width, canvas_h=config.canvas_height,
+                                      sub_margin_v=_sub_margin, sub_size=design.subtitle_size,
+                                      tts_margin_v=_tts_margin, tts_size=design.tts_line_font_size,
+                                      emph_scale=stage4.EMPH_SCALE_RANGE[1])
     else:
         crop_map = {}
         log("  [v3/render] 채널 face_tracking=false — 피사체 앵커 크롭 끔(중앙)")
@@ -1528,7 +1637,7 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                 detector=_cd.get("face_detector") or FACE_DETECTOR_DEFAULT,
                 hold=(_mode != "pan"),
                 utterances=utterances_from_segments(segments, plan["timeline"], plan.get("source_fps")),
-                fps=plan.get("source_fps"), log=log)
+                fps=plan.get("source_fps"), scene_cuts=read_scene_cuts(output_dir), log=log)
             crop_map = {**crop_map, **_smap}
         except Exception as e:  # noqa: BLE001
             log(f"  [v3/render] ⚠ 화자 추적 실패 — 종전 맵으로 진행: {e}")
@@ -1567,6 +1676,10 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                             base_rows = json.loads(Path(crop_map[key]).read_text(encoding="utf-8"))
                         except (OSError, ValueError):
                             base_rows = None
+    # 사람 크롭 고정(2026-09-11): 클립 reframe.mode == "fixed" 는 추적·앵커 맵을 덮는다(마지막에 얹어 이긴다).
+    _fixed_map, _fixed_audit = fixed_crop_map(render_tl, output_dir=output_dir, aspect_ratio=design.aspect_ratio,
+                                              picture=picture, video_path=Path(video_path), log=log)
+    crop_map = {**crop_map, **_fixed_map}
                     rows = zoom_crop_rows(base_rows, float(z["factor"]), str(z.get("anchor") or "center"), geo)
                     p = output_dir / f"v3_crop_zoom_{_ri}.json"
                     p.write_text(json.dumps(rows), encoding="utf-8")

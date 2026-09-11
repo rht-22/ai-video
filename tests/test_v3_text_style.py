@@ -261,3 +261,83 @@ def test_rank_speaker_x_uses_speaker_memory():
     _, runs2 = hold_keyframes(rows, [(2375.8, 2377.08, "임재홍")], clip_start=2375.8, clip_end=2377.08,
                               fps=24.0, pic_w=1920, samples=smp, speaker_memory=mem2)
     assert runs2[0]["x"] == 1620.0
+def test_rank_speaker_x_requires_presence_in_half_the_samples():
+    """2026-09-10 지금불륜 ep01x01 「대원 여러분」 실사고: 와이드 숏에서 가족(x≈1300, 15표본 중 11)은 입 움직임이
+    거의 없고, 마지막 1.5초에만 잡힌 촬영감독 뒤통수 "얼굴"(x≈360, 4표본)이 talk×√w 로 이겨 크롭이 왼쪽 끝에 붙었다.
+    후보는 run 표본의 절반 이상에 있어야 한다 — 절반을 채우는 사람이 없을 때만 전원 폴백."""
+    from app.v3.finalize import rank_speaker_x
+    fam = (1300.0, 700.0, 97, 180, 0.01)
+    back = (360.0, 625.0, 120, 160, 0.30)
+    samples = [{"t": 303.2 + 0.46 * i, "faces": [fam]} for i in range(11)] \
+        + [{"t": 308.3 + 0.46 * i, "faces": [fam, back]} for i in range(4)]
+    x, how = rank_speaker_x(samples, 302.9, 309.8, 1920)
+    assert x == 1300.0 and how["people"] == 1
+    # 둘 다 절반 미만이면(각 2/6) 전원 폴백 — 종전 순위 그대로
+    few = [{"t": float(i), "faces": [fam]} for i in range(2)] + [{"t": 2.0 + i, "faces": [back]} for i in range(2)] \
+        + [{"t": 4.0 + i, "faces": []} for i in range(2)]
+    x2, how2 = rank_speaker_x(few, 0.0, 6.0, 1920)
+    assert x2 == 360.0 and how2["people"] == 2
+
+
+def test_hold_keyframes_split_runs_at_scene_cuts():
+    """컷은 새 구도 — 같은 화자의 run 이 장면 전환을 넘으면 컷에서 쪼개 각각 x 를 잡는다(짧은 조각도 합치지 않는다)."""
+    from app.v3.finalize import hold_keyframes
+    rows = [_row(0.0, 800), _row(0.5, 805), _row(1.0, 810),          # 클로즈업(x≈800)
+            _row(1.5, 1300, 90), _row(2.0, 1302, 90), _row(2.5, 1298, 90), _row(3.0, 1301, 90)]   # 와이드(x≈1300)
+    utt = [(0.1, 3.2, "A")]
+    kfs, runs = hold_keyframes(rows, utt, clip_start=0.0, clip_end=3.3, fps=24.0, pic_w=1920,
+                               scene_cuts=[1.25, 9.9])
+    assert [(r["start"], r["end"], r["x"]) for r in runs] == [(0.1, 1.25, 807.5), (1.25, 3.2, 1300.5)]   # 0.1~1.25 안 표본 805·810 의 중앙값
+    assert [k["x_center"] for k in kfs] == [807.5, 807.5, 1300.5, 1300.5]
+    assert kfs[2]["time_sec"] == 1.25
+    # 컷이 run 양 끝 0.2s 안에 있으면 안 쪼갠다 · scene_cuts 없음 = 종전(중앙값 하나)
+    _, runs2 = hold_keyframes(rows, utt, clip_start=0.0, clip_end=3.3, fps=24.0, pic_w=1920, scene_cuts=[0.2, 3.1])
+    assert len(runs2) == 1
+    _, runs3 = hold_keyframes(rows, utt, clip_start=0.0, clip_end=3.3, fps=24.0, pic_w=1920)
+    assert len(runs3) == 1
+
+
+def test_read_scene_cuts_reads_grid_or_empty(tmp_path):
+    import json as _json
+    from app.v3.finalize import read_scene_cuts
+    assert read_scene_cuts(tmp_path) == []
+    (tmp_path / "grid.json").write_text(_json.dumps({"scene_cuts": [303.25, 311.25, {"t": 5.0}]}), encoding="utf-8")
+    assert read_scene_cuts(tmp_path) == [5.0, 303.25, 311.25]
+
+
+def test_yunet_plausible_rejects_back_of_head_and_specks():
+    """2026-09-10 실측(EP01): 뒤통수는 랜드마크가 붕괴(눈 간격·입 폭 ≤0.03), 실제 얼굴은 ≥0.17. 크기 하한 20px."""
+    from app.modules.reframe import YUNET_MIN_FACE_PX, yunet_plausible
+
+    def row(w, ex, mx, score=0.9):
+        # 박스 (0,0,w,w) · 랜드마크: 눈 둘 · 코 · 입 둘 — x 만 의미 있게(정규화 ex·mx)
+        x0 = 0.25 * w
+        return [0, 0, w, w, x0, 0.4 * w, x0 + ex * w, 0.4 * w, 0.5 * w, 0.6 * w,
+                x0, 0.75 * w, x0 + mx * w, 0.75 * w, score]
+    assert yunet_plausible(row(27, 0.48, 0.38))            # 와이드 숏 가족(27px) — 살린다
+    assert yunet_plausible(row(273, 0.25, 0.22))           # 누운 경희(측면) — 살린다
+    assert not yunet_plausible(row(104, 0.03, 0.00))       # 촬영감독 뒤통수 — 버린다
+    assert not yunet_plausible(row(103, 0.01, 0.03))
+    assert not yunet_plausible(row(12, 0.58, 0.49))        # 12px 잡티 — 크기로 버린다
+    assert YUNET_MIN_FACE_PX == 20
+    assert yunet_plausible([0, 0, 50, 50])                 # 랜드마크 없는 행은 크기만
+    assert not yunet_plausible([0, 0, 19, 50])
+
+
+def test_rank_speaker_x_drops_out_of_focus_face():
+    """2026-09-11 「언제 밥 한 번」 실사고: 흐린 전경(조여정, w360·선명도 5.8)이 초점 안 화자(김혜수, w140·10.6)를
+    talk×√w 와 기억으로 이겼다. 6번째 값(선명도)이 있으면 표본 최대 대비 0.6 미만은 후보에서 뺀다. 5-튜플(구 표본)은 종전."""
+    from app.v3.finalize import rank_speaker_x
+    smp = [{"t": t, "faces": [(494.0, 600.0, 360, 380, 0.45, 5.8), (1103.0, 400.0, 140, 150, 0.30, 10.6)]}
+           for t in (0.0, 0.5, 1.0, 1.5)]
+    x, how = rank_speaker_x(smp, 0.0, 1.5, 1920)
+    assert x == 1103.0 and how["people"] == 1
+    # 기억이 흐린 쪽을 가리켜도 초점 안 얼굴만 남는다
+    x2, _ = rank_speaker_x(smp, 0.0, 1.5, 1920, prefer_x=500.0)
+    assert x2 == 1103.0
+    # 둘 다 비슷하게 선명하면 종전 순위(talk×√w)
+    smp2 = [{"t": t, "faces": [(494.0, 600.0, 360, 380, 0.45, 9.0), (1103.0, 400.0, 140, 150, 0.30, 10.6)]} for t in (0.0, 0.5)]
+    assert rank_speaker_x(smp2, 0.0, 0.5, 1920)[0] == 494.0
+    # 구 표본(5-튜플)은 종전과 동일
+    smp3 = [{"t": t, "faces": [(494.0, 600.0, 360, 380, 0.45), (1103.0, 400.0, 140, 150, 0.30)]} for t in (0.0, 0.5)]
+    assert rank_speaker_x(smp3, 0.0, 0.5, 1920)[0] == 494.0

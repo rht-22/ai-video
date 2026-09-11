@@ -192,9 +192,35 @@ class _HaarDetector:
         return faces
 
 
+YUNET_MIN_FACE_PX = 20          # 종전 40 — 와이드 숏의 인물(1080p 에서 25~29px)이 통째로 버려졌다(2026-09-10)
+YUNET_MIN_LANDMARK_SPREAD = 0.08  # 눈 간격·입 폭(박스 폭 대비) 하한 — 뒤통수는 ≤0.03, 실제 얼굴은 ≥0.17(실측)
+
+
+def yunet_plausible(face_row) -> bool:
+    """YuNet 한 행([x, y, w, h, 5쌍 랜드마크(x,y), score]) 이 사람 얼굴 모양인가 — 순수.
+
+    2026-09-10 지금불륜 ep01x01 「대원 여러분」 실사고: 와이드 숏에서 촬영감독 **뒤통수** 둘이 점수 0.66~0.82 로
+    검출돼(실제 얼굴 점수 0.66~0.94 와 겹친다 — 점수로는 못 가른다) 화자로 뽑혔다. 뒤통수에서는 YuNet 랜드마크가
+    한 점으로 붕괴한다(눈 간격 0.01~0.03 · 입 폭 0.00~0.03 — EP01 여러 프레임 실측), 실제 얼굴은 누운 옆얼굴(0.25)·
+    측면(0.17)도 그보다 훨씬 넓다. 크기 하한은 20px(9~13px 잡티는 버리고 25px 인물은 살린다)."""
+    try:
+        x, y, w, h = float(face_row[0]), float(face_row[1]), float(face_row[2]), float(face_row[3])
+    except (TypeError, IndexError, ValueError):
+        return False
+    if w < YUNET_MIN_FACE_PX or h < YUNET_MIN_FACE_PX:
+        return False
+    if len(face_row) < 14:
+        return True                       # 랜드마크가 없는 행(테스트·구 모델)은 크기만 본다
+    lx = [(float(face_row[4 + 2 * i]) - x) / w for i in range(5)]
+    eye_spread = abs(lx[1] - lx[0])
+    mouth_width = abs(lx[4] - lx[3])
+    return eye_spread >= YUNET_MIN_LANDMARK_SPREAD and mouth_width >= YUNET_MIN_LANDMARK_SPREAD
+
+
 class _YuNetDetector:
     """OpenCV FaceDetectorYN(ONNX) — 측면·작은 얼굴을 Haar 보다 훨씬 덜 놓친다(autoframe 실측:
-    Haar 는 10배 느리고 놓치는 프레임이 4배). 입력 크기가 바뀌면 다시 만든다."""
+    Haar 는 10배 느리고 놓치는 프레임이 4배). 입력 크기가 바뀌면 다시 만든다.
+    행은 `yunet_plausible` 로 거른다(크기 20px + 랜드마크 기하 — 뒤통수 배제)."""
 
     def __init__(self, model_path: Path, score_th: float = 0.6, nms_th: float = 0.3, top_k: int = 5000):
         import cv2
@@ -218,7 +244,7 @@ class _YuNetDetector:
         _, faces = self._det.detect(frame_bgr)
         if faces is None or len(faces) == 0:
             return []
-        out = [[int(f[0]), int(f[1]), int(f[2]), int(f[3])] for f in faces if f[2] >= 40 and f[3] >= 40]
+        out = [[int(f[0]), int(f[1]), int(f[2]), int(f[3])] for f in faces if yunet_plausible(f)]
         return np.array(out) if out else []
 
 
@@ -227,6 +253,19 @@ def _make_detector(name: str | None, tmp_dir: str):
     if kind == "yunet":
         return _YuNetDetector(YUNET_MODEL_PATH)
     return _HaarDetector(tmp_dir)
+
+
+def _face_sharpness(gray, x, y, w, h) -> float:
+    """얼굴 상자 안 라플라시안 분산 — 초점(선명도) 단서. 실패·빈 상자는 0."""
+    try:
+        import cv2
+        x0, y0 = max(0, int(x)), max(0, int(y))
+        roi = gray[y0:y0 + max(1, int(h)), x0:x0 + max(1, int(w))]
+        if roi.size == 0:
+            return 0.0
+        return float(cv2.Laplacian(roi, cv2.CV_64F).var())
+    except Exception:  # noqa: BLE001
+        return 0.0
 
 
 def _detect_faces(
@@ -319,9 +358,12 @@ def _detect_faces(
 
         _det_face: tuple[float, float, int, int] | None = None   # E19-4: 이 표본의 raw 얼굴 박스
         if collect is not None:
+            # 6번째 값 = 얼굴 상자의 선명도(라플라시안 분산, 2026-09-11) — 숏/리버스숏에서 초점 밖 전경 얼굴
+            # (흐림 5.8)과 초점 안 화자(10.6~12)를 가른다. 소비자는 표본 안 최대값 대비 비율로만 쓴다.
             collect.append({"t": current_frame / fps,
                             "faces": [(float(x + w / 2), float(y + h / 2), int(w), int(h),
-                                       _mouth_motion(gray, prev_gray, x, y, w, h))
+                                       _mouth_motion(gray, prev_gray, x, y, w, h),
+                                       _face_sharpness(gray, x, y, w, h))
                                       for (x, y, w, h) in faces]})
         if len(faces) > 0:
             if enable_speaker_tracking:
