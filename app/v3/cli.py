@@ -108,6 +108,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "{\"prefer\": [\"홍지윤이 주인공인 사건\"]}")
     # 노래 구간 자막 제외(2026-09-07 사용자 지시, 가왕쇼) — 음향 비트 주기성 + Stage 2 문장
     # 두 증인이 노래로 확정한 소스 구간의 대사 자막을 내지 않는다. 기본 꺼짐(드라마 BGM 오작동 방지).
+    # 권리사 활용 불가 구간(2026-09-10) — 템플릿 `banned` 키와 같은 모양의 인라인 JSON
+    # {"2": [{"t0": "22:06", "t1": "22:50", "what": "수정&재홍 호텔 씬"}]}. 템플릿과 합집합.
+    p.add_argument("--banned-json", dest="banned_json", default=None,
+                   help="권리사 활용 불가 구간 JSON {회차: [{t0, t1, what, keywords?}]} — 시각과 겹치는 "
+                        "Stage 2 사건 단위 전체 + 설명 키워드가 있는 이웃 단위를 어느 용도로도 못 쓰게 "
+                        "막고, 조립 뒤 벨트가 위반을 크게 실패시킨다(--episode 필수)")
     p.add_argument("--episode-map", action="store_true",
                    help="3단계 회차 지도(2026-09-08): Stage 2 기록 위 정방향·역방향 두 번 읽기 → "
                         "episode_map.json(사실/믿음 장부·레지스터·diegesis 확정·검수). 미지정 = 단계 없음")
@@ -210,7 +216,13 @@ def load_design_preset(name: str, *, base_dir: Path | None = None) -> dict:
             editorial = parse_editorial(_json.dumps(doc["editorial"], ensure_ascii=False))
         except ValueError as e:
             raise SystemExit(f"--design-preset {name!r}: editorial 오류 — {e}")
-    return {"design": design, "options": opts, "editorial": editorial}
+    # 권리사 활용 불가 구간(2026-09-10) — 회차별 시각 목록. 형식 오류 즉시 실패(banned.py 규율).
+    from app.v3.banned import BannedError, parse_banned_doc
+    try:
+        banned = parse_banned_doc(doc.get("banned"))
+    except BannedError as e:
+        raise SystemExit(f"--design-preset {name!r}: banned 오류 — {e}")
+    return {"design": design, "options": opts, "editorial": editorial, "banned": banned}
 
 
 def apply_design_preset(args: argparse.Namespace, preset: dict) -> list[str]:
@@ -282,12 +294,28 @@ def main(argv: list[str] | None = None) -> int:
         print("  [v3] --story-flow human → 인명 교정(--fix-names) 기본 켬")
 
     _preset_editorial = None
+    _preset_banned = None
     if args.design_preset:
         _preset = load_design_preset(args.design_preset)
         _filled = apply_design_preset(args, _preset)
         _preset_editorial = _preset.get("editorial")
+        _preset_banned = _preset.get("banned")
         print(f"  [v3] design 템플릿 {args.design_preset!r} 적용 — {_filled}"
-              + (" · editorial" if _preset_editorial else ""))
+              + (" · editorial" if _preset_editorial else "")
+              + (f" · banned {sum(len(v) for v in _preset_banned.values())}건" if _preset_banned else ""))
+    # 권리사 활용 불가 구간(2026-09-10): 템플릿 ⊕ --banned-json → 이 회차 항목. 목록이 있는데
+    # 회차를 모르면 즉시 실패(어느 회차 규칙인지 모른 채 '막았다'고 믿으면 안 된다).
+    import json as _json
+    from app.v3.banned import BannedError, banned_for_episode, merge_banned, parse_banned_doc
+    try:
+        _cli_banned = parse_banned_doc(_json.loads(args.banned_json)) if args.banned_json else None
+        banned_ranges = banned_for_episode(merge_banned(_preset_banned, _cli_banned), args.episode)
+    except (BannedError, ValueError) as e:
+        raise SystemExit(f"banned 오류: {e}")
+    if banned_ranges:
+        _spans = " · ".join(f"{b['t0']:.0f}~" + ("end" if b["t1"] is None else f"{b['t1']:.0f}")
+                            for b in banned_ranges)
+        print(f"  [v3] 권리사 활용 불가 구간 {len(banned_ranges)}건(회차 {args.episode}) — {_spans}")
     # 편집 지침 병합: 템플릿 상시 ⊕ --editorial-json ⊕ --editorial-run-json (avoid·rules 는 합집합)
     from app.modules.editorial import merge_editorial, parse_editorial
     try:
@@ -325,6 +353,7 @@ def main(argv: list[str] | None = None) -> int:
                  exclude_ranges=parse_exclude_ranges(args.exclude_range) or None,
                  subtitle_skip_singing=bool(args.subtitle_skip_singing),
                  editorial=editorial,
+                 banned_ranges=banned_ranges or None,
                  channel_design=channel_design or None,
                  narration_original_db=args.narration_original_db,
                  episode_map=bool(args.episode_map),

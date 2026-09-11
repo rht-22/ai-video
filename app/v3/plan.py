@@ -162,6 +162,7 @@ def plan_fingerprint(map_doc: dict | None, stage2_doc: dict, n: int, excluded: s
 def run_plan(gemini, stage2_doc: dict, grid: dict, *, n: int, map_doc: dict | None,
              work_title: str, research_context: str = "",
              exclude_topics: tuple[str, ...] = (), exclude_ranges=(),
+             banned: dict | None = None,
              call: Callable[[Any, str], dict] | None = None, log=print) -> tuple[dict, dict]:
     if map_doc is None:
         raise ValueError("plan 단계는 회차 지도(episode_map.json)가 필요하다 — --episode-map 을 먼저(지도 없는 plan 은 같은 사건을 N번 고른다)")
@@ -176,6 +177,12 @@ def run_plan(gemini, stage2_doc: dict, grid: dict, *, n: int, map_doc: dict | No
     silent = silent_runs(grid.get("words") or [], _dur)
     excluded = excluded_meaning_ids(rows, exclude_ranges)
     ex_blk = exclude_block(exclude_topics, excluded, rows)
+    # 권리사 활용 불가 구간(2026-09-10) — 장면 확장된 사건 단위를 제외 집합에 더하고 블록을 덧붙인다.
+    # 호출자(_run_plan)가 같은 집합으로 지문을 재므로 여기서 빠지면 캐시가 영원히 안 맞는다.
+    if banned and (banned.get("units") or banned.get("items")):
+        from app.v3.banned import banned_block as _bb
+        excluded = excluded | set(int(u) for u in banned.get("units") or [])
+        ex_blk = ex_blk + _bb(banned)
     rc = (research_context or "").strip()
     research_block = f"\n\n### 작품 정보(리서치)\n{rc[:3000]}" if rc else ""
     audit: dict[str, Any] = {"n": n, "meanings": len(rows), "excluded": sorted(excluded)}

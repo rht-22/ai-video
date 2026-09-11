@@ -151,6 +151,7 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
            exclude_ranges: tuple[tuple[float, float], ...] | None = None,
            subtitle_skip_singing: bool = False,
            editorial: dict | None = None,
+           banned_ranges: list[dict] | None = None,
            channel_design: dict | None = None,
            narration_original_db: float | None = None,
            episode_map: bool = False,
@@ -456,6 +457,7 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
             _run_plan(output_dir=output_dir, work_title=work_title, grid=grid, research=research,
                       from_step=from_step, n=int(plan_shorts),
                       exclude_topics=exclude_topics or (), exclude_ranges=exclude_ranges or (),
+                      banned_ranges=banned_ranges,
                       get_gemini=get_gemini, step=step, log=log)
 
         # ── M3: Stage 3 story → edit_plan·자막·TTS cue ────────────────────
@@ -475,7 +477,7 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
                     story_flow=story_flow,
                     exclude_topics=exclude_topics, exclude_ranges=exclude_ranges,
                     subtitle_skip_singing=subtitle_skip_singing,
-                    editorial=editorial,
+                    editorial=editorial, banned_ranges=banned_ranges,
                     use_episode_map=episode_map, plan_slot=plan_slot,
                     get_gemini=get_gemini, step=step, log=log)
 
@@ -797,10 +799,35 @@ def _run_map(*, output_dir: Path, work_title: str, grid: dict, research: dict | 
 PLAN_FILE = "checkpoint_plan.json"
 
 
+def _resolve_banned_for_job(stage2_doc: dict, grid: dict, banned_ranges: list[dict], *,
+                            span_index: dict | None = None, log=print) -> dict:
+    """권리사 활용 불가 구간(2026-09-10) → 이 잡의 사건 단위·span·구간(banned.resolve_banned).
+    plan·story 가 **같은 함수**로 같은 답을 본다(따로 계산하면 언젠가 어긋난다). 건별·경고 stdout."""
+    from app.v3 import banned as _bn
+    from app.v3.story_flow.common import meaning_rows as _mr
+    if span_index is None:
+        from app.v3.story import build_span_index as _bsi
+        span_index, _ = _bsi(stage2_doc, grid)
+    runtime = grid.get("duration_sec") or (grid.get("source") or {}).get("duration_sec")
+    res = _bn.resolve_banned(banned_ranges, _mr(stage2_doc), grid.get("span_candidates") or [],
+                             runtime, span_index=span_index)
+    for it in res["items"]:
+        a, z = it["interval"]
+        log(f"  [v3/banned] [{it['t0']:.0f}~{it['t1']:.0f}s] '{it['what'] or '/'.join(it['keywords'])}' → "
+            f"차단 [{a:.1f}~{z:.1f}s] 직접 {len(it['direct'])} · 증인 {len(it['witness'])} · "
+            f"확대 {len(it['widened'])}")
+    for w in res["warnings"]:
+        log(f"  [v3/banned] ⚠ {w}")
+    log(f"  [v3/banned] 사건 단위 {len(res['units'])}개 · span {len(res['span_ids'])}개 차단")
+    return res
+
+
 def _run_plan(*, output_dir: Path, work_title: str, grid: dict, research: dict | None,
               from_step: str | None, n: int, exclude_topics, exclude_ranges,
-              get_gemini, step, log) -> None:
-    """4단계 plan(N편) — episode_map.json 위에서. 캐시 = 지도 지문 + stage2 지문 + N + 제외."""
+              get_gemini, step, log, banned_ranges: list[dict] | None = None) -> None:
+    """4단계 plan(N편) — episode_map.json 위에서. 캐시 = 지도 지문 + stage2 지문 + N + 제외.
+    banned_ranges(2026-09-10): 권리사 활용 불가 구간 — 장면 확장된 사건 단위를 제외 집합에 더한다
+    (지문의 excluded 에 들어가므로 금지가 바뀌면 plan 재구성)."""
     from app.v3 import plan as pl
     stage2_doc = _read_json(output_dir / "stage2.json")
     map_doc = load_episode_map(output_dir)
@@ -809,6 +836,10 @@ def _run_plan(*, output_dir: Path, work_title: str, grid: dict, research: dict |
     from app.v3.story_flow.common import meaning_rows as _mr
     from app.v3.story_flow.select import excluded_meaning_ids as _ex
     excluded = _ex(_mr(stage2_doc), tuple((float(a), float(z)) for a, z in (exclude_ranges or ())))
+    _banned = None
+    if banned_ranges:
+        _banned = _resolve_banned_for_job(stage2_doc, grid, banned_ranges, log=log)
+        excluded |= set(_banned["units"])
     fp = pl.plan_fingerprint(map_doc, stage2_doc, n, excluded)
     path = output_dir / PLAN_FILE
     if path.exists() and from_step not in ("plan", "episode_map"):
@@ -822,7 +853,8 @@ def _run_plan(*, output_dir: Path, work_title: str, grid: dict, research: dict |
     doc, audit = pl.run_plan(
         get_gemini(), stage2_doc, grid, n=n, map_doc=map_doc, work_title=work_title,
         research_context=(research or {}).get("work_context") or "",
-        exclude_topics=tuple(exclude_topics or ()), exclude_ranges=tuple(exclude_ranges or ()), log=log)
+        exclude_topics=tuple(exclude_topics or ()), exclude_ranges=tuple(exclude_ranges or ()),
+        banned=_banned, log=log)
     _write_json(path, doc)
     step("plan", elapsed=round(time.time() - t0, 1), n=n, shorts=len(doc["shorts"]),
          calls=audit["calls"], kinds=[it["kind"] for it in doc["shorts"]],
@@ -875,6 +907,7 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
             exclude_ranges: tuple[tuple[float, float], ...] | None = None,
             subtitle_skip_singing: bool = False,
             editorial: dict | None = None,
+            banned_ranges: list[dict] | None = None,
             use_episode_map: bool = False,
             plan_slot: int | None = None) -> None:
     """Stage 3(story) + 경계면 조립 + resources(TTS 합성) — 발주서 v3-m3.
@@ -950,6 +983,22 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
         log(f"  [v3/story] 편집 지침 — avoid {len(editorial.get('avoid') or [])} · rules "
             f"{len(editorial.get('rules') or [])} · prefer {len(editorial.get('prefer') or [])}"
             + (" · tone" if editorial.get("tone") else ""))
+    # 권리사 활용 불가 구간(2026-09-10, banned.py) — 두 흐름 모두. 시각 → 장면(사건 단위) 확장 + 설명
+    # 증인 → 금지 span 은 색인에서 빼고(대사·덮개·소리 전부), 조립 뒤 벨트가 다시 본다. 결정적이라
+    # 매 실행 재도출하고 사이드카(checkpoint_banned.json)는 M4·훅 변형의 벨트 재료. 지문 재료다
+    # (금지가 바뀌면 story 재구성). 미지정 = 키 없음·사이드카 없음(회귀 0).
+    _banned: dict | None = None
+    _banned_path = output_dir / "checkpoint_banned.json"
+    if banned_ranges:
+        _banned = _resolve_banned_for_job(stage2_doc, grid, banned_ranges, span_index=span_index, log=log)
+        _write_json(_banned_path, _banned)
+        _fp_payload["banned"] = {"intervals": _banned["intervals"], "span_ids": _banned["span_ids"]}
+        step("banned", units=len(_banned["units"]), spans=len(_banned["span_ids"]),
+             intervals=_banned["intervals"], warnings=_banned["warnings"], items=_banned["items"])
+    elif _banned_path.exists():
+        # 이번 실행은 금지 없이 왔는데 옛 사이드카가 남아 있다 — 낡은 규칙이 벨트를 오작동시키면 안 된다
+        _banned_path.unlink()
+        log("  [v3/banned] 금지 구간 미지정 — 옛 checkpoint_banned.json 제거")
     # 회차 지도(3단계, 2026-09-08) — 있을 때만 지문 재료(지도가 바뀌면 편성 재료가 다르다).
     # 미지정·파일 없음 = 키 없음(캐시 회귀 0). human 흐름만 소비한다(legacy 는 프롬프트 동결).
     _map_doc = load_episode_map(output_dir) if (use_episode_map and story_flow == "human") else None
@@ -1019,6 +1068,7 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
                 stage1_doc=(_read_json(_s1p) if _s1p.exists() else None),
                 tone_block=tone_block, exclude_topics=_ex_topics, exclude_ranges=_ex_ranges,
                 editorial_block=_ed_block, editorial_tone_block=_ed_tone,
+                banned=_banned,
                 episode_map=_map_doc, topic_override=_topic_override, log=log)
             story_doc, audit = run_story_flow(get_gemini(), stage2_doc, grid, **_flow_kw)
             # 갭 8 역류(3단계 3-3): 덮개 프로브가 되돌림 상한 뒤에도 "문장·화면 모순"을 남기면
@@ -1048,6 +1098,7 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
                 research_context=research_ctx, target_sec=target, max_sec=max_sec,
                 story_templates=story_templates, tone_block=tone_block,
                 shorts_hints=_shorts,
+                banned_span_ids=(set(_banned["span_ids"]) if _banned else None),
                 measure_fn=_measure_narration, log=log)
         _write_json(story_ckpt, {"fingerprint": fingerprint, "story": story_doc})
         step("story", elapsed=round(time.time() - t0, 1),
@@ -1074,6 +1125,10 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
     if belt["pct"] is not None and belt["pct"] < 100.0:
         # Stage 2 벨트와 같은 규율 — 구조상 100% 여야 하고 아니면 코드 결함
         raise AssertionError(f"edit_plan 시각 정합 벨트 위반: {belt}")
+    # 권리사 금지 벨트(2026-09-10) — 색인에서 뺐어도 조립 산출을 다시 본다(프롬프트는 1차 필터일 뿐)
+    if _banned:
+        from app.v3 import banned as _bn
+        _bn.enforce(plan.get("timeline") or [], _banned, where="story 조립", log=log)
     _write_json(output_dir / "edit_plan.json", plan)
 
     # 내레이션 창 밖은 원음이 살아 있다 → 그 구간 대사는 자막을 낸다(M15)
@@ -1265,6 +1320,12 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
     from app.v3 import finalize, stage4
 
     plan = _read_json(output_dir / "edit_plan.json")
+    # 권리사 금지 벨트(2026-09-10) — M3 뒤 사람 수정(M5 overrides)이 클립을 움직였을 수 있다. 사이드카가
+    # 있으면 렌더 앞에서 한 번 더 본다(watch_trim 은 빼기만 하므로 이 지점 통과 = 최종본 통과).
+    _banned_side = output_dir / "checkpoint_banned.json"
+    if _banned_side.exists():
+        from app.v3 import banned as _bn
+        _bn.enforce(plan.get("timeline") or [], _read_json(_banned_side), where="렌더 전", log=log)
     story_ckpt = _read_json(output_dir / "checkpoint_story.json")
     story_doc = story_ckpt.get("story") or {}
     segments = _read_json(output_dir / "subtitle_segments.json") \
@@ -1611,6 +1672,10 @@ def _run_hook_variants(*, output_dir: Path, video_path: Path, work_title: str,
         belt = assemble.verify_edit_plan(plan, grid)
         if belt["pct"] is not None and belt["pct"] < 100.0:
             raise AssertionError(f"변형 {k} 시각 정합 벨트 위반: {belt}")
+        if (output_dir / "checkpoint_banned.json").exists():
+            from app.v3 import banned as _bn
+            _bn.enforce(plan.get("timeline") or [], _read_json(output_dir / "checkpoint_banned.json"),
+                        where=f"훅 변형 {k}", log=log)
         segs = assemble.word_subtitles(
             plan["timeline"], span_index, grid.get("words") or [],
             sorted(w for wins in assemble.narration_windows(vdoc).values() for w in wins),

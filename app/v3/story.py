@@ -2110,11 +2110,19 @@ def run_story(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
               tone_block: str = "",
               shorts_hints: list[dict] | None = None,
               measure_fn=None,
+              banned_span_ids: set[str] | None = None,
               log=print) -> tuple[dict, dict]:
-    """Stage 3 실행 → (story 문서, 감사 기록). 실패해도 폴백으로 반드시 1개."""
+    """Stage 3 실행 → (story 문서, 감사 기록). 실패해도 폴백으로 반드시 1개.
+    banned_span_ids(2026-09-10): 권리사 활용 불가 span — 색인에서 뺀다(프롬프트 동결 유지 · 재료 표에서
+    사라지는 것으로 막고, 조립 뒤 벨트가 다시 본다). None = 종전과 동일."""
     span_index, span_order = build_span_index(stage2_doc, grid)
     if not span_index:
         raise ValueError("분석된 span 이 없다 — Stage 2 가 선행돼야 한다")
+    if banned_span_ids:
+        span_index = {k: v for k, v in span_index.items() if k not in banned_span_ids}
+        span_order = [s for s in span_order if s not in banned_span_ids]
+        if not span_index:
+            raise ValueError("권리사 활용 불가 구간이 분석된 span 전부를 덮는다 — 이 회차에서 만들 수 없다")
     allowed_templates = resolve_story_templates(story_templates)
     arousal = grid.get("arousal") or []
     audit: dict[str, Any] = {"attempts": [], "spans_available": len(span_index),

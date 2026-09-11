@@ -91,6 +91,7 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
                    exclude_topics: tuple[str, ...] = (),
                    exclude_ranges: tuple[tuple[float, float], ...] = (),
                    editorial_block: str = "", editorial_tone_block: str = "",
+                   banned: dict | None = None,
                    episode_map: dict | None = None,
                    corrections: list[dict] | None = None,
                    topic_override: dict | None = None,
@@ -107,6 +108,15 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
     span_index, span_order = build_span_index(stage2_doc, grid)
     if not span_index:
         raise ValueError("분석된 span 이 없다 — Stage 2 가 선행돼야 한다")
+    # 권리사 활용 불가 구간(2026-09-10, banned.py): 금지 span 은 색인에서 **아예 뺀다** — 재료 표·덮개·
+    # B-roll·뮤트 어느 경로도 이 색인만 보므로 한 곳에서 끝난다. 사건 단위는 검증기 제외 집합에도
+    # 더한다(아래). 미지정 = 종전과 동일.
+    if banned and banned.get("span_ids"):
+        _bset = set(banned["span_ids"])
+        span_index = {k: v for k, v in span_index.items() if k not in _bset}
+        span_order = [s for s in span_order if s not in _bset]
+        if not span_index:
+            raise ValueError("권리사 활용 불가 구간이 분석된 span 전부를 덮는다 — 이 회차에서 만들 수 없다")
     from app.v3 import episode_map as em
     if episode_map:
         _n = em.apply_diegesis_final(span_index, episode_map)
@@ -144,6 +154,13 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
     # 제외(이미 만든 쇼츠, 2026-09-07) — 구간 → 사건 단위 idx 는 코드가 정한다
     excluded = sl.excluded_meaning_ids(rows, exclude_ranges)
     exclude_blk = sl.exclude_block(exclude_topics, excluded, rows)
+    if banned and (banned.get("units") or banned.get("items")):
+        from app.v3 import banned as _bn
+        excluded = excluded | set(int(u) for u in banned.get("units") or [])
+        exclude_blk = exclude_blk + _bn.banned_block(banned)
+        audit["banned"] = {"units": sorted(int(u) for u in banned.get("units") or []),
+                           "spans": len(banned.get("span_ids") or []),
+                           "intervals": banned.get("intervals")}
     # 편집 지침(editorial, 2026-09-08 — v1 --editorial-json 과 같은 입구): 걸음 1·2 프롬프트 뒤에
     # 제외 블록과 같은 자리로 덧붙인다(템플릿 무변경). 톤은 걸음 4 로. 비면 종전과 동일.
     if editorial_block:

@@ -289,3 +289,17 @@ def test_scene_quotes_are_not_song_titles_and_chant_verbs_are_speech():
     assert not assemble.span_sings({"meaning_content": unit, "scene_script": "전유진이 마이크를 잡고 진심 어린 감사를 표한다."})
     assert assemble.span_sings({"meaning_content": unit, "scene_script": "최수호가 '우연히'를 부른다."})
     assert assemble.span_sings({"meaning_content": unit, "scene_script": "세 사람이 손을 번쩍 들며 무대를 마무리한다."})   # 근거 없음 → 단위 문장
+
+
+def test_bundled_jigeum_preset_loads_with_premiere_title_color2():
+    """지금불륜 템플릿(2026-09-10): design 은 EP01 v3 세 편의 값, 제목 2줄 색만 premiere_claude
+    수작업(build9~12 HOOK (255,60,60))의 #FF3C3C — 사용자 지시 "2번째 줄 색깔만 여기서 작업한 대로"."""
+    from app.v3.cli import CHANNEL_DESIGN_ARGS, load_design_preset
+    preset = load_design_preset("jigeum")
+    assert set(preset["design"]) <= set(CHANNEL_DESIGN_ARGS)
+    d = preset["design"]
+    assert d["title_color"] == "#FFFFFF" and d["title_color2"] == "#FF3C3C"
+    assert d["title_font"] == "JalnanGothic"
+    assert d["platform_placement"] == "above_work" and d["platform_image"] == "coupangplay_icon"
+    assert preset["options"] == {}
+    assert len(preset["editorial"]["avoid"]) == 3          # 권리사 텍스트 금지 3건

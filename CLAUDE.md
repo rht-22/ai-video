@@ -2692,3 +2692,41 @@ subtitle_skip_singing}}`. **명시한 플래그가 템플릿을 이긴다**(None
   에녹이 마이크를 잡고 말한다」의 따옴표가 `SING_HINT` 의 곡명 패턴에 걸려 무대 뒤 MC 멘트 8줄(「누구를 뽑아야 한다고요?
   전유진!」)이 가사로 버려졌다. 곡명 패턴은 사건 단위 문장(창 확정)에서만 쓰고, 연호·유도·당부·응원·감사·멘트·진행은 발화.
 - 회귀 가드: `tests/test_v3_story_flow.py`(+1) · `tests/test_v3_singing_skip.py`(+1). 전체 2215 통과.
+### 지금불륜 design 템플릿 `jigeum.json` (2026-09-10, 사용자 지시)
+
+`app/data/channel_designs/jigeum.json` — EP01 v3 세 편(ep01s2·ep01full·ep01_codex_test01)이 플래그로 넘기던 값을 그대로
+템플릿화(JalnanGothic · 제목 1줄 흰 · 플랫폼 above_work 쿠팡플레이 아이콘+문구). **제목 2줄만 `#FF3C3C`** — premiere_claude
+수작업(build9~12 `HOOK` 의 (255,60,60))에 맞추라는 지시(종전 `#B7FF4A`). `editorial.avoid` 는 쿠플 가이드 PDF 의 텍스트
+단위 권리사 금지 3건(수위·뺑소니 범인 스포·최상철 진범 스포). ⚠ 가이드의 **회차별 시각 구간 금지**(2화 22:06~22:50 등)는
+이 파일도 `--exclude-range`(사건 단위 50% 겹침 반려)도 표현하지 못한다 — span 단위 하드 필터 별건. 회귀 가드:
+`tests/test_v3_singing_skip.py::test_bundled_jigeum_preset_loads_with_premiere_title_color2`.
+
+## 권리사 활용 불가 구간 `banned` — 시각 입력 · 장면 차단 · 증인 · 벨트 (2026-09-10, 사용자 결정)
+
+`app/v3/banned.py` · 템플릿 `banned` 키(`jigeum.json`) · `--banned-json` · pipeline `_resolve_banned_for_job` ·
+`checkpoint_banned.json` · `scripts/banned_dryrun.py`. 계기: 쿠팡플레이 지금불륜 가이드 PDF 의 회차별 활용 불가
+장면(2화 22:06~22:50 호텔 씬 등 12건). "타임스탬프냐 장면이냐" → **둘 다**.
+
+- **시각만 믿으면 안 된다는 증거**: 가이드는 2화 44:00~엔딩에 「엄마 지금 다시 가면 그 아저씨 살 수 있을지도 몰라」
+  가 있다고 적었는데 우리 EP02 전사에서 그 대사는 **43:33**(27초 앞). 사람이 적은 시각이라 시간축이 어긋난다.
+- **입력은 시각**(권리사 정본, `{t0, t1, what, keywords?}` · mm:ss · `"end"`), **차단 단위는 Stage 2 사건 단위**
+  — 조금이라도 겹치면 통째(`--exclude-range` 의 50% 규칙과 다르다 — 그쪽은 소재 중복 회피, 여기는 부분 겹침이
+  곧 위반). **설명은 증인** — 앞뒤 `BANNED_SEARCH_PAD_SEC`(60s) 이웃 단위 중 keywords 가 Stage 2 기록(사건 문장·
+  청취·화면 묘사·화면 글자·인물)에 있는 단위도 합류(43:33 케이스가 이 규칙으로 잡혔다 — m057 「사고 난 아저씨를
+  살릴 수 있다고」). 어디에도 없으면 **시간축 불일치 의심** 경고 + 이웃 전부 차단(과잉 차단이 누락보다 싸다).
+- **금지 span 은 색인에서 뺀다**(human 흐름 `run_story_flow(banned=)` · legacy `run_story(banned_span_ids=)`) —
+  재료 표·덮개·B-roll·뮤트·소리 어느 경로도 색인만 보므로 한 곳에서 끝난다. 사건 단위는 검증기 제외 집합 +
+  프롬프트 블록(`banned_block`)에도. plan(`run_plan(banned=)`)도 같은 집합(지문에 들어가므로 금지가 바뀌면 재구성).
+  커버리지 밖 span 도 시각으로 막는다.
+- **벨트 세 곳**: M3 조립 직후 · M4 `edit_plan` 읽은 직후(M5 오버라이드 뒤 · watch_trim 은 빼기만) · 훅 변형. 클립
+  (덮개 포함)이 차단 구간·span 에 닿으면 전부 열거 + `ValueError`. 사이드카는 M3 가 매 실행 재도출(결정적)하고 금지
+  미지정 실행은 옛 사이드카를 지운다(낡은 규칙 오작동 방지). 미지정 = 지문·사이드카·프롬프트 종전과 동일(회귀 0).
+- **`--episode` 필수** — 목록이 있는데 회차를 모르면 즉시 실패. `banned` 키 형식 오류도 즉시 실패.
+- ⚠ **keywords 는 Stage 2 기록 어휘로** — 가이드 '호텔'을 기록은 '침실·침대·가운'으로 적었다(EP02 실측, 처음엔
+  경고). **주인공 이름을 넣지 말 것**(수정·재홍·예지·민서·경희) — 어느 이웃에나 있어 증인이 못 되고 이웃이 전부
+  합류한다. 절차: Stage 2 뒤 `python -m scripts.banned_dryrun --job <잡> --design-preset jigeum --episode N` 으로
+  **경고 0** 확인 → 실행.
+- **EP02 실측(v1 스키마 잡 fb76f307)**: 원문 금지 447s → 차단 929s(32%) — 사건 단위가 길어서(p50 38s) 확장이 크다.
+  기존 EP02 완성본(「아빠 차로 사람 쳤어」)은 13클립 중 10 위반 → 폐기 확정.
+- 회귀 가드: `tests/test_v3_banned.py`(13건). 전체 2211 통과.
+
