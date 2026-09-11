@@ -2756,6 +2756,38 @@ subtitle_skip_singing}}`. **명시한 플래그가 템플릿을 이긴다**(None
   v1 기본 검출기는 haar 라 v1 무변경. 재실측: 클립 1 전 run x=892(가족 세 얼굴이 링크 거리 안에서 한 사람으로 묶임).
 
 ### 초점 단서 — 화자 순위의 흐린 전경 배제 (2026-09-11, ep01x02 「언제 밥 한 번」 실사고)
+### 제목 줄당 12자 (2026-09-10, 사용자 지시 "제목이 너무 길어서 눈에 안 들어와")
+
+`story_flow/select.TITLE_MAX_CHARS` 16 → **12(공백 포함)** + SCENES_PROMPT 에 "7~12자 · 조사·수식어 빼고 구어체 명사구 종결
+(…당함·…해버림·…입성함)" + 예시 두 개(수작업 v9 「이사 인사 갔다가 / 앞집한테 개무시당함」). human 흐름 전용 — legacy
+`story.TITLE_MAX_CHARS`(16)는 프롬프트 동결이라 그대로. 짧아진 만큼 렌더 `fit_title_sizes` 가 글자를 키운다. 기존 잡의
+story 캐시는 그대로(제목은 오버라이드 `title.top_title` 로 — ep01x01 「옥탑방서 울던 부부 / 청담동 대저택 입성함」).
+테스트 픽스처 제목 2건을 12자 안으로 줄였다(`test_reveal_scenes_title_gate`).
+
+### libass 자막 크기 보정 · v9 글씨 맞춤 · v9 하단 템플릿 교체 (2026-09-10, 사용자 요청)
+
+- **"같은 글씨"는 이미 같은 폰트였다**(v9 build9 `NotoSansCJK-Black.ttc` = 우리 v3 기본 `NotoSansCJKkr-Black`, 외곽선 8 동일).
+  작아 보인 이유: **libass 는 ASS Fontsize 를 em 이 아니라 줄 높이(ascender−descender)로 해석**한다. Noto Sans CJK Black 은
+  1.448em 이라 ASS 60 → 실제 41px(글자 폭 실측 338 vs Pillow 60px 483). v9 는 Pillow 로 62px em 을 그대로 찍었다.
+  `finalize.libass_line_height_ratio`(PIL getmetrics 1000 기준)·`ass_size_for_em` — **기본 폰트(채널 미명시) 채널만** 보정
+  (`design_from_style`). 폰트를 명시한 가왕쇼 등은 사람이 보고 맞춘 값이라 종전 그대로(JalnanGothic 도 libass 에서 0.725 로
+  찍히지만 건드리지 않는다). 라벨(`label_size`)은 아직 미보정(x 폭 자·얼굴 회피가 em 가정 — 별건).
+- `jigeum.json`: subtitle_size 62 · tts_size 62 · tts_color `#FFE23C`(v9 make_sub 62 · nsub (255,226,60)). 보정 뒤 ASS 90.
+- **v9 하단 템플릿 교체**: `~/premiere_claude/shorts_ep01_v9/shorts_ep01_v9_final_ourbottom.mp4` — v9 완성본의 밴드 아래
+  (y≥1405)를 검게 덮고 우리 완성본(ep01x01) 프레임에서 잘라낸 하단 블록(플랫폼 줄 + 작품 로고, y 1477~)을 **밴드 하단
+  기준 같은 오프셋**으로 붙였다(ffmpeg drawbox+overlay, 오디오 copy). 파이프라인 산출이 아니라 1회 합성.
+- 회귀 가드: `tests/test_v3_text_style.py::test_libass_em_compensation_only_for_default_font`.
+- 쿠팡 카피는 **「지금 쿠팡플레이에서 무료로 시청하세요」**(2026-09-10 사용자 확정, "앞으로도 이렇게") — `jigeum.json` platform_text.
+- **라벨 얼굴 회피의 자막 띠 장애물**(같은 날, 「(눈물의 다짐)」 실사고): `label_faces.subtitle_obstacles`(대사 한 줄×강조 상한
+  1.45 · 내레이션 두 줄 블록, margin_v 기준 전폭 띠) — 회피 후보(특히 '아래')가 띠와 겹치면 건너뛰고, 얼굴 없이 띠만 겹치는
+  라벨은 띠 바로 위로 올린다(`why=above-subtitle`). render_final 이 `_sub_margin/_tts_margin` 을 넘긴다. 회귀 가드
+  `tests/test_v3_label_faces.py`(+1).
+- **Files API 간헐 실패 대비**(같은 날 밤 실측): 같은 300KB 프로브 클립을 3회 올려 2회 `failed to be processed`(code 13),
+  폴링 `files.get` 에서 500 도 났다 — 서버 쪽 흔들림. 한 번 실패가 watch_trim(트림 없이 진행)·덮개 프로브(산술 배치)를 통째로
+  폴백시켰다(ep01x01 r1 · ep01x02 r1). `seq_analyze._upload_video` 재시도를 `FILES_UPLOAD_ATTEMPTS`(6, 백오프 ≤8s)로,
+  `refine._cut_probe_clip` 은 `-map 0:v:0 -dn`(소스 tmcd 데이터 스트림이 딸려 오던 것 제거). 회귀 가드
+  `tests/test_v3_stage1.py::test_upload_video_retries_transient_files_api_failures`.
+
 
 `reframe._face_sharpness`(collect 6번째 값 = 얼굴 상자 라플라시안 분산) · `finalize.SPEAKER_FOCUS_RATIO`(0.6) ·
 `rank_speaker_x` 의 focused 필터.

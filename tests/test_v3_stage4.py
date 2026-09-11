@@ -87,8 +87,11 @@ def test_design_mapping_and_ass_color_conversion():
 def test_design_mapping_defaults_untouched():
     base = finalize.DesignConfig()
     d = finalize.design_from_style({})
-    assert d.subtitle_size == base.subtitle_size
+    # 2026-09-10: 폰트 미명시 = v3 기본 Noto → libass 줄높이 보정(em 65 → ASS 94). 색·그 외는 기본값 그대로.
+    assert d.subtitle_size == finalize.ass_size_for_em(finalize.V3_TEXT_FONT, base.subtitle_size)
+    assert d.tts_line_font_size == finalize.ass_size_for_em(finalize.V3_TEXT_FONT, base.tts_line_font_size)
     assert d.tts_line_color == base.tts_line_color
+    assert finalize.design_from_style({"subtitle_font": "JalnanGothic"}).subtitle_size == base.subtitle_size
 
 
 # ── 비트 창 복원 ────────────────────────────────────────────────────────────

@@ -261,6 +261,8 @@ def test_rank_speaker_x_uses_speaker_memory():
     _, runs2 = hold_keyframes(rows, [(2375.8, 2377.08, "임재홍")], clip_start=2375.8, clip_end=2377.08,
                               fps=24.0, pic_w=1920, samples=smp, speaker_memory=mem2)
     assert runs2[0]["x"] == 1620.0
+
+
 def test_rank_speaker_x_requires_presence_in_half_the_samples():
     """2026-09-10 지금불륜 ep01x01 「대원 여러분」 실사고: 와이드 숏에서 가족(x≈1300, 15표본 중 11)은 입 움직임이
     거의 없고, 마지막 1.5초에만 잡힌 촬영감독 뒤통수 "얼굴"(x≈360, 4표본)이 talk×√w 로 이겨 크롭이 왼쪽 끝에 붙었다.
@@ -322,6 +324,20 @@ def test_yunet_plausible_rejects_back_of_head_and_specks():
     assert YUNET_MIN_FACE_PX == 20
     assert yunet_plausible([0, 0, 50, 50])                 # 랜드마크 없는 행은 크기만
     assert not yunet_plausible([0, 0, 19, 50])
+
+
+def test_libass_em_compensation_only_for_default_font():
+    """2026-09-10: libass 는 ASS Fontsize 를 줄 높이(ascender−descender)로 해석 — Noto Sans CJK Black(1.448em)은
+    60 이 41px 로 찍혔다(수작업 v9 는 Pillow 62px em). 기본 폰트 채널만 보정, 폰트 명시 채널은 종전 값."""
+    from app.v3 import finalize, stage4
+    r = finalize.libass_line_height_ratio("NotoSansCJKkr-Black")
+    assert 1.40 <= r <= 1.50
+    assert finalize.ass_size_for_em("NotoSansCJKkr-Black", 62) == round(62 * r)
+    d = finalize.design_from_style({**stage4.get_style_preset(None), "subtitle_size": 62, "tts_size": 62})
+    assert d.subtitle_font == "NotoSansCJKkr-Black" and d.subtitle_size == round(62 * r) and d.tts_line_font_size == round(62 * r)
+    j = finalize.design_from_style({**stage4.get_style_preset(None), "subtitle_font": "JalnanGothic", "subtitle_size": 62})
+    assert j.subtitle_size == 62                     # 명시 폰트 — 보정 없음
+    assert finalize.libass_line_height_ratio("없는폰트-xyz") == 1.0
 
 
 def test_rank_speaker_x_drops_out_of_focus_face():

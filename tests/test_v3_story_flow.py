@@ -854,7 +854,7 @@ def test_reveal_topic_parse_default_and_strategy_conflict():
 
 def test_reveal_scenes_title_gate():
     base = {"scenes": [{"meaning": "m000", "purpose": "배경"}, {"meaning": "m001", "purpose": "결과"}],
-            "title": {"line1": "시장에 뜬 홍지윤 빈예서", "line2": "티켓 300장 완판 가능할까"},
+            "title": {"line1": "시장에 뜬 홍지윤", "line2": "티켓 300장 완판할까"},
             "title_review": {"line2_reveals_ending": False, "hook_answers_title": False}}
     # reveal 없음 = 종전 그대로 통과
     assert sl.validate_scenes(base, ROWS)[0] is not None
@@ -862,7 +862,7 @@ def test_reveal_scenes_title_gate():
     obj, pr, _ = sl.validate_scenes(base, ROWS, reveal="front")
     assert obj is None and any("질문형" in p for p in pr)
     # front + 서술형 = 통과
-    ok = {**base, "title": {"line1": "시장에 뜬 홍지윤 빈예서", "line2": "50분 만에 완판한 비결"}}
+    ok = {**base, "title": {"line1": "시장에 뜬 홍지윤", "line2": "50분 만에 완판"}}
     assert sl.validate_scenes(ok, ROWS, reveal="front")[0] is not None
     # end + 질문형 = 통과(결과는 마지막에 온다)
     assert sl.validate_scenes(base, ROWS, reveal="end")[0] is not None
