@@ -30,9 +30,12 @@ NAR_PAD_SEC = 0.15           # 합성 길이에 더하는 여유(머리 0.1 · �
 NAR_HEAD_PAD_SEC = 0.10      # 엔딩 덮개 — 머리 여유만(내레이션 끝 = 컷)
 JOIN_GAP_SEC = 0.6           # 덮개 끝~앵커 틈이 이보다 짧으면 덮개를 앵커까지 늘려 잇는다
 SNAP_TOL_SEC = 0.30          # 프로브 답을 장면 전환·grid 경계에 붙이는 관용
-PROBE_MIN_SLACK_SEC = 1.0    # 창 − L 이 이보다 작으면 고를 게 없다 — 호출 생략
+PROBE_MIN_SLACK_SEC = 1.0    # 창 − L 이 이보다 작으면 시작점은 고를 게 없다 — 그래도 **문장·화면 대조는 한다**
+                             # (2026-09-11 규칙 4-①: 지정 화면이 딱 맞을 때 검증이 빠지던 구멍 — 시작 고정 프로브)
 PROBE_MAX_WINDOW_SEC = 30.0  # 프로브 클립 상한(넘으면 지정 화면 중심으로 자른다)
-FLASH_BUDGET = 10            # 편당 덮개 프로브 호출 상한(refine 과 같은 규율)
+FLASH_BUDGET = 12            # 되돌림 패스당 덮개 프로브 호출 상한(전수 프로브 — 내레이션 상한 8 + 여유)
+VERIFY_MIN_WINDOW_SEC = 1.0  # 정지·쌓기 덮개 검증 프로브의 최소 클립 길이(붙잡은 프레임 앞 footage 로 채운다)
+OPENING_MOTION_SEC = 3.0     # 첫 N초 안에 컷 전환·발화 시작이 하나는 있어야 한다(2026-09-11 규칙 1)
 MIN_FREE_SEC = 0.5
 STACK_MIN_PART_SEC = 0.6     # 컷 쌓기 조각 하한(지침서: 1.5초짜리 컷을 쌓는다 — 너무 짧으면 깜빡임)
 STACK_MAX_PARTS = 4
@@ -346,8 +349,11 @@ def cut_clip(video: Path, t0: float, t1: float, out: Path) -> None:
 
 def run_probe(gemini, video: Path, out_dir: Path, tag: str, win: dict, L: float,
               text: str, refers_to: str, grid: dict, span_index: dict[str, dict],
-              log=print, focus: tuple[float, float] | None = None) -> dict | None:
-    """창을 잘라 Flash 에 묻는다 → {start(원본 절대초), snap, raw, reason} | None."""
+              log=print, focus: tuple[float, float] | None = None,
+              fixed_start: float | None = None) -> dict | None:
+    """창을 잘라 Flash 에 묻는다 → {start(원본 절대초), snap, raw, reason} | None.
+    fixed_start(2026-09-11): 시작점은 이미 정해졌고(여유 없는 창·뮤트·정지) **문장·화면 대조만** 얻는다 —
+    모델의 start_sec 은 무시하고 start=fixed_start·snap="fixed" 로 돌려준다."""
     from app.v3.refine import _call_probe
     t0, t1 = probe_window(win, L, focus)
     clip = out_dir / f"cover_probe_{tag}.mp4"
@@ -367,15 +373,18 @@ def run_probe(gemini, video: Path, out_dir: Path, tag: str, win: dict, L: float,
             log(f"  [v3/cover] ⚠ 프로브 호출 실패({tag}, 시도 {attempt + 1}/2): {e}")
     if resp is None:
         return None
-    rel, why = validate_probe(resp, L, t1 - t0)
-    if rel is None:
-        log(f"  [v3/cover] ⚠ 프로브 답 거절({tag}): {why} — {json.dumps(resp, ensure_ascii=False)[:120]}")
-        return None
-    raw = t0 + rel
-    snapped, how = snap_time(raw, grid)
-    # 스냅이 창 밖·L 미확보로 밀면 원값
-    if snapped < win["w0"] - 1e-6 or snapped + L > win["w1"] + 1e-6:
-        snapped, how = round(raw, 2), "raw"
+    if fixed_start is not None:
+        raw, snapped, how = round(float(fixed_start), 3), round(float(fixed_start), 3), "fixed"
+    else:
+        rel, why = validate_probe(resp, L, t1 - t0)
+        if rel is None:
+            log(f"  [v3/cover] ⚠ 프로브 답 거절({tag}): {why} — {json.dumps(resp, ensure_ascii=False)[:120]}")
+            return None
+        raw = t0 + rel
+        snapped, how = snap_time(raw, grid)
+        # 스냅이 창 밖·L 미확보로 밀면 원값
+        if snapped < win["w0"] - 1e-6 or snapped + L > win["w1"] + 1e-6:
+            snapped, how = round(raw, 2), "raw"
     # 문장·화면 대조(갭 8 첫 삽, 2026-09-07): 프로브는 이미 내레이션 문장과 클립을 함께
     # 보므로 추가 호출 0 으로 "화면을 보니 문장이 틀렸다"가 나온다. 판정은 호출자가 한다
     # (모순이면 걸음 4 재질의 1회). 칸이 없으면 None = 판정 없음(옛 응답 호환).
@@ -386,6 +395,137 @@ def run_probe(gemini, video: Path, out_dir: Path, tag: str, win: dict, L: float,
             "text_matches": (tm if isinstance(tm, bool) else None),
             "seen": str(resp.get("seen") or "")[:120],
             "probe_window": [round(t0, 3), round(t1, 3)]}
+
+
+def _verify_probe(gemini, video, out_dir, tag: str, f0: float, f1: float, L: float, text: str,
+                  group: dict, grid: dict, span_index: dict[str, dict], budget: dict | None,
+                  probe_cache: dict | None, log=print) -> dict | None:
+    """시작이 정해진 덮개(정지·쌓기)의 **문장·화면 대조만** — 창 [f0,f1] 을 그대로 보여주고 시작은 f0 로 고정.
+    창이 너무 짧으면(붙잡은 한 프레임) 앞 footage 로 VERIFY_MIN_WINDOW_SEC 까지 채운다(같은 장면의 직전)."""
+    if gemini is None or video is None or out_dir is None:
+        return None
+    if budget is not None and budget.get("left", 0) <= 0:
+        log(f"  [v3/cover] 프로브 예산 소진 — {tag} 검증 없음")
+        return None
+    w0 = min(f0, max(0.0, f1 - VERIFY_MIN_WINDOW_SEC))
+    ckey = (tag, text, round(w0, 2), round(f1, 2))
+    if probe_cache is not None and ckey in probe_cache:
+        return dict(probe_cache[ckey])
+    if budget is not None:
+        budget["left"] = budget.get("left", 0) - 1
+        budget["used"] = budget.get("used", 0) + 1
+    win = {"kind": "verify", "w0": w0, "w1": f1, "attach": "start"}
+    probe = run_probe(gemini, video, out_dir, tag, win, min(L, f1 - w0), text,
+                      group.get("refers_to", "") or _cover_desc(group, span_index),
+                      grid, span_index, log=log, fixed_start=round(f0, 3))
+    if probe:
+        probe["verify_only"] = True
+        if probe_cache is not None:
+            probe_cache[ckey] = dict(probe)
+    return probe
+
+
+def opening_motion(beats: list[dict], span_index: dict[str, dict], grid: dict, *,
+                   limit: float = OPENING_MOTION_SEC) -> tuple[bool, str, list[dict]]:
+    """첫 limit 초 안에 **컷 전환 또는 발화 시작**이 하나는 있는가(2026-09-11 사용자 규칙 1 교정판 —
+    "대사 필수"가 아니라 "정지 없음"). 순수·결정적. 편집본 머리 = 비트 0 의 before 덮개(조각·쌓기·정지)
+    → 비트 0 의 조각(head_trim 반영). 이벤트: 조각 경계가 원본에서 불연속이면 컷, grid 장면 전환이 조각
+    안에 있으면 컷, 유성 조각 시작은 발화. 정지(hold)가 limit 안에서 시작하면 그 자체가 위반.
+    반환 (ok, 사유, 이벤트 목록)."""
+    if not beats:
+        return True, "", []
+    b = beats[0]
+    cuts = sorted(float(c) for c in (grid.get("scene_cuts") or []))
+    pieces: list[dict] = []
+    for c in b.get("covers") or []:
+        if c.get("position") != "before":
+            continue
+        parts = c.get("parts") or [(c["t_in"], c["t_out"])]
+        for a, z in parts:
+            pieces.append({"t0": float(a), "t1": float(z), "hold": 0.0, "kind": c.get("kind"), "voiced": False})
+        if c.get("hold_sec"):
+            pieces[-1]["hold"] = float(c["hold_sec"])
+    ids = b.get("span_ids") or []
+    ht = b.get("head_trim_sec")
+    for x in ids:
+        sp = span_index[x]
+        t0 = sp["t_in"]
+        if ht is not None and x == ids[0] and sp["t_in"] < ht < sp["t_out"]:
+            t0 = ht
+        pieces.append({"t0": t0, "t1": sp["t_out"], "hold": 0.0, "kind": "beat",
+                       "voiced": bool(sp.get("is_audio"))})
+    events: list[dict] = []
+    e = 0.0
+    prev_t1: float | None = None
+    for pc in pieces:
+        if e >= limit - 1e-6:
+            break
+        if prev_t1 is not None and abs(pc["t0"] - prev_t1) > 0.05 and e > 1e-6:
+            events.append({"at": round(e, 3), "kind": "cut", "why": "조각 경계"})
+        if pc["voiced"]:
+            events.append({"at": round(e, 3), "kind": "speech"})
+        for c in cuts:
+            # 조각 끝의 장면 전환(다음 조각 머리 = 컷)도 센다 — 경계가 limit 에 걸리면 포함(3.0s 컷은 '3초 안')
+            if pc["t0"] + 0.05 < c <= pc["t1"] + 1e-6:
+                at = e + (c - pc["t0"])
+                if at <= limit + 0.05:
+                    events.append({"at": round(at, 3), "kind": "cut", "why": "장면 전환"})
+        e += pc["t1"] - pc["t0"]
+        if pc["hold"] > 0 and e < limit - 1e-6:
+            return False, (f"첫 {limit:.0f}초 안에 정지 화면(hold {pc['hold']:.1f}s · 편집본 {e:.1f}s 부터) — "
+                           "오프닝은 정지시키지 않는다"), events
+        e += pc["hold"]
+        prev_t1 = pc["t1"]
+    if events:
+        return True, "", events
+    return False, (f"첫 {limit:.0f}초 안에 컷 전환·발화 시작이 하나도 없다(정지에 가까운 오프닝) — "
+                   "훅 내레이션을 짧게 끊거나 컷이 있는 화면을 짚어라"), events
+
+
+def verify_covers(story_doc: dict, span_index: dict[str, dict], grid: dict, *,
+                  gemini, video: Path | None, out_dir: Path | None,
+                  budget: int = FLASH_BUDGET, log=print) -> list[dict]:
+    """문장·화면 판정(text_matches)이 없는 덮개를 **전수** 다시 본다(2026-09-11 규칙 4-② — 손편집 덮개·
+    프로브 실패 덮개는 검증 없이 나갔다). 시작은 그대로(fixed) — 판정만 얻어 cover["probe"] 에 제자리로 쓴다
+    (호출자가 체크포인트를 다시 써서 한 번만 든다). 반환: 모순 목록(제거는 하지 않는다 — 손편집은 사람이
+    이긴다 · 크게 기록)."""
+    if gemini is None or video is None or out_dir is None:
+        return []
+    cues = story_doc.get("narration_cues") or []
+    bad: list[dict] = []
+    used = 0
+    for b in story_doc.get("beats") or []:
+        for c in b.get("covers") or []:
+            pr = c.get("probe")
+            if isinstance(pr, dict) and pr.get("text_matches") is not None:
+                continue
+            lines = [str(q.get("text") or "") for q in cues
+                     if q.get("beat") == b.get("number")
+                     and c["t_in"] - 1e-3 <= float(q.get("source_time_sec") or -1) <= c["t_out"] + 1e-3]
+            if not lines:
+                continue
+            if used >= budget:
+                log(f"  [v3/cover] ⚠ 덮개 검증 예산({budget}) 소진 — 비트 {b.get('number')} {c.get('position')} 미검증")
+                continue
+            used += 1
+            f0, f1 = (c["parts"][0] if c.get("parts") else (c["t_in"], c["t_out"]))
+            w0 = min(float(f0), max(0.0, float(f1) - VERIFY_MIN_WINDOW_SEC))
+            win = {"kind": "verify", "w0": w0, "w1": float(f1), "attach": "start"}
+            tag = f"verify_{b.get('number')}_{c.get('position')}"
+            desc = " / ".join((span_index.get(x) or {}).get("scene_script") or ""
+                              for x in c.get("span_ids") or [])[:300]
+            probe = run_probe(gemini, video, out_dir, tag, win, float(f1) - w0, " ".join(lines), desc,
+                              grid, span_index, log=log, fixed_start=round(float(f0), 3))
+            if probe is None:
+                continue
+            probe["verify_only"] = True
+            c["probe"] = probe
+            if probe.get("text_matches") is False:
+                x = {"anchor": f"{c.get('position')}{b.get('number')}", "text": " ".join(lines),
+                     "seen": probe.get("seen", ""), "reason": probe.get("reason", "")}
+                bad.append(x)
+                log(f"  [v3/cover] ⚠ 문장·화면 모순(사후 검증) {x['anchor']}: 「{x['text'][:30]}」 ↔ 화면 「{x['seen'][:40]}」")
+    return bad
 
 
 # ── 덮개 확정 ──────────────────────────────────────────────────────────────
@@ -462,9 +602,12 @@ def choose_cover(anchor: tuple[str, int], group: dict, beats: list[dict],
                  out_dir: Path | None = None, budget: dict | None = None,
                  placed: list[tuple[float, float]] | None = None,
                  allow_ids: set[str] | None = None,
+                 probe_cache: dict | None = None,
                  log=print) -> dict:
     """한 내레이션 묶음의 덮개 → {position, kind, t_in, t_out, span_ids, probe, note}.
-    allow_ids: 지정 화면이 비트 안 조각이어도 허용(무대사 편 — designated_window 참조)."""
+    allow_ids: 지정 화면이 비트 안 조각이어도 허용(무대사 편 — designated_window 참조).
+    probe_cache(2026-09-11): (tag, 문장, 창) → 프로브 결과. 모순 내레이션을 뺀 뒤 나머지를 다시 놓을 때
+    같은 창을 다시 묻지 않는다(요금·결정성)."""
     # 엔딩(after) 덮개는 내레이션이 끝나는 곳에서 **뚝** 끊는다 — 꼬리 여유 없이 머리
     # 0.1s 만(2026-09-03 사용자 지적: 마지막 내레이션 뒤 장면이 길다)
     pad = NAR_HEAD_PAD_SEC if anchor[0] == "after" else NAR_PAD_SEC
@@ -516,7 +659,9 @@ def choose_cover(anchor: tuple[str, int], group: dict, beats: list[dict],
             return {"position": kind, "kind": "hold",
                     "t_in": round(f0, 3), "t_out": round(f1, 3), "hold_sec": hold,
                     "span_ids": spans_overlapping(f0, f1, span_index),
-                    "probe": None, "note": note,
+                    "probe": _verify_probe(gemini, video, out_dir, tag, f0, f1, L, text, group,
+                                           grid, span_index, budget, probe_cache, log),
+                    "note": note,
                     "window": [round(f0, 3), round(f1, 3)], "L": L}
         if dw is not None:
             wins.append(dw)
@@ -533,7 +678,9 @@ def choose_cover(anchor: tuple[str, int], group: dict, beats: list[dict],
                 return {"position": kind, "kind": "stack",
                         "t_in": parts[0][0], "t_out": parts[-1][1], "parts": [list(p) for p in parts],
                         "span_ids": [x for a, z in parts for x in spans_overlapping(a, z, span_index)],
-                        "probe": None, "note": note,
+                        "probe": _verify_probe(gemini, video, out_dir, tag, parts[0][0], parts[0][1], L, text,
+                                               group, grid, span_index, budget, probe_cache, log),
+                        "note": note,
                         "window": [parts[0][0], parts[-1][1]], "L": L}
     wins += candidate_windows(anchor, beats, span_index, rows_by_idx, L,
                               extra_used=placed)
@@ -543,27 +690,34 @@ def choose_cover(anchor: tuple[str, int], group: dict, beats: list[dict],
             continue
         probe = None
         slack = (win["w1"] - win["w0"]) - L
-        can_probe = (gemini is not None and video is not None and out_dir is not None
-                     and slack >= PROBE_MIN_SLACK_SEC
-                     and not win["kind"].startswith("mute")
-                     and not win["kind"].endswith("spill"))
+        if win["kind"] == "designated":
+            base_start = max(win["w0"], min(win["focus0"], win["w1"] - L))
+        else:
+            base_start = arithmetic_start(win, L)
+        # 시작점을 고를 여유가 있는 창만 모델이 시작점을 정한다. 여유 없는 창·뮤트·spill 은 시작이 산술로
+        # 정해지지만 **문장·화면 대조는 전수**(2026-09-11 규칙 4-① — 종전엔 이 창들이 검증 없이 나갔다).
+        free_start = (slack >= PROBE_MIN_SLACK_SEC and not win["kind"].startswith("mute")
+                      and not win["kind"].endswith("spill"))
+        can_probe = gemini is not None and video is not None and out_dir is not None
         if can_probe and budget is not None and budget.get("left", 0) <= 0:
-            log(f"  [v3/cover] 프로브 예산 소진 — {tag} 산술 배치")
+            log(f"  [v3/cover] 프로브 예산 소진 — {tag} 산술 배치(검증 없음)")
             can_probe = False
         if can_probe:
-            if budget is not None:
-                budget["left"] = budget.get("left", 0) - 1
-                budget["used"] = budget.get("used", 0) + 1
-            probe = run_probe(gemini, video, out_dir, tag, win, L, text,
-                              group.get("refers_to", "") or _cover_desc(group, span_index),
-                              grid, span_index, log=log,
-                              focus=focus if win["kind"] == "designated" else None)
-        if probe:
-            start = probe["start"]
-        elif win["kind"] == "designated":
-            start = max(win["w0"], min(win["focus0"], win["w1"] - L))
-        else:
-            start = arithmetic_start(win, L)
+            ckey = (tag, text, round(win["w0"], 2), round(win["w1"], 2))
+            if probe_cache is not None and ckey in probe_cache:
+                probe = dict(probe_cache[ckey])
+            else:
+                if budget is not None:
+                    budget["left"] = budget.get("left", 0) - 1
+                    budget["used"] = budget.get("used", 0) + 1
+                kw = {} if free_start else {"fixed_start": round(base_start, 3)}
+                probe = run_probe(gemini, video, out_dir, tag, win, L, text,
+                                  group.get("refers_to", "") or _cover_desc(group, span_index),
+                                  grid, span_index, log=log,
+                                  focus=focus if win["kind"] == "designated" else None, **kw)
+                if probe_cache is not None and probe:
+                    probe_cache[ckey] = dict(probe)
+        start = probe["start"] if probe else base_start
         end = start + L
         note = ""
         if win["kind"] == "lead_in" and 0 < win["w1"] - end < JOIN_GAP_SEC:
@@ -665,5 +819,6 @@ def cap_head_gap(beat: dict, span_index: dict[str, dict],
 
 __all__ = ["choose_cover", "apply_cover_to_beats", "candidate_windows", "subtract",
            "used_intervals", "snap_time", "validate_probe", "build_probe_prompt",
+           "opening_motion", "verify_covers", "OPENING_MOTION_SEC",
            "arithmetic_start", "probe_window", "spans_overlapping", "NAR_PAD_SEC",
            "JOIN_GAP_SEC", "FLASH_BUDGET", "HEAD_GAP_MAX_SEC", "cap_head_gap"]

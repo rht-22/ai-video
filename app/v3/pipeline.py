@@ -1116,6 +1116,32 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
             return
         story_doc = _read_json(story_ckpt).get("story")
 
+    # ── 덮개 사후 검증(2026-09-11 규칙 4-②) — 문장·화면 판정(text_matches)이 없는 덮개를 전수 다시 본다.
+    # 걸음 5 는 이제 전수 프로브라 여기 걸리는 것은 **손편집 덮개**(probe:null)와 호출 실패분이다. 시작은 그대로,
+    # 판정만 cover["probe"] 에 써서 체크포인트를 다시 쓴다(한 번만 든다 — 재렌더 결정성). 손편집은 사람이 이기므로
+    # 제거하지 않고 크게 기록한다(run_log `cover_verify` + stdout ⚠).
+    if story_doc and story_doc.get("template") == "human_flow":
+        from app.v3.story_flow import cover as _cv
+        _unverified = sum(1 for _b in story_doc.get("beats") or [] for _c in _b.get("covers") or []
+                          if not (isinstance(_c.get("probe"), dict) and _c["probe"].get("text_matches") is not None))
+        if _unverified:
+            log(f"  [v3/story] 덮개 사후 검증 — 판정 없는 덮개 {_unverified}개(손편집·프로브 실패)를 다시 본다")
+            try:
+                _vbad = _cv.verify_covers(story_doc, span_index, grid, gemini=get_gemini(), video=video_path,
+                                          out_dir=output_dir / "cover_probes", log=log)
+            except Exception as _e:  # noqa: BLE001 — 검증 장치가 본편을 막지 않는다(기록)
+                log(f"  [v3/story] ⚠ 덮개 사후 검증 실패: {_e}")
+                _vbad = None
+            if _vbad is not None:
+                story_doc["cover_verify"] = {"checked": _unverified, "contradictions": _vbad}
+                if story_ckpt.exists():
+                    _ck = _read_json(story_ckpt)
+                    _ck["story"] = story_doc
+                    _write_json(story_ckpt, _ck)
+                step("cover_verify", checked=_unverified, contradictions=len(_vbad), details=_vbad)
+                if _vbad:
+                    log(f"  [v3/story] ⚠ 손편집·미검증 덮개 {len(_vbad)}건이 문장과 모순 — 검수 대상(사람 편집은 유지)")
+
     # ── 경계면 조립(C1·C2·C6) — 순수, LLM 없음 ────────────────────────────
     plan = assemble.assemble_edit_plan(
         story_doc, span_index, video_path=str(video_path), work_title=work_title,
@@ -1558,6 +1584,9 @@ def _run_m4(*, output_dir: Path, video_path: Path, grid: dict,
     _fp_parts.append({"cues": _cue_sig})
     # 제목도 렌더 재료다(같은 날 — 제목 아랫줄만 고친 재실행이 캐시를 지나쳤다)
     _fp_parts.append({"title": (story_doc.get("title") or {}), "top_title": (plan.get("layout") or {}).get("top_title")})
+    # 썸네일 안전 구역(2026-09-11) — 경계가 바뀌면 배치가 바뀐다. ⚠ 이 항목이 생기며 기존 잡은 다음 재개에서 한 번 다시 렌더된다.
+    _fp_parts.append({"thumb_safe": [finalize.THUMB_SAFE_TOP, finalize.THUMB_SAFE_BOTTOM,
+                                     finalize.LOGO_MIN_SCALE, finalize.TITLE_MIN_SCALE]})
     render_fp = hashlib.sha1(json.dumps(_fp_parts, sort_keys=True,
                                         ensure_ascii=False).encode()).hexdigest()[:16]
     if final_path.exists() and _sidecar_ok("render_fingerprint.json", render_fp) \

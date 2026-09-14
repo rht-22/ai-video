@@ -153,6 +153,14 @@ def estimate_title_bottom(design: Any, geom: BandGeometry, *,
     이 아래로만 올린다'는 **하한**이라 블록을 크게 잡는 쪽이 안전하다(줄 수는 호출부가
     실제 제목으로 세어 넘긴다).
     """
+    return estimate_title_block(design, geom, line_count=line_count,
+                                line_spacing=line_spacing)[1]
+
+
+def estimate_title_block(design: Any, geom: BandGeometry, *,
+                         line_count: int = 2, line_spacing: int = 30) -> tuple[int, int]:
+    """제목 블록의 (윗변, 아랫변) y — `estimate_title_bottom` 과 한 벌(같은 수식).
+    윗변은 v3 썸네일 안전 구역 판정(finalize.fit_thumbnail_safe_zone)이 쓴다(2026-09-11)."""
     sizes = list(getattr(design, "title_sizes", None) or [int(getattr(design, "title_size", 70))])
     boxes = list(getattr(design, "title_boxes", None) or ["none"])
     n = max(1, int(line_count))
@@ -171,7 +179,7 @@ def estimate_title_bottom(design: Any, geom: BandGeometry, *,
         top = dynamic_top
     else:
         top = title_y
-    return top + total
+    return top, top + total
 
 
 # ─────────────────────────────────────────────────────────────────────────

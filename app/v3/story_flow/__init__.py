@@ -51,8 +51,8 @@ def _hint_block(stage1_doc: dict | None) -> str:
     return "\n## 본 눈의 추천(참고 — 영상을 본 단계가 지목한 쇼츠감)\n" + "\n".join(rows) + "\n"
 
 
-COVER_REASK_MAX = 1              # 덮개 프로브가 "문장이 화면과 모순"이라 하면 걸음 4·5 를 다시 도는
-                                 # 상한(갭 8 첫 삽, 2026-09-07) — 편당 1회, 무한 루프 금지
+COVER_REASK_MAX = 2              # 덮개 프로브가 "문장이 화면과 모순"이라 하면 걸음 4·5 를 다시 도는 상한(2026-09-11: 1→2 ·
+                                 # 소진 뒤 잔존은 제거 또는 실패 — 종전 "검수 기록만"은 폐지). 무한 루프 금지
 
 
 def _loop(name: str, make_prompt: Callable[[str], str], validate: Callable[[dict], tuple],
@@ -300,38 +300,18 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
         return sec
 
     pbudget = {"left": cv.FLASH_BUDGET, "used": 0}
+    probe_cache: dict = {}                          # (tag, 문장, 창) → 프로브 — 재배치 때 같은 창 재호출 방지
     beats_snapshot = copy.deepcopy(beats)
     reask_note = ""
     contradictions_all: list[dict] = []
-    for pass_no in range(1 + COVER_REASK_MAX):
-        if pass_no:
-            # 되돌림: 덮개가 비트에서 가져간 조각·head_trim 을 원상 복구하고 걸음 4 부터
-            beats = copy.deepcopy(beats_snapshot)
-            log(f"  [v3/flow] ↩ 덮개 프로브가 문장·화면 모순 {len(contradictions_all)}건을 봤다 — "
-                f"걸음 4(내레이션)부터 다시({pass_no}/{COVER_REASK_MAX})")
-        groups = _loop("narration" if not pass_no else f"narration_reask{pass_no}",
-                       lambda rej: nr.PROMPT.format(
-            max_chars=nr.NAR_MAX_CHARS, max_n=max_n,
-            work_title=work_title, research_block=research_block, topic=topic["topic"],
-            title_line1=title["line1"], title_line2=title["line2"],
-            beats_block=nr.beats_block(beats, span_index, rows_by_idx, jumps),
-            silent_note=silent_note,
-            rhythm_block=nr.rhythm_block(rhythm),
-            available_block=nr.available_block(available, span_index, allowed,
-                                               beat_ids=own_ids or None),
-            tone_block=(f"\n{tone_block}\n" if tone_block else ""), reject_block=rej),
-            lambda r: nr.validate_narrations(r, len(beats), required=required,
-                                             rewind={j["before_beat"] for j in (jumps or []) if j.get("rewind")},
-                                             available=set(available), max_n=max_n,
-                                             min_total_sec=min_total),
-            gemini, audit, log, initial_reject=reask_note)
-        nr.synthesize_groups(groups, nar_dir, _synth_cached, log=log)
-        for g in groups:
-            log(f"  [v3/flow/narration] {g['anchor'][0]}{g['anchor'][1]}: "
-                + " | ".join(f"{t} ({m:.2f}s)" for t, m in zip(g["lines"], g["measured"]))
-                + (f"  화면 {g['cover_ids']}" if g.get("cover_ids") else "  화면 미지정"))
+    groups: list[dict] = []
+    cues: list[dict] = []
+    covers_audit: list[dict] = []
+    bad: list[dict] = []
+    opening_ok, opening_why, opening_ev = True, "", []
 
-        # 5 덮개 — 그 자리를 다시 본다
+    def _place_covers(groups: list[dict], beats: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+        """5 덮개 — 그 자리를 다시 본다. beats 는 제자리 갱신(covers·head_trim). → (cues, 감사, 모순)."""
         covers_audit: list[dict] = []
         cues: list[dict] = []
         placed: list[tuple[float, float]] = []          # 이미 놓인 덮개 — 같은 화면 재사용 금지
@@ -357,6 +337,7 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
                 # 자기 비트 화면 허용은 before 앵커만 — after 덮개가 마지막 비트 머리를 가져가면
                 # 나머지 조각이 덮개보다 먼저 재생돼 시간이 되감긴다
                 allow_ids=((own_ids & set(beats[k]["span_ids"])) or None) if kind == "before" else None,
+                probe_cache=probe_cache,
                 log=log)
             removed = cv.apply_cover_to_beats(cover, beats, span_index, k)
             cover["removed_span_ids"] = removed
@@ -371,7 +352,8 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
             placed.extend([tuple(p) for p in (cover.get("parts") or [(cover["t_in"], cover["t_out"])])])
             beats[k]["covers"].append(cover)
             if cover.get("probe") and cover["probe"].get("text_matches") is False:
-                bad.append({"anchor": f"{kind}{k}", "text": " ".join(g["lines"]),
+                bad.append({"anchor": f"{kind}{k}", "anchor_key": (kind, k),
+                            "text": " ".join(g["lines"]),
                             "seen": cover["probe"].get("seen", ""),
                             "reason": cover["probe"].get("reason", "")})
             # cue — 묶음의 줄들을 덮개 안에 순서대로(측정 길이 비례가 아니라 실측 그대로,
@@ -397,24 +379,97 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
             log(f"  [v3/flow/cover] {kind}{k} {cover['kind']} {fmt_t(cover['t_in'])}~{fmt_t(cover['t_out'])} "
                 f"({cover['L']:.1f}s)" + (f" · 프로브 {cover['probe']['snap']} {cover['probe']['reason'][:40]}"
                                          if cover.get("probe") else " · 산술"))
+        return cues, covers_audit, bad
+
+    for pass_no in range(1 + COVER_REASK_MAX):
+        pbudget["left"] = cv.FLASH_BUDGET               # 패스마다 새 예산(같은 창은 캐시가 막는다)
+        if pass_no:
+            # 되돌림: 덮개가 비트에서 가져간 조각·head_trim 을 원상 복구하고 걸음 4 부터
+            beats = copy.deepcopy(beats_snapshot)
+            log(f"  [v3/flow] ↩ 덮개 프로브가 문장·화면 모순 {len(contradictions_all)}건"
+                + (" + 오프닝 정지" if not opening_ok else "")
+                + f" 을 봤다 — 걸음 4(내레이션)부터 다시({pass_no}/{COVER_REASK_MAX})")
+        groups = _loop("narration" if not pass_no else f"narration_reask{pass_no}",
+                       lambda rej: nr.PROMPT.format(
+            max_chars=nr.NAR_MAX_CHARS, max_n=max_n,
+            work_title=work_title, research_block=research_block, topic=topic["topic"],
+            title_line1=title["line1"], title_line2=title["line2"],
+            beats_block=nr.beats_block(beats, span_index, rows_by_idx, jumps),
+            silent_note=silent_note,
+            rhythm_block=nr.rhythm_block(rhythm),
+            available_block=nr.available_block(available, span_index, allowed,
+                                               beat_ids=own_ids or None),
+            tone_block=(f"\n{tone_block}\n" if tone_block else ""), reject_block=rej),
+            lambda r: nr.validate_narrations(r, len(beats), required=required,
+                                             rewind={j["before_beat"] for j in (jumps or []) if j.get("rewind")},
+                                             available=set(available), max_n=max_n,
+                                             min_total_sec=min_total, span_index=span_index,
+                                             hook_before_t=(span_index[beats[0]['span_ids'][0]]['t_in'] if beats and beats[0]['span_ids'] else None)),
+            gemini, audit, log, initial_reject=reask_note)
+        nr.synthesize_groups(groups, nar_dir, _synth_cached, log=log)
+        for g in groups:
+            log(f"  [v3/flow/narration] {g['anchor'][0]}{g['anchor'][1]}: "
+                + " | ".join(f"{t} ({m:.2f}s)" for t, m in zip(g["lines"], g["measured"]))
+                + (f"  화면 {g['cover_ids']}" if g.get("cover_ids") else "  화면 미지정"))
+
+        cues, covers_audit, bad = _place_covers(groups, beats)
         audit["covers"] = covers_audit
         audit["probe_calls"] = pbudget["used"]
+        # 오프닝 정지 검사(2026-09-11 규칙 1): 첫 3초 안에 컷 전환·발화 시작이 있어야 한다 — 없으면
+        # 모순과 같은 통로로 걸음 4 재질의(훅을 짧게·컷 있는 화면으로)
+        opening_ok, opening_why, opening_ev = cv.opening_motion(beats, span_index, grid)
+        audit["opening"] = {"ok": opening_ok, "why": opening_why or None, "events": opening_ev}
+        if not opening_ok:
+            log(f"  [v3/flow/cover] ⚠ 오프닝: {opening_why}")
 
-        # 갭 8 첫 삽 — 프로브가 "문장이 화면과 모순"이라 한 묶음이 있으면 되돌린다(1회).
-        # 프로브 없는 묶음(hold·산술·예산 소진)은 판정이 없어 그대로다(기록으로 드러난다).
+        # 갭 8 — 프로브가 "문장이 화면과 모순"이라 한 묶음이 있으면 되돌린다(COVER_REASK_MAX 회).
+        # 프로브 없는 묶음(예산 소진·호출 실패)은 판정이 없어 그대로다(기록으로 드러난다 — 파이프라인의
+        # 사후 검증 verify_covers 가 한 번 더 본다).
         for x in bad:
             log(f"  [v3/flow/cover] ⚠ 문장·화면 모순 {x['anchor']}: 「{x['text'][:30]}」 ↔ 화면 「{x['seen'][:40]}」")
-        if not bad or pass_no >= COVER_REASK_MAX:
-            if bad:
-                log(f"  [v3/flow] ⚠ 모순 {len(bad)}건이 남았지만 되돌림 상한({COVER_REASK_MAX}) — 검수 대상으로 기록")
-                audit["narration_contradictions_left"] = bad
+        if (not bad and opening_ok) or pass_no >= COVER_REASK_MAX:
             break
         contradictions_all = bad
         audit["narration_contradictions"] = bad
-        reask_note = reject_block([
-            f"{x['anchor']} 의 문장 「{x['text']}」이 지정한 화면과 모순된다(화면을 다시 본 결과: "
-            f"「{x['seen']}」). 화면이 실제로 보여주는 것을 말하거나, 그 행동이 보이는 조각으로 cover 를 바꿔라"
-            for x in bad])
+        reask_note = reject_block(
+            [f"{x['anchor']} 의 문장 「{x['text']}」이 지정한 화면과 모순된다(화면을 다시 본 결과: "
+             f"「{x['seen']}」). 화면이 실제로 보여주는 것을 말하거나, 그 행동이 보이는 조각으로 cover 를 바꿔라"
+             for x in bad]
+            + ([f"오프닝(before_beat 0): {opening_why}. 훅 문장을 한 줄(≈2초)로 끊고 컷 전환이 있거나 곧 대사가 "
+                "시작되는 화면을 짚어라. 정지(hold) 금지"] if not opening_ok else []))
+
+    # 되돌림 상한 뒤에도 모순이 남으면(2026-09-11 규칙 4-③ — 종전엔 '검수 대상' 메모만 남기고 그대로 나갔다):
+    # 필수 자리(훅·점프 다리·무대사 비트)면 **크게 실패**, 선택 자리면 그 내레이션을 빼고 나머지를 다시 놓는다.
+    if bad:
+        audit["narration_contradictions_left"] = bad
+        req_bad = [x for x in bad if x["anchor_key"][0] == "before" and x["anchor_key"][1] in required]
+        if req_bad:
+            raise ValueError("내레이션 문장이 화면과 모순인 채 되돌림 상한(%d)을 소진했다 — 필수 자리라 뺄 수 없다: %s"
+                             % (COVER_REASK_MAX, " / ".join(f"{x['anchor']} 「{x['text'][:30]}」 ↔ 「{x['seen'][:30]}」"
+                                                        for x in req_bad)))
+        drop_keys = {x["anchor_key"] for x in bad}
+        dropped = [{"text": x["text"], "anchor": x["anchor"], "reason": "문장·화면 모순(되돌림 소진)",
+                    "seen": x["seen"]} for x in bad]
+        for x in bad:
+            log(f"  [v3/flow] ⚠ 내레이션 제거 {x['anchor']} 「{x['text'][:30]}」 — 화면과 끝내 모순")
+        groups = [g for g in groups if g["anchor"] not in drop_keys]
+        beats = copy.deepcopy(beats_snapshot)
+        cues, covers_audit, bad2 = _place_covers(groups, beats)
+        audit["covers"] = covers_audit
+        audit["probe_calls"] = pbudget["used"]
+        audit["narration_contradictions_dropped"] = dropped
+        if bad2:
+            # 재배치로 새 창을 만난 묶음이 다시 모순이면 더 되돌리지 않는다(무한 루프 금지) — 검수 기록
+            audit["narration_contradictions_after_drop"] = bad2
+            for x in bad2:
+                log(f"  [v3/flow/cover] ⚠ 재배치 뒤 모순 잔존 {x['anchor']} — 검수 대상")
+        opening_ok, opening_why, opening_ev = cv.opening_motion(beats, span_index, grid)
+        audit["opening"] = {"ok": opening_ok, "why": opening_why or None, "events": opening_ev}
+    else:
+        dropped = []
+    if not opening_ok:
+        audit["opening_static"] = opening_why
+        log(f"  [v3/flow] ⚠ 오프닝 정지 잔존(되돌림 소진) — 검수 대상: {opening_why}")
 
     # 덮개가 통째로 삼킨(재료 0) 비트는 빠진다 — cue.beat 는 새 번호로 옮긴다
     keep_idx = [i for i, b in enumerate(beats) if b["span_ids"] or b.get("covers")]
@@ -425,6 +480,8 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
     doc = build_story_doc(beats, span_index, cues, topic=topic, title=title,
                           scenes=scenes, target_sec=target_sec, max_sec=max_sec,
                           jumps=jumps)
+    if dropped:
+        doc["narration_dropped"] = dropped
     audit["pieces"] = len(beats)
     audit["attempts"] = [{"attempt": 1, "steps": {k: len(v) for k, v in audit.items()
                                                   if isinstance(v, list) and k in

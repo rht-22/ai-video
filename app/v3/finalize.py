@@ -15,6 +15,7 @@ validate 확장(경고 모드 — 기획: 차단하지 않는다):
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import time
 from pathlib import Path
@@ -552,6 +553,198 @@ def tts_cue_margins(captions: list[str], *, band_bottom: int, offset: int, font_
                                         font_size=font_size, canvas_height=canvas_height)
                    + max(0, int(lift)))
     return out
+
+
+def base_text_margins(design, *, channel_design: dict | None, geom, ref_geom, work_top: int,
+                      canvas_height: int = 1920) -> tuple[int, int, int, list[str]]:
+    """자막·내레이션의 기준 margin_v — 번인 회피 **전** 값. 순수.
+
+    프리셋 밴드 상대(preset_relative_margin) · 밴드 앵커(subtitle/tts_band_offset) · 내레이션 =
+    대사 줄 · 채널 명시 절대값의 밴드 아래 클램프를 이 순서로 건다. render_final 과 썸네일 안전
+    구역 판정(layout_extents)이 **같은 함수**를 쓴다 — 둘이 베끼면 판정과 화면이 갈린다.
+    반환 (자막, 내레이션, 내레이션 기준값(클램프 전 — 줄별 lift 기준), 로그 줄)."""
+    from app.modules.subtitle_region import estimate_subtitle_height
+    cd = channel_design or {}
+    H = int(canvas_height)
+    notes: list[str] = []
+    sub_from_channel = cd.get("subtitle_y_margin") is not None
+    tts_from_channel = cd.get("tts_y_margin") is not None
+    sub_m = int(design.subtitle_y_margin)
+    tts_m = int(design.tts_line_y_margin)
+    if not sub_from_channel:
+        sub_m = preset_relative_margin(sub_m, ref_band_bottom=ref_geom.bottom,
+                                       band_bottom=geom.bottom)
+    if not tts_from_channel:
+        tts_m = preset_relative_margin(tts_m, ref_band_bottom=ref_geom.bottom,
+                                       band_bottom=geom.bottom)
+    if geom.bottom != ref_geom.bottom:
+        notes.append(f"[v3/자막배치] 프리셋 밴드 하단 {ref_geom.bottom} → 이 편 {geom.bottom} — "
+                     f"자막 margin_v {sub_m}{'(채널 명시)' if sub_from_channel else ''} · "
+                     f"내레이션 {tts_m}{'(채널 명시)' if tts_from_channel else ''}")
+    sub_off = cd.get("subtitle_band_offset")
+    tts_off = cd.get("tts_band_offset")
+    if sub_off is not None:          # 대사 어절 자막은 v3 에서 늘 한 줄(12자)
+        sub_m = band_anchored_margin(band_bottom=geom.bottom, offset=int(sub_off),
+                                     lines=1, font_size=design.subtitle_size, canvas_height=H)
+        notes.append(f"[v3/자막배치] 자막 — 밴드 하단 {geom.bottom} + {sub_off}px 앵커 → margin_v {sub_m}")
+    if tts_off is not None:          # 전역값은 두 줄 기준(번인 회피·구 소비자용), 줄별은 render_final
+        tts_m = band_anchored_margin(band_bottom=geom.bottom, offset=int(tts_off),
+                                     lines=2, font_size=design.tts_line_font_size, canvas_height=H)
+        notes.append(f"[v3/자막배치] 내레이션 — 밴드 하단 {geom.bottom} + {tts_off}px 앵커 → margin_v {tts_m}(2줄 기준)")
+    if not tts_from_channel and tts_off is None:
+        # 내레이션 아랫줄을 대사 자막과 같은 자리에(v10: 둘 다 SUB_Y 앵커 'md'). 대사·내레이션은
+        # 시간상 겹치지 않으므로(human 흐름) 한 자리를 나눠 쓴다. 두 줄 내레이션은 위로 쌓인다.
+        if tts_m != sub_m:
+            notes.append(f"[v3/자막배치] 내레이션 margin_v {tts_m} → {sub_m} (대사 자막과 같은 줄)")
+        tts_m = sub_m
+    tts_base = tts_m
+    # 밴드 아래로 내리기(2026-09-04) — **채널이 명시한 절대 margin** 이 밴드 위치와 안 맞으면
+    # 두 줄 블록이 영상에 얹힌다(가왕쇼 7화: tts 550 vs video_y 500). 프리셋·상대 앵커 값은
+    # 밴드 안쪽이 의도라 안 건다. 번인 회피(render_final)는 이 값 위에서 **올리기만** 한다.
+    for name, size, cur in (("자막", design.subtitle_size, sub_m),
+                            ("내레이션", design.tts_line_font_size, tts_m)):
+        if name == "자막" and (sub_off is not None or not sub_from_channel):
+            continue
+        if name == "내레이션" and (tts_off is not None or not tts_from_channel):
+            continue
+        # 대사 어절 자막은 v3 에서 늘 한 줄(12자) — 두 줄 블록으로 재면 75px 을 더 내린다
+        blk = estimate_subtitle_height(size, lines=1 if name == "자막" else 2)
+        new, note = fit_margin_below_band(cur, canvas_height=H, band_bottom=geom.bottom,
+                                          block_height=blk, work_top=work_top)
+        if note:   # 로고 근접 ⚠ 는 자막 스택이 작품명을 내려서 푼다 — 여기선 안 찍는다
+            notes.append(f"[v3/자막배치] {name} — {note.split(' ⚠')[0]}")
+        if name == "자막":
+            sub_m = int(new)
+        else:
+            tts_m = int(new)
+    return sub_m, tts_m, tts_base, notes
+
+
+# 썸네일 안전 구역(2026-09-11 사용자 지시 "썸네일 안에 제목/영상화면/작품 로고가 다 들어오게").
+# 쇼츠 피드·채널 탭 썸네일은 2:3 **가운데 크롭**이라 캔버스 약 148~1770 만 보인다(지금불륜 2화 ·
+# 가왕쇼 네 편 썸네일 스크린샷을 완성본 밴드 경계에 맞대어 잰 값 — docs/shorts_thumbnail_safe_zone.md).
+# 경계는 사용자가 "맨 위와 맨 아래 경계 자체는 참고할 만 해" 라고 지목한 가왕쇼 템플릿에 맞췄다
+# (제목 블록 윗변 187 · 캡션 블록 아랫변 1711 → 둘 다 안). 지금불륜은 로고가 1831 까지 내려가 잘렸다.
+THUMB_SAFE_TOP = 180          # 제목 블록 윗변(렌더러 drawtext y) 하한
+THUMB_SAFE_BOTTOM = 1715      # 하단 블록(플랫폼 줄·작품명/로고·캡션) 아랫변 상한
+LOGO_MIN_SCALE = 0.7          # 로고 축소 하한(채널 박스에 contain 한 크기 대비)
+TITLE_MIN_SCALE = 0.8         # 제목 크기 상한 축소 하한
+
+
+def layout_extents(design, *, channel_design: dict | None = None, style_preset: str | None = None,
+                   line_count: int = 2, canvas_width: int = 1080,
+                   canvas_height: int = 1920) -> dict:
+    """세로 배치의 위·아래 끝 — 제목 블록 윗변 · 밴드 · 하단 블록(자막 스택 반영) 아랫변. 순수
+    (로고 PNG 크기만 읽는다). render_final 과 같은 함수들로 잰다. 번인 자막 회피는 넣지 않는다 —
+    회피는 자막을 **올리기만** 해서 작품명을 덜 밀므로, 이 값은 실제보다 같거나 아래(보수적)다."""
+    from app.modules import subtitle_region as _sr
+    H = int(canvas_height)
+    geom = _sr.band_geometry(design, canvas_width=canvas_width, canvas_height=H)
+    ref_geom = _sr.band_geometry(design_from_style(stage4.get_style_preset(style_preset)),
+                                 canvas_width=canvas_width, canvas_height=H)
+    title_top, _title_bottom = _sr.estimate_title_block(design, geom, line_count=line_count)
+    work_top = estimate_work_top(design, band_bottom=geom.bottom, canvas_height=H)
+    sub_m, tts_m, _base, _notes = base_text_margins(design, channel_design=channel_design,
+                                                    geom=geom, ref_geom=ref_geom,
+                                                    work_top=work_top, canvas_height=H)
+    work_h = estimate_work_height(design)
+    _s, _t, min_top, _n = stack_work_below_text(sub_margin=sub_m, tts_margin=tts_m,
+                                                work_top=work_top, work_height=work_h,
+                                                canvas_height=H)
+    top = estimate_work_top(design, band_bottom=geom.bottom, canvas_height=H, min_top=min_top)
+    return {"title_top": int(title_top), "band_top": int(geom.top), "band_bottom": int(geom.bottom),
+            "work_top": int(top), "bottom": int(top + work_h)}
+
+
+def fit_thumbnail_safe_zone(design, *, channel_design: dict | None = None,
+                            style_preset: str | None = None, line_count: int = 2,
+                            canvas_width: int = 1080, canvas_height: int = 1920) -> tuple[Any, dict]:
+    """제목 윗변 ≥ THUMB_SAFE_TOP · 하단 블록 아랫변 ≤ THUMB_SAFE_BOTTOM 이 되게 design 을 고친다. 순수.
+
+    이미 안이면 **design 그대로**(회귀 0). 밖이면 이 순서로 — 앞 단계일수록 화면 손실이 없다:
+      ① 작품 로고 가운데 정렬의 빈 공간을 걷는다(밴드 +20 에 붙임)
+      ② 반대쪽 여유만큼 밴드를 옮긴다(제목·자막·로고가 전부 밴드 상대라 같이 움직인다)
+      ③ 로고를 줄인다(contain 박스 높이, 하한 LOGO_MIN_SCALE)
+      ④ 제목 크기 상한을 줄이고(하한 TITLE_MIN_SCALE) 다시 ②
+    그래도 밖이면 unmet 에 모자란 px 을 남긴다(렌더는 막지 않는다 — 템플릿을 사람이 고칠 몫).
+
+    ⚠ 제목은 이 편의 실제 크기가 아니라 **채널 상한(design.title_sizes)** 으로 잰다 — 편마다 제목
+    길이가 달라도 밴드·로고 자리가 같아야 채널 썸네일 격자가 가지런하다(가왕쇼 네 편처럼).
+    실제 제목은 fit_title_sizes 가 상한 이하로만 줄이므로 늘 이 판정보다 안쪽이다."""
+    import dataclasses as _dc
+
+    kw = dict(channel_design=channel_design, style_preset=style_preset, line_count=line_count,
+              canvas_width=canvas_width, canvas_height=canvas_height)
+
+    def _ext(dd):
+        return layout_extents(dd, **kw)
+
+    def _viol(e):
+        return max(0, e["bottom"] - THUMB_SAFE_BOTTOM), max(0, THUMB_SAFE_TOP - e["title_top"])
+
+    def _shift(dd, e):
+        over, short = _viol(e)
+        room_top = e["title_top"] - THUMB_SAFE_TOP
+        room_bottom = THUMB_SAFE_BOTTOM - e["bottom"]
+        delta = 0
+        if over and room_top > 0:
+            delta = -min(over, room_top)
+        elif short and room_bottom > 0:
+            delta = min(short, room_bottom)
+        if not delta:
+            return dd, e
+        dd = _dc.replace(dd, video_y=int(e["band_top"]) + delta)
+        e2 = _ext(dd)
+        actions.append(f"밴드 {'위' if delta < 0 else '아래'}로 {abs(delta)}px (video_y "
+                       f"{e['band_top']} → {e2['band_top']})")
+        return dd, e2
+
+    e0 = _ext(design)
+    info: dict[str, Any] = {"safe": [THUMB_SAFE_TOP, THUMB_SAFE_BOTTOM], "before": e0}
+    over, short = _viol(e0)
+    if not over and not short:
+        info.update(after=e0, actions=[], unmet=None, band_shift=0)
+        return design, info
+    actions: list[str] = []
+    d, e = design, e0
+    is_logo = getattr(d, "work_type", "text") == "image" and bool(getattr(d, "work_value", None))
+    if over and is_logo and getattr(d, "work_image_align", "top") == "center" \
+            and getattr(d, "work_band_offset", None) is None:
+        d = _dc.replace(d, work_band_offset=WORK_GAP_BELOW_VIDEO)
+        e2 = _ext(d)
+        actions.append(f"작품 로고를 밴드 아래 {WORK_GAP_BELOW_VIDEO}px 에 붙임(가운데 정렬 해제) — "
+                       f"아랫변 {e['bottom']} → {e2['bottom']}")
+        e = e2
+    d, e = _shift(d, e)
+    over, _short = _viol(e)
+    if over and is_logo:
+        cur_h = _work_item_height(d)
+        new_h = max(int(math.ceil(cur_h * LOGO_MIN_SCALE)), cur_h - over)
+        new_h -= new_h % 2                     # 렌더러가 짝수로 내린다 — 올리면 1px 넘쳐 ④까지 번진다(실측)
+        if new_h < cur_h:
+            d = _dc.replace(d, work_image_height=new_h)
+            e2 = _ext(d)
+            actions.append(f"작품 로고 높이 {cur_h} → {_work_item_height(d)}px — 아랫변 "
+                           f"{e['bottom']} → {e2['bottom']}")
+            e = e2
+    over, short = _viol(e)
+    if over or short:
+        sizes = [int(s) for s in (d.title_sizes or [d.title_size])]
+        n = max(1, int(line_count))
+        cur = sum(sizes[i] if i < len(sizes) else sizes[-1] for i in range(n))
+        k = max(TITLE_MIN_SCALE, (cur - over - short) / float(cur)) if cur else 1.0
+        new_sizes = [max(40, int(s * k)) for s in sizes]
+        if new_sizes != sizes:
+            d = _dc.replace(d, title_sizes=new_sizes, title_size=new_sizes[0])
+            e2 = _ext(d)
+            actions.append(f"제목 크기 상한 {sizes} → {new_sizes} — 윗변 {e['title_top']} → {e2['title_top']}")
+            e = e2
+            d, e = _shift(d, e)
+    over, short = _viol(e)
+    info.update(after=e, actions=actions,
+                unmet=({"bottom_over": over, "top_short": short} if over or short else None),
+                band_shift=int(e["band_top"]) - int(e0["band_top"]))
+    return d, info
 
 
 def cover_mute_windows(timeline: list[dict],
@@ -1250,13 +1443,52 @@ def zoom_crop_rows(base_rows: list[dict] | None, factor: float, anchor: str,
     return [{"time_sec": 0.0, "x_center": x, "y_center": y, "crop_w": zw, "crop_h": zh}]
 
 
-def emphasis_styles(v3_style: dict | None, base_size: int) -> dict[int, dict]:
-    """강조 줄 → {자막 세그먼트 idx: {size, color, fx}}. 강한 팝인(pop_strong)은 build12 EPOP 의 대응."""
+EMPH_RESOLVE_TOL_SEC = 1.0   # 강조 줄 번호가 어긋났을 때 시각으로 다시 찾는 허용 오차
+
+
+def resolve_emphasis_index(e: dict, segments: list[dict] | None) -> int | None:
+    """강조 항목 → 지금 자막 세그먼트 번호. 순수.
+
+    Stage 4 는 강조를 **자막 줄 번호**(`index`)로 적는데, 자막 오버라이드로 줄을 나누거나 합치면 번호가 밀려
+    엉뚱한 줄이 빨개진다(2026-09-11 지금불륜 2화 3편·4편 실사고 두 번). 항목에는 `text`·`start_sec` 가 함께
+    실려 있으므로: ① 그 번호의 줄이 같은 글자면 그대로 ② 아니면 같은 글자의 줄 중 시각이 가장 가까운 줄
+    ③ 그것도 없으면(사람이 글자를 고침) 시작 시각이 EMPH_RESOLVE_TOL_SEC 안인 가장 가까운 줄
+    ④ 그래도 없으면 종전대로 번호. segments 가 없으면 번호 그대로(종전)."""
+    try:
+        idx = int(e["index"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not segments:
+        return idx
+    text = str(e.get("text") or "").strip()
+    if not text:
+        return idx
+    if 0 <= idx < len(segments) and str(segments[idx].get("text") or "").strip() == text:
+        return idx
+    try:
+        t0 = float(e.get("start_sec")) if e.get("start_sec") is not None else None
+    except (TypeError, ValueError):
+        t0 = None
+    same = [i for i, sg in enumerate(segments) if str(sg.get("text") or "").strip() == text]
+    if same:
+        if t0 is None or len(same) == 1:
+            return same[0]
+        return min(same, key=lambda i: abs(float(segments[i]["start_sec"]) - t0))
+    if t0 is not None:
+        near = min(range(len(segments)), key=lambda i: abs(float(segments[i]["start_sec"]) - t0))
+        if abs(float(segments[near]["start_sec"]) - t0) <= EMPH_RESOLVE_TOL_SEC:
+            return near
+    return idx
+
+
+def emphasis_styles(v3_style: dict | None, base_size: int,
+                    segments: list[dict] | None = None) -> dict[int, dict]:
+    """강조 줄 → {자막 세그먼트 idx: {size, color, fx}}. 강한 팝인(pop_strong)은 build12 EPOP 의 대응.
+    segments 를 주면 줄 번호를 글자·시각으로 다시 맞춘다(resolve_emphasis_index)."""
     out: dict[int, dict] = {}
     for e in (v3_style or {}).get("emphasis") or []:
-        try:
-            idx = int(e["index"])
-        except (KeyError, TypeError, ValueError):
+        idx = resolve_emphasis_index(e, segments)
+        if idx is None:
             continue
         out[idx] = {"size": int(round(base_size * float(e.get("scale") or stage4.EMPH_DEFAULT_SCALE))),
                     "color": str(e.get("color") or stage4.EMPH_DEFAULT_COLOR), "fx": EMPHASIS_FX}
@@ -1335,8 +1567,23 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                                  work_image_width=LOGO_WIDTH,
                                  work_image_height=LOGO_BOX_HEIGHT,
                                  work_image_align="center")
-    # 제목 줄별 크기를 이 편의 실제 글자수로 맞춘다
     _title_text = (plan.get("layout") or {}).get("top_title") or ""
+    # 썸네일 안전 구역(2026-09-11) — 제목 **상한** 크기로 재서 채널 안에서 밴드·로고 자리가 편마다
+    # 같게. 안에 들면 design 그대로(회귀 0). 밴드를 옮기면 라벨(캔버스 좌표)도 같이 옮긴다(아래).
+    design, _thumb = fit_thumbnail_safe_zone(
+        design, channel_design=channel_design, style_preset=style_preset,
+        line_count=max(2, len([ln for ln in _title_text.split("\n") if ln.strip()])),
+        canvas_width=config.canvas_width, canvas_height=config.canvas_height)
+    if _thumb["actions"] or _thumb["unmet"]:
+        _b, _a = _thumb["before"], _thumb["after"]
+        log(f"  [v3/썸네일] 안전 구역 {THUMB_SAFE_TOP}~{THUMB_SAFE_BOTTOM} — 제목 윗변 "
+            f"{_b['title_top']} → {_a['title_top']} · 하단 아랫변 {_b['bottom']} → {_a['bottom']}")
+        for _n in _thumb["actions"]:
+            log(f"  [v3/썸네일] {_n}")
+        if _thumb["unmet"]:
+            log(f"  [v3/썸네일] ⚠ 다 못 넣음 {_thumb['unmet']} — 템플릿(화면비·로고·제목 크기) 조정 필요")
+    _label_dy = _thumb["band_shift"] / float(config.canvas_height)
+    # 제목 줄별 크기를 이 편의 실제 글자수로 맞춘다
     _fitted = fit_title_sizes(_title_text, list(design.title_sizes),
                               font_path=str(design.title_font))   # 경로화된 제목 폰트로 실측
     if _fitted != list(design.title_sizes):
@@ -1359,63 +1606,18 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     _ref_geom = _sr.band_geometry(design_from_style(stage4.get_style_preset(style_preset)),
                                   canvas_width=config.canvas_width,
                                   canvas_height=config.canvas_height)
-    _sub_from_channel = _cd.get("subtitle_y_margin") is not None
-    _tts_from_channel = _cd.get("tts_y_margin") is not None
-    _sub_margin = int(design.subtitle_y_margin)
-    _tts_margin = int(design.tts_line_y_margin)
-    if not _sub_from_channel:
-        _sub_margin = preset_relative_margin(_sub_margin, ref_band_bottom=_ref_geom.bottom,
-                                             band_bottom=_geom.bottom)
-    if not _tts_from_channel:
-        _tts_margin = preset_relative_margin(_tts_margin, ref_band_bottom=_ref_geom.bottom,
-                                             band_bottom=_geom.bottom)
-    if _geom.bottom != _ref_geom.bottom:
-        log(f"  [v3/자막배치] 프리셋 밴드 하단 {_ref_geom.bottom} → 이 편 {_geom.bottom} — "
-            f"자막 margin_v {_sub_margin}{'(채널 명시)' if _sub_from_channel else ''} · "
-            f"내레이션 {_tts_margin}{'(채널 명시)' if _tts_from_channel else ''}")
     _sub_h = _sr.estimate_subtitle_height(design.subtitle_size)
     _floor_top = _title_bottom + SUB_GAP_PX
-    # 밴드 아래로 내리기(2026-09-04) — **채널이 명시한 절대 margin** 이 밴드 위치와 안 맞으면
-    # 두 줄 블록이 영상에 얹힌다(가왕쇼 7화: tts 550 vs video_y 500). 프리셋·상대 앵커 값은
-    # 밴드 안쪽이 의도라 안 건다. 번인 회피(아래 블록)는 이 값 위에서 **올리기만** 한다.
     _work_top = estimate_work_top(design, band_bottom=_geom.bottom,
                                   canvas_height=config.canvas_height)
-    _sub_off = _cd.get("subtitle_band_offset")
+    # 기준 margin(프리셋 밴드 상대 · 밴드 앵커 · 내레이션=대사 줄 · 채널 절대값 클램프) — 썸네일
+    # 판정(layout_extents)과 같은 함수. 번인 회피(아래 블록)는 이 값 위에서 **올리기만** 한다.
+    _sub_margin, _tts_margin, _tts_base, _margin_notes = base_text_margins(
+        design, channel_design=channel_design, geom=_geom, ref_geom=_ref_geom,
+        work_top=_work_top, canvas_height=config.canvas_height)
+    for _n in _margin_notes:
+        log(f"  {_n}")
     _tts_off = _cd.get("tts_band_offset")
-    if _sub_off is not None:          # 대사 어절 자막은 v3 에서 늘 한 줄(12자)
-        _sub_margin = band_anchored_margin(band_bottom=_geom.bottom, offset=int(_sub_off),
-                                           lines=1, font_size=design.subtitle_size,
-                                           canvas_height=config.canvas_height)
-        log(f"  [v3/자막배치] 자막 — 밴드 하단 {_geom.bottom} + {_sub_off}px 앵커 → margin_v {_sub_margin}")
-    if _tts_off is not None:          # 전역값은 두 줄 기준(번인 회피·구 소비자용), 줄별은 아래
-        _tts_margin = band_anchored_margin(band_bottom=_geom.bottom, offset=int(_tts_off),
-                                           lines=2, font_size=design.tts_line_font_size,
-                                           canvas_height=config.canvas_height)
-        log(f"  [v3/자막배치] 내레이션 — 밴드 하단 {_geom.bottom} + {_tts_off}px 앵커 → margin_v {_tts_margin}(2줄 기준)")
-    if not _tts_from_channel and _tts_off is None:
-        # 내레이션 아랫줄을 대사 자막과 같은 자리에(v10: 둘 다 SUB_Y 앵커 'md'). 대사·내레이션은
-        # 시간상 겹치지 않으므로(human 흐름) 한 자리를 나눠 쓴다. 두 줄 내레이션은 위로 쌓인다.
-        if _tts_margin != _sub_margin:
-            log(f"  [v3/자막배치] 내레이션 margin_v {_tts_margin} → {_sub_margin} (대사 자막과 같은 줄)")
-        _tts_margin = _sub_margin
-    _tts_base = _tts_margin
-    for _name, _size, _cur in (("자막", design.subtitle_size, _sub_margin),
-                               ("내레이션", design.tts_line_font_size, _tts_margin)):
-        if _name == "자막" and (_sub_off is not None or not _sub_from_channel):
-            continue                  # 상대 앵커·프리셋(밴드 안쪽 의도) — 절대값 클램프는 안 건다
-        if _name == "내레이션" and (_tts_off is not None or not _tts_from_channel):
-            continue
-        # 대사 어절 자막은 v3 에서 늘 한 줄(12자) — 두 줄 블록으로 재면 75px 을 더 내린다
-        _blk = _sr.estimate_subtitle_height(_size, lines=1 if _name == "자막" else 2)
-        _new, _note = fit_margin_below_band(
-            _cur, canvas_height=config.canvas_height, band_bottom=_geom.bottom,
-            block_height=_blk, work_top=_work_top)
-        if _note:   # 로고 근접 ⚠ 는 아래 자막 스택이 작품명을 내려서 푼다 — 여기선 안 찍는다
-            log(f"  [v3/자막배치] {_name} — {_note.split(' ⚠')[0]}")
-        if _name == "자막":
-            _sub_margin = int(_new)
-        else:
-            _tts_margin = int(_new)
 
     def _runs(t0: float, t1: float) -> list[tuple[int, int]]:
         return _sr.runs_in_window(_profiles, t0, t1, _geom) if _profiles else []
@@ -1495,7 +1697,7 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     if _moved:
         log(f"  [v3/자막회피] 자막 {_moved}/{len(segments)}줄을 구간별로 더 올렸습니다")
 
-    _emph = emphasis_styles(_v3s, design.subtitle_size)   # 강조 자막(2026-09-08) — 없으면 빈 dict
+    _emph = emphasis_styles(_v3s, design.subtitle_size, segments)   # 강조 자막(2026-09-08) — 없으면 빈 dict · 줄 번호는 글자·시각으로 재확인(09-11)
 
     def _seg_style(seg: dict, idx: int = 0) -> dict | None:
         st: dict[str, Any] = {}
@@ -1581,7 +1783,7 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
         labels.append({"text": lb["text"], "start_sec": float(lb["start_sec"]),
                        "end_sec": float(lb["end_sec"]),
                        "x": float(lb.get("x", 0.5)),
-                       "y": float(lb.get("y", LABEL_Y_RATIO)),
+                       "y": float(lb.get("y", LABEL_Y_RATIO)) + _label_dy,   # 썸네일 맞춤이 옮긴 밴드만큼
                        "rotate": float(lb.get("rotate", 0.0)),
                        "size": _label_size, "stroke": "dark_thick",
                        "fx": str(lb.get("fx") or "pop"), "font": _text_font_name,
@@ -1592,7 +1794,7 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
             labels.append({"text": lb["text"], "start_sec": lb["start_sec"],
                            "end_sec": lb["end_sec"],
                            "x": float(pos.get("x", 0.5)),
-                           "y": float(pos.get("y", LABEL_Y_RATIO)),
+                           "y": float(pos.get("y", LABEL_Y_RATIO)) + _label_dy,
                            "rotate": float(pos.get("rotate", 0.0)),
                            "size": _label_size, "stroke": "dark_thick",
                            "fx": str(pos.get("fx") or "pop"), "font": _text_font_name,
@@ -1796,8 +1998,12 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     if _emph:
         try:
             from app.modules.sfx_narration import place_emphasis_sfx
+            # `sfx: false` 인 강조 줄은 소리 없이 글자·팝만(2026-09-11 — 한 문장을 여러 줄로 나눠 전부 강조하면
+            # 줄마다 타격음이 겹친다. 문장 첫 줄만 소리를 낸다).
+            _no_sfx = {i for i in (resolve_emphasis_index(e, segments) for e in (_v3s.get("emphasis") or [])
+                                   if e.get("sfx") is False) if i is not None}
             _emph_lines = [{"start_sec": float(segments[i]["start_sec"]), "text": segments[i].get("text")}
-                           for i in sorted(_emph) if 0 <= i < len(segments)]
+                           for i in sorted(_emph) if 0 <= i < len(segments) and i not in _no_sfx]
             _emph_sfx = place_emphasis_sfx(_emph_lines, app_root=_root, run_dir=output_dir,
                                            seed=output_dir.name + ":emph",
                                            speed=float(getattr(design, "video_speed", 1.0) or 1.0))
@@ -1845,6 +2051,17 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                            "work_top": int(_work_top_final),
                            "work_min_top": _work_min_top,
                            "capped": any(n.startswith("⚠") for n in _stack_notes)}}
+    # 썸네일 안전 구역 — 이 편의 실제 값(실제 제목 크기 · 번인 회피 뒤 자막 스택)으로 다시 잰 끝
+    _tt_actual = _sr.estimate_title_block(
+        design, _geom, line_count=max(1, len([ln for ln in _title_text.split("\n") if ln.strip()])))[0]
+    _bottom_actual = int(_work_top_final) + estimate_work_height(design)
+    cost["thumb_safe"] = {"safe": [THUMB_SAFE_TOP, THUMB_SAFE_BOTTOM],
+                          "title_top": int(_tt_actual), "bottom": int(_bottom_actual),
+                          "band": [int(_geom.top), int(_geom.bottom)],
+                          "actions": _thumb["actions"], "unmet": _thumb["unmet"],
+                          "band_shift": _thumb["band_shift"]}
+    if _tt_actual < THUMB_SAFE_TOP or _bottom_actual > THUMB_SAFE_BOTTOM:
+        log(f"  [v3/썸네일] ⚠ 최종 배치가 안전 구역 밖 — 제목 윗변 {_tt_actual} · 하단 아랫변 {_bottom_actual}")
     if picture:
         cost["letterbox_crop"] = {**picture, "clips": len(crop_map)}   # 회귀 0: 없으면 키 없음
     if speaker_audit:

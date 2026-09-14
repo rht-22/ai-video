@@ -244,3 +244,53 @@ def test_fixed_crop_from_beat_crop_x(tmp_path):
     assert a2[0]["x"] == json.loads(m2["hook_0"].read_text())[0]["crop_w"] / 2
     assert finalize.fixed_crop_map([{"role": "b", "clip_start_sec": 0, "clip_end_sec": 1}], output_dir=tmp_path,
                                    aspect_ratio="24:23", picture=None, video_path=tmp_path / "x.mp4") == ({}, [])
+
+
+def test_emphasis_sfx_opt_out_flag_is_wired():
+    """강조 줄 `sfx: false`(2026-09-11) — 한 문장을 여러 줄로 나눠 강조할 때 첫 줄만 타격음."""
+    from pathlib import Path
+    src = Path(__file__).resolve().parents[1].joinpath("app/v3/finalize.py").read_text()
+    assert 'e.get("sfx") is False' in src and "i not in _no_sfx" in src
+
+
+def test_adjacent_emphasis_sfx_use_different_sounds(tmp_path):
+    """붙어 있는 강조 줄(3초 안)은 서로 다른 효과음 — 매니페스트 emphasis_followup(punch)과 번갈아(2026-09-11)."""
+    from pathlib import Path
+    import app.config as c
+    from app.modules.sfx_narration import place_emphasis_sfx
+    root = Path(c.__file__).resolve().parent
+    lines = [{"start_sec": 0.15, "text": "a"}, {"start_sec": 29.56, "text": "b"}, {"start_sec": 30.01, "text": "c"},
+             {"start_sec": 31.12, "text": "d"}, {"start_sec": 46.54, "text": "e"}, {"start_sec": 47.54, "text": "f"}]
+    out = place_emphasis_sfx(lines, app_root=root, run_dir=tmp_path, seed="s")
+    fam = [o["_label"]["family"] or o["_label"]["id"] for o in out]
+    assert len(fam) == 6
+    for k, (a, b) in enumerate(zip(lines, lines[1:])):
+        if b["start_sec"] - a["start_sec"] <= 3.0:
+            assert fam[k] != fam[k + 1], (k, fam)
+    assert fam[0] == "hit"                      # 떨어진 강조는 종전(soft 풀) 그대로
+
+
+def test_adjacent_emphasis_chain_stays_in_hit_family(tmp_path):
+    """세 줄 연속 강조는 이웃끼리 서로 다르고 강조 풀(hit3 · 연이어 강조 punch/gunshot) 안에서만 고른다(2026-09-11)."""
+    from pathlib import Path
+    import app.config as c
+    from app.modules.sfx_narration import place_emphasis_sfx
+    root = Path(c.__file__).resolve().parent
+    lines = [{"start_sec": 29.56, "text": "a"}, {"start_sec": 30.01, "text": "b"}, {"start_sec": 32.11, "text": "c"}]
+    fam = [o["_label"]["id"] for o in place_emphasis_sfx(lines, app_root=root, run_dir=tmp_path, seed="s")]
+    assert fam[0] == "hit3" and all(a != b for a, b in zip(fam, fam[1:])), fam
+    assert set(fam) <= {"hit3", "punch", "gunshot"}, fam
+
+
+def test_emphasis_index_is_resolved_by_text_and_time_after_subtitle_edits():
+    """자막 오버라이드로 줄이 합쳐져 번호가 밀려도 강조는 원래 글자의 줄에 붙는다(2026-09-11 3편·4편 실사고)."""
+    from app.v3.finalize import emphasis_styles, resolve_emphasis_index
+    segs = [{"start_sec": 0.0, "text": "a"}, {"start_sec": 1.0, "text": "이걸로, 이거 불 끌 때"},
+            {"start_sec": 2.0, "text": "으아악!"}, {"start_sec": 3.0, "text": "불을 어디다"}, {"start_sec": 3.9, "text": "끄는 거예요?"}]
+    v = {"emphasis": [{"index": 3, "text": "으아악!", "start_sec": 2.0},             # 번호가 한 줄 밀림 → 글자로
+                      {"index": 5, "text": "끄는 거예요?", "start_sec": 3.9},        # 범위 밖 번호 → 글자로
+                      {"index": 0, "text": "원래 문구", "start_sec": 3.05},          # 글자가 고쳐짐 → 시각으로
+                      {"index": 1, "text": "이걸로, 이거 불 끌 때"}]}                 # 번호·글자 일치 → 그대로
+    assert sorted(emphasis_styles(v, 60, segs)) == [1, 2, 3, 4]
+    assert resolve_emphasis_index({"index": 2, "text": "x"}, None) == 2              # 세그먼트 없으면 종전(번호)
+    assert resolve_emphasis_index({"index": 0, "text": "없는 글자", "start_sec": 9.0}, segs) == 0   # 못 찾으면 번호

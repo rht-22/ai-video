@@ -357,3 +357,37 @@ def test_rank_speaker_x_drops_out_of_focus_face():
     # 구 표본(5-튜플)은 종전과 동일
     smp3 = [{"t": t, "faces": [(494.0, 600.0, 360, 380, 0.45), (1103.0, 400.0, 140, 150, 0.30)]} for t in (0.0, 0.5)]
     assert rank_speaker_x(smp3, 0.0, 0.5, 1920)[0] == 494.0
+
+
+# ── 2026-09-11 사용자 지시: 대사 자막 끝 마침표 제거 · 비트 꼬리 트림(손편집 통로) ──
+
+def test_strip_dialogue_period_keeps_question_and_ellipsis():
+    from app.v3.assemble import strip_dialogue_period as f
+    assert f("모른척 살든가.") == "모른척 살든가"
+    assert f("아빠 친구..") == "아빠 친구"
+    assert f("어쩌라는 거야 지금?") == "어쩌라는 거야 지금?"
+    assert f("제발!") == "제발!" and f("그게…") == "그게…" and f("그게...") == "그게..."
+    assert f("") == ""
+
+
+def test_tail_trim_sec_shortens_last_clip_and_belt_accepts(monkeypatch):
+    import sys
+    from pathlib import Path as _P
+    sys.path.insert(0, str(_P(__file__).resolve().parent))
+    from test_v3_story_flow import GRID, IDX
+    from app.v3 import assemble
+    doc = {"schema": "v3_story/1", "template": "human_flow", "title": {"line1": "a", "line2": "b"},
+           "beats": [{"number": 0, "role": "hook", "span_ids": ["sp0001", "sp0002"], "tail_trim_sec": 5.5,
+                      "time": {"start": "00:00:02.000", "end": "00:00:06.500"}, "narration": None,
+                      "labels": [], "muted_span_ids": [], "covers": []}],
+           "narration_cues": [], "narration_dropped": [],
+           "budget": {"target_sec": 10, "max_sec": 20, "total_before_sec": 4.5, "total_after_sec": 4.5,
+                      "removed": [], "unmet": False, "deficit_sec": 0}, "flow": {}, "review": []}
+    plan = assemble.assemble_edit_plan(doc, IDX, video_path="v", work_title="T", words=[], silences=[])
+    c = plan["timeline"][0]
+    assert (c["clip_start_sec"], c["clip_end_sec"]) == (2.0, 5.5) and c["tail_trim"] is True
+    assert assemble.verify_edit_plan(plan, GRID)["pct"] == 100.0
+    # 범위 밖(마지막 조각 밖)이면 무시 — 종전과 동일
+    doc["beats"][0]["tail_trim_sec"] = 9.0
+    plan = assemble.assemble_edit_plan(doc, IDX, video_path="v", work_title="T", words=[], silences=[])
+    assert plan["timeline"][0]["clip_end_sec"] == 6.5 and "tail_trim" not in plan["timeline"][0]

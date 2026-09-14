@@ -219,6 +219,14 @@ def assemble_edit_plan(story_doc: dict, span_index: dict[str, dict], *,
             if ht is not None and group[0] == beat["span_ids"][0] \
                     and t0 < ht < t1 - 0.05:
                 t0, head = float(ht), True
+            # 꼬리 트림(2026-09-11, ep02full 훅 — 안수정 반응 5.6s 조각을 통째로 쓰거나 빼는 길밖에 없었다):
+            # 비트 `tail_trim_sec`(소스 절대초)가 마지막 조각 안이면 끝을 당긴다. head_trim 의 거울이고
+            # 벨트는 `tail_trim` 을 이미 인정한다(watch_trim 의 눈금 밖 끝과 같은 지위). 사람 손편집 통로.
+            tail = False
+            tt = beat.get("tail_trim_sec")
+            if tt is not None and group[-1] == beat["span_ids"][-1] \
+                    and t0 + 0.05 < tt < t1:
+                t1, tail = float(tt), True
 
             clip = {
                 "role": beat["role"],
@@ -246,6 +254,8 @@ def assemble_edit_plan(story_doc: dict, span_index: dict[str, dict], *,
                     clip["subject_pos"] = sides[0]
             if head:
                 clip["head_trimmed"] = True
+            if tail:
+                clip["tail_trim"] = True
             timeline.append(clip)
 
         for sid in b["span_ids"]:
@@ -758,6 +768,18 @@ def _word_speakers(sp: dict, in_span: list[dict]) -> list[str] | None:
     return out
 
 
+def strip_dialogue_period(text: str) -> str:
+    """대사 자막 줄 끝의 마침표를 뗀다(2026-09-11 사용자 지시 "대사 자막에 '.'은 빼줘"). `?`·`!`·`…` 는 남긴다
+    (감정·의문은 표기의 일부). 줄 나눔이 문장 힌트(마침표)를 다 쓴 **뒤** 최종 텍스트에서만 뗀다 — 앞에서 떼면
+    '대박. 미쳤다.' 류의 줄 경계 힌트가 사라진다. 순수."""
+    t = str(text or "").rstrip()
+    while t.endswith("."):
+        if t.endswith("…") or t.endswith("..."):
+            break
+        t = t[:-1].rstrip()
+    return t
+
+
 def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                    grid_words: list[dict],
                    mute_windows: list[tuple[float, float]] | None = None,
@@ -911,7 +933,7 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                     if skip_log is not None:
                         skip_log.append({"span_id": sid, "src_start": round(ln["start"], 3),
                                          "src_end": round(ln["end"], 3), "edit_start": e0,
-                                         "text": ln["text"],
+                                         "text": strip_dialogue_period(ln["text"]),
                                          **({} if _sings else {"kept": True})})
                     if _sings:
                         continue                  # 노래 구간 — 가사 자막을 내지 않는다
@@ -926,7 +948,7 @@ def word_subtitles(timeline: list[dict], span_index: dict[str, dict],
                             l_spk = wspk[wi2] or speaker
                             l_color = colors.get(l_spk, SPEAKER_DEFAULT_COLOR)
                             break
-                segments.append({"start_sec": e0, "end_sec": e1, "text": ln["text"],
+                segments.append({"start_sec": e0, "end_sec": e1, "text": strip_dialogue_period(ln["text"]),
                                  "speaker": l_spk, "color": l_color})
         off += clip_duration(clip_len(c), fps)
     segments.sort(key=lambda s: (s["start_sec"], s["end_sec"]))

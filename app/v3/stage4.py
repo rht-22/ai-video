@@ -270,15 +270,16 @@ def label_events(dialogue: list[dict] | None, timeline: list[dict] | None) -> li
     segs = [sg for sg in (dialogue or []) if sg.get("start_sec") is not None]
     for n, sg in enumerate(segs):
         s0, s1 = float(sg["start_sec"]), float(sg["end_sec"])
+        _spk = str(sg.get("speaker") or "").strip()
         ev.append({"id": f"L{n}", "kind": "line", "start": round(s0, 3), "end": round(s1, 3),
-                   "text": str(sg.get("text") or "")})
+                   "text": str(sg.get("text") or ""), "speaker": _spk})
         nxt = float(segs[n + 1]["start_sec"]) if n + 1 < len(segs) else None
         _c = _clip_at(s1 - 1e-3, clips)          # 줄 끝이 컷 경계면 그 줄이 속한(앞) 클립
         clip_end = _c["end"] if _c else None
         g1 = min(x for x in (nxt, clip_end) if x is not None) if (nxt is not None or clip_end is not None) else None
         if g1 is not None and g1 - s1 >= LABEL_GAP_MIN_SEC:
             ev.append({"id": f"G{n}", "kind": "gap", "start": round(s1, 3), "end": round(g1, 3),
-                       "text": f"「{sg.get('text')}」 직후 정적"})
+                       "text": f"「{sg.get('text')}」 직후 정적", "speaker": _spk})
     for c in clips:
         ev.append({"id": f"C{c['clip']}", "kind": "clip", "start": c["start"], "end": c["end"],
                    "text": ""})
@@ -290,7 +291,8 @@ def label_events_block(events: list[dict]) -> tuple[str, str]:
     lines, cuts = [], []
     for e in events:
         if e["kind"] == "line":
-            lines.append(f"- {e['id']} {e['start']:.1f}~{e['end']:.1f}s 「{e['text']}」")
+            _who = f" — 화자: {e['speaker']}" if e.get("speaker") else ""
+            lines.append(f"- {e['id']} {e['start']:.1f}~{e['end']:.1f}s 「{e['text']}」{_who}")
         elif e["kind"] == "gap":
             lines.append(f"    · {e['id']} 정적 {e['start']:.1f}~{e['end']:.1f}s")
         else:
@@ -353,7 +355,7 @@ LABEL_PROBE_PROMPT = """당신은 쇼츠 편집자다. 첨부한 클립은 편�
 이 자리에 괄호 라벨 {text} 를 띄우려 한다. 라벨은 화면에 대한 반응이다 — 표정이 꺾이는 순간, 인물 정체, 눈에 띄는 행동.
 {context}
 질문:
-1. 이 클립 안에 이 라벨이 **맞는** 표정·행동이 있는가? 인물의 감정이 라벨과 반대이거나(웃는 얼굴에 '충격') 그런 순간이 없으면 fit=false.
+1. 이 클립 안에 이 라벨이 **맞는** 표정·행동이 있는가? 인물의 감정이 라벨과 반대이거나(웃는 얼굴에 '충격') 그런 순간이 없으면 fit=false. 라벨이 **누가 무엇을 했는지 틀리게 말하거나 그렇게 읽힐 수 있어도**(남이 쏜 소화기를 '본인한테 쏨'처럼 스스로 한 짓으로 읽히는 문구) fit=false.
 2. 있다면 그 표정·행동이 **시작하는** 시각(클립 안 초, 0~{length:.1f})은? 라벨은 그 순간부터 {dur:.1f}초 뜬다.
 ## 출력 (JSON 만)
 {{"fit": true, "start_sec": 0.8, "reason": "한 문장"}}"""
@@ -627,7 +629,30 @@ def validate_style_response(resp: Any, n_beats: int,
                         continue
                     notes.append(f"라벨 {text!r} 컷 경계로 자름 {t1:.2f}→{_c['end']:.2f}")
                     t1 = _c["end"]
+        # 반응 라벨의 청자 규칙(2026-09-11 사용자 규칙 2 — ep01x03 「(동공지진)」이 말한 김혜수에게 붙은 실사고).
+        # 입력 단계에서 막는다: 표에 화자가 실렸으니 L·G 앵커의 반응 라벨은 person(청자)이 있어야 하고 화자
+        # 본인이면 드롭, 얼굴이 안 보인다고 모델이 답하면(person_visible false) 드롭. C 앵커(대사 없는 컷)는 자유.
+        if kind == "reaction" and anchored and events is not None:
+            _ev = next((e for e in events if e["id"] == anchor_id), None)
+            _spk = str((_ev or {}).get("speaker") or "").strip()
+            _who = str(item.get("person") or "").strip()
+            if _ev is not None and _ev.get("kind") in ("line", "gap") and _spk:
+                if not _who:
+                    notes.append(f"라벨 {text!r} 반응 라벨인데 person(청자)이 없다 — 드롭(반응은 들은 사람의 것)")
+                    continue
+                if _who == _spk:
+                    notes.append(f"라벨 {text!r} 반응 라벨을 화자 본인({_spk})에게 붙였다 — 드롭(들은 사람에게)")
+                    continue
+            if item.get("person_visible") is False:
+                notes.append(f"라벨 {text!r} 인물({_who or '?'}) 얼굴이 안 보인다(person_visible=false) — 드롭(crop 으로 먼저 잡아라)")
+                continue
         if label_facts is not None and _clip_i is not None:
+            if kind == "reaction" and str(item.get("person") or "").strip():
+                _who = str(item.get("person")).strip()
+                _chars = (label_facts.get("clip_characters") or {}).get(_clip_i) or []
+                if _chars and _who not in _chars:
+                    notes.append(f"라벨 {text!r} 반응 인물({_who})이 그 컷(C{_clip_i})의 인물({'/'.join(_chars)})이 아니다 — 드롭")
+                    continue
             if kind == "pointer" and _clip_i not in (label_facts.get("screen_clips") or set()):
                 notes.append(f"라벨 {text!r} 지시형인데 그 컷(C{_clip_i})에 화면 글자가 없다 — 드롭")
                 continue
@@ -669,6 +694,8 @@ def validate_style_response(resp: Any, n_beats: int,
             entry["kind"] = kind                  # additive — 감사 기록(갭 10)
             if kind == "irony":
                 entry["register_id"] = str(item.get("register_id"))
+        if str(item.get("person") or "").strip():
+            entry["person"] = str(item.get("person")).strip()   # additive — 프로브 문맥·감사(누구의 반응인가)
         if anchored:
             entry["anchor"] = anchor_id           # additive — 감사 기록("라벨 ← 이벤트")
         authored_out.append(entry)
@@ -948,6 +975,7 @@ STYLE_PROMPT = """당신은 쇼츠 아트디렉터다. 첨부한 영상은 리�
    - `color`: {palette_names} 중 하나 — **배경과의 대비가 우선이다.** 화면이 그 색 계열이면 쓰지 마라(붉은 조명 위 red 는 글자가 사라진다). 확신이 없으면 white·yellow. 연달아 나오면 서로 다른 색.
    - `fx`: `pop`(기본 — 띠용) · `glow`(**어두운 화면 전용** — 밝거나 같은 색 계열 배경에서는 외곽선이 사라져 안 보인다) · `shake`(충격·놀람) · `none`(차분).
    - `kind`: `reaction`(기본 — 심리·행동) · `identity`(인물 지목 — `person` 에 그 인물 이름, **그 인물이 화면에 있는 컷**에서만){kind_extra}
+   - ⚠ **반응 라벨은 그 대사를 들은 사람에게** 붙는다(「너 바람피니?」의 「(동공지진)」은 말한 아내가 아니라 들은 남편의 것). L·G 앵커의 반응 라벨은 `person` 에 **그 순간 표정이 바뀌는 인물**(보통 화자가 아닌 쪽 — 표의 화자 표기를 보라)을 적어라. 화자 본인에게 붙이면 드롭된다. `person_visible`: 그 인물의 얼굴이 이 컷에 **보이는가**(멀리 작거나 뒤돌아 있으면 false) — false 면 라벨을 달지 말고, 대신 그 비트의 `crop` 을 그 인물 쪽으로 잡아라(얼굴이 안 보이는 사람의 반응은 라벨로 못 세운다 — 드롭된다).
    - ⚠ **판정 동사 금지**: 거짓말·불륜·살인·범인·바람 같은 단정은 화면이 보여주기 전엔 쓰지 마라(드롭된다). 보이는 것·표정·행동으로만.
 1. 자막 가독성: 화면 하단이 밝거나 복잡하면 subtitle_color/외곽선 대비, 필요시 subtitle_y_margin 조정.
 2. 제목 밴드: 기본 유지 — 화면과 무관(검정 밴드 위)이라 특별한 사유 없으면 손대지 않는다.
@@ -1076,6 +1104,9 @@ def _default_label_probe(gemini, draft_path: Path, *, log=print):
         clip = out_dir / f"label_{int(round(t0 * 100)):06d}.mp4"
         _cut_probe_clip(ffmpeg, Path(draft_path), t0, t1, clip)
         ctx = f"앵커: {lb.get('anchor')} · 라벨 창(편집본): {lb['start_sec']:.1f}~{lb['end_sec']:.1f}s"
+        if lb.get("person"):
+            ctx += (f"\n이 라벨은 **{lb['person']}** 의 반응이다 — 그 인물의 얼굴이 보이고 그 표정이 라벨과 맞아야 fit=true. "
+                    "다른 인물의 표정으로 판정하지 마라. 그 인물이 화면에 없거나 얼굴이 안 보이면 fit=false.")
         prompt = LABEL_PROBE_PROMPT.format(
             t0=f"{t0:.1f}", t1=f"{t1:.1f}", text=lb["text"], context=ctx,
             length=t1 - t0, dur=float(lb["end_sec"]) - float(lb["start_sec"]))

@@ -29,6 +29,17 @@ NAR_SPEED = "fast"           # ElevenLabs 1.1 (2026-09-03 사용자: very_fast 1
 NAR_EST_CPS = 7.7            # 합성 실패 시 견적(공백 제외 자/초 · fast)
 NAR_EST_LEAD_SEC = 0.35
 MAX_NARRATIONS = 8
+# 훅 화면(2026-09-11 사용자 지적 — 지금불륜 2화 4편: 첫 3초 내레이션 밑이 옥상 와이드에 서 있는 인물(importance 2)이라
+# 규칙 1(컷·발화)은 통과했지만 눈길을 못 끌었다). 훅(before_beat 0) 내레이션이 짚는 화면은 Stage 2 importance 가
+# 이 값 이상인 조각을 하나는 포함해야 한다(목록에 ★). 쓸 수 있는 화면에 그런 조각이 없으면 있는 것 중 최고값으로 낮춘다.
+HOOK_COVER_MIN_IMPORTANCE = 4
+
+
+def _imp(sp: dict) -> int:
+    try:
+        return int(sp.get("importance") or 0)
+    except (TypeError, ValueError):
+        return 0
 # 무대사 편(갭 3, 2026-09-07): 내레이션이 뼈대라 상한·하한이 다르다. 60초 편에 8줄×2.5초는
 # 20초뿐이라 상한을 올리고, 견적 합계가 편 길이의 이 비율에 못 미치면 걸음 4 를 반려한다
 # (합성 앞이라 요금 0 — 견적은 NAR_EST_CPS 로).
@@ -45,12 +56,13 @@ PROMPT = """당신은 리캡 쇼츠 구성작가다. 영상은 볼 수 없다 �
 - 내레이션은 **접착제**다 — 상황을 정리하자마자 틈 없이 다음 대사가 치고 들어온다. 설명충이 되지 마라. 한 문장 = **공백 제외 {max_chars}자 이내**(2~3초). 길면 두 문장으로 나눠 따로 적어라. 다리 자리(훅·점프·전환)에서는 쉼표로 끝내 다음 대사가 받게 하는 형식("협박까지 나왔는데,")이 좋다.
 - **편의 마지막에 오는 내레이션은 반드시 문장을 닫아라** — 연결 어미(…는데, / …자, / …고,)로 끝내면 편이 끝나지 않은 느낌이 된다. 떡밥이어도 문장은 닫는다("…이 시작됐죠."). 각 줄의 `closed` 에 그 줄이 문장을 닫는지 네 판정을 적어라.
 - 서술체(~했죠 / ~는데,). 예고형이 완료 묘사형보다 낫다. **다음 대사의 내용을 먼저 말하지 마라** — 상황만 깔고 대사가 답하게.
-- 근거는 기록뿐: 구체 명사·인물명을 기록 그대로 써라. 화면에 없는 행동을 지어내지 마라.
+- 근거는 기록뿐: 구체 명사·인물명을 기록 그대로 써라. 화면에 없는 행동을 지어내지 마라. **내레이션이 가리키는 것은 덮개 화면에 보여야 한다** — 추상어("불륜 정황을 확인하자"·"의혹"·"비밀")는 시청자에게 아무것도 보여주지 않는다. 화면의 구체물로 말하라("남편 지갑에서 나온 건," + 지갑 조각). 짚은 조각의 화면 기록에 없는 물건·행동·인물을 문장에 넣지 마라 — 코드가 그 화면을 다시 보고 문장과 대조해 모순이면 반려하고, 끝내 안 맞으면 그 내레이션을 뺀다.
 - `cover`: 이 문장이 흐르는 동안 **보여줄 화면**을 아래 「쓸 수 있는 화면」에서 조각 id 로 골라라(1~3개, 이어지는 조각). 코드가 그 화면의 소리를 끄고 그 위에 얹는다. **내레이션이 가리키는 정보가 화면에 글자로 있으면(메시지·문서·검색창·자막 — 📄 표시된 자료화면) 그 화면을 짚고 `hold: true`** — 코드가 그 화면의 마지막 프레임을 내레이션 길이만큼 붙잡아 시청자가 읽게 한다. **자료화면이 아닌 화면은 절대 정지시키지 않는다** — 짚은 화면이 문장보다 짧으면 코드가 같은 씬의 다른 조각을 이어 붙여(컷 쌓기) 채우니, 그런 자리엔 hold 를 쓰지 말고 이어 보여도 어색하지 않은 조각을 짚어라. **문장은 그 화면이 보여주는 것을 말해야 한다** — 발장난을 말하려면 발장난 조각을 짚어라. 대사 중인 얼굴이라도 내레이션이 가리키는 장면이면 괜찮다. 짚을 화면이 없는 말은 쓰지 마라.
 - 화면 글자(📄)가 있는 조각은 그 문구를 근거로 쓸 수 있다(원문을 인용해도 된다). 글자 화면을 짚으면 `hold: true`.
 - ⚠ 표시된 장면(회상/상상/unclear)은 **사건으로 단정하는 문장을 쓰지 마라** — '~하는 상상을 한다'·'~했다고 믿는다'·'~를 떠올린다' 식으로 층위를 드러내라.
-- ⚠ **되감기** 자리(훅이 결과를 먼저 보여준 뒤 원본의 앞으로 돌아가는 점프)의 다리는 **시간을 되돌린다는 표지**를 문장에 넣어라 — "사실 이 완판, 시작은 몇 시간 전,", "이야기는 차 안에서 시작됐죠," 처럼. 장소만 말하면("신포시장으로 향하던 중,") 시청자는 그것이 방금 본 결과의 **이전** 과정인지 모른다.
-- 훅(before_beat: 0)은 **필수**. ⚠ 점프 자리도 **필수**. 엔딩 뒤 한 줄(after_last)은 선택 — 다음에 벌어질 일의 암시·떡밥(작품 정보·다른 씬 요약에 있는 사건은 화면 없이 말로 예고할 수 있다). 해소·정리 멘트 금지.
+- ⚠ **되감기** 자리(훅이 결과를 먼저 보여준 뒤 원본의 앞으로 돌아가는 점프)의 다리는 **시간을 되돌린다는 표지**를 문장에 넣어라 — "사실 이 완판, 시작은,", "이야기는 차 안에서 시작됐죠," 처럼(기간은 적지 않는다). 장소만 말하면("신포시장으로 향하던 중,") 시청자는 그것이 방금 본 결과의 **이전** 과정인지 모른다.
+- 훅(before_beat: 0)은 **필수**이되 **짧게** — 쇼츠는 첫 3초에 갈린다. 훅 문장의 화면은 **★ 표시된 조각**(이 편에서 눈길을 끄는 순간 — 폭발·충돌·분사·표정이 터지는 순간)에서 골라라. 서 있기·걷기·뒷모습·풍경 와이드는 첫 3초를 죽인다(반려된다). ★ 는 **첫 화면에만** 해당한다 — 나머지 내레이션의 화면은 ★ 와 무관하게 **문장과 맞고 앞뒤로 자연스럽게 이어지는 조각**을 골라라(관련성·자연스러움이 우선). 첫 3초 안에 컷 전환이나 발화가 하나는 있어야 하므로(코드가 잰다), 훅 문장은 한 줄(≈2초)로 끊고 컷이 있거나 곧 대사가 시작되는 화면을 짚어라. 정지된 그림 위로 긴 문장이 흐르는 오프닝은 반려된다. ⚠ 점프 자리도 **필수**. 엔딩 뒤 한 줄(after_last)은 선택 — 다음에 벌어질 일의 암시·떡밥(작품 정보·다른 씬 요약에 있는 사건은 화면 없이 말로 예고할 수 있다). 결말을 유보한 편이면 주인공의 반응 컷 위에 **질문으로 끝낼 수도 있다**("과연 무엇을 본 걸까?") — 필수는 아니다, 편마다 다르게. 해소·정리 멘트 금지.
+- **시간 경과를 단정하지 마라** — "며칠 전"·"그날 밤"·"다음 날"·"몇 시간 후" 같은 기간·날짜 표현은 기록에 근거가 없다(드라마상 당일일 수도 다음날일 수도 있다). 쓰면 반려된다. 되감기 표지도 기간 없이 — "사실 시작은,"·"이야기는 이렇게 시작됐죠,".
 - 최대 {max_n}곳.
 
 ## 작품 · 주제 · 제목
@@ -211,7 +223,8 @@ def available_block(available: list[str], span_index: dict[str, dict],
         if beat_ids and sid in beat_ids:
             desc = "[비트 안 화면] " + desc
         desc += screen_text_tag(sp.get("screen_text")) + diegesis_tag(sp.get("diegesis"))
-        out.append(f"{sid} | {fmt_t(sp['t_in'])} | {sp['t_out'] - sp['t_in']:.1f}s | {desc}")
+        star = "★ " if _imp(sp) >= HOOK_COVER_MIN_IMPORTANCE else ""
+        out.append(f"{sid} | {fmt_t(sp['t_in'])} | {sp['t_out'] - sp['t_in']:.1f}s | {star}{desc}")
     return "\n".join(out) if out else "(없음 — 고른 씬의 모든 조각이 대사로 쓰였다)"
 
 
@@ -245,14 +258,32 @@ def split_sentences(text: str, max_chars: int = NAR_MAX_CHARS) -> list[str]:
 # 되감기 표지 어휘(2026-09-09): 되감기 점프의 다리 문장에 이 중 하나는 있어야 한다. 텍스트 지시만으로는
 # 모델이 장소 전환 문장으로 되돌아온다(형식으로 막는다 — reveal 규율과 같다). 넓게 잡되 '이전 시점'을
 # 말하는 표현만.
-REWIND_MARKERS = ("시간 전", "분 전", "일 전", "전으로", "앞서", "시작은", "시작된", "시작됐", "시작한",
+# ⚠ 기간이 든 표지("몇 시간 전"·"일 전"·"그날 아침")는 뺐다(2026-09-11 사용자 규칙 3 — 시간 경과를
+# 단정하지 않는다). 남은 것은 전부 **기간 없는** 표지다 — TIME_ASSERT_BANNED 와 짝.
+REWIND_MARKERS = ("전으로", "앞서", "시작은", "시작된", "시작됐", "시작한",
                   "거슬러", "사실", "처음", "그 전", "이야기는", "되돌", "돌아가", "돌아가면", "출발",
-                  "일찍이", "그날 아침", "그날 낮", "오전", "이 결과", "이 완판", "이 장면")
+                  "일찍이", "이 결과", "이 완판", "이 장면")
+
+# 시간 경과 단정 어휘(2026-09-11 사용자 규칙 3, ep01x03 「시작은 며칠 전」 실사고): 드라마상 당일일 수도
+# 다음날일 수도 있는데 기록 어디에도 시각 근거가 없다. 내레이션 어느 줄에든 있으면 반려(형식 — 텍스트
+# 지시만으로는 되돌아온다). 화면·기록에 날짜가 글자로 있으면 그 문구를 인용하는 길은 열려 있다
+# (📄 인용 규칙) — 그 경우도 여기서 걸리므로 인용은 대사·자료화면 자막에 맡긴다.
+TIME_ASSERT_BANNED = ("며칠 전", "며칠 후", "며칠 뒤", "며칠째", "그날 밤", "그날 아침", "그날 낮", "그날 저녁",
+                      "그날 오후", "그날 새벽", "다음 날", "다음날", "이튿날", "다음 주", "다음주", "몇 시간 후",
+                      "몇 시간 뒤", "몇 시간 전", "몇 분 전", "몇 분 후", "몇 분 뒤", "한 시간", "하루 뒤",
+                      "하루 전", "하루 후", "하루가 지나", "일주일", "몇 주", "몇 달", "몇 년", "한 달", "1년",
+                      "일 년", "전날", "어젯밤", "어제", "그저께", "오늘 밤", "오늘밤", "그 다음 날")
 
 
 def has_rewind_marker(text: str) -> bool:
     t = " ".join(str(text or "").split())
     return any(m in t for m in REWIND_MARKERS)
+
+
+def time_assertion(text: str) -> str | None:
+    """문장에 든 시간 경과 단정 어휘(첫 것) — 없으면 None. 순수."""
+    t = " ".join(str(text or "").split())
+    return next((m for m in TIME_ASSERT_BANNED if m in t), None)
 
 
 def validate_narrations(resp: Any, n_beats: int, *,
@@ -263,6 +294,8 @@ def validate_narrations(resp: Any, n_beats: int, *,
                         available: set[str] | None = None,
                         max_n: int = MAX_NARRATIONS,
                         min_total_sec: float | None = None,
+                        span_index: dict[str, dict] | None = None,
+                        hook_before_t: float | None = None,
                         ) -> tuple[list[dict] | None, list[str], list[str]]:
     """→ [{anchor: ("before", k) | ("after", n-1), lines: [문장…], cover_ids: [...]}].
     required: 내레이션이 반드시 있어야 하는 before_beat 집합(기본 {0}).
@@ -296,6 +329,10 @@ def validate_narrations(resp: Any, n_beats: int, *,
             key = ("before", bi)
         lines = split_sentences(text, max_chars)
         for ln in lines:
+            _ta = time_assertion(ln)
+            if _ta:
+                problems.append(f"narrations[{k}] 「{_ta}」 — 시간 경과를 단정하는 표현은 기록에 근거가 없다. "
+                                f"기간 없이 써라(되감기면 \"사실 시작은,\"·\"이야기는 이렇게 시작됐죠,\"): {ln!r}")
             if nospace_len(ln) > hard_max:
                 problems.append(f"narrations[{k}] 문장이 공백 제외 {nospace_len(ln)}자 — "
                                 f"{max_chars}자 이내 문장 둘로 나눠 적어라: {ln!r}")
@@ -325,6 +362,21 @@ def validate_narrations(resp: Any, n_beats: int, *,
         if ("before", bi) not in groups:
             problems.append(f"before_beat: {bi} 내레이션이 없다 — "
                             + ("도입(훅)은 필수" if bi == 0 else "점프 자리라 다리가 필수"))
+    # 훅 화면 importance(2026-09-11) — span_index·available 이 있을 때만(없으면 종전)
+    if span_index is not None and available and ("before", 0) in groups:
+        # 훅 덮개가 실제로 쓸 수 있는 화면만 — before 덮개는 비트 첫 조각보다 앞의 화면이어야 한다(cover 의 되감기 방지)
+        pool = [x for x in available if x in span_index
+                and (hook_before_t is None or span_index[x].get("t_out", 0.0) <= hook_before_t + 1e-6)]
+        best = max((_imp(span_index[x]) for x in pool), default=0)
+        need = min(HOOK_COVER_MIN_IMPORTANCE, best)
+        ids0 = groups[("before", 0)]["cover_ids"]
+        got = max((_imp(span_index[x]) for x in ids0 if x in span_index), default=0)
+        if need > 0 and got < need:
+            top = sorted((x for x in pool if _imp(span_index[x]) >= need),
+                         key=lambda x: -_imp(span_index[x]))[:5]
+            problems.append(("훅(before_beat: 0) 화면을 짚지 않았다" if not ids0 else
+                             f"훅(before_beat: 0) 화면 {ids0[:3]} 이 밋밋하다(importance {got})")
+                            + f" — 첫 3초는 눈길을 끄는 ★ 조각(importance ≥{need})에서 골라라: {top}")
     for bi in sorted(rewind or ()):
         g = groups.get(("before", bi))
         if g is not None and not any(has_rewind_marker(ln) for ln in g["lines"]):
@@ -392,6 +444,7 @@ def synthesize_groups(groups: list[dict], out_dir: Path,
 
 
 __all__ = ["PROMPT", "NAR_MAX_CHARS", "NAR_SPEED", "NAR_VOICE", "beats_block",
+           "REWIND_MARKERS", "TIME_ASSERT_BANNED", "has_rewind_marker", "time_assertion",
            "available_covers", "available_block", "split_sentences", "silent_note",
            "silent_beat_ids", "SILENT_MAX_NARRATIONS", "SILENT_NARRATION_MIN_RATIO",
            "validate_narrations", "synthesize_groups", "default_synth", "estimate_sec",

@@ -898,6 +898,9 @@ def _pick_video_encoder(ffmpeg_path: str) -> str:
     return _VIDEO_ENCODER_CACHE
 
 
+H264_LEVEL = "4.2"   # libx264 출력 level 상한 — VideoToolbox 호환(함수 안 주석 참조)
+
+
 def _video_encoder_args(encoder: str, preset: str) -> list[str]:
     preset = (preset or "balanced").lower()
     if preset not in {"fastest", "balanced", "quality"}:
@@ -923,12 +926,15 @@ def _video_encoder_args(encoder: str, preset: str) -> list[str]:
             return ["-preset", "slow"]
         return ["-preset", "medium"]
 
-    # libx264
+    # libx264 — `-level 4.2` 명시(2026-09-11 실사고): 필터그래프 출력의 프레임레이트를 x264 가 못 읽어
+    # 자동 level 이 6.2 로 찍혔고, 애플 VideoToolbox(QuickTime·iOS)가 어두운 아웃포커스 구간 프레임을
+    # -12909(bad data)로 거부해 화면이 깨졌다(ffmpeg 소프트웨어 디코드는 멀쩡해 렌더 검증이 못 잡았다).
+    # 1080×1920 ≤64fps 는 4.2 안이다(High 4.2 · 8192 MB/frame · 522,240 MB/s). 재인코딩 실측: 4.0 은 0건 · 6.2 는 83건.
     if preset == "fastest":
-        return ["-preset", "ultrafast", "-crf", "23"]
+        return ["-preset", "ultrafast", "-crf", "23", "-level", H264_LEVEL]
     if preset == "quality":
-        return ["-preset", "faster", "-crf", "20"]
-    return ["-preset", "superfast", "-crf", "21"]
+        return ["-preset", "faster", "-crf", "20", "-level", H264_LEVEL]
+    return ["-preset", "superfast", "-crf", "21", "-level", H264_LEVEL]
 
 
 def _relpath_or_abs(p: Path, base: Path) -> Path:

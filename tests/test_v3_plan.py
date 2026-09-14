@@ -248,14 +248,14 @@ def test_rewind_jump_requires_time_marker_in_bridge_narration():
     # 편성표에 되감기 표지 요구가 실린다
     blk = nr.beats_block(beats, IDX, {0: {}, 1: {}}, jumps)
     assert "⚠ 되감기" in blk and "시간을 되돌리는 표지 필수" in blk
-    assert "되감기" in nr.PROMPT and "시작은 몇 시간 전" in nr.PROMPT
+    assert "되감기" in nr.PROMPT and "사실 이 완판, 시작은," in nr.PROMPT
     # 검증: 장소만 말하는 다리는 반려 · 시간 표지가 있으면 통과 · rewind 미지정이면 종전(회귀 0)
     base = {"narrations": [{"before_beat": 0, "text": "완판 선언,", "closed": False},
                            {"before_beat": 1, "text": "신포시장으로 향하던 중이었죠.", "closed": True}]}
     obj, pr, _ = nr.validate_narrations(base, 2, required={0, 1}, rewind={1})
     assert obj is None and any("되감기 자리" in p for p in pr)
     ok = {"narrations": [{"before_beat": 0, "text": "완판 선언,", "closed": False},
-                         {"before_beat": 1, "text": "사실 시작은 몇 시간 전 차 안이었죠.", "closed": True}]}
+                         {"before_beat": 1, "text": "사실 시작은 차 안이었죠.", "closed": True}]}
     assert nr.validate_narrations(ok, 2, required={0, 1}, rewind={1})[0] is not None
     assert nr.validate_narrations(base, 2, required={0, 1})[0] is not None
     assert nr.has_rewind_marker("이야기는 차 안에서 시작됐죠,") and not nr.has_rewind_marker("신포시장으로 향하던 중,")

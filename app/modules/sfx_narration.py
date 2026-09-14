@@ -39,6 +39,8 @@ from pathlib import Path
 from typing import Any
 
 MANIFEST_NAME = "narration_manifest.json"
+EMPHASIS_FOLLOWUP_TAG = "emphasis_followup"   # 연이어 강조(punch) — 매니페스트 mid 태그
+EMPHASIS_FOLLOWUP_GAP_SEC = 3.0               # 직전 강조와 이 안이면 "붙어 있는" 강조
 SFX_DIR_NAME = "sfx"
 STAGE_SUBDIR = "style_assets"      # 스티커·AI SFX 와 같은 스테이징 위치
 _PROBE_SR = 16000
@@ -310,13 +312,26 @@ def place_emphasis_sfx(lines: list[dict], *, app_root: Path, run_dir: Path, seed
     dest_dir = Path(run_dir) / STAGE_SUBDIR
     out: list[dict[str, Any]] = []
     recent: list[str] = []
+    prev_at: float | None = None
+    prev_family: str | None = None
     for step, ln in enumerate(lines):
         try:
             at = float(ln["start_sec"])
         except (TypeError, ValueError, KeyError):
             continue
-        it = _pick(mf["items"], EMPHASIS_TAG, seed, step, recent, no_repeat) \
-            or _pick(mf["items"], LABEL_TAG, seed, step, recent, no_repeat)
+        # 붙어 있는 강조(2026-09-11 사용자 지시 "붙어있는 효과끼리는 서로 다른 효과음"): 직전 강조와
+        # EMPHASIS_FOLLOWUP_GAP_SEC 안이면 매니페스트의 `emphasis_followup`(연이어 강조 — punch) 풀에서 고르고
+        # 직전과 같은 계열은 뺀다. 풀에 직전과 다른 게 없으면 soft 풀 → label 풀 순. 떨어진 강조는 종전 그대로.
+        it = None
+        if prev_at is not None and at - prev_at <= EMPHASIS_FOLLOWUP_GAP_SEC:
+            for tag in (EMPHASIS_FOLLOWUP_TAG, EMPHASIS_TAG, LABEL_TAG):
+                it = _pick(mf["items"], tag, seed, step, [prev_family or ""], 1)
+                if it is not None and (it.get("family") or it["id"]) != prev_family:
+                    break
+                it = None
+        if it is None:
+            it = _pick(mf["items"], EMPHASIS_TAG, seed, step, recent, no_repeat) \
+                or _pick(mf["items"], LABEL_TAG, seed, step, recent, no_repeat)
         if it is None:
             continue
         src = src_dir / it["file"]
@@ -334,5 +349,6 @@ def place_emphasis_sfx(lines: list[dict], *, app_root: Path, run_dir: Path, seed
                                "at": round(at, 3), "text": str(ln.get("text") or "")[:20],
                                "peak_sec": peak, "kind": "emphasis"}})
         recent.append(it.get("family") or it["id"])
+        prev_at, prev_family = at, (it.get("family") or it["id"])
     return out
 
