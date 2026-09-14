@@ -635,6 +635,7 @@ def build_form_fields(
     language: str,
     keyterms: list[str] | None,
     is_raw: bool,
+    diarize: bool = False,
 ) -> list[tuple[str, str]]:
     """multipart 폼 필드를 (이름, 값) **열**로 만든다 — 순수, 테스트 대상.
 
@@ -650,7 +651,7 @@ def build_form_fields(
         ("timestamps_granularity", "word"),
         # 기본이 true 다 — 켜두면 자막에 '(laughter)' 가 섞인다.
         ("tag_audio_events", "false"),
-        ("diarize", "false"),
+        ("diarize", "true" if diarize else "false"),     # 티키타카 화자 대조(voice_check)만 true — 자막 경로는 종전 그대로 false
     ]
     if is_raw:
         fields.append(("file_format", "pcm_s16le_16"))
@@ -674,6 +675,7 @@ def _post_speech_to_text(
     language: str,
     keyterms: list[str] | None,
     is_raw: bool,
+    diarize: bool = False,
 ) -> dict:
     """multipart POST + 실패 분류.
 
@@ -686,7 +688,7 @@ def _post_speech_to_text(
     """
     import requests
 
-    fields = build_form_fields(language=language, keyterms=keyterms, is_raw=is_raw)
+    fields = build_form_fields(language=language, keyterms=keyterms, is_raw=is_raw, diarize=diarize)
     headers = {"xi-api-key": api_key}
     last_err: Exception | None = None
     for attempt in range(_EL_RETRIES + 1):

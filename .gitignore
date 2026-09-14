@@ -194,3 +194,6 @@ outputs/**
 outputs_ab/**
 sources_local/**
 rejected/**app/assets/fonts/ArialUnicode.ttf
+
+# tikitaka 파이프라인 산출(잡 디렉토리 — 대용량)
+outputs_tikitaka/**
