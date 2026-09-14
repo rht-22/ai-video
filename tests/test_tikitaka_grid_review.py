@@ -1,0 +1,371 @@
+"""Hybrid contracts: ID authority, speech preservation, per-version review/cache."""
+from __future__ import annotations
+
+import copy
+import shutil
+import subprocess
+import json
+from pathlib import Path
+
+import pytest
+
+from app.tikitaka import grid as gg, grid_table as gt, finish
+from app.tikitaka.common import Job
+
+
+def fact(sid, **kw):
+    return {"span_id": sid, "scene_script": "표정을 바라본다", "characters": ["갑", "을"],
+            "importance": 4, "has_text": False, "screen_text": "", "screen_text_kind": "기타",
+            "diegesis": "actual", **kw}
+
+
+def fixtures(tmp_path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"synthetic media identity")
+    tts = tmp_path / "tts.mp3"
+    tts.write_bytes(b"synthetic audio identity")
+    grid = {"source": {"duration_sec": 12, "width": 640, "height": 360, "fps": 30},
+            "span_candidates": [{"id": f"sp{i:04d}", "t_in": i*2., "t_out": i*2.+2,
+                                 "is_audio": i in (0, 4), "text": "대사" if i in (0,4) else "",
+                                 "time_authority": "stt" if i in (0,4) else "scene"} for i in range(6)],
+            "scene_cuts": [2., 4., 6., 8., 10.], "words": [], "arousal": []}
+    facts = {s["id"]: fact(s["id"]) for s in grid["span_candidates"]}
+    rows = []
+    # Spoken line, removable visual insert, narration, final spoken line.
+    for i, (mode, start) in enumerate([("S", 0), ("A", 2), ("N", 6), ("S", 8)], 1):
+        cut = {"in": float(start), "out": float(start+2), "dur": 2.,
+               "src": f"sp{start//2:04d}", "span_ids": [f"sp{start//2:04d}"],
+               "authority": "grid+tts" if mode == "N" else "stt", "desc": "표정"}
+        row = {"i": i, "mode": mode, "cuts": [cut], "dur": 2., "dur_video": 2.,
+               "text": "지금 이 표정", "speaker": "갑", "t0": 2.*(i-1),
+               "sub_lines": [{"start": start+.1, "end": start+1.8, "text": "무슨 일이야?"}] if mode == "S" else []}
+        if mode == "N":
+            row.update(tts=str(tts), plan_sec=2.)
+        rows.append(row)
+    table = {"version": {"n": 1, "title": "뜻밖의 표정", "strategy": "대사", "issues": []},
+             "rows": rows, "total_sec": 8, "voice": "ko_female", "speed": "normal"}
+    return Job(source, tmp_path, "테스트"), grid, {"grid_facts": facts}, table
+
+
+def test_grid_uses_stt_and_shared_carver_without_changing_words():
+    transcript = {"words": [{"start": 1., "end": 1.5, "text": "안녕."}], "backend": "elevenlabs"}
+    before = copy.deepcopy(transcript)
+    grid = gg.build_grid({"duration_sec": 5}, transcript, [2., 4.])
+    voiced = [s for s in grid["span_candidates"] if s["is_audio"]]
+    assert voiced[0]["t_in"] == 1 and voiced[0]["t_out"] == 1.5
+    assert grid["scene_cuts"] == [2, 4]
+    assert transcript == before
+
+
+def test_observer_cannot_override_clock_or_invent_id():
+    spans = [{"id": "sp0000", "t_in": 10., "t_out": 12.}]
+    raw = {"spans": [dict(fact("sp0000"), start=933, end=999), fact("invented")],
+           "scenes": [{"span_ids": ["sp0000"], "start": 1000}, {"span_ids": ["absent"]}],
+           "speakers": {"L-001": "갑", "L-999": "을"}}
+    parsed = gg.parse_observations(raw, spans, {"L-001"})
+    assert "start" not in parsed["facts"]["sp0000"]
+    assert parsed["scenes"][0]["start"] == 10
+    assert len(parsed["issues"]) == 2
+    assert parsed["speakers"] == {"L-001": "갑"}
+
+
+def test_cover_rejects_unknown_duplicate_and_weak_opening():
+    candidates = {"sp0": {**fact("sp0", importance=3), "t_in": 0., "t_out": 2.}}
+    for ids in (["fake"], ["sp0", "sp0"]):
+        with pytest.raises(ValueError):
+            gt.assemble_cover(ids, candidates, 1)
+    with pytest.raises(ValueError, match="중요도"):
+        gt.assemble_cover(["sp0"], candidates, 1, opening=True)
+
+
+def test_only_information_screen_can_hold_and_tts_is_not_shortened():
+    sp = {**fact("sp0", has_text=True, screen_text="방송 자막"), "t_in": 0., "t_out": 1.}
+    with pytest.raises(ValueError, match="부족"):
+        gt.assemble_cover(["sp0"], {"sp0": sp}, 2)
+    sp["screen_text_kind"] = "기사"
+    result = gt.assemble_cover(["sp0"], {"sp0": sp}, 2)
+    assert result[0]["hold_sec"] == 1
+    assert result[0]["out"] == 1
+    assert result[0]["dur"] == 2
+
+
+def test_same_scene_candidates_do_not_leak_to_middle_scene():
+    rows = [{"mode": "S", "cuts": [{"in": 0., "out": 1.}]},
+            {"mode": "N", "cuts": []}, {"mode": "S", "cuts": [{"in": 9., "out": 10.}]}]
+    spans = [{"id": "sp0", "t_in": 3., "t_out": 4.}, {"id": "sp1", "t_in": 7., "t_out": 8.}]
+    index = {"scenes": [{"start": 0., "end": 2.}, {"start": 2., "end": 6.}, {"start": 6., "end": 10.}],
+             "grid_facts": {s["id"]: fact(s["id"]) for s in spans}}
+    candidates = gt.candidates_for(rows[1], rows, index, {"span_candidates": spans}, [], [])
+    assert set(candidates) == {"sp1"}
+    assert not gt.candidates_for(rows[1], rows, index, {"span_candidates": spans}, [(7,8)], [])
+
+
+def test_adapter_keeps_spoken_words_tts_and_source_identity(tmp_path):
+    job, grid, index, table = fixtures(tmp_path)
+    before = copy.deepcopy(table)
+    plan, story, segments, resources = finish.bundle(table, grid, title=job.title)
+    assert [s["start_sec"] for s in segments] == pytest.approx([.1, 6.1])
+    assert resources["tts_cue_files"][0]["cue"]["start_sec"] == 4
+    assert not plan["timeline"][2]["use_original_audio"]
+    assert table == before
+    assert finish.validate_bundle(plan, grid, segments, resources)["duration_sec"] == 8
+    with pytest.raises(ValueError, match="excluded"):
+        finish.validate_bundle(plan, grid, segments, resources, exclude=[(6.5, 6.6)])
+
+
+def test_review_remaps_once_and_reuses_style_render_independently(tmp_path, monkeypatch):
+    job, grid, index, table = fixtures(tmp_path)
+    job.save("picture_area.json", {"x": 0, "y": 0, "w": 640, "h": 360})
+    calls = {"watch": 0, "style": 0, "render": 0, "draft": 0}
+    def draft(video, tl, out, resources, **kwargs):
+        calls["draft"] += 1
+        out.write_bytes(b"draft")
+    def watch(*args, **kwargs):
+        calls["watch"] += 1
+        return [{"start": 2.5, "end": 3.5, "reason": "늘어짐"}], {}
+    def style(*args, **kwargs):
+        calls["style"] += 1
+        assert kwargs["dialogue"][-1]["start_sec"] < 6.1
+        return {"design": kwargs["preset"], "v3_style": {}}, {"attempts": []}
+    def render(**kwargs):
+        calls["render"] += 1
+        assert kwargs["resources"]["tts_cue_files"][0]["cue"]["start_sec"] < 4
+        out = kwargs["output_dir"] / "final_1080x1920.mp4"
+        out.write_bytes(b"render")
+        return out, {}
+    monkeypatch.setattr(finish, "render_draft", draft)
+    monkeypatch.setattr(finish.watch_trim, "run_watch_trim", watch)
+    monkeypatch.setattr(finish.stage4, "run_style", style)
+    monkeypatch.setattr(finish.finalize, "render_final", render)
+    monkeypatch.setattr(finish, "render_dependencies", lambda: "rules1")
+    monkeypatch.setattr(finish, "validate_media", lambda *a: {"mock": True})
+    for _ in range(2):
+        result = finish.run(job, table, grid, index, get_gemini=lambda: None)
+        assert result.read_bytes() == b"render"
+    assert calls["watch"] == calls["style"] == calls["render"] == 1
+    first = job.load("review_v1/checkpoint_resources.json")
+    monkeypatch.setattr(finish, "render_dependencies", lambda: "rules2")
+    finish.run(job, table, grid, index, get_gemini=lambda: None)
+    assert calls["watch"] == calls["style"] == 1 and calls["render"] == 2
+    assert list(job.path("review_v1").glob("final_prev_*.mp4"))
+    assert job.load("review_v1/checkpoint_resources.json") == first
+    table["version"]["n"] = 2
+    finish.run(job, table, grid, index, get_gemini=lambda: None)
+    assert calls["watch"] == 2 and job.has("review_v2/checkpoint_review.json")
+
+
+def test_reviewer_cannot_remove_a_spoken_line(tmp_path, monkeypatch):
+    job, grid, index, table = fixtures(tmp_path)
+    job.save("picture_area.json", {"x": 0, "y": 0, "w": 640, "h": 360})
+    monkeypatch.setattr(finish, "render_draft", lambda v, tl, out, res, **kw: out.write_bytes(b"draft"))
+    monkeypatch.setattr(finish.watch_trim, "run_watch_trim", lambda *a, **kw: ([{"start": .5, "end": 1.5}], {}))
+    with pytest.raises(ValueError, match="protected"):
+        finish.run(job, table, grid, index, get_gemini=lambda: None)
+
+
+def test_explicit_logo_adapter_uses_shared_design():
+    design = finish.finalize.design_from_style({"work_type": "image", "work_value": "/test/logo.png",
+                                              "work_image_width": 600, "work_image_height": 240})
+    assert design.work_type == "image" and design.work_value == "/test/logo.png"
+
+
+def test_scribe_diarization_is_opt_in():
+    from app.modules.stt_elevenlabs import build_form_fields
+    args = dict(language="kor", keyterms=[], is_raw=False)
+    assert dict(build_form_fields(**args))["diarize"] == "false"
+    assert dict(build_form_fields(**args, diarize=True))["diarize"] == "true"
+
+
+def test_story_cache_invalidation_is_tag_scoped_and_preserves_edits(tmp_path):
+    job = Job(tmp_path / "source.mp4", tmp_path, "작품")
+    job.save("rebuild_a.json", {"human_edit": True})
+    job.save("verified_v1_a.json", {"human_edit": True})
+    job.save("verified_v1_b.json", {"other": True})
+    gg.ensure_story_inputs(job, {"grid": "new"}, tag="a")
+    assert not job.has("rebuild_a.json") and not job.has("verified_v1_a.json")
+    assert job.has("verified_v1_b.json")
+    assert list(tmp_path.glob("rebuild_a.json.prev_*"))
+    job.save("rebuild_a.json", {"new": True})
+    gg.ensure_story_inputs(job, {"grid": "new"}, tag="a")
+    assert job.has("rebuild_a.json")
+
+
+def test_cli_default_runs_tikitaka_selection_then_reviews_each_version(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from app.tikitaka import cli, probe, transcribe, llm, rebuild, report
+    monkeypatch.setattr(cli, "load_dotenv_if_any", lambda: None)
+    job, grid, index, table = fixtures(tmp_path)
+    index.update(grid_fingerprint="test", scenes=[], cast=[], speakers={}, moments=[])
+    transcript = {"lines": [], "words": []}
+    versions = [dict(table["version"], n=i, items=[], structure="", analysis={}, plan_sec=8) for i in (1, 2)]
+    def indexer(j, *a, **kw):
+        j.save("transcript.json", transcript)
+        return index, grid
+    def tabler(j, *a, version_n, **kw):
+        return {**copy.deepcopy(table), "version": versions[version_n-1]}
+    rendered = []
+    def render(j, t, *a, **kw):
+        rendered.append((t["version"]["n"], kw))
+    monkeypatch.setattr(probe, "probe", lambda j: grid["source"])
+    monkeypatch.setattr(probe, "build_audio", lambda j: job.source)
+    monkeypatch.setattr(probe, "build_scan_proxy", lambda j: job.source)
+    monkeypatch.setattr(probe, "build_cut_proxy", lambda j: job.source)
+    monkeypatch.setattr(transcribe, "transcribe", lambda *a, **kw: transcript)
+    from app.tikitaka import scenecut
+    monkeypatch.setattr(scenecut, "detect_scene_cuts", lambda *a: [])
+    monkeypatch.setattr(scenecut, "detect_black_spans", lambda *a: [])
+    monkeypatch.setattr(llm, "Gemini", lambda **kw: SimpleNamespace(usage=SimpleNamespace(calls=[])))
+    monkeypatch.setattr(gg, "build_index", indexer)
+    monkeypatch.setattr(rebuild, "rebuild", lambda *a, **kw: {"versions": versions, "recommended": 1,
+                        "ranking": [1,2], "rerank": True, "reason": ""})
+    monkeypatch.setattr(rebuild, "apply_scene_order_version", lambda *a, **kw: 0)
+    monkeypatch.setattr(rebuild, "polish_character_names", lambda *a, **kw: 0)
+    monkeypatch.setattr(report, "versions_md", lambda *a, **kw: "versions")
+    monkeypatch.setattr(gt, "build_table", tabler)
+    monkeypatch.setattr(finish, "run", render)
+    out = tmp_path / "output"
+    assert cli.main(["--source", str(job.source), "--title", "테스트", "--out", str(out), "--count", "2",
+                     "--no-verify", "--no-voice-check", "--no-transcript-polish", "--no-digest"]) == 0
+    assert [n for n, _ in rendered] == [1,2]
+    assert all(not kw["redo"] for _, kw in rendered)
+    assert (out / "publish_v2.json").exists()
+
+
+def test_explicit_render_redo_does_not_reask_watch_or_style(tmp_path, monkeypatch):
+    job, grid, index, table = fixtures(tmp_path)
+    job.save("picture_area.json", {"x": 0, "y": 0, "w": 640, "h": 360})
+    counters = {"watch": 0, "style": 0, "render": 0}
+    def watch(*a, **kw):
+        counters["watch"] += 1
+        return [], {}
+    def style(*a, **kw):
+        counters["style"] += 1
+        return {"design": kw["preset"], "v3_style": {}}, {}
+    def render(**kw):
+        counters["render"] += 1
+        out = kw["output_dir"] / "final_1080x1920.mp4"
+        out.write_bytes(b"output")
+        return out, {}
+    monkeypatch.setattr(finish, "render_draft", lambda v,t,o,r,**kw: o.write_bytes(b"draft"))
+    monkeypatch.setattr(finish.watch_trim, "run_watch_trim", watch)
+    monkeypatch.setattr(finish.stage4, "run_style", style)
+    monkeypatch.setattr(finish.finalize, "render_final", render)
+    monkeypatch.setattr(finish, "validate_media", lambda *a: {})
+    monkeypatch.setattr(finish, "render_dependencies", lambda: "fixed")
+    finish.run(job, table, grid, index, get_gemini=lambda: None)
+    finish.run(job, table, grid, index, get_gemini=lambda: None, force_render=True)
+    assert counters == {"watch": 1, "style": 1, "render": 2}
+    table["version"]["title"] = "바꾼 제목"
+    table["rows"][0]["cuts"][0]["reframe"] = {"mode": "fixed", "x": 300}
+    finish.run(job, table, grid, index, get_gemini=lambda: None)
+    assert counters["watch"] == 1
+    saved = job.load("review_v1/edit_plan.json")
+    assert saved["layout"]["top_title"] == "바꾼 제목"
+    assert saved["timeline"][0]["reframe"] == {"mode": "fixed", "x": 300}
+
+
+def test_grid_table_reselects_contradictory_cover_then_caches(tmp_path, monkeypatch):
+    job, grid, index, table = fixtures(tmp_path)
+    index["scenes"] = [{"start": 0., "end": 12.}]
+    index["moments"] = []
+    transcript = {"words": [{"i": 0, "start": 8.1, "end": 9., "text": "안녕"}],
+                  "lines": [{"id": "L-001", "word_i": [0], "text": "안녕", "speaker": "갑"}]}
+    version = {"n": 1, "title": "첫 장면", "strategy": "대사", "items": [
+        {"type": "N", "text": "표정이 달라지는데"}, {"type": "S", "line_ids": ["L-001"]}]}
+    calls = []
+    class Model:
+        def text_json(self, prompt, **kw):
+            calls.append(prompt)
+            return {"span_ids": ["sp0000" if len(calls) == 1 else "sp0002"]}
+    monkeypatch.setattr(gt, "_tts_cached", lambda *a: (tmp_path/"tts.mp3", 2.))
+    monkeypatch.setattr(gt, "probe_cover", lambda j,g,c,t,**kw: {
+        "text_matches": c["src"] != "sp0000", "seen": "다른 사람", "reason": "불일치"})
+    args = (job, Model(), {"versions": [version]}, index, transcript, [], 12., job.source)
+    result = gt.build_table(*args, version_n=1, title=job.title, grid=grid)
+    assert len(calls) == 2 and "불일치" in calls[-1]
+    assert result["rows"][0]["cuts"][0]["src"] == "sp0002"
+    assert result["cover_review"][0]["attempts"] == 2
+    gt.build_table(*args, version_n=1, title=job.title, grid=grid)
+    assert len(calls) == 2
+    gt.build_table(*args, version_n=1, title=job.title, grid=grid, force=True)
+    assert len(calls) == 3
+
+
+def test_ambient_cut_cannot_repeat_later_dialogue(tmp_path, monkeypatch):
+    job, grid, index, table = fixtures(tmp_path)
+    ambient, spoken = copy.deepcopy(table["rows"][1]), copy.deepcopy(table["rows"][3])
+    ambient["cuts"][0].update({"in": 8., "out": 10., "dur": 2.})
+    monkeypatch.setattr(gt, "rows_from_items", lambda *a, **kw: [ambient, spoken])
+    with pytest.raises(ValueError, match="중복"):
+        gt.build_table(job, None, {"versions": [{"n": 1}]}, index, {}, [], 12., job.source,
+                       version_n=1, title=job.title, grid=grid)
+
+
+def test_grid_observation_pipeline_cache_and_binding_review(tmp_path, monkeypatch):
+    from app.v3 import audio, arousal, chunk_analyze
+    from app.tikitaka import index as legacy_index
+    job, _, _, _ = fixtures(tmp_path)
+    info = {"duration_sec": 12, "width": 640, "height": 360}
+    transcript = {"words": [{"start": 8., "end": 9., "text": "안녕."}],
+                  "lines": [{"id": "L-001", "start": 8., "end": 9., "text": "안녕."}]}
+    monkeypatch.setattr(audio, "detect_silence_intervals", lambda *a: [(0., 8.), (9., 12.)])
+    monkeypatch.setattr(audio, "load_pcm", lambda *a: [])
+    monkeypatch.setattr(arousal, "compute_arousal", lambda *a: [])
+    monkeypatch.setattr(legacy_index, "_cut_window_clip", lambda *a: job.source)
+    checks = []
+    def check(*a, **kw):
+        checks.append(1)
+        return {"status": "ok", "checked": 8, "mismatch": 0}
+    monkeypatch.setattr(chunk_analyze, "verify_scene_binding", check)
+    spans = gg.build_grid(info, transcript, [4.], silence=[(0.,8.),(9.,12.)])["span_candidates"]
+    class Model:
+        video_model = "gemini-3.7-flash"
+        def video_json(self, *a, **kw):
+            return {"spans": [fact(s["id"]) for s in spans], "speakers": {"L-001": "갑"},
+                    "scenes": [{"span_ids": [s["id"] for s in spans], "summary": "대화", "chars": ["갑"]}]}
+    index, grid = gg.build_index(job, Model(), transcript, job.source, info, [4.],
+                                 title=job.title, cast=["갑"], get_v3=lambda: None)
+    assert grid["silence"] == [[0.,8.],[9.,12.]]
+    assert index["moments"] and transcript["lines"][0]["speaker"] == "갑"
+    job.path("stage2.json").unlink()
+    gg.build_index(job, Model(), transcript, job.source, info, [4.], title=job.title, cast=["갑"], get_v3=lambda: None)
+    assert len(checks) == 1 and job.has("stage2.json")
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="ffmpeg required")
+def test_real_render_applies_effects_and_heard_narration_without_api(tmp_path, monkeypatch):
+    """Real media, model verdicts injected: exercises the actual shared renderer."""
+    job, grid, index, table = fixtures(tmp_path)
+    ffmpeg = shutil.which("ffmpeg")
+    monkeypatch.setenv("FFMPEG_BIN", ffmpeg)
+    monkeypatch.setenv("FFPROBE_BIN", shutil.which("ffprobe"))
+    subprocess.run([ffmpeg, "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30",
+        "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000", "-t", "12", "-c:v", "libx264",
+        "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(job.source)], check=True, capture_output=True)
+    subprocess.run([ffmpeg, "-y", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=660:sample_rate=48000",
+                    "-t", "2", str(tmp_path/"tts.mp3")], check=True, capture_output=True)
+    index["grid_facts"]["sp0001"].update(has_text=True, screen_text="화면의 기사", screen_text_kind="기사")
+    raw = {"design": {}, "beats": [], "labels": [{"text": "(동공지진)", "anchor": "L0", "person": "을",
+            "person_visible": True, "duration_sec": .8, "offset_sec": .2, "color": "white"}],
+           "emphasis": [{"line": "L0", "color": "red", "scale": 1.23}], "zooms": [], "fits": [{"clip": "C1"}]}
+    monkeypatch.setattr(finish.watch_trim, "run_watch_trim", lambda *a, **kw: ([], {}))
+    monkeypatch.setattr(finish.stage4, "_call_style_model", lambda *a, **kw: raw)
+    monkeypatch.setattr(finish.stage4, "_default_label_probe", lambda *a, **kw: (
+        lambda *a: {"fit": True, "start_sec": .3, "reason": "injected verdict"}))
+    output = finish.run(job, table, grid, index, get_gemini=lambda: None,
+                        design={"aspect_ratio": "1:1", "speaker_tracking": "on"})
+    media = finish.validate_media(output, 8)
+    assert (media["width"], media["height"]) == (1080,1920)
+    style = job.load("review_v1/checkpoint_style.json")["style"]["v3_style"]
+    assert len(style["labels"]) == 1 and len(style["emphasis"]) == 1
+    assert style["zooms"] and style["fits"] == [1]
+    assert list(job.path("review_v1/style_assets").glob("*.wav"))
+    # Draft has the narration at the same location (660Hz), not the muted
+    # source's 220Hz. A silent draft would make review of narration misleading.
+    import numpy as np
+    pcm = subprocess.check_output([ffmpeg, "-v", "error", "-ss", "4.4", "-t", "0.4", "-i",
+        str(job.path("review_v1/draft_480.mp4")), "-f", "f32le", "-ac", "1", "-ar", "8000", "pipe:1"])
+    samples = np.frombuffer(pcm, dtype="float32")
+    spectrum = np.abs(np.fft.rfft(samples))
+    peak = np.fft.rfftfreq(len(samples), 1/8000)[spectrum.argmax()]
+    assert abs(peak-660) < 10

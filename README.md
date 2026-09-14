@@ -6,6 +6,7 @@
 - 구조: **Hook → Build×N → Payoff** (storytelling) 또는 단일 클립(highlight)
 - 결과물: `shorts.mp4` + `edit_plan.json` + `run_log.json` + 단계별 체크포인트
 - 상세 설계: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- Tikitaka 기반 grid·편별 재관찰 경로: `python -m app.tikitaka` — [실행 및 적용 규칙](docs/tikitaka_grid_review.md)
 
 ## 설치
 

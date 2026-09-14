@@ -195,5 +195,8 @@ outputs_ab/**
 sources_local/**
 rejected/**app/assets/fonts/ArialUnicode.ttf
 
+outputs_tikitaka/**
+outputs_tikitaka_grid/**
+
 # 참고 쇼츠·해부 산출(수 GB 영상) — 레포 밖 (2026-09-03)
 work/**

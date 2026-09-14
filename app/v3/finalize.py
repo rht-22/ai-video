@@ -172,6 +172,13 @@ def design_from_style(design: dict) -> DesignConfig:
             up[k] = str(design[k])
     if design.get("work_caption_font_size") is not None:
         up["work_caption_font_size"] = int(design["work_caption_font_size"])
+    # Explicit imported guide logo (tikitaka adapter); absent keys leave v3 unchanged.
+    for k in ("work_type", "work_value", "work_image_align"):
+        if design.get(k):
+            up[k] = str(design[k])
+    for k in ("work_image_width", "work_image_height"):
+        if design.get(k) is not None:
+            up[k] = int(design[k])
     return dataclasses.replace(base, **up)
 
 
