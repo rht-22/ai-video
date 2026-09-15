@@ -9,6 +9,30 @@ from app.v3.assemble import _lines_for_span, strip_dialogue_period
 SCHEMA = "tikitaka_phrase_subtitles/v1"
 
 
+def filter_singing(table, spans, windows):
+    """Reuse v3's acoustic windows and per-span evidence; preserve N/A and clocks."""
+    from app.v3.assemble import span_sings
+    out = copy.deepcopy(table)
+    audit = []
+    for row in out['rows']:
+        if row['mode'] != 'S':
+            continue
+        kept = []
+        ids = {sid for cut in row['cuts'] for sid in cut.get('span_ids', [])}
+        for sub in row.get('sub_lines', []):
+            mid = (sub['start'] + sub['end']) / 2
+            drop = False
+            if any(a <= mid < z for a, z in windows):
+                evidence = [spans[sid] for sid in ids if sid in spans
+                            and spans[sid]['t_in'] <= mid < spans[sid]['t_out']]
+                drop = bool(evidence) and all(span_sings(sp) for sp in evidence)
+                audit.append({**sub, 'kept': not drop})
+            if not drop:
+                kept.append(sub)
+        row['sub_lines'] = kept
+    return out, audit
+
+
 def corrected_words(line, words):
     """Keep measured boundaries. Unalignable replacement groups stay together.
 

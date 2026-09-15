@@ -93,8 +93,9 @@ def adapt(stage2: dict, grid: dict, transcript: dict, *, title: str, cast: list[
 
 
 def build_index(job, gemini, transcript, proxy, info, cuts, *, title, cast, get_v3,
-                research_context="", force=False, retry_failed=False):
-    from app.v3 import seq_analyze, chunk_analyze, refine, chunk_split
+                research_context="", force=False, retry_failed=False,
+                skip_broadcast_text=False, reuse_analysis=False):
+    from app.v3 import seq_analyze, chunk_analyze, refine, chunk_split, text_policy, screen_text
     from app.v3.audio import detect_silence_intervals, load_pcm
     from app.v3.arousal import compute_arousal
     from app.v3.pipeline import _run_m2
@@ -108,11 +109,25 @@ def build_index(job, gemini, transcript, proxy, info, cuts, *, title, cast, get_
                     "arousal": compute_arousal(load_pcm(audio), info["duration_sec"], words)}
         job.save("grid_audio.json", measured)
     grid = build_grid(info, transcript, cuts, silence=measured["silence"], arousal=measured["arousal"])
+    if reuse_analysis:
+        if force or retry_failed:
+            raise ValueError("--reuse-analysis는 분석 재생성·실패 재시도와 함께 사용할 수 없습니다")
+        if not job.has("grid.json") or not job.has("index.json") or job.load("grid.json") != grid:
+            raise ValueError("저장된 분석의 시간 격자·전사가 현재 입력과 다릅니다")
+        cached_index = job.load("index.json")
+        if cached_index.get("analysis_backend") != SCHEMA or cached_index.get("title") != title or cached_index.get("cast") != cast:
+            raise ValueError("저장된 분석의 작품·인물·백엔드가 다릅니다")
+        job.record_step("analysis_reuse", fingerprint=cached_index["grid_fingerprint"],
+                        mode="explicit_saved_analysis", grid_verified=True)
+        job.log("[v3/index] 저장된 영상 분석 재사용 — 시간 격자·전사 일치, 영상 분석 호출 0")
+        return cached_index, grid
     client = get_v3()
     fp = fingerprint([SCHEMA, grid, source_identity(job.source), research_context, cast,
                       [(l["id"], l["text"]) for l in transcript["lines"]],
                       client.config.model_name, client.config.flash_model_name,
                       client.config.analysis_thinking_level,
+                      *(["essential_text", Path(text_policy.__file__).read_text(),
+                         Path(screen_text.__file__).read_text()] if skip_broadcast_text else []),
                       [Path(m.__file__).read_text() for m in (seq_analyze, chunk_analyze, chunk_split, refine)]])
     work = job.path(f"v3_analysis/{fp}")
     if force and work.exists():
@@ -144,7 +159,8 @@ def build_index(job, gemini, transcript, proxy, info, cuts, *, title, cast, get_
                 grid=grid, research={"work_context": research_context,
                                     "cast_images": [{"character_name": n} for n in cast]},
                 from_step=None, max_chunks=None, get_gemini=get_v3, step=step, log=job.log,
-                retry_failed=retry_failed)
+                retry_failed=retry_failed,
+                **({"skip_broadcast_text": True} if skip_broadcast_text else {}))
         index = adapt(cache.load("stage2.json"), grid, transcript, title=title, cast=cast, fp=fp)
         if not index["scenes"]:
             raise ValueError("v3 analysis: 성공한 분석 청크가 없습니다. --retry-failed-chunks로 재시도하세요")

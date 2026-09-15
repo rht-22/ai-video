@@ -6,20 +6,21 @@ SCHEMA = 'cover_evidence/v1'
 
 
 def retrieve(job, gemini, rows, index, grid, excluded, guide=None):
+    from app.tikitaka.production import SEMANTIC_RULES, narration_context
     scenes = [s for s in index.get('scenes', []) if s.get('id')]
     if not scenes:
         return {}
     # Retrieval sees the whole episode, not just the next dialogue's scene.
     material = [{'id': s['id'], 'summary': s.get('summary'), 'start': s['start'], 'end': s['end']}
                 for s in scenes if not overlap(s['start'], s['end'], excluded)]
-    narrations = [{'row': r['i'], 'text': r['text']} for r in rows if r['mode'] == 'N']
+    narrations = [{'row': r['i'], 'text': r['text'], 'context': narration_context(rows, r)} for r in rows if r['mode'] == 'N']
     prompt = ('각 내레이션이 설명하는 행동이나 장면 자체를 직접 보여주는 씬을 찾아라. '
               '단순히 같은 인물이 있거나 다음 대사와 가깝다는 이유로 고르지 마라. '
               '이미 한 행동을 설명하면 앞선 실제 행동 씬을 자료화면으로 다시 보여줘도 된다. '
               '관점 전환·의견처럼 대응 행동이 없는 문장은 빈 목록. '
               '지갑에 추적기를 심었다면 지도 확인이나 차 운전이 아니라 실제 심는 씬이다. '
               '행별 최대 3개 씬을 적합도 순서로 고르고 근거를 남겨라. '
-              'JSON {rows:[{row:int, scene_ids:[string], reason:string}]}\n'
+              + SEMANTIC_RULES + '\nJSON {rows:[{row:int, scene_ids:[string], reason:string}]}\n'
               f'내레이션: {narrations}\n장면: {material}\n제작 가이드: {guide or {}}')
     key = fingerprint([SCHEMA, prompt])
     name = f'cover_evidence/{key}.json'

@@ -39,12 +39,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--pipeline", choices=("grid-review", "legacy"), default="grid-review",
                     help="기본 grid-review: grid 인덱스 + 편별 초안 재관찰 + v3 연출. legacy: 원격 tikitaka 경로")
     ap.add_argument("--design-preset", default=None, help="grid-review 렌더 디자인 프리셋")
+    ap.add_argument("--style-preset", choices=("drama_clip", "recap"), default="drama_clip",
+                    help="grid-review 기본 스타일(기존 가왕쇼 템플릿은 recap)")
     ap.add_argument("--source", required=True, type=Path)
     ap.add_argument("--title", required=True, help="작품명")
     ap.add_argument("--episode", default="", help="회차 표기(예: 1회)")
     ap.add_argument("--cast", default="", help="등장인물 후보(쉼표 구분)")
     ap.add_argument("--skip-research", action="store_true", help="grid-review의 v3 작품 리서치를 생략(가이드 인물 정보는 적용)")
     ap.add_argument("--retry-failed-chunks", action="store_true", help="v3 분석의 실패 청크만 다시 요청")
+    ap.add_argument("--reuse-analysis", action="store_true", help="명시적으로 저장된 영상 분석 재사용(코드 변경 후에도 유지, 시간 격자·전사 일치 필수)")
+    ap.add_argument("--skip-broadcast-text", action="store_true", help="방송 자막 전량 전사 대신 사건 이해에 필요한 글자만 읽기")
     ap.add_argument("--out", type=Path, default=None, help="잡 디렉토리(기본 outputs_tikitaka_grid/<제목>_<회차>, legacy는 outputs_tikitaka)")
     ap.add_argument("--version", default="auto", help="렌더할 리빌딩 버전 번호(쉼표로 여러 개 · 11~14 는 선형 서사 계열) 또는 auto(추천)")
     ap.add_argument("--range", default=None, help="재료 구간 MM:SS~MM:SS (쉼표로 여러 개) — 그 밖은 활용 불가로 배제. 산출은 자동 태그 r<시작>-<끝>")
@@ -97,10 +101,11 @@ def main(argv: list[str] | None = None) -> int:
             if episode_match is None:
                 ap.error("활용 불가 구간 프리셋은 --episode 회차 숫자가 필요합니다")
             preset_episode = int(episode_match[1])
-        if preset["options"].get("subtitle_skip_singing"):
-            ap.error("이 프리셋은 v3 가창 분석이 필요합니다. grid-review에서는 지원하지 않습니다")
 
     load_dotenv_if_any()
+    skip_broadcast_text = a.skip_broadcast_text or bool(preset and preset["options"].get("skip_broadcast_text"))
+    if a.pipeline != "grid-review" and (a.reuse_analysis or skip_broadcast_text):
+        ap.error("분석 재사용·방송 자막 정책은 grid-review 전용입니다")
     from app.tikitaka import probe as P, transcribe as T, scenecut as C, index as I, rebuild as R, table as TB, render as RD, report as RP
     from app.tikitaka import verify as V
     from app.tikitaka import transcript_polish as TP
@@ -228,7 +233,8 @@ def main(argv: list[str] | None = None) -> int:
         index, grid = grid_module.build_index(job, gemini, transcript, proxy, info, cuts,
                                               title=a.title, cast=cast, get_v3=get_v3,
                                               research_context=observation_context,
-                                              force="index" in redo, retry_failed=a.retry_failed_chunks)
+                                              force="index" in redo, retry_failed=a.retry_failed_chunks,
+                                              skip_broadcast_text=skip_broadcast_text, reuse_analysis=a.reuse_analysis)
     else:
         index = I.build_index(job, gemini, transcript, proxy, info["duration_sec"], title=a.title, cast=cast, workers=a.workers)
     transcript = job.load("transcript.json")
@@ -238,6 +244,19 @@ def main(argv: list[str] | None = None) -> int:
         transcript, index = job.load("transcript.json"), job.load("index.json")
     if a.until == "index":
         return 0
+    if skip_broadcast_text:
+        from app.v3.text_policy import filter_index
+        from app.tikitaka.grid import fingerprint
+        before_chars = len(R.source_script(index, transcript, None))
+        index, text_audit = filter_index(index)
+        after_chars = len(R.source_script(index, transcript, None))
+        job.save("index.json", index)
+        job.save("screen_text_policy.json", {**text_audit, "policy": "essential",
+                 "script_chars_before": before_chars, "script_chars_after": after_chars})
+        guide = dict(guide or {"text": "", "files": [], "avoid": []})
+        guide["text"] += "\n화면 글자 정책: 로고·감탄·대사/가사 반복을 인용하지 않는다. 미확정 글자는 새 사실의 근거로 쓰지 말고, 필요하면 선택한 영상 확인 단계에서 확인한다."
+        guide["sha"] = fingerprint([guide.get("sha"), guide["text"], "essential_text"])
+        job.log(f"[text-policy] 필요한 글자만 유지 — 스크립트 {before_chars:,} → {after_chars:,}자")
     analysis_exclude = index.get("analysis_excluded_ranges", [])
     if analysis_exclude:
         from app.tikitaka.v3_analysis import overlaps
@@ -304,6 +323,13 @@ def main(argv: list[str] | None = None) -> int:
             ap.error(f"없는 버전 {bad} — 있는 버전: {[v['n'] for v in rebuild['versions']]}")
     job.log(f"[cli] 렌더 대상 버전 {targets}")
     for n in targets:
+        if a.pipeline == "grid-review":
+            from app.tikitaka.production import preflight
+            draft_plan = next(v for v in rebuild["versions"] if v["n"] == n)
+            feasibility = preflight(draft_plan, index, transcript, exclude + black)
+            job.save(f"production_preflight_v{n}{sfx}_draft.json", feasibility)
+            job.log(f"[preflight] v{n} 조립 전 추정 검사 — 확인 항목 {feasibility['issue_count']}개 "
+                    "(최종 길이·화면 판정은 TTS 실측·영상 검수)")
         rb_for_table = rebuild
         if not a.no_verify:                                   # 4.5 영상 확인 패스 — 고정 구성(2026-09-10 사용자 결정)
             final = V.verify_version(job, gemini, rebuild, n, index, transcript, proxy, title=a.title, episode=a.episode, guide=guide,
@@ -343,7 +369,7 @@ def main(argv: list[str] | None = None) -> int:
         if a.pipeline == "grid-review":
             from app.tikitaka import finish
             from app.v3.stage4 import get_style_preset
-            template = get_style_preset("drama_clip")
+            template = get_style_preset(a.style_preset)
             design = {k: template[k] for k in ("aspect_ratio", "video_y")}
             design["face_tracking"] = not a.no_framing
             if a.layout is not None:
@@ -372,7 +398,9 @@ def main(argv: list[str] | None = None) -> int:
                     design.update(platform_text=copy_text, platform_placement="above_work")
             finish.run(job, table, grid, index, get_gemini=get_v3, design=design,
                        redo=bool(redo & {"review", "table"}), force_render="render" in redo,
-                       force_style="style" in redo, exclude=exclude, tag=a.tag, split_narration=True)
+                       force_style="style" in redo, exclude=exclude, tag=a.tag, split_narration=True,
+                       subtitle_skip_singing=bool(preset and preset["options"].get("subtitle_skip_singing")),
+                       style_preset=a.style_preset)
             job.save(f"publish_v{n}{sfx}.json", {"title": table["version"]["title"], "work": a.title,
                 "episode": a.episode, "hashtags": (guide or {}).get("hashtags") or [], "copy": copy_text,
                 "review": f"review_v{n}{sfx}.json", "pipeline": "grid-review"})

@@ -46,6 +46,21 @@ CUTS = [90.0, 102.8, 106.5, 109.5, 115.0]
 DUR = 200.0
 
 
+@pytest.mark.parametrize("title", [
+    {"line1": "투표함에 넣다 말고", "line2": "표 도로 뺀 관객"},
+    "투표함에 넣다 말고\n표 도로 뺀 관객",
+])
+def test_semantic_title_lines_survive_validation_and_render_adapter(index, transcript, title):
+    from app.tikitaka.finish import v3_title
+    raw = {"versions": [{"n": 1, "title": title, "items": [
+        {"type": "S", "line_ids": ["L-001"]}]}], "recommended": 1}
+    version = validate_versions(raw, index, transcript)["versions"][0]
+    assert version["title"] == "투표함에 넣다 말고\n표 도로 뺀 관객"
+    assert split_title(version["title"]) == ("투표함에 넣다 말고", "표 도로 뺀 관객")
+    assert v3_title(version["title"]) == {
+        "line1": "투표함에 넣다 말고", "line2": "표 도로 뺀 관객"}
+
+
 # ── extract_json ──────────────────────────────────────────────────────────
 def test_extract_json_strips_fence_and_takes_first_value():
     assert extract_json('```json\n{"a": 1}\n```') == {"a": 1}

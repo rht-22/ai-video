@@ -115,7 +115,7 @@ REBUILD_PROMPT = """# 📜 범용 티키타카 스크립트 리빌딩 프로토�
 
 ## 출력 JSON (하나만, 코드블록 금지)
 {{"versions": [
-  {{"n": 1, "strategy": "결말 선공개형", "title": "유튜브 썸네일용 후킹 제목(≤24자)", "structure": "⑤하이라이트 → ②리액션 → ①발단 …",
+  {{"n": 1, "strategy": "결말 선공개형", "title": {{"line1": "상황·조건", "line2": "핵심 행동·반응"}}, "structure": "⑤하이라이트 → ②리액션 → ①발단 …",
     "items": [ … ],
     "analysis": {{"text_match": 0.0, "structure_sim": 0.0, "order_sim": 0.0, "keyword_var": 0.0, "grade": "매우 안전|안전|보통", "viral_point": "…", "comment": "…"}} }},
   … 14개 …],

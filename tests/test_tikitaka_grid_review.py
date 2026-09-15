@@ -132,7 +132,8 @@ def test_adapter_keeps_spoken_words_tts_and_source_identity(tmp_path):
         finish.validate_bundle(plan, grid, segments, resources, exclude=[(6.5, 6.6)])
 
 
-def test_review_remaps_once_and_reuses_style_render_independently(tmp_path, monkeypatch):
+@pytest.mark.parametrize("style_preset", ["drama_clip", "recap"])
+def test_review_remaps_once_and_reuses_style_render_independently(tmp_path, monkeypatch, style_preset):
     job, grid, index, table = fixtures(tmp_path)
     index["v3_stage2"] = {"sequences": [], "validation": {"original": True}}
     job.save("picture_area.json", {"x": 0, "y": 0, "w": 640, "h": 360})
@@ -145,10 +146,12 @@ def test_review_remaps_once_and_reuses_style_render_independently(tmp_path, monk
         return [{"start": 2.5, "end": 3.5, "reason": "늘어짐"}], {}
     def style(*args, **kwargs):
         calls["style"] += 1
+        assert kwargs["preset"] == finish.stage4.get_style_preset(style_preset)
         assert kwargs["dialogue"][-1]["start_sec"] < 6.1
         return {"design": kwargs["preset"], "v3_style": {}}, {"attempts": []}
     def render(**kwargs):
         calls["render"] += 1
+        assert kwargs["style_preset"] == style_preset
         assert kwargs["resources"]["tts_cue_files"][0]["cue"]["start_sec"] < 4
         out = kwargs["output_dir"] / "final_1080x1920.mp4"
         out.write_bytes(b"render")
@@ -160,18 +163,18 @@ def test_review_remaps_once_and_reuses_style_render_independently(tmp_path, monk
     monkeypatch.setattr(finish, "render_dependencies", lambda: "rules1")
     monkeypatch.setattr(finish, "validate_media", lambda *a: {"mock": True})
     for _ in range(2):
-        result = finish.run(job, table, grid, index, get_gemini=lambda: None)
+        result = finish.run(job, table, grid, index, get_gemini=lambda: None, style_preset=style_preset)
         assert result.read_bytes() == b"render"
     assert calls["watch"] == calls["style"] == calls["render"] == 1
     assert job.load("review_v1/stage2.json") == index["v3_stage2"]
     first = job.load("review_v1/checkpoint_resources.json")
     monkeypatch.setattr(finish, "render_dependencies", lambda: "rules2")
-    finish.run(job, table, grid, index, get_gemini=lambda: None)
+    finish.run(job, table, grid, index, get_gemini=lambda: None, style_preset=style_preset)
     assert calls["watch"] == calls["style"] == 1 and calls["render"] == 2
     assert list(job.path("review_v1").glob("final_prev_*.mp4"))
     assert job.load("review_v1/checkpoint_resources.json") == first
     table["version"]["n"] = 2
-    finish.run(job, table, grid, index, get_gemini=lambda: None)
+    finish.run(job, table, grid, index, get_gemini=lambda: None, style_preset=style_preset)
     assert calls["watch"] == 2 and job.has("review_v2/checkpoint_review.json")
 
 
@@ -487,7 +490,7 @@ def test_leadin_rewrites_resynthesizes_then_probes_and_updates_all_outputs(tmp_p
 
 
 @pytest.mark.parametrize('failure', ['long', 'meaning'])
-def test_leadin_rewrite_exhaustion_never_holds_or_falls_back(tmp_path, monkeypatch, failure):
+def test_leadin_rewrite_exhaustion_rejects_selection_without_holding(tmp_path, monkeypatch, failure):
     job, grid, index, n, s, version = leadin_fixture(tmp_path, monkeypatch)
     calls = []
     class Model:
@@ -501,11 +504,11 @@ def test_leadin_rewrite_exhaustion_never_holds_or_falls_back(tmp_path, monkeypat
     monkeypatch.setattr(gt, '_tts_cached', lambda *a: (tmp_path/'tts.mp3', 2.4 if failure == 'long' else 1.))
     # Info screens must also shorten, never hold, in before-dialogue placement.
     index['grid_facts']['sp0003'].update(has_text=True, screen_text_kind='기사', screen_text='기사 원문')
-    with pytest.raises(gt.NarrationFitError, match='재작성 3회 소진'):
+    with pytest.raises(ValueError, match='덮개 재검토 소진'):
         gt.build_table(job, Model(), {'versions': [version]}, index, {}, [6.,8.], 12., job.source,
                        version_n=1, title=job.title, grid=grid)
     assert calls.count('grid_narration_fit') == 3
-    assert calls.count('grid_cover_select') == 1
+    assert calls.count('grid_cover_select') == 3
     assert job.load('review_v1.json')['blocked']
     assert not job.has('grid_table_v1.json')
 
@@ -616,3 +619,144 @@ def test_media_tolerance_includes_exact_audio_boundary(monkeypatch):
     streams['streams'][1]['duration'] = '39.601'
     with pytest.raises(ValueError, match='mismatch'):
         finish.validate_media(Path('x.mp4'), 39.5)
+
+
+def test_singing_subtitles_preserve_speech_narration_and_cut_clocks():
+    from app.tikitaka.subtitles import filter_singing
+    table = {'rows': [
+        {'mode': 'S', 'cuts': [{'in': 0, 'out': 6, 'span_ids': ['song', 'speech', 'outside']}],
+         'sub_lines': [{'start': 0, 'end': 1, 'text': '노래 가사'},
+                       {'start': 2, 'end': 3, 'text': '남은 시간입니다'},
+                       {'start': 4, 'end': 5, 'text': '창 밖 가사'}]},
+        {'mode': 'N', 'cuts': [{'in': 6, 'out': 8}], 'text': '내레이션', 'tts': 'voice.mp3'},
+        {'mode': 'A', 'cuts': [{'in': 8, 'out': 9}], 'text': '박수'}]}
+    before = copy.deepcopy(table)
+    spans = {'song': {'t_in': 0, 't_out': 2, 'scene_script': '노래를 열창한다'},
+             'speech': {'t_in': 2, 't_out': 4, 'scene_script': '남은 시간을 알린다',
+                        'meaning_content': '노래 무대'},
+             'outside': {'t_in': 4, 't_out': 6, 'scene_script': '노래를 부른다'}}
+    result, audit = filter_singing(table, spans, [(0, 4)])
+    assert table == before
+    assert result['rows'][0]['sub_lines'] == before['rows'][0]['sub_lines'][1:]
+    assert result['rows'][0]['cuts'] == before['rows'][0]['cuts']
+    assert result['rows'][1:] == before['rows'][1:]
+    assert [x['kept'] for x in audit] == [False, True]
+    assert filter_singing(table, spans, [])[0] == before
+    assert filter_singing(table, {}, [(0, 6)])[0] == before
+
+
+def test_adjacent_action_reclaims_only_optional_tail_without_losing_audio():
+    transcript = {'lines': [{'id': 'L-941', 'word_i': [0], 'text': '넣었다가.'}],
+                  'words': [{'start': 3246.06, 'end': 3246.58}]}
+    rows = [
+        {'i': 1, 'mode': 'S', 'src': ['L-941'], 'dur': 1.47,
+         'sub_lines': [{'start': 3246.01, 'end': 3246.73, 'text': '넣었다가.'}],
+         'cuts': [{'in': 3246.01, 'out': 3247.48, 'dur': 1.47}]},
+        {'i': 2, 'mode': 'A', 'dur': 1.32,
+         'cuts': [{'in': 3246.58, 'out': 3247.9, 'dur': 1.32}]}]
+    before = copy.deepcopy(rows)
+    assert len(gt.share_adjacent_action_boundary(rows, transcript)) == 1
+    s, a = [r['cuts'][0] for r in rows]
+    assert s['out'] == a['in'] == 3246.73
+    assert s['in'] == before[0]['cuts'][0]['in']
+    assert a['out'] == before[1]['cuts'][0]['out']
+    assert rows[0]['sub_lines'] == before[0]['sub_lines']
+    assert sum(r['dur'] for r in rows) == pytest.approx(a['out'] - s['in'])
+    assert gt.share_adjacent_action_boundary(rows, transcript) == []
+
+
+@pytest.mark.parametrize('word_end,action_end', [(3247.2, 3247.9), (3246.58, 3247.0)])
+def test_action_boundary_does_not_hide_real_conflicts(word_end, action_end):
+    transcript = {'lines': [{'id': 'L', 'word_i': [0], 'text': '대사'}],
+                  'words': [{'start': 3246.06, 'end': word_end}]}
+    rows = [{'i': 1, 'mode': 'S', 'src': ['L'], 'cuts': [{'in': 3246.01, 'out': 3247.48}]},
+            {'i': 2, 'mode': 'A', 'cuts': [{'in': 3246.58, 'out': action_end}]}]
+    before = copy.deepcopy(rows)
+    assert gt.share_adjacent_action_boundary(rows, transcript) == []
+    assert rows == before
+
+
+def test_failed_narration_fit_reselects_and_preserves_original_row(tmp_path, monkeypatch):
+    job, grid, index, n, s, version = leadin_fixture(tmp_path, monkeypatch)
+    calls, probes = [], []
+    class Model:
+        def text_json(self, prompt, *, kind):
+            calls.append(kind)
+            if kind == 'grid_cover_select':
+                if calls.count(kind) == 1:
+                    return {'placement': 'before_dialogue', 'span_ids': ['sp0003']}
+                assert '재작성 3회 소진' in prompt
+                return {'placement': 'same_scene', 'span_ids': ['sp0000', 'sp0001']}
+            return {'text': '여전히 너무 긴 문장'}
+    monkeypatch.setattr(gt, '_tts_cached', lambda *a: (tmp_path/'tts.mp3', 3.))
+    def probe(j, g, cut, text, **kw):
+        probes.append(text)
+        return {'text_matches': True}
+    monkeypatch.setattr(gt, 'probe_cover', probe)
+    result = gt.build_table(job, Model(), {'versions': [version]}, index, {}, [6.,8.], 12., job.source,
+                            version_n=1, title=job.title, grid=grid)
+    row = result['rows'][0]
+    assert row['text'] == n['text'] and row['dur'] == n['dur'] and row['tts'] == n['tts']
+    assert probes == [n['text'], n['text']]
+    assert calls.count('grid_cover_select') == 2
+    assert calls.count('grid_narration_fit') == 3
+    assert all('hold_sec' not in c for c in row['cuts'])
+
+
+def test_cover_probe_context_is_transmitted_and_invalidates_cache(tmp_path, monkeypatch):
+    job, _, _, _ = fixtures(tmp_path)
+    monkeypatch.setattr('app.tikitaka.probe.cut_proxy_clip', lambda *a: job.source)
+    prompts = []
+    class Model:
+        def video_json(self, prompt, clip, **kw):
+            prompts.append(prompt)
+            return {'text_matches': True, 'record_matches': True, 'seen': '규칙 설명', 'reason': '같은 상황'}
+    cut = {'in': 0., 'out': 1., 'desc': '진행자가 규칙을 설명한다'}
+    ctx = [{'mode': 'S', 'text': '다른 팀 티켓은 두 표예요.'}]
+    gt.probe_cover(job, Model(), cut, '점수가 두 배죠.', key='fixed', context=ctx)
+    gt.probe_cover(job, Model(), cut, '점수가 두 배죠.', key='fixed', context=ctx)
+    assert len(prompts) == 1 and ctx[0]['text'] in prompts[0]
+    gt.probe_cover(job, Model(), cut, '점수가 두 배죠.', key='fixed', context=[])
+    assert len(prompts) == 2
+
+
+def test_joint_reselection_checks_meaning_measures_tts_and_updates_outputs(tmp_path, monkeypatch):
+    job, grid, index, n, s, version = leadin_fixture(tmp_path, monkeypatch)
+    calls, probes = [], []
+    class Model:
+        def text_json(self, prompt, *, kind):
+            calls.append(kind)
+            if kind == 'grid_cover_select':
+                return {'text': '메시지를 보자', 'placement': 'same_scene', 'span_ids': ['sp0000']}
+            assert kind == 'grid_narration_revision_check'
+            return {'meaning_preserved': True, 'reason': '동일 사건을 간결하게 연결'}
+    monkeypatch.setattr(gt, '_tts_cached', lambda *a: (tmp_path/'tts.mp3', 1.8))
+    monkeypatch.setattr(gt, 'probe_cover', lambda j,g,c,t,**kw: probes.append(t) or {'text_matches': True})
+    result = gt.build_table(job, Model(), {'versions':[version]}, index, {}, [6.,8.], 12., job.source,
+                            version_n=1, title=job.title, grid=grid)
+    row = result['rows'][0]
+    assert row['text'] == '메시지를 보자' and row['dur'] == 1.8
+    assert row['original_text'] == n['text']
+    assert result['version']['items'][0]['text'] == row['text']
+    assert probes == [row['text']]
+    assert calls == ['grid_cover_select', 'grid_narration_revision_check']
+
+
+def test_joint_reselection_rejects_new_fact_before_tts_and_keeps_good_row(tmp_path, monkeypatch):
+    job, grid, index, n, s, version = leadin_fixture(tmp_path, monkeypatch)
+    selections = []
+    class Model:
+        def text_json(self, prompt, *, kind):
+            if kind == 'grid_cover_select':
+                selections.append(prompt)
+                return {'text': '범인이 잡혔다' if len(selections)==1 else n['text'],
+                        'placement':'same_scene', 'span_ids':['sp0000','sp0001']}
+            return {'meaning_preserved':False, 'reason':'원문에 없는 범인 체포 사실'}
+    monkeypatch.setattr(gt, '_tts_cached', lambda *a: pytest.fail('rejected text must not be synthesized'))
+    monkeypatch.setattr(gt, 'probe_cover', lambda *a,**kw: {'text_matches':True})
+    result = gt.build_table(job, Model(), {'versions':[version]}, index, {}, [6.,8.], 12., job.source,
+                            version_n=1, title=job.title, grid=grid)
+    row = result['rows'][0]
+    assert row['text'] == n['text'] and row['tts'] == n['tts']
+    assert 'original_text' not in row
+    assert len(selections)==2 and '핵심 의미 보존 실패' in selections[1]

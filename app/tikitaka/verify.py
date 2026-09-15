@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from app.tikitaka.title import TITLE_PROMPT
 from app.tikitaka.common import Job, fmt_tc, ms3
 from app.tikitaka.llm import Gemini
 from app.tikitaka.rebuild import (validate_versions, source_script, polish_literal_actions, polish_guide, apply_name_map, TARGET_MIN_SEC,
@@ -56,7 +57,7 @@ VERIFY_PROMPT = """# 📜 티키타카 스크립트 리빌딩 — 영상 확인 
 {{"type":"N","text":"…","effect":"[…]"|null}} · {{"type":"S","line_ids":["L-045","L-046"],"effect":…}} · {{"type":"A","moment_id":"S-012","effect":…}}
 
 ## 출력 JSON 하나(코드블록 금지)
-{{"n": {n}, "strategy": "{strategy}", "title": "후킹 제목(≤24자)", "structure": "…",
+{{"n": {n}, "strategy": "{strategy}", "title": {{"line1": "상황·조건", "line2": "핵심 행동·반응"}}, "structure": "…",
  "looked_at": [{{"start": "MM:SS.ms", "end": "MM:SS.ms", "why": "무엇을 확인했나"}}, …],
  "changes": ["초안 대비 바꾼 것과 이유", …],
  "speaker_fixes": {{"L-606": "박경희", …}}  (없으면 {{}}),
@@ -103,6 +104,8 @@ def draft_block(version: dict) -> str:
     for k, it in enumerate(version["items"], 1):
         if it["type"] == "N":
             out.append(f"{k}. [N] \"{it['text']}\" (effect {it.get('effect')})")
+            if it.get("production_plan"):
+                out.append(f"   문장·화면 계획: {it['production_plan']}")
         elif it["type"] == "S":
             out.append(f"{k}. [S] {'+'.join(it['line_ids'])} {it.get('speaker')}: \"{it['text']}\" (effect {it.get('effect')})")
         else:
@@ -148,6 +151,11 @@ def verify_version(job: Job, gemini: Gemini, rebuild: dict, version_n: int, inde
                                   draft=draft_block(draft), script=source_script(index, transcript, exclude),
                                   target_min=TARGET_MIN_SEC, target_max=TARGET_MAX_SEC, guide=guide_block(guide), strategy_note=strategy_note,
                                   digest=digest_block(digest))
+    prompt += TITLE_PROMPT
+    if index.get("grid_facts"):
+        from app.tikitaka.production import planning_rules, preflight
+        prompt += planning_rules() + f"\n초안의 조립 사전검사(추정): {preflight(draft, index, transcript, exclude)}"
+        prompt += "\n영상 확인 시 문제가 있는 N 문장과 화면 계획만 함께 고쳐라. 정상 대사·다른 항목은 보존하라."
     job.log(f"[verify] v{version_n} 초안 항목 {len(draft['items'])} → 영상 확인 패스(agentic)" + (" · 작품 이해 문서 첨부" if digest else ""))
     try:
         raw, meta = gemini.agentic_video_json(prompt, proxy, kind="verify", upload_cache=job.path("files_cache.json"), max_output_tokens=16384)

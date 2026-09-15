@@ -87,11 +87,13 @@ def targets(stage2_doc: dict) -> list[dict]:
     return out
 
 
-def cluster_scenes(rows: list[dict], gap_sec: float = CLUSTER_GAP_SEC) -> list[dict]:
+def cluster_scenes(rows: list[dict], gap_sec: float = CLUSTER_GAP_SEC,
+                   max_duration: float | None = None) -> list[dict]:
     """시각 순 대상 → 장면 묶음 [{t0, t1, span_ids, importance, rows}]. 순수."""
     scenes: list[dict] = []
     for r in sorted(rows, key=lambda x: (x["t0"], str(x.get("span_id")))):
-        if scenes and r["t0"] - scenes[-1]["t1"] <= gap_sec:
+        if scenes and r["t0"] - scenes[-1]["t1"] <= gap_sec and (
+                max_duration is None or r["t1"] - scenes[-1]["t0"] <= max_duration):
             sc = scenes[-1]
             sc["t1"] = max(sc["t1"], r["t1"])
             sc["span_ids"].append(r["span_id"])
@@ -218,13 +220,17 @@ def extract_frame(ffmpeg: str, video: Path, t: float, out: Path) -> None:
                    check=True, capture_output=True)
 
 
-def call_read(gemini, frames: list[Path], hint: str = "") -> dict:
+def call_read(gemini, frames: list[Path], hint: str = "", *, essential_only=False) -> dict:
     types = gemini.types
     parts: list[Any] = []
     for i, f in enumerate(frames):
         parts.append(types.Part.from_bytes(data=f.read_bytes(), mime_type="image/jpeg"))
         parts.append(f"프레임 {i}")
     parts.append(PROMPT.format(hint=hint))
+    if essential_only:
+        parts.append("채널 정책: 위 전량 전사 지시 대신 사건 이해에 필요한 새 정보(미션 조건·시간 제한)와 "
+                     "문자·기사·편지 등 내용 자체가 근거인 글자만 원문으로 읽어라. 로고·감탄 자막·이름표·"
+                     "대사/노래 가사 반복은 제외하라. 필요한 글자가 없으면 readable:false를 반환하라.")
     resp = gemini.client.models.generate_content(
         model=gemini.config.flash_model_name, contents=parts,
         config=types.GenerateContentConfig(
@@ -239,14 +245,14 @@ def run_screen_text_pass(gemini, stage2_doc: dict, video_path: Path, out_dir: Pa
                          extract: Callable[[str, Path, float, Path], None] | None = None,
                          call: Callable[[Any, list[Path]], dict] | None = None,
                          ffmpeg: str | None = None,
-                         log=print) -> dict:
+                         log=print, essential_only=False) -> dict:
     """대상 span 을 장면으로 묶어 원본 프레임으로 다시 읽고 stage2_doc 에 **그 자리에서** 써 넣는다.
 
     반환 audit = {scenes, calls, filled, budget, skipped, details}. 사이드카가 지문과 맞으면
     저장된 결과를 재적용하고 호출 0. 실패·예산 소진은 초벌 유지 + 기록."""
     mark_stage2_sources(stage2_doc)
     rows = targets(stage2_doc)
-    scenes = cluster_scenes(rows)
+    scenes = cluster_scenes(rows, max_duration=8.0 if essential_only else None)
     budget = budget_for(duration_sec)
     audit: dict[str, Any] = {"targets": len(rows), "scenes": len(scenes),
                              "unread_scenes": sum(1 for s in scenes if s.get("unread")),
@@ -272,6 +278,8 @@ def run_screen_text_pass(gemini, stage2_doc: dict, video_path: Path, out_dir: Pa
 
     _extract = extract or extract_frame
     _call = call or call_read
+    if essential_only and call is None:
+        _call = lambda client, frames, hint="": call_read(client, frames, hint, essential_only=True)
     if _extract is extract_frame and ffmpeg is None:
         from app.modules.ffmpeg_utils import find_ffmpeg_command
         ffmpeg = find_ffmpeg_command("ffmpeg")

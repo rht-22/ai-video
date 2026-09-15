@@ -118,6 +118,9 @@ def rows_from_items(version: dict, index: dict, transcript: dict, cuts: list[flo
             path, sec = tts_fn(it["text"])
             rows.append({"i": k, "mode": "N", "text": it["text"], "effect": it.get("effect"), "plan_sec": narration_plan_sec(it["text"]),
                          "tts": str(path), "dur": sec, "src": [], "cuts": []})
+            if it.get("production_plan"):
+                import copy
+                rows[-1]["production_plan"] = copy.deepcopy(it["production_plan"])
     return rows
 
 

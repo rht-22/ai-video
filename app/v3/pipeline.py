@@ -150,6 +150,7 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
            exclude_topics: tuple[str, ...] | None = None,
            exclude_ranges: tuple[tuple[float, float], ...] | None = None,
            subtitle_skip_singing: bool = False,
+           skip_broadcast_text: bool = False,
            editorial: dict | None = None,
            banned_ranges: list[dict] | None = None,
            channel_design: dict | None = None,
@@ -440,6 +441,7 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
                     stage1_path=stage1_path, grid=grid, research=research,
                     from_step=from_step, max_chunks=max_chunks,
                     retry_failed=retry_failed_chunks,
+                    skip_broadcast_text=skip_broadcast_text,
                     get_gemini=get_gemini, step=step, log=log)
 
         # ── 3단계: 회차 지도(--episode-map · 미지정 = 단계 없음) ──────────
@@ -532,7 +534,8 @@ def drop_failed_chunks(done: dict) -> tuple[dict, list[str]]:
 
 def _run_m2(*, output_dir: Path, video_path: Path, stage1_path: Path, grid: dict,
             research: dict | None, from_step: str | None, max_chunks: int | None,
-            get_gemini, step, log, retry_failed: bool = False) -> None:
+            get_gemini, step, log, retry_failed: bool = False,
+            skip_broadcast_text: bool = False) -> None:
     """chunk_split + Stage 2 — run_v3 본체에서 분리(단계 블록이 길어져서).
 
     청크별 결과는 checkpoint_chunk_analyze.json 에 **증분 저장**된다 — Pro 호출이
@@ -573,7 +576,8 @@ def _run_m2(*, output_dir: Path, video_path: Path, stage1_path: Path, grid: dict
          "spans": [[s["id"], s["t_in"], s["t_out"]] for s in
                    grid.get("span_candidates") or []],
          # 스키마 버전(2단계, 2026-09-08) — span 필드가 늘면 옛 캐시는 새 필드가 영원히 빈다
-         "schema": STAGE2_SCHEMA},
+         "schema": STAGE2_SCHEMA,
+         **({"screen_text_policy": "essential"} if skip_broadcast_text else {})},
         sort_keys=True).encode("utf-8")).hexdigest()[:16]
     ca_ckpt = output_dir / "checkpoint_chunk_analyze.json"
     done: dict[str, Any] = {}
@@ -608,7 +612,8 @@ def _run_m2(*, output_dir: Path, video_path: Path, stage1_path: Path, grid: dict
             meanings, audit = run_chunk_analyze(
                 get_gemini(), output_dir / "chunks" / entry["file"], entry,
                 stage1_doc, grid, appearances=appearances,
-                research_context=research_ctx, character_names=names or None, log=log)
+                research_context=research_ctx, character_names=names or None, log=log,
+                **({"skip_broadcast_text": True} if skip_broadcast_text else {}))
         except Exception as e:  # noqa: BLE001 — 부분 실패 계약: 다른 chunk 는 계속 간다
             meanings = None
             audit = {"chunk": key, "attempts": [],
@@ -673,11 +678,18 @@ def _run_m2(*, output_dir: Path, video_path: Path, stage1_path: Path, grid: dict
     # 하류가 두 파일을 합치지 않게 stage2.json 은 정독 결과가 반영된 문서 하나다.
     # 사이드카는 청크 캐시와 같은 지문에 묶인다(재개 시 재호출 0).
     from app.v3 import screen_text as _st
+    if skip_broadcast_text:
+        from app.v3.text_policy import filter_document
+        stage2_doc, text_audit = filter_document(stage2_doc)
+        step("screen_text_policy", policy="essential", **text_audit)
+        # A broad read sidecar must not overwrite the selected information-only text.
+        fingerprint += "_essential"
     _dur = (grid.get("source") or {}).get("duration_sec")
     try:
         _st_audit = _st.run_screen_text_pass(
             get_gemini() if _st.targets(stage2_doc) else None, stage2_doc, video_path,
-            output_dir, duration_sec=_dur, fingerprint=fingerprint, log=log)
+            output_dir, duration_sec=_dur, fingerprint=fingerprint, log=log,
+            **({"essential_only": True} if skip_broadcast_text else {}))
     except Exception as e:  # noqa: BLE001 — 정독은 부가물: 실패해도 초벌로 진행(기록)
         _st_audit = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
         log(f"  [v3/screen_text] ⚠ 정독 패스 실패 — 초벌 유지: {e}")

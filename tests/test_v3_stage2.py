@@ -440,6 +440,99 @@ def test_run_chunk_analyze_exhaustion_marks_failed(monkeypatch):
     assert meanings is None and "반려 소진" in audit["failed"]   # 커버리지 표기 몫
 
 
+def test_span_repair_preserves_good_entries_and_meaning_boundaries():
+    original = _resp_ok()
+    bad = json.loads(json.dumps(original))
+    bad["meanings"][0]["spans"].append({"id": "sp0000", "scene_script": "잘못된 중복"})
+    bad["meanings"][1]["spans"].pop()
+    snapshot = json.loads(json.dumps(bad))
+    targets = ca.span_repair_targets(bad, _spans4())
+    assert targets == ["sp0000", "sp0003"]
+    patch = {"spans": [original["meanings"][0]["spans"][0], original["meanings"][1]["spans"][1]]}
+    result = ca.apply_span_repair(bad, patch, targets, _spans4())
+    assert bad == snapshot
+    for got, expected in zip(result["meanings"], original["meanings"]):
+        assert {k: v for k, v in got.items() if k != "spans"} == {k: v for k, v in expected.items() if k != "spans"}
+        assert sorted(got["spans"], key=lambda s: s["id"]) == expected["spans"]
+    assert ca.validate_stage2_response(result, _spans4(), final_attempt=False)[1] == []
+    for invalid in ({"spans": patch["spans"][:1]},
+                    {"spans": patch["spans"] * 2},
+                    {"spans": patch["spans"], "meanings": []},
+                    {"spans": [{"id": "sp0001", "scene_script": "정상 항목 덮기"}]}):
+        with pytest.raises(ValueError, match="부분 수정"):
+            ca.apply_span_repair(bad, invalid, targets, _spans4())
+    bad["meanings"][0]["last_span"] = "sp0002"
+    assert ca.span_repair_targets(bad, _spans4()) == []  # overlapping meanings need full analysis
+
+
+def test_run_chunk_repairs_only_requested_ids_and_records_original(monkeypatch):
+    grid = _grid_spans([(0, 4, True, "안녕하세요."), (4, 8, False, ""),
+                        (8, 12, True, "반갑습니다."), (12, 16, True, "저는 강비오입니다.")])
+    bad = _resp_ok()
+    bad["meanings"][0]["spans"].append({"id": "sp0001", "scene_script": "중복 설명"})
+    wanted = _resp_ok()["meanings"][0]["spans"][1]
+    replies = [bad, {"spans": [wanted, wanted]}, {"spans": [wanted]}]
+    prompts = []
+    def call(g, u, prompt):
+        prompts.append(prompt)
+        return json.loads(json.dumps(replies[len(prompts)-1]))
+    monkeypatch.setattr(ca, "_call_stage2_model", call)
+    monkeypatch.setattr(ca, "_upload_video", lambda *a, **k: type("U", (), {"name": "f"})())
+    monkeypatch.setattr(ca, "verify_scene_binding", lambda *a, **k: {"status": "ok", "mismatch": 0, "checked": 1})
+    _FakeGemini.client = type("C", (), {"files": type("F", (), {"delete": staticmethod(lambda name: None)})()})()
+    meanings, audit = ca.run_chunk_analyze(_FakeGemini(), Path("x.mp4"),
+        {"seq_number": 0, "chunk_number": 0, "start_sec": 0., "end_sec": 16.},
+        _stage1([(0, 16, [(0, 16)])]), grid)
+    assert meanings
+    assert [r["mode"] for r in audit["attempts"]] == ["full", "span_repair", "span_repair"]
+    assert audit["attempts"][0]["response"] == bad
+    assert audit["attempts"][1]["response"] == replies[1]
+    assert audit["attempts"][2]["repair_ids"] == ["sp0001"]
+    assert '"video_start_sec": 4.0' in prompts[1]
+    assert '"id": "sp0000"' not in prompts[1]  # good details are not regenerated
+
+
+def test_span_repair_moves_known_misplaced_id_but_rejects_unknown():
+    bad = _resp_ok()
+    wrong = bad["meanings"][1]["spans"].pop()
+    bad["meanings"][0]["spans"].append(wrong)
+    assert ca.span_repair_targets(bad, _spans4()) == ["sp0003"]
+    result = ca.apply_span_repair(bad, {"spans": [wrong]}, ["sp0003"], _spans4())
+    assert result == _resp_ok()
+    bad["meanings"][0]["spans"][-1]["id"] = "sp9999"
+    assert ca.span_repair_targets(bad, _spans4()) == []
+
+
+def test_failed_json_response_is_retained_for_diagnosis(monkeypatch):
+    def invalid(*args):
+        error = ValueError("응답 JSON 파싱 실패")
+        error.raw_response = '{"meanings": [{"content": "잘린 응답'
+        raise error
+    monkeypatch.setattr(ca, "_call_stage2_model", invalid)
+    monkeypatch.setattr(ca, "_upload_video", lambda *a, **k: type("U", (), {"name": "f"})())
+    _FakeGemini.client = type("C", (), {"files": type("F", (), {"delete": staticmethod(lambda name: None)})()})()
+    result, audit = ca.run_chunk_analyze(_FakeGemini(), Path("x.mp4"),
+        {"seq_number": 0, "chunk_number": 0, "start_sec": 0., "end_sec": 8.},
+        _stage1([(0, 8, [(0, 8)])]), _grid_spans([(0, 8, False, "")]))
+    assert result is None
+    assert len(audit["attempts"]) == 3
+    assert all(r["response"] == '{"meanings": [{"content": "잘린 응답' for r in audit["attempts"])
+
+
+def test_text_role_survives_normalization_and_essential_groups_are_bounded():
+    from app.v3 import screen_text as stx
+    response = _resp_ok()
+    response['meanings'][0]['spans'][0].update(screen_text_role='story_info', screen_text='15분 남음')
+    norm, problems, _ = ca.validate_stage2_response(response, _spans4(), final_attempt=False)
+    assert not problems
+    meanings = ca.assemble_chunk_meanings(norm, _spans4())
+    assert meanings[0]['spans'][0]['screen_text_role'] == 'story_info'
+    rows = [{'t0': float(i), 't1': float(i+1), 'span_id': f's{i}',
+             'importance': 3, 'unread': False, 'draft': '자막'} for i in range(100)]
+    assert len(stx.cluster_scenes(rows)) == 1  # default behavior unchanged
+    assert all(s['t1']-s['t0'] <= 8 for s in stx.cluster_scenes(rows, max_duration=8))
+
+
 def test_pipeline_m2_wiring(tmp_path, monkeypatch):
     """합성 소재 — stage1 주입 후 chunk_split 실행·stage2 조립·증분 캐시 확인."""
     import subprocess

@@ -310,7 +310,10 @@ def wrap_lines(text: str, max_chars: int = 18, max_lines: int = 2) -> str:
 
 
 def split_title(title: str) -> tuple[str, str]:
-    """제목을 두 줄로: 가운데에 가장 가까운 공백에서 가른다. 공백이 없으면 한 줄."""
+    """명시한 두 줄은 보존하고, 구 한 줄 제목만 가운데 공백에서 가른다."""
+    lines = [line.strip() for line in str(title).splitlines() if line.strip()]
+    if len(lines) == 2:
+        return lines[0], lines[1]
     t = " ".join(str(title).split())
     if len(t) <= 12 or " " not in t:
         return t, ""

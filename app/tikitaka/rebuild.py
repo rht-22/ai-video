@@ -7,8 +7,11 @@
 """
 from __future__ import annotations
 
+import json
+
 import re
 
+from app.tikitaka.title import TITLE_PROMPT, normalize_title
 from app.tikitaka.common import Job, fmt_tc, MAX_SHORTS_SEC, ms3
 from app.tikitaka.llm import Gemini
 from app.tikitaka.prompts import REBUILD_PROMPT
@@ -179,7 +182,14 @@ def validate_versions(raw: dict, index: dict, transcript: dict, *, hard_max: flo
                     issues.append(f"item{k}: 빈 내레이션 — 드롭")
                     continue
                 sec = narration_plan_sec(text)
-                items.append({"type": "N", "text": text, "effect": eff, "plan_sec": sec})
+                item = {"type": "N", "text": text, "effect": eff, "plan_sec": sec}
+                if "production_plan" in it:
+                    from app.tikitaka.production import normalize_plan
+                    plan, errors = normalize_plan(it["production_plan"], index, transcript, ex)
+                    if plan is not None:
+                        item["production_plan"] = plan
+                    issues.extend(f"item{k}: {error}" for error in errors)
+                items.append(item)
                 total += sec
             elif t == "S":
                 ids = [str(x) for x in (it.get("line_ids") or [])]
@@ -267,7 +277,7 @@ def validate_versions(raw: dict, index: dict, transcript: dict, *, hard_max: flo
             dropped = items.pop()
             total -= dropped["plan_sec"]
             issues.append(f"상한 {hard_max}s 초과 → 꼬리 항목 드롭({dropped['type']})")
-        title = " ".join(str(v.get("title") or "").split())[:40]
+        title = normalize_title(v.get("title"))
         flags = literal_action_flags([title] + [it["text"] for it in items if it["type"] == "N"], index, transcript)
         issues += [f"[비유 의심] {f}" for f in flags]
         g_hits = guide_hits({"title": title, "items": items}, avoid)
@@ -438,6 +448,10 @@ def rebuild(job: Job, gemini: Gemini, index: dict, transcript: dict, *, title: s
                                    target_min=TARGET_MIN_SEC, target_max=TARGET_MAX_SEC, hard_max=int(MAX_SHORTS_SEC), script=script,
                                    guide=guide_block(guide), material_note=material, seq_hook_rule=SEQ_HOOK_RULES[bool(seq_hook)],
                                    digest=digest_block(digest))
+    prompt += TITLE_PROMPT
+    if index.get("grid_facts"):
+        from app.tikitaka.production import planning_rules
+        prompt += planning_rules()
     job.log(f"[rebuild] 소스 스크립트 {len(script):,}자 → {len(STRATEGIES)}버전 요청" + (f" (제작 가이드 {guide['sha']})" if guide else "")
             + (" · 작품 이해 문서 첨부" if digest else " · ⚠ 작품 이해 문서 없음")
             + (f" · 재료 구간 {range_label}" if range_label else "") + f" · 순차형 콜드오픈 {'on' if seq_hook else 'off'}")
@@ -457,6 +471,10 @@ def rebuild(job: Job, gemini: Gemini, index: dict, transcript: dict, *, title: s
             polish_guide(gemini, v, guide, log=job.log)
         if guide and guide.get("actors"):           # 극중 이름 → 배우 이름(프롬프트가 놓친 것만 치환)
             apply_name_map(v, guide["actors"], log=job.log)
+    if index.get("grid_facts"):
+        from app.tikitaka.production import preflight
+        for version in data["versions"]:
+            version["production_preflight"] = preflight(version, index, transcript, exclude)
     apply_rerank(job, gemini, data, title=title, episode=episode_label, basis="draft")   # 리빌딩 호출의 순위는 예시에 끌린다 — 별도 호출로
     n_issues = sum(len(v["issues"]) for v in data["versions"])
     job.save(cache_name, data)
@@ -589,9 +607,11 @@ def polish_character_names(gemini: Gemini, version: dict, index: dict, transcrip
     rel = " / ".join(((digest or {}).get("relationships") or [])[:20]) or "(없음)"
     raw = gemini.text_json(CHARACTER_POLISH_PROMPT.format(actors=", ".join(f"{c}={a}" for c, a in (actors or {}).items()) or "(없음 — 극중 이름 그대로)",
                                                            relations=rel, flags="\n".join(f"- {f}" for f in flags),
-                                                           texts="\n".join(f"{k}. {t}" for k, t in enumerate(texts, 1))),
+                                                           texts="\n".join(f"{k}. {json.dumps(t, ensure_ascii=False)}" for k, t in enumerate(texts, 1)))
+                           + "\n첫 항목은 화면 제목이다. 제목은 의미 단위로 나눈 두 줄을 유지하라. 수정해도 JSON 문자열 안의 줄바꿈을 보존하고, texts는 문자열 배열로 반환하라.",
                            kind="character_polish", thinking="low")
-    new = [" ".join(str(x).split()) for x in (raw.get("texts") or [])]
+    new = [normalize_title(x) if i == 0 else " ".join(str(x).split())
+           for i, x in enumerate(raw.get("texts") or [])]
     if len(new) != len(texts):
         log(f"[인물] ⚠ 다듬기 응답 개수 불일치({len(new)}≠{len(texts)}) — 적용 안 함")
         return 0
@@ -640,9 +660,11 @@ def polish_literal_actions(gemini: Gemini, version: dict, index: dict, transcrip
     lo = min((l["start"] for l in transcript["lines"] if l["id"] in used_ids), default=0.0) - 60
     hi = max((l["end"] for l in transcript["lines"] if l["id"] in used_ids), default=1e9) + 60
     moments = "; ".join(f"{m['id']} {m['desc']}" for m in index["moments"] if lo <= m["start"] <= hi)[:1500]
-    raw = gemini.text_json(POLISH_PROMPT.format(moments=moments, flags="\n".join(flags), texts="\n".join(f"{k}. {t}" for k, t in enumerate(texts, 1))),
+    raw = gemini.text_json(POLISH_PROMPT.format(moments=moments, flags="\n".join(flags), texts="\n".join(f"{k}. {json.dumps(t, ensure_ascii=False)}" for k, t in enumerate(texts, 1)))
+                           + "\n첫 항목은 화면 제목이다. 제목은 의미 단위로 나눈 두 줄을 유지하라. 수정해도 JSON 문자열 안의 줄바꿈을 보존하고, texts는 문자열 배열로 반환하라.",
                            kind="polish", thinking="low")
-    new = [" ".join(str(x).split()) for x in (raw.get("texts") or [])]
+    new = [normalize_title(x) if i == 0 else " ".join(str(x).split())
+           for i, x in enumerate(raw.get("texts") or [])]
     if len(new) != len(texts):
         log(f"[rebuild] ⚠ 다듬기 응답 개수 불일치({len(new)}≠{len(texts)}) — 적용 안 함")
         return 0
@@ -712,9 +734,11 @@ def polish_guide(gemini: Gemini, version: dict, guide: dict, *, log=print) -> in
     texts = [t for _, t, _ in entries]
     raw = gemini.text_json(GUIDE_POLISH_PROMPT.format(guide=guide.get("text", "")[:2000], avoid=", ".join(avoid),
                                                        hits="\n".join(f"- {w!r}: {t}" for w, t in hits),
-                                                       texts="\n".join(f"{k}. {t}" for k, t in enumerate(texts, 1))),
+                                                       texts="\n".join(f"{k}. {json.dumps(t, ensure_ascii=False)}" for k, t in enumerate(texts, 1)))
+                           + "\n첫 항목은 화면 제목이다. 제목은 의미 단위로 나눈 두 줄을 유지하라. 수정해도 JSON 문자열 안의 줄바꿈을 보존하고, texts는 문자열 배열로 반환하라.",
                            kind="guide_polish", thinking="low")
-    new = [" ".join(str(x).split()) for x in (raw.get("texts") or [])]
+    new = [normalize_title(x) if i == 0 else " ".join(str(x).split())
+           for i, x in enumerate(raw.get("texts") or [])]
     if len(new) != len(texts):
         log(f"[guide] ⚠ 다듬기 응답 개수 불일치({len(new)}≠{len(texts)}) — 적용 안 함")
         return 0
@@ -794,6 +818,8 @@ RERANK_PROMPT = """너는 드라마 쇼츠 채널의 편집장이다. 아래는 
 
 def version_block(v: dict) -> str:
     out = [f"### 버전 {v['n']} · {v['strategy']} · 제목 \"{v['title']}\" · 계획 {v.get('plan_sec', 0):.0f}s"]
+    if v.get("production_preflight"):
+        out.append(f"조립 사전검사(추정; 해결되지 않은 화면 부족·중복은 선정 시 감점): {v['production_preflight']}")
     for it in v["items"]:
         eff = f" 〈{it['effect']}〉" if it.get("effect") else ""
         if it["type"] == "N":

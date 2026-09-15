@@ -79,8 +79,43 @@ def test_shared_stages_and_cache_resume(tmp_path, monkeypatch):
     kw={'title':'작품','cast':['경희'],'get_v3':lambda:client,'research_context':'가족'}
     va.build_index(*args,**kw); va.build_index(*args,**kw)
     assert calls == ['proxy','s1','m2']
+    va.build_index(*args, **{**kw, 'reuse_analysis': True, 'get_v3': lambda: pytest.fail('API must not be loaded')})
+    assert calls == ['proxy','s1','m2']
+    with pytest.raises(ValueError, match='인물'):
+        va.build_index(*args, **{**kw, 'reuse_analysis': True, 'cast': ['다른 인물']})
+    with pytest.raises(ValueError, match='함께'):
+        va.build_index(*args, **{**kw, 'reuse_analysis': True, 'retry_failed': True})
+    job.save('grid.json', {'changed': True})
+    with pytest.raises(ValueError, match='시간 격자'):
+        va.build_index(*args, **{**kw, 'reuse_analysis': True})
+    job.save('grid.json', {**grid, 'words': []})
     va.build_index(*args,**{**kw,'retry_failed':True})
     assert calls == ['proxy','s1','m2','m2']
     va.build_index(*args,**{**kw,'research_context':'인물 정정'})
     assert calls[-3:] == ['proxy','s1','m2']
     assert job.load('stage2.json') == doc
+
+
+def test_essential_text_keeps_story_info_without_changing_speech_or_clocks():
+    from app.v3.text_policy import filter_index, filter_document
+    doc, grid, tr = material()
+    spans = doc['sequences'][0]['chunks'][0]['meanings'][0]['spans']
+    spans[0].update(screen_text='ㅋㅋㅋ / 프로그램 로고', screen_text_role='decorative')
+    spans[1].update(screen_text='남은 시간 15분', screen_text_role='story_info', has_text=True)
+    spans[2].update(screen_text='편지의 내용', screen_text_kind='문서', has_text=True)
+    index = va.adapt(doc, grid, tr, title='작품', cast=[], fp='fp')
+    before = copy.deepcopy(index)
+    filtered, audit = filter_index(index)
+    assert index == before
+    assert 'ㅋㅋㅋ' not in source_script(filtered, tr, [])
+    assert '남은 시간 15분' in source_script(filtered, tr, [])
+    assert '편지의 내용' in source_script(filtered, tr, [])
+    assert filtered['grid_facts']['sp0']['audio_script'] == index['grid_facts']['sp0']['audio_script']
+    assert filtered['grid_facts']['sp0']['time'] == index['grid_facts']['sp0']['time']
+    assert filtered['moments'][0]['subject_pos'] == 'right'
+    assert filtered['analysis_excluded_ranges'] == index['analysis_excluded_ranges']
+    assert audit['roles']['decorative'] == 1
+    spans[0].pop('screen_text_role')
+    legacy, _ = filter_document(doc)
+    s = legacy['sequences'][0]['chunks'][0]['meanings'][0]['spans'][0]
+    assert s['screen_text_role'] == 'uncertain' and 'screen_text' not in s

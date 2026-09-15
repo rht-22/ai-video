@@ -18,8 +18,8 @@ MIN_CUT = .6
 MAX_CUT = 2.0
 MAX_HOLD = 2.0
 FPS = 30
-SCHEMA = "tikitaka_grid_table/v5_action"
-PROBE_SCHEMA = "visual_consistency/v3_narration"
+SCHEMA = "tikitaka_grid_table/v7_joint_plan"
+PROBE_SCHEMA = "visual_consistency/v5_shared_semantics"
 MAX_NARRATION_REWRITES = 3
 
 
@@ -103,6 +103,8 @@ def assemble_before_dialogue(candidates, target, *, opening=False):
 def fit_before_dialogue(job, gemini, row, candidates, rows, *, voice, speed, key, guide=None,
                         budget_sec=None, placement="before_dialogue"):
     """Rewrite then re-synthesize within a fixed source window, transactionally."""
+    from app.tikitaka.production import SEMANTIC_RULES, narration_context
+    context = narration_context(rows, row)
     budget = (sum(z-a for _, _, a, z in before_dialogue_windows(candidates))
               if budget_sec is None else budget_sec)
     if not math.isfinite(budget) or budget < 1 / FPS:
@@ -127,7 +129,7 @@ def fit_before_dialogue(job, gemini, row, candidates, rows, *, voice, speed, key
                   'JSON {"text": "새 문장"}.\n'
                   f"원문: {original}\n직전 시도: {candidate_text} ({measured:.3f}초)\n"
                   f"허용 길이: {budget:.3f}초 / 공백 제외 약 {hint}자 이내 권장\n"
-                  f"앞뒤 대본: {[(r['mode'], r['text']) for r in rows]}\n"
+                  f"문장 역할·인접 대본: {context}\n" + SEMANTIC_RULES + "\n"
                   f"고정 화면: {list(candidates.values())}\n제작 가이드: {guide or {}}")
         if audit["attempts"]:
             prompt += f"\n직전 검수: {audit['attempts'][-1]}"
@@ -154,7 +156,7 @@ def fit_before_dialogue(job, gemini, row, candidates, rows, *, voice, speed, key
                         "보존하고 새 사실·시간 단정·가이드 위반을 추가하지 않았는지 판단하라. "
                         'JSON {"meaning_preserved": boolean, "reason": string}.\n'
                         f"원문: {original}\n재작성: {candidate_text}\n"
-                        f"앞뒤 대본: {[(r['mode'], r['text']) for r in rows]}\n"
+                        f"문장 역할·인접 대본: {context}\n" + SEMANTIC_RULES + "\n"
                         f"화면: {list(candidates.values())}\n제작 가이드: {guide or {}}")
         check_name = f"narration_fit/{fingerprint([key, check_prompt])}_meaning.json"
         verdict = job.load(check_name) if job.has(check_name) else gemini.text_json(check_prompt, kind="grid_narration_fit_check")
@@ -165,7 +167,7 @@ def fit_before_dialogue(job, gemini, row, candidates, rows, *, voice, speed, key
             job.save(attempt_file, audit)
             continue
         row.update(text=candidate_text, tts=str(path), dur=measured,
-                   plan_sec=narration_plan_sec(candidate_text), original_text=original)
+                   plan_sec=narration_plan_sec(candidate_text), original_text=row.get("original_text", original))
         audit.update(final_text=candidate_text, final_sec=measured)
         job.save(attempt_file, audit)
         job.log(f"[grid/narration_fit] {original!r} → {candidate_text!r} ({measured:.2f}/{budget:.2f}초)")
@@ -242,9 +244,10 @@ def assemble_cover(ids, candidates, target, *, opening=False):
     return cuts
 
 
-def probe_cover(job, gemini, cut, text, *, key):
+def probe_cover(job, gemini, cut, text, *, key, context=None):
     from app.tikitaka.probe import cut_proxy_clip
-    name = f"grid_cover_probes/{fingerprint([PROBE_SCHEMA, key])}.json"
+    from app.tikitaka.production import SEMANTIC_RULES
+    name = f"grid_cover_probes/{fingerprint([PROBE_SCHEMA, key, context])}.json"
     if job.has(name):
         return job.load(name)
     clip = cut_proxy_clip(job, cut["in"], cut["out"], f"grid_cover_probes/{key}.mp4")
@@ -258,8 +261,9 @@ def probe_cover(job, gemini, cut, text, *, key):
               "기록은 후보를 찾기 위한 참고이며 오기나 더 긴 구간의 설명일 수 있다. "
               "text_matches는 내레이션과 실제 선택 화면이 맞는지 판단한다. 기록과의 불일치는 record_matches와 reason에 별도로 남기고 그것만으로 text_matches=false를 주지 마라. "
               "구체 행동을 말하는 내레이션은 그 행동의 직접 장면이어야 한다. 단순히 같은 인물이 등장하는 다른 행동은 불일치다. "
-              "시각을 제안하지 마라. JSON {text_matches: boolean, record_matches: boolean, seen: string, reason: string}.\n"
-              f"내레이션: {text}\n기록: {cut['desc']}")
+              + SEMANTIC_RULES + "\n"
+              "시각을 제안하지 마라. JSON {text_matches: boolean, record_matches: boolean, narration_kind: string, seen: string, reason: string}.\n"
+              f"내레이션: {text}\n기록: {cut['desc']}\n인접 대본(S=원본 대사, A=현장음 설명, N=내레이션): {context or []}")
     raw = gemini.video_json(prompt, clip, kind="grid_cover_probe", fps=10)
     if not isinstance(raw, dict) or type(raw.get("text_matches")) is not bool:
         raise ValueError("덮개 프로브의 일치 판정 없음")
@@ -267,11 +271,43 @@ def probe_cover(job, gemini, cut, text, *, key):
     return raw
 
 
+def share_adjacent_action_boundary(rows, transcript):
+    """Partition contiguous S→A footage without dropping audio or repeating it.
+
+    Only reclaim the optional speech tail, retaining the STT words and standard
+    padding. The reclaimed tail plays with original audio in the following A row.
+    Actual speech/action conflicts and non-adjacent repeats still fail validation.
+    """
+    from app.tikitaka.timing import bind_dialogue
+    lines = {line["id"]: line for line in transcript.get("lines", [])}
+    notes = []
+    for speech, action in zip(rows, rows[1:]):
+        if speech["mode"] != "S" or action["mode"] != "A":
+            continue
+        if len(speech["cuts"]) != 1 or len(action["cuts"]) != 1:
+            continue
+        s, a = speech["cuts"][0], action["cuts"][0]
+        if not s["in"] < a["in"] < s["out"] < a["out"]:
+            continue
+        protected_end = bind_dialogue(lines, transcript["words"], speech["src"])["end"]
+        boundary = max(protected_end, a["in"])
+        if boundary >= s["out"] or a["out"] - boundary < 0.8:
+            continue
+        old_end = s["out"]
+        s["out"] = a["in"] = boundary
+        s["dur"] = speech["dur"] = round(boundary - s["in"], 3)
+        a["dur"] = action["dur"] = round(a["out"] - boundary, 3)
+        notes.append(f"행{speech['i']}→{action['i']}: 대사 뒤 여유 구간을 인접 현장음으로 연속 재생 "
+                     f"(경계 {old_end:.3f}→{boundary:.3f}s, 원본 화면·소리 보존)")
+    return notes
+
+
 def build_table(job, gemini, rebuild, index, transcript, cuts, duration, proxy, *,
                 version_n, title, grid, voice="ko_female", speed="normal", exclude=None, black=None, tag="", force=False, guide=None):
     version = next(v for v in rebuild["versions"] if v["n"] == version_n)
     exclude, black = exclude or [], black or []
-    fp = fingerprint([SCHEMA, version, index, transcript, grid, voice, speed,
+    from app.tikitaka.production import SEMANTIC_RULES, narration_context, preflight
+    fp = fingerprint([SCHEMA, SEMANTIC_RULES, version, index, transcript, grid, voice, speed,
                       exclude, black, guide, source_identity(job.source)])
     name = f"grid_table_v{version_n}{'_'+tag if tag else ''}.json"
     cached = job.load(name) if job.has(name) else {}
@@ -280,10 +316,16 @@ def build_table(job, gemini, rebuild, index, transcript, cuts, duration, proxy, 
             for r in cached["rows"] if r.get("tts")):
         return cached
     nonce = time.time_ns() if force else None
+    preflight_result = preflight(version, index, transcript, exclude + black) if index.get("moments") else None
+    if preflight_result:
+        job.save(f"production_preflight_v{version_n}{'_'+tag if tag else ''}.json", preflight_result)
     rows = rows_from_items(version, index, transcript, cuts, duration,
         lambda text: _tts_cached(job, text, voice, speed),
         end_fn=lambda we, limit: speech_end_after(job, we, limit=limit))
-    notes = trim_a_rows_off_dialogue(rows) + trim_a_rows_off_black(rows, black)
+    notes = share_adjacent_action_boundary(rows, transcript)
+    notes += trim_a_rows_off_dialogue(rows) + trim_a_rows_off_black(rows, black)
+    for note in notes:
+        job.log(f"[table] {note}")
     spoken = [(c["in"], c["out"]) for r in rows if r["mode"] == "S" for c in r["cuts"]]
     by = {s["id"]: s for s in grid["span_candidates"]}
     used, audit = [], []
@@ -310,6 +352,17 @@ def build_table(job, gemini, rebuild, index, transcript, cuts, duration, proxy, 
         proof = {sid: sp for sid, sp in evidence.get(row["i"], {}).get("candidates", {}).items()
                  if not overlap(sp["t_in"], sp["t_out"], used)}
         candidates.update(proof)
+        context = narration_context(rows, row, index, transcript)
+        moments = {m["id"]: m for m in index.get("moments", [])}
+        planned_ids = list(dict.fromkeys(sid for mid in (row.get("production_plan") or {}).get("cover_moment_ids", [])
+                                        for sid in moments.get(mid, {}).get("span_ids", [])))
+        for sid in planned_ids:
+            sp, fact = by.get(sid), index.get("grid_facts", {}).get(sid)
+            if sp is None or fact is None or overlap(sp["t_in"], sp["t_out"], exclude + black + used):
+                continue
+            if any(word in fact.get("scene_script", "") for word in (guide or {}).get("avoid", []) if word):
+                continue
+            candidates[sid] = {**sp, **fact}
         rejection = ""
         failed_selections = []
         for attempt in range(MAX_REASKS + 1):
@@ -323,15 +376,19 @@ def build_table(job, gemini, rebuild, index, transcript, cuts, duration, proxy, 
                       "이 배치는 아래 고정 앞 장면 전체를 선택하며, 짧으면 내레이션을 다시 쓴다. "
                       "앞 장면에 자료화면 정지·슬로우·다른 씬 추가로 시간을 늘리지 않는다. "
                       "그 외 same_scene 배치는 화면을 이어 TTS 길이를 채우고 자료화면만 최대 2초 정지 가능. "
-                      "JSON {placement: before_dialogue|same_scene, span_ids: [string]}. 시간은 쓰지 마라.\n"
+                      "문장과 화면을 함께 결정하라. 계획한 화면을 우선 검토하되 사용할 수 없거나 의미가 맞지 않으면 새 조합을 골라라. "
+                      "다른 화면에 맞추려 새 사실을 만들지 마라. 문장은 필요할 때만 고치고 핵심 의미·연결을 보존하라. "
+                      "JSON {text: string, placement: before_dialogue|same_scene, span_ids: [string]}. 시간은 쓰지 마라.\n"
+                      + SEMANTIC_RULES + "\n"
                       f"문장: {row['text']} / 길이: {row['dur']:.3f}s\n"
-                      f"앞뒤 대본: {[(r['mode'], r['text']) for r in rows]}\n"
+                      f"문장 역할·근거·인접 대본: {context}\n"
+                      f"작성 단계의 계획 화면(현재 후보에 있는 ID만 가능): {planned_ids}\n"
                       f"행동/장면 검색 근거: {evidence.get(row['i'], {}).get('reason', '')}\n"
                       f"행동/장면 후보 ID: {list(proof)}\n"
                       f"일반 후보: {[dict(v, usable_sec=max(0, min(MAX_CUT, math.floor(v['t_out']*FPS+1e-7)/FPS-math.ceil(v['t_in']*FPS-1e-7)/FPS))) for v in candidates.values()]}\n"
                       f"이미 반려된 선택(재사용 금지): {failed_selections}\n"
                       f"고정 앞 장면(선택 시 ID 전부): {list(before.values())}\n반려 사유: {rejection}")
-            request_key = fingerprint([fp, row["i"], prompt, nonce])
+            request_key = fingerprint([SCHEMA, prompt, voice, speed, source_identity(job.source), nonce])
             selection_name = f"grid_cover_probes/{request_key}_selection.json"
             raw = None
             try:
@@ -342,6 +399,24 @@ def build_table(job, gemini, rebuild, index, transcript, cuts, duration, proxy, 
                 working = copy.deepcopy(row)
                 fit_audit = None
                 ids = raw.get("span_ids")
+                revised = raw.get("text", row["text"])
+                if not isinstance(revised, str) or not revised.strip():
+                    raise ValueError("빈 내레이션 재선택")
+                if revised.strip() != row["text"]:
+                    rewrite_check = ("내레이션·화면 재선택의 문장 수정 검수. 핵심 의미와 앞뒤 연결을 유지하고 "
+                                     "새 사실·인물·시간 단정을 만들지 않았는지 판단하라. "
+                                     'JSON {meaning_preserved: boolean, reason: string}.\n' + SEMANTIC_RULES +
+                                     f"\n원문: {row['text']}\n수정: {revised.strip()}\n맥락: {context}\n가이드: {guide or {}}")
+                    check_name = f"narration_fit/{fingerprint([SCHEMA, rewrite_check])}_joint_meaning.json"
+                    verdict = job.load(check_name) if job.has(check_name) else gemini.text_json(rewrite_check, kind="grid_narration_revision_check")
+                    job.save(check_name, verdict)
+                    if not isinstance(verdict, dict) or verdict.get("meaning_preserved") is not True:
+                        raise ValueError(f"내레이션 재선택의 핵심 의미 보존 실패: {verdict}")
+                    path, measured = _tts_cached(job, revised.strip(), voice, speed)
+                    if not math.isfinite(measured) or measured <= 0:
+                        raise ValueError("내레이션 재합성 길이가 유효하지 않음")
+                    working.update(text=revised.strip(), original_text=row["text"], tts=str(path), dur=measured,
+                                   plan_sec=narration_plan_sec(revised.strip()))
                 placement = raw.get("placement", "same_scene")
                 if placement not in {"before_dialogue", "same_scene"}:
                     raise ValueError("알 수 없는 덮개 배치")
@@ -368,20 +443,21 @@ def build_table(job, gemini, rebuild, index, transcript, cuts, duration, proxy, 
                             key=request_key, guide=guide, budget_sec=e.available, placement="same_scene")
                         selected = assemble_cover(ids, candidates, working["dur"], opening=row is rows[0])
                 for cut in selected:
-                    result = probe_cover(job, gemini, cut, working["text"], key=fingerprint([request_key, cut, working["text"]]))
+                    result = probe_cover(job, gemini, cut, working["text"],
+                        key=fingerprint([request_key, cut, working["text"]]), context=context)
                     if not result["text_matches"]:
                         raise ValueError(f"{cut['src']} 모순: {result.get('seen')} / {result.get('reason')}")
                 working["cuts"] = selected
                 working["cover_placement"] = "before_dialogue" if is_before else "same_scene"
                 row.update(working)
                 audit.append({"row": row["i"], "attempts": attempt+1, "previous_rejection": rejection,
-                              "narration_fit": fit_audit})
+                              "narration_fit": fit_audit, "context": context,
+                              "original_text": row.get("original_text"), "final_text": row["text"]})
                 break
-            except NarrationFitError as e:
-                job.save(f"review_v{version_n}{'_'+tag if tag else ''}.json",
-                         {"items": [{"kind": "narration_fit", "row": row["i"], "error": str(e)}], "blocked": True})
-                raise
             except (ValueError, TypeError, AttributeError) as e:
+                # A failed fit rejects this selection, not the entire script.
+                # The next bounded selection must choose different footage and
+                # pass the same fit/visual checks; the original row is untouched.
                 if isinstance(raw, dict) and raw not in failed_selections:
                     failed_selections.append(copy.deepcopy(raw))
                 rejection = str(e)
@@ -403,7 +479,8 @@ def build_table(job, gemini, rebuild, index, transcript, cuts, duration, proxy, 
     for row in rows:
         if row.get("original_text"):
             item = final_version["items"][row["i"]-1]
-            item.update(text=row["text"], original_text=row["original_text"])
+            item.update(text=row["text"], original_text=row["original_text"], plan_sec=narration_plan_sec(row["text"]))
+    final_version["plan_sec"] = round(sum(it.get("plan_sec", 0) for it in final_version["items"]), 3)
     result = {"version": final_version, "rows": rows, "total_sec": t,
               "voice": voice, "speed": speed, "cut_search": "grid", "fingerprint": fp,
               "cover_review": audit, "opening_review": opening_audit, "notes": notes}

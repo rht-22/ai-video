@@ -182,7 +182,8 @@ def label_facts(timeline, facts):
 
 
 def run(job, table, grid, index, *, get_gemini, design=None, redo=False, force_render=False,
-        force_style=False, exclude=(), tag="", split_narration=False):
+        force_style=False, exclude=(), tag="", split_narration=False, subtitle_skip_singing=False,
+        style_preset="drama_clip"):
     n = table["version"]["n"]
     suffix = f"v{n}{'_'+tag if tag else ''}"
     work = Job(job.source.resolve(), job.path(f"review_{suffix}").resolve(), job.title)
@@ -194,6 +195,21 @@ def run(job, table, grid, index, *, get_gemini, design=None, redo=False, force_r
         if transcript.get("words") and transcript.get("lines"):
             table = refresh_table(table, transcript)
             job.save(f"subtitle_table_{suffix}.json", table)
+    if subtitle_skip_singing:
+        from app.v3.pipeline import _ensure_singing_windows
+        from app.v3.story import build_span_index
+        from app.tikitaka.subtitles import filter_singing
+        stage2 = index.get("v3_stage2")
+        if not stage2:
+            raise ValueError("노래 자막 제외에는 공유 v3 Stage 2 분석이 필요합니다")
+        windows = _ensure_singing_windows(job.out_dir, job.source, stage2, log=job.log)
+        spans, _ = build_span_index(stage2, grid)
+        table, audit = filter_singing(table, spans, windows)
+        for item in audit:
+            job.log(f"[자막/노래] {'유지' if item['kept'] else '제외'} {item['start']:.3f}s {item['text']}")
+        job.save(f"singing_subtitles_{suffix}.json", {"windows": windows, "details": audit})
+        job.record_step(f"subtitle_skip_singing_{suffix}", dropped=sum(not x['kept'] for x in audit),
+                        kept=sum(x['kept'] for x in audit), windows=windows)
     initial = bundle(table, grid, title=job.title)
     review_material = copy.deepcopy(initial)
     review_material[0].pop("layout", None)
@@ -269,7 +285,7 @@ def run(job, table, grid, index, *, get_gemini, design=None, redo=False, force_r
         work.save("tts_caption_segments.json", resources["tts_caption_segments"])
     work.save("edit_plan.json", plan); work.save("subtitle_segments.json", segments)
     work.save("checkpoint_story.json", {"story": story}); work.save("checkpoint_resources.json", resources)
-    preset = finalize.merge_channel_preset(stage4.get_style_preset("drama_clip"), design)
+    preset = finalize.merge_channel_preset(stage4.get_style_preset(style_preset), design)
     style_fp = fingerprint([input_fp, plan, segments, preset, index["grid_facts"],
                             hashlib.sha256(Path(stage4.__file__).read_bytes()).hexdigest()])
     saved = work.load("checkpoint_style.json") if work.has("checkpoint_style.json") else {}
@@ -302,7 +318,7 @@ def run(job, table, grid, index, *, get_gemini, design=None, redo=False, force_r
             final.rename(work.path(f"final_prev_{time.time_ns()}.mp4"))
         final, render_audit = finalize.render_final(video_path=job.source, plan=plan, style_doc=style_doc,
             segments=segments, resources=resources, story_doc=story, output_dir=work.out_dir,
-            channel_design=design, muted_gain_db=None, style_preset="drama_clip", log=work.log)
+            channel_design=design, muted_gain_db=None, style_preset=style_preset, log=work.log)
         work.record_step("render", **render_audit)
     validation = validate_bundle(plan, grid, segments, resources, exclude=exclude)
     validation["media"] = validate_media(final, validation["duration_sec"])

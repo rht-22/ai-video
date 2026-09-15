@@ -18,6 +18,7 @@ chunk 당 Pro 1회가 span 후보들을 meaning 으로 **묶는다**. 모델은 
 """
 from __future__ import annotations
 
+import copy
 import json
 import time
 from pathlib import Path
@@ -103,6 +104,10 @@ def _extra_span_fields(entry: dict, sid: str, is_audio: bool, notes: list[str]) 
     - diegesis: 화이트리스트 밖은 폐기+note. actual 은 기본이라 키를 남기지 않는다(생략 가능).
     - is_claim: bool · 유성 한정. 무성 span 이면 폐기+note."""
     out: dict = {}
+    from app.v3.text_policy import ROLES
+    role = entry.get("screen_text_role")
+    if isinstance(role, str) and role in ROLES:
+        out["screen_text_role"] = role
     st = entry.get("screen_text")
     if st is not None and st != "":
         if isinstance(st, str):
@@ -142,7 +147,7 @@ def _extra_span_fields(entry: dict, sid: str, is_audio: bool, notes: list[str]) 
     return out
 
 
-EXTRA_SPAN_KEYS = ("screen_text", "has_text", "diegesis", "is_claim")
+EXTRA_SPAN_KEYS = ("screen_text", "has_text", "diegesis", "is_claim", "screen_text_role")
 
 
 def validate_stage2_response(resp: Any, chunk_spans: list[dict], *,
@@ -680,10 +685,12 @@ def _call_stage2_model(gemini, uploaded, prompt: str) -> dict:
             obj = None
         if isinstance(obj, dict):
             return obj
-        raise ValueError(
+        error = ValueError(
             "응답 JSON 파싱 실패"
             + (f" (MAX_TOKENS 절단: {truncated})" if truncated else "")
-            + f": {e} — 앞 200자: {text[:200]!r}") from e
+            + f": {e} — 앞 200자: {text[:200]!r}")
+        error.raw_response = response.text or ""
+        raise error from e
 
 
 # ── 내용-시각 정합 벨트 (2026-09-01) ────────────────────────────────────────
@@ -796,10 +803,97 @@ def verify_scene_binding(gemini, chunk_file: Path, chunk: dict, norm: list[dict]
             "details": details}
 
 
+SPAN_REPAIR_LIMIT = 24
+
+
+def span_repair_targets(resp: Any, chunk_spans: list[dict]) -> list[str]:
+    """Only repair details when the existing meaning partition is valid."""
+    if not isinstance(resp, dict) or not isinstance(resp.get("meanings"), list):
+        return []
+    order = [sp["id"] for sp in chunk_spans]
+    positions = {sid: i for i, sid in enumerate(order)}
+    candidate = copy.deepcopy(resp)
+    targets = set()
+    for m in candidate["meanings"]:
+        if not isinstance(m, dict):
+            return []
+        a, z = m.get("first_span"), m.get("last_span")
+        if not isinstance(a, str) or not isinstance(z, str) or a not in positions or z not in positions:
+            return []
+        expected = order[positions[a]:positions[z]+1]
+        entries = m.get("spans")
+        if not isinstance(entries, list):
+            return []
+        counts = {}
+        for entry in entries:
+            sid = entry.get("id") if isinstance(entry, dict) else None
+            if not isinstance(sid, str) or sid not in positions:
+                return []  # Cannot infer which real ID an unknown entry meant.
+            counts[sid] = counts.get(sid, 0) + 1
+        targets.update(sid for sid in expected if counts.get(sid, 0) != 1)
+        targets.update(sid for sid in counts if sid not in expected)
+        # Validate the partition and metadata without the malformed details.
+        m["spans"] = [{"id": sid, "scene_script": "repair eligibility check"} for sid in expected]
+    if not targets or len(targets) > SPAN_REPAIR_LIMIT:
+        return []
+    _, problems, _ = validate_stage2_response(candidate, chunk_spans, final_attempt=False)
+    return [] if problems else [sid for sid in order if sid in targets]
+
+
+def apply_span_repair(resp: dict, patch: Any, targets: list[str], chunk_spans: list[dict]) -> dict:
+    """Replace only requested IDs; never accept new meaning boundaries or metadata."""
+    if not isinstance(patch, dict) or set(patch) != {"spans"} or not isinstance(patch["spans"], list):
+        raise ValueError("부분 수정은 spans 배열 하나만 반환해야 한다")
+    replacements = {}
+    for entry in patch["spans"]:
+        sid = entry.get("id") if isinstance(entry, dict) else None
+        if not isinstance(sid, str) or sid not in targets or sid in replacements:
+            raise ValueError(f"부분 수정 ID 중복·범위 위반: {sid!r}")
+        if not isinstance(entry.get("scene_script"), str) or not entry["scene_script"].strip():
+            raise ValueError(f"부분 수정 {sid} 화면 묘사 없음")
+        replacements[sid] = entry
+    if set(replacements) != set(targets):
+        raise ValueError(f"부분 수정 ID 누락: {sorted(set(targets)-set(replacements))}")
+    result = copy.deepcopy(resp)
+    positions = {sp["id"]: i for i, sp in enumerate(chunk_spans)}
+    for m in result["meanings"]:
+        m["spans"] = [entry for entry in m["spans"] if entry["id"] not in replacements]
+        a, z = positions[m["first_span"]], positions[m["last_span"]]
+        m["spans"].extend(copy.deepcopy(replacements[sid]) for sid in targets if a <= positions[sid] <= z)
+    return result
+
+
+def build_span_repair_prompt(resp, targets, chunk, chunk_spans, research_context, problems):
+    by_id = {sp["id"]: sp for sp in chunk_spans}
+    positions = {sp["id"]: i for i, sp in enumerate(chunk_spans)}
+    rows = []
+    for sid in targets:
+        sp = by_id[sid]
+        owner = next(m for m in resp["meanings"]
+                     if positions[m["first_span"]] <= positions[sid] <= positions[m["last_span"]])
+        rows.append({"id": sid, "video_start_sec": sp["t_in"]-chunk["start_sec"],
+                     "video_end_sec": sp["t_out"]-chunk["start_sec"], "is_audio": sp["is_audio"],
+                     "transcript": sp.get("text", ""), "meaning": owner["content"],
+                     "previous_entries": [entry for m in resp["meanings"] for entry in m["spans"]
+                                          if entry["id"] == sid]})
+    return """영상 분석 JSON의 장면 상세만 부분 수정하라. 사건 묶음·다른 ID는 이미 고정되어 있다.
+아래 각 ID의 영상 내 시각으로 이동해 실제 화면과 소리를 확인하라. 각 ID를 정확히 한 번씩 반환하라.
+중복된 기존 설명 중 임의로 마지막 것을 고르지 말고, 영상에 맞는 하나의 상세를 작성하라.
+scene_script는 실제 화면 묘사, characters는 확실한 인물만, importance는 1~5다.
+유성 구간만 heard에 실제로 들은 대사를 화자별로 적어라. 전사는 참고이며 베끼거나 각색하지 마라.
+화면 글자는 screen_text에 원문 그대로(못 읽으면 has_text:true), 회상·상상은 diegesis로 구분한다.
+필요한 선택 필드 subject_pos(left/center/right), is_claim도 기존 분석 계약대로 보존하라.
+출력은 {"spans":[{"id":"지정 ID","scene_script":"...","characters":[],"importance":3,
+"heard":[{"speaker":"...","line":"..."}]}]} 형태다. 다른 최상위 키·추가 ID·시간 필드는 금지다.
+""" + "\n참고 리서치:\n" + research_context + "\n수정 대상:\n" + json.dumps(rows, ensure_ascii=False) + \
+        "\n직전 반려 사유:\n" + "\n".join(problems)
+
+
 def run_chunk_analyze(gemini, chunk_file: Path, chunk: dict, stage1_doc: dict,
                       grid: dict, *, appearances: list[dict] | None = None,
                       research_context: str = "",
                       character_names: list[str] | None = None,
+                      skip_broadcast_text: bool = False,
                       log=print) -> tuple[list[dict] | None, dict]:
     """chunk 1개 분석 → (meanings | None(실패 — 커버리지 표기), 감사 기록)."""
     chunk_spans = spans_for_chunk(grid, chunk["start_sec"], chunk["end_sec"])
@@ -812,31 +906,60 @@ def run_chunk_analyze(gemini, chunk_file: Path, chunk: dict, stage1_doc: dict,
     uploaded = _upload_video(gemini, chunk_file, log=log)
     try:
         reject_note = ""
+        pending_repair = None
         for attempt in range(1 + MAX_REASKS):
             final = attempt == MAX_REASKS
-            prompt = build_stage2_prompt(
-                chunk, stage1_doc, chunk_spans, appearances,
-                research_context=research_context, character_names=character_names,
-                reject_note=reject_note)
-            log(f"  [v3/stage2] {audit['chunk']} Pro 요청 "
+            if pending_repair:
+                base, targets, previous_problems = pending_repair
+                prompt = build_span_repair_prompt(base, targets, chunk, chunk_spans,
+                                                 research_context, previous_problems)
+            else:
+                prompt = build_stage2_prompt(
+                    chunk, stage1_doc, chunk_spans, appearances,
+                    research_context=research_context, character_names=character_names,
+                    reject_note=reject_note)
+            mode = "span_repair" if pending_repair else "full"
+            if skip_broadcast_text:
+                from app.v3.text_policy import INSTRUCTION
+                prompt += INSTRUCTION
+            label = f"부분 수정 {len(targets)}개" if pending_repair else "Pro 요청"
+            log(f"  [v3/stage2] {audit['chunk']} {label} "
                 f"(시도 {attempt + 1}/{1 + MAX_REASKS}, span {len(chunk_spans)})")
             t0 = time.time()
             problems: list[str] = []
             notes: list[str] = []
+            resp = None
+            response_record = None
             try:
-                resp = _call_stage2_model(gemini, uploaded, prompt)
+                received = _call_stage2_model(gemini, uploaded, prompt)
+                response_record = copy.deepcopy(received)
+                resp = apply_span_repair(base, received, targets, chunk_spans) if pending_repair else received
                 norm, problems, notes = validate_stage2_response(
-                    resp, chunk_spans, final_attempt=final)
+                    resp, chunk_spans, final_attempt=final and not pending_repair)
             except ValueError as e:
+                if response_record is None:
+                    response_record = getattr(e, "raw_response", None)
                 problems = [f"응답 오류: {e}"]
                 norm = []
             rec = {"attempt": attempt + 1, "elapsed": round(time.time() - t0, 1),
+                   "mode": mode, "response": response_record,
                    "problems": problems, "notes": notes}
+            if pending_repair:
+                rec["repair_ids"] = list(targets)
             audit["attempts"].append(rec)
             if problems:
                 log(f"  [v3/stage2] {audit['chunk']} 반려 — 사유 {len(problems)}건")
                 reject_note = "\n".join(f"- {p}" for p in problems[:20])
+                repair_ids = span_repair_targets(resp, chunk_spans)
+                if repair_ids:
+                    pending_repair = (copy.deepcopy(resp), repair_ids, problems)
+                elif pending_repair and resp is None:
+                    pending_repair = (base, targets, problems)
+                else:
+                    pending_repair = None
                 continue
+
+            pending_repair = None
 
             # 내용-시각 정합 벨트 — 표본 프레임 ↔ scene_script 대조(화면판 전사 가드)
             binding = verify_scene_binding(gemini, chunk_file, chunk, norm,

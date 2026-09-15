@@ -189,7 +189,7 @@ V3_ONLY_DESIGN_KEYS = frozenset({"subtitle_band_offset", "tts_band_offset",
 
 
 CHANNEL_DESIGN_DIR = Path(__file__).resolve().parent.parent / "data" / "channel_designs"
-PRESET_OPTIONS = ("no_reframe", "subtitle_skip_singing", "no_subtitles")   # 템플릿이 켤 수 있는 불리언 스위치
+PRESET_OPTIONS = ("no_reframe", "subtitle_skip_singing", "no_subtitles", "skip_broadcast_text")
 
 
 def load_design_preset(name: str, *, base_dir: Path | None = None) -> dict:
@@ -352,6 +352,7 @@ def main(argv: list[str] | None = None) -> int:
                  exclude_topics=tuple(args.exclude_topic or ()) or None,
                  exclude_ranges=parse_exclude_ranges(args.exclude_range) or None,
                  subtitle_skip_singing=bool(args.subtitle_skip_singing),
+                 skip_broadcast_text=bool(getattr(args, "skip_broadcast_text", False)),
                  editorial=editorial,
                  banned_ranges=banned_ranges or None,
                  channel_design=channel_design or None,
