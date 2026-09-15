@@ -54,9 +54,29 @@ def validate_media(path, expected):
     video = next(s for s in streams if s["codec_type"] == "video")
     audio = next(s for s in streams if s["codec_type"] == "audio")
     vd, ad = float(video["duration"]), float(audio["duration"])
-    if (video["width"], video["height"]) != (1080, 1920) or abs(vd-expected) > .05 or abs(ad-expected) > .1:
+    if (video["width"], video["height"]) != (1080, 1920) or abs(vd-expected) > .05 + 1e-6 or abs(ad-expected) > .1 + 1e-6:
         raise ValueError(f"render duration/geometry mismatch: expected={expected}, video={video}, audio={ad}")
     return {"video_sec": vd, "audio_sec": ad, "width": video["width"], "height": video["height"]}
+
+
+def v3_title(title):
+    """Adapt existing Tikitaka wording to v3's line1/line2 contract.
+
+    Keep explicit editorial line breaks. For legacy single-line titles, split
+    at the most balanced word boundary without dropping or rewriting words;
+    shared finalize.fit_title_sizes remains the authority for font sizing.
+    """
+    if isinstance(title, dict):
+        return {k: str(title.get(k) or "").strip() for k in ("line1", "line2")}
+    lines = [line.strip() for line in str(title).splitlines() if line.strip()]
+    if len(lines) == 2:
+        return dict(zip(("line1", "line2"), lines))
+    text = " ".join(str(title).split())
+    spaces = [i for i, c in enumerate(text) if c == " "]
+    if spaces and len(text) > 12:
+        split = min(spaces, key=lambda i: abs(len(text[:i]) - len(text[i+1:])))
+        return {"line1": text[:split], "line2": text[split+1:]}
+    return {"line1": text, "line2": ""}
 
 
 def bundle(table, grid, *, title):
@@ -109,10 +129,11 @@ def bundle(table, grid, *, title):
                    "source_time_sec": row["cuts"][0]["in"], "source_end_sec": row["cuts"][-1]["out"],
                    "muted_span_ids": list(dict.fromkeys(ids))}
             cue_files.append({"cue": cue, "path": str(Path(row["tts"]).resolve())})
-    plan = {"timeline": timeline, "source_fps": FPS,
-            "layout": {"top_title": table["version"]["title"], "bottom_label": title},
+    headline = v3_title(table["version"]["title"])
+    plan = {"timeline": timeline, "source_fps": FPS, "output_fps": FPS,
+            "layout": {"top_title": "\n".join(v for v in headline.values() if v), "bottom_label": title},
             "audio_mix": {"original_gain_db": -3, "tts_gain_db": -3}}
-    story = {"beats": beats, "title": {"top_title": table["version"]["title"]},
+    story = {"beats": beats, "title": headline,
              "narration_cues": [f["cue"] for f in cue_files], "template": "tikitaka"}
     return plan, story, segments, {"tts_cue_files": cue_files}
 
@@ -161,15 +182,23 @@ def label_facts(timeline, facts):
 
 
 def run(job, table, grid, index, *, get_gemini, design=None, redo=False, force_render=False,
-        force_style=False, exclude=(), tag=""):
+        force_style=False, exclude=(), tag="", split_narration=False):
     n = table["version"]["n"]
     suffix = f"v{n}{'_'+tag if tag else ''}"
     work = Job(job.source.resolve(), job.path(f"review_{suffix}").resolve(), job.title)
     work.out_dir.mkdir(parents=True, exist_ok=True)
     design = design or {}
+    if job.has("transcript.json"):
+        from app.tikitaka.subtitles import refresh_table
+        transcript = job.load("transcript.json")
+        if transcript.get("words") and transcript.get("lines"):
+            table = refresh_table(table, transcript)
+            job.save(f"subtitle_table_{suffix}.json", table)
     initial = bundle(table, grid, title=job.title)
     review_material = copy.deepcopy(initial)
     review_material[0].pop("layout", None)
+    # Draft is already 30fps; this option only fixes the final renderer.
+    review_material[0].pop("output_fps", None)
     review_material[1].pop("title", None)
     for clip in review_material[0]["timeline"]:
         clip.pop("reframe", None)
@@ -177,7 +206,7 @@ def run(job, table, grid, index, *, get_gemini, design=None, redo=False, force_r
                             [(f["path"], hashlib.sha256(Path(f["path"]).read_bytes()).hexdigest()) for f in initial[3]["tts_cue_files"]]])
     prior = work.load("checkpoint_review.json") if work.has("checkpoint_review.json") else {}
     work.save("grid.json", grid)
-    work.save("stage2.json", stage2_document(grid, index["grid_facts"]))
+    work.save("stage2.json", index.get("v3_stage2") or stage2_document(grid, index["grid_facts"]))
     # Same media identity the existing speaker/letterbox code consumes.
     if not job.has("picture_area.json"):
         from app.v3.letterbox import detect_or_full
@@ -185,7 +214,7 @@ def run(job, table, grid, index, *, get_gemini, design=None, redo=False, force_r
                                  height=grid["source"]["height"], log=job.log)
         job.save("picture_area.json", picture)
     work.save("checkpoint_probe.json", {**grid["source"], "picture": job.load("picture_area.json")})
-    if prior.get("fingerprint") == input_fp and not redo and work.has("draft_480.mp4"):
+    if prior.get("fingerprint") == input_fp and not prior.get("audit", {}).get("error") and not redo and work.has("draft_480.mp4"):
         plan, story, segments, resources = prior["bundle"]
         audit = prior["audit"]
         work.log("[review] 같은 편의 재관찰 결과 재사용")
@@ -193,7 +222,8 @@ def run(job, table, grid, index, *, get_gemini, design=None, redo=False, force_r
         plan, story, segments, resources = initial
         validate_bundle(plan, grid, segments, resources, exclude=exclude)
         draft = work.path("draft_480.mp4")
-        render_draft(job.source, plan["timeline"], draft, resources, log=work.log)
+        if prior.get("fingerprint") != input_fp or not draft.exists() or redo:
+            render_draft(job.source, plan["timeline"], draft, resources, log=work.log)
         from app.v3.story import build_span_index
         span_index, _ = build_span_index(work.load("stage2.json"), grid)
         # Lip-sync lines are protected. Review can remove pauses and irrelevant
@@ -201,7 +231,7 @@ def run(job, table, grid, index, *, get_gemini, design=None, redo=False, force_r
         importance = {s["id"]: (s["is_audio"], 4 if s["is_audio"] else index["grid_facts"].get(s["id"], {}).get("importance", 3))
                       for s in grid["span_candidates"]}
         cuts, audit = watch_trim.run_watch_trim(get_gemini(), draft, timeline=plan["timeline"],
-            grid=grid, resources=resources, segments=segments, importance=importance, span_index=span_index, log=work.log)
+            grid=grid, resources=resources, segments=segments, importance=importance, span_index=span_index, opening_focus=True, log=work.log)
         guards = watch_trim.protected_intervals(plan["timeline"], resources, importance, grid)
         cuts = [{**c, "start": math.ceil(c["start"]*FPS-1e-6)/FPS,
                  "end": math.floor(c["end"]*FPS+1e-6)/FPS} for c in cuts]
@@ -223,6 +253,7 @@ def run(job, table, grid, index, *, get_gemini, design=None, redo=False, force_r
             "bundle": [plan, story, segments, resources], "audit": audit})
     # Appearance-only edits cannot trigger a different trim or resurrect an old
     # title from the reviewed checkpoint. Reapply them after the clock is fixed.
+    plan["output_fps"] = FPS
     plan["layout"] = copy.deepcopy(initial[0]["layout"])
     story["title"] = copy.deepcopy(initial[1]["title"])
     for c in plan["timeline"]:
@@ -232,6 +263,10 @@ def run(job, table, grid, index, *, get_gemini, design=None, redo=False, force_r
                          and x["clip_end_sec"] >= c["clip_end_sec"]-1e-6), None)
         if original and original.get("reframe"):
             c["reframe"] = copy.deepcopy(original["reframe"])
+    if split_narration:
+        from app.tikitaka.subtitles import narration_captions
+        resources["tts_caption_segments"] = narration_captions(job, resources)
+        work.save("tts_caption_segments.json", resources["tts_caption_segments"])
     work.save("edit_plan.json", plan); work.save("subtitle_segments.json", segments)
     work.save("checkpoint_story.json", {"story": story}); work.save("checkpoint_resources.json", resources)
     preset = finalize.merge_channel_preset(stage4.get_style_preset("drama_clip"), design)

@@ -15,7 +15,9 @@ from pathlib import Path
 
 from app.tikitaka.common import Job, fmt_tc, find_bin
 from app.tikitaka.llm import Gemini
+from app.tikitaka.grid import fingerprint, source_identity
 
+SCHEMA = "transcript_polish/research_v2"
 WINDOW_SEC = 600.0
 _NORM = re.compile(r"[\s\.\,\!\?…~\"'“”‘’\-]+")
 
@@ -25,6 +27,13 @@ POLISH_PROMPT = """너는 한국어 드라마 전사 교정자다. 첨부 오디
 [할 일] 오디오를 듣고 **잘못 들은 단어만** 고쳐라. 문장을 다시 쓰거나 줄이거나 늘리지 마라 — 같은 자리의 단어를 맞는 단어로
 바꾸는 것만 허용된다(예: "입시장산하고" → "입시 장사하고", "목사판" → "복사판", "찌리니까" → "찔리니까"). 띄어쓰기·맞춤법도 고친다.
 확신이 없으면 그대로 둔다. 고친 줄만 출력한다.
+
+[작품·인물 리서치]
+{research_context}
+
+인명은 오디오·앞뒤 대사와 리서치의 극중 이름을 함께 대조하라. 비슷하게 들리는 오인식은 정식 이름으로
+교정하되, 이름 목록에 없다는 이유만으로 강제 치환하지 마라. 별명·가명·다른 인물은 원문을 유지한다.
+극중 이름을 배우 이름으로 바꾸지 마라. 리서치의 줄거리나 설명을 대사에 추가하지 마라.
 
 [전사 줄]
 {lines}
@@ -64,14 +73,22 @@ def _window_audio(job: Job, wav: Path, t0: float, t1: float, k: int) -> Path:
     return out
 
 
-def polish_transcript(job: Job, gemini: Gemini, transcript: dict, wav: Path, duration: float, *, title: str, cast: list[str]) -> dict:
-    if transcript.get("polished"):
+def polish_transcript(job: Job, gemini: Gemini, transcript: dict, wav: Path, duration: float, *, title: str, cast: list[str], research_context: str = "") -> dict:
+    original_lines = [{**l, "text": l.get("text_orig", l["text"])} for l in transcript["lines"]]
+    identity = fingerprint([SCHEMA, POLISH_PROMPT, title, cast, research_context, duration,
+                            source_identity(job.source),
+                            [(l["id"], l["start"], l["end"], l["text"]) for l in original_lines]])
+    if transcript.get("polished") and transcript.get("polish", {}).get("fingerprint") == identity:
         return transcript
+    previous = {l["id"]: l["text"] for l in transcript["lines"]}
+    if transcript.get("polished"):
+        job.log("[polish] 리서치·인물·교정 입력 변경 → 기존 교정 캐시 재평가")
     lines = transcript["lines"]
     for l in lines:                        # 재실행(--redo polish) 이면 원문으로 되돌리고 시작
         if l.get("text_orig"):
             l["text"] = l["text_orig"]
-    audit = {"windows": [], "applied": [], "rejected": []}
+    audit = {"schema": SCHEMA, "fingerprint": identity, "research_context": research_context,
+             "cast": cast, "windows": [], "applied": [], "rejected": []}
     t = 0.0
     k = 0
     while t < duration - 0.5:
@@ -80,19 +97,19 @@ def polish_transcript(job: Job, gemini: Gemini, transcript: dict, wav: Path, dur
             e = duration
         win_lines = [l for l in lines if t <= l["start"] < e]
         if win_lines:
-            cache = job.path("polish_windows") / f"win_{k:02d}.json"
+            cache = job.path("polish_windows") / f"win_{k:02d}_{identity}.json"
             if cache.exists():
                 raw = json.loads(cache.read_text(encoding="utf-8"))
             else:
                 audio = _window_audio(job, wav, t, e, k)
                 block = "\n".join(f"{l['id']} [{fmt_tc(l['start']-t)}~{fmt_tc(l['end']-t)}] {l['text']}" for l in win_lines)
-                prompt = POLISH_PROMPT.format(title=title, win_start=fmt_tc(t), win_end=fmt_tc(e), cast=", ".join(cast) if cast else "(미제공)", lines=block)
+                prompt = POLISH_PROMPT.format(title=title, win_start=fmt_tc(t), win_end=fmt_tc(e), cast=", ".join(cast) if cast else "(미제공)", lines=block, research_context=research_context or "(미제공)")
                 try:
                     raw = gemini.media_json(prompt, audio, mime="audio/mp4", kind=f"polish{k:02d}", thinking="low")
-                except Exception as e:  # noqa: BLE001 — 교정은 보강이라 창 하나가 실패해도 전사 원문으로 진행한다(기록)
-                    job.log(f"[polish] ⚠ 창{k:02d} 교정 실패 → 원문 유지: {type(e).__name__}: {str(e)[:160]}")
+                except Exception as exc:  # noqa: BLE001 — 교정은 보강이라 창 하나가 실패해도 전사 원문으로 진행한다(기록)
+                    job.log(f"[polish] ⚠ 창{k:02d} 교정 실패 → 원문 유지: {type(exc).__name__}: {str(exc)[:160]}")
                     audit["windows"].append({"k": k, "start": t, "end": e, "lines": len(win_lines), "applied": 0, "rejected": 0,
-                                             "error": str(e)[:200]})
+                                             "error": str(exc)[:200]})
                     t = e
                     k += 1
                     continue
@@ -118,8 +135,11 @@ def polish_transcript(job: Job, gemini: Gemini, transcript: dict, wav: Path, dur
             job.log(f"[polish] 창{k:02d} {fmt_tc(t)}~{fmt_tc(e)} 줄 {len(win_lines)} · 교정 {n_ok} · 기각 {n_no}")
         t = e
         k += 1
-    transcript["polished"] = True
-    transcript["polish"] = {"applied": len(audit["applied"]), "rejected": len(audit["rejected"])}
+    transcript["polished"] = not any(w.get("error") for w in audit["windows"])
+    transcript["polish"] = {"fingerprint": identity, "applied": len(audit["applied"]), "rejected": len(audit["rejected"])}
+    changed = [l["id"] for l in lines if previous[l["id"]] != l["text"]]
+    if changed:
+        job.save("transcript_dependents_dirty.json", {"fingerprint": identity, "changed_line_ids": changed})
     job.save("transcript.json", transcript)
     job.save("transcript_polish.json", audit)
     for a in audit["applied"][:12]:

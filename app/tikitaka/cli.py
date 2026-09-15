@@ -27,6 +27,8 @@ def cascade_redo(steps: set[str]) -> set[str]:
     """앞 단계를 다시 만들면 그 산출을 먹는 뒤 단계도 전부 다시 — 옛 줄 ID 위에 새 전사가 얹히는 조용한 불일치를 막는다. 순수."""
     out = set(steps)
     for st in steps:
+        if st == "research":
+            out.update(REDO_ORDER[REDO_ORDER.index("index"):])
         if st in REDO_ORDER:
             out.update(REDO_ORDER[REDO_ORDER.index(st):])
     return out
@@ -41,6 +43,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--title", required=True, help="작품명")
     ap.add_argument("--episode", default="", help="회차 표기(예: 1회)")
     ap.add_argument("--cast", default="", help="등장인물 후보(쉼표 구분)")
+    ap.add_argument("--skip-research", action="store_true", help="grid-review의 v3 작품 리서치를 생략(가이드 인물 정보는 적용)")
+    ap.add_argument("--retry-failed-chunks", action="store_true", help="v3 분석의 실패 청크만 다시 요청")
     ap.add_argument("--out", type=Path, default=None, help="잡 디렉토리(기본 outputs_tikitaka_grid/<제목>_<회차>, legacy는 outputs_tikitaka)")
     ap.add_argument("--version", default="auto", help="렌더할 리빌딩 버전 번호(쉼표로 여러 개 · 11~14 는 선형 서사 계열) 또는 auto(추천)")
     ap.add_argument("--range", default=None, help="재료 구간 MM:SS~MM:SS (쉼표로 여러 개) — 그 밖은 활용 불가로 배제. 산출은 자동 태그 r<시작>-<끝>")
@@ -50,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--all-versions", action="store_true", help="생성된 14전략 버전 전부 테이블+렌더")
     ap.add_argument("--count", type=int, default=1, help="조회수 기대 순위 상위 N개 버전을 각각 확인·테이블·렌더 (--version auto 일 때)")
     ap.add_argument("--cut-search", choices=("agentic", "index"), default="agentic", help="N 행 컷 소스 탐색 경로")
-    ap.add_argument("--layout", choices=("fill", "band"), default="fill", help="fill=레퍼런스형(5:6 크롭·제목 위 검정 영역) · band=16:9 밴드")
+    ap.add_argument("--layout", choices=("fill", "band"), default=None, help="grid-review 미지정=V3 템플릿 · fill=5:6 · band=16:9 · legacy 기본=fill")
     ap.add_argument("--no-framing", action="store_true", help="5.5단계 Gemini 주인물 크롭을 건너뛴다(중앙 크롭)")
     ap.add_argument("--guide", action="append", default=None, help="제작 가이드 파일(반복 가능). 미지정이면 guides/tikitaka/<작품명>.md · <작품명>/<회차>.md 자동 탐색")
     ap.add_argument("--logo", default=None, help="작품명 대신 넣을 로고 이미지(PNG 알파). 가이드의 '로고:' 키보다 우선")
@@ -64,10 +68,21 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-transcript-polish", action="store_true", help="1.5단계 Gemini 글자 교정을 건너뛴다")
     ap.add_argument("--no-voice-check", action="store_true", help="3.5단계 목소리(diarize) 기준 화자 대조를 건너뛴다")
     ap.add_argument("--no-verify", action="store_true", help="4.5단계 영상 확인 패스를 건너뛴다(텍스트 리빌딩 버전 그대로)")
-    ap.add_argument("--redo", default="", help="다시 만들 단계(쉼표): transcribe,polish,index,digest,rebuild,verify,agentic,table,review,style,render. grid-review의 render는 관찰/연출을 재사용")
+    ap.add_argument("--redo", default="", help="다시 만들 단계(쉼표): research,transcribe,polish,index,digest,rebuild,verify,agentic,table,review,style,render. grid-review의 render는 관찰/연출을 재사용")
     ap.add_argument("--no-digest", action="store_true", help="3.7단계 작품 이해 문서(digest)를 만들지 않는다(종전 프롬프트)")
-    ap.add_argument("--until", default="render", choices=("transcribe", "polish", "index", "digest", "rebuild", "verify", "table", "render"))
+    ap.add_argument("--until", default="render", choices=("research", "transcribe", "polish", "index", "digest", "rebuild", "verify", "table", "render"))
     a = ap.parse_args(argv)
+    if a.pipeline == "legacy" and a.layout is None:
+        a.layout = "fill"
+    from app.tikitaka import research as research_module
+    research_episode = None
+    if a.pipeline == "grid-review":
+        try:
+            research_episode = research_module.episode_number(a.episode)
+        except ValueError as exc:
+            ap.error(str(exc))
+    elif a.until == "research" or "research" in a.redo.split(","):
+        ap.error("research 단계는 grid-review 전용입니다")
     if a.tag and not re.fullmatch(r"[A-Za-z0-9_-]+", a.tag):
         ap.error("--tag는 영숫자, 밑줄, 하이픈만 사용할 수 있습니다")
     preset = None
@@ -129,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
     if logo and not logo.exists():
         ap.error(f"로고 이미지가 없다: {logo}")
     redo = cascade_redo({s.strip() for s in a.redo.split(",") if s.strip()})
-    unknown_redo = redo - set(REDO_ORDER) - {"review", "style"}
+    unknown_redo = redo - set(REDO_ORDER) - {"research", "review", "style"}
     if unknown_redo:
         ap.error(f"알 수 없는 --redo 단계: {sorted(unknown_redo)}")
     if a.pipeline == "grid-review" and "index" in redo:
@@ -170,6 +185,15 @@ def main(argv: list[str] | None = None) -> int:
         tr["polished"] = False
         (out_dir / "transcript.json").write_text(json.dumps(tr, ensure_ascii=False, indent=1), encoding="utf-8")
     cast = [c.strip() for c in a.cast.split(",") if c.strip()]
+    observation_context = ""
+    if a.pipeline == "grid-review":
+        research = None if a.skip_research else research_module.run(
+            job, get_v3, episode=research_episode, force="research" in redo)
+        cast = research_module.cast_names(research, cast, guide)
+        observation_context = research_module.context(research, cast, guide)
+        guide = research_module.with_context(guide, observation_context)
+        if a.until == "research":
+            return 0
 
     info = P.probe(job)
     wav = P.build_audio(job)
@@ -181,14 +205,30 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     gemini = Gemini(log=job.log)
     if not a.no_transcript_polish:                        # 1.5 글자 교정(시각은 STT 그대로)
-        transcript = TP.polish_transcript(job, gemini, transcript, wav, info["duration_sec"], title=a.title, cast=cast)
+        transcript = TP.polish_transcript(job, gemini, transcript, wav, info["duration_sec"], title=a.title, cast=cast,
+                                          research_context=observation_context)
     if a.until == "polish":
         return 0
+    if job.has("transcript_dependents_dirty.json"):
+        # Preserve previous outputs for comparison; caches with embedded old
+        # dialogue must not survive a text-only correction.
+        import time
+        stamp = time.time_ns()
+        patterns = [pat for step, pats in REDO_FILES if step in REDO_ORDER[2:] for pat in pats]
+        patterns += ["grid_index.json", "voice_check.json", "grid_table_v*.json", "review_v*", "publish_v*.json"]
+        for pat in patterns:
+            for old in list(out_dir.glob(pat)):
+                if ".prev_" not in old.name:
+                    old.rename(old.with_name(f"{old.name}.prev_{stamp}"))
+        job.path("transcript_dependents_dirty.json").rename(job.path(f"transcript_dependents_dirty.json.prev_{stamp}"))
+        job.log("[polish] 전사 변경 → 이전 대본·편집·렌더 캐시 보존 후 무효화")
     grid = None
     if a.pipeline == "grid-review":
-        from app.tikitaka import grid as grid_module
+        from app.tikitaka import v3_analysis as grid_module
         index, grid = grid_module.build_index(job, gemini, transcript, proxy, info, cuts,
-                                              title=a.title, cast=cast, get_v3=get_v3)
+                                              title=a.title, cast=cast, get_v3=get_v3,
+                                              research_context=observation_context,
+                                              force="index" in redo, retry_failed=a.retry_failed_chunks)
     else:
         index = I.build_index(job, gemini, transcript, proxy, info["duration_sec"], title=a.title, cast=cast, workers=a.workers)
     transcript = job.load("transcript.json")
@@ -198,6 +238,12 @@ def main(argv: list[str] | None = None) -> int:
         transcript, index = job.load("transcript.json"), job.load("index.json")
     if a.until == "index":
         return 0
+    analysis_exclude = index.get("analysis_excluded_ranges", [])
+    if analysis_exclude:
+        from app.tikitaka.v3_analysis import overlaps
+        transcript = {**transcript, "lines": [l for l in transcript["lines"]
+                      if not overlaps(l["start"], l["end"], analysis_exclude)]}
+        job.log(f"[v3/index] 제외/실패 구간 {len(analysis_exclude)}개를 대본·덮개·렌더에서 배제")
     digest = None
     if not a.no_digest:                                            # 3.7 작품 이해 — 대본을 짜기 전에 회차 전체(관계·동기·인과)를 문서로
         digest = DG.build_digest(job, gemini, index, transcript, title=a.title, episode_label=a.episode, guide=guide)
@@ -206,7 +252,7 @@ def main(argv: list[str] | None = None) -> int:
     if guide and job.has(f"rebuild{'_' + a.tag if a.tag else ''}.json") and job.load(f"rebuild{'_' + a.tag if a.tag else ''}.json").get("guide_sha") != guide["sha"]:
         job.log(f"[guide] ⚠ 리빌딩 캐시(rebuild.json)는 이 가이드({guide['sha']})로 만든 것이 아니다 — 가이드는 확인 패스·문구 벨트에만 적용된다. "
                 "처음부터 반영하려면 --redo rebuild")
-    exclude = G.excluded_ranges(guide, info["duration_sec"])
+    exclude = sorted(G.excluded_ranges(guide, info["duration_sec"]) + [tuple(r) for r in analysis_exclude])
     preset_exclude = []
     if preset and preset.get("banned"):
         from app.v3.banned import banned_for_episode
@@ -237,7 +283,7 @@ def main(argv: list[str] | None = None) -> int:
         ensure_story_inputs(job, [index["grid_fingerprint"], guide, exclude, a.seq_hook,
                                   [(l["id"], l["text"]) for l in transcript["lines"]]], tag=a.tag)
     rebuild = R.rebuild(job, gemini, index, transcript, title=a.title, episode_label=a.episode, duration=info["duration_sec"], guide=guide,
-                        extra_exclude=range_exclude + preset_exclude, range_label=range_label, seq_hook=(a.seq_hook == "on"), cache_name=rebuild_name, digest=digest)
+                        extra_exclude=range_exclude + preset_exclude + [tuple(r) for r in analysis_exclude], range_label=range_label, seq_hook=(a.seq_hook == "on"), cache_name=rebuild_name, digest=digest)
     if digest and not rebuild.get("digest"):
         job.log("[digest] ⚠ 리빌딩 캐시는 작품 이해 문서 없이 만든 것이다 — 처음부터 반영하려면 --redo rebuild")
     if not rebuild.get("rerank"):                                     # 재순위 단계 이전에 만든 캐시 — 초안 기준으로 한 번 매긴다(멱등)
@@ -287,7 +333,7 @@ def main(argv: list[str] | None = None) -> int:
             from app.tikitaka import grid_table
             table = grid_table.build_table(job, gemini, rb_for_table, index, transcript, cuts, info["duration_sec"], proxy,
                 version_n=n, title=a.title, grid=grid, voice=a.voice, speed=a.speed, exclude=exclude, tag=a.tag, black=black,
-                force="table" in redo)
+                force="table" in redo, guide=guide)
         else:
             table = TB.build_table(job, gemini, rb_for_table, index, transcript, cuts, info["duration_sec"], proxy, version_n=n,
                                    title=a.title, cut_search=a.cut_search, voice=a.voice, speed=a.speed, exclude=exclude, tag=a.tag, black=black)
@@ -296,8 +342,12 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if a.pipeline == "grid-review":
             from app.tikitaka import finish
-            design = {"aspect_ratio": "5:6" if a.layout == "fill" else "16:9",
-                      "face_tracking": not a.no_framing}
+            from app.v3.stage4 import get_style_preset
+            template = get_style_preset("drama_clip")
+            design = {k: template[k] for k in ("aspect_ratio", "video_y")}
+            design["face_tracking"] = not a.no_framing
+            if a.layout is not None:
+                design["aspect_ratio"] = "5:6" if a.layout == "fill" else "16:9"
             if preset:
                 design.update(preset["design"])
                 if preset["options"].get("no_reframe"):
@@ -313,13 +363,16 @@ def main(argv: list[str] | None = None) -> int:
                 design.update(work_type="image", work_value=str(logo.resolve()),
                               work_image_width=600, work_image_height=240, work_image_align="center")
             if copy_text:
-                if copy_pos == "below":
+                if copy_text == design.get("platform_text"):
+                    # The channel already places this same copy above its logo.
+                    design.pop("work_caption", None)
+                elif copy_pos == "below":
                     design["work_caption"] = copy_text
                 else:
                     design.update(platform_text=copy_text, platform_placement="above_work")
             finish.run(job, table, grid, index, get_gemini=get_v3, design=design,
                        redo=bool(redo & {"review", "table"}), force_render="render" in redo,
-                       force_style="style" in redo, exclude=exclude, tag=a.tag)
+                       force_style="style" in redo, exclude=exclude, tag=a.tag, split_narration=True)
             job.save(f"publish_v{n}{sfx}.json", {"title": table["version"]["title"], "work": a.title,
                 "episode": a.episode, "hashtags": (guide or {}).get("hashtags") or [], "copy": copy_text,
                 "review": f"review_v{n}{sfx}.json", "pipeline": "grid-review"})

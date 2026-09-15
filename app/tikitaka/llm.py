@@ -167,6 +167,16 @@ class Gemini:
     def video_json(self, prompt: str, video_path: Path, *, kind: str, fps: float | None = 1.0,
                    thinking: str = "low", low_res: bool = True, max_output_tokens: int = 65536) -> Any:
         types = self.types
+        # These bounded review clips are tiny. Avoid a separate Files API
+        # processing job (and its repeated 500 failures) for each 1–2s clip.
+        if kind in {"grid_cover_probe", "opening_review"} and video_path.stat().st_size <= INLINE_MAX_BYTES:
+            part = types.Part(inline_data=types.Blob(data=video_path.read_bytes(), mime_type="video/mp4"),
+                              video_metadata=types.VideoMetadata(fps=fps) if fps else None)
+            kw = dict(response_mime_type="application/json", max_output_tokens=max_output_tokens,
+                      thinking_config=types.ThinkingConfig(thinking_level=thinking))
+            if low_res:
+                kw["media_resolution"] = types.MediaResolution.MEDIA_RESOLUTION_LOW
+            return self._call(kind, self.video_model, [part, prompt], types.GenerateContentConfig(**kw))
         try:
             uploaded = self._upload(video_path)
         except Exception as e:  # noqa: BLE001

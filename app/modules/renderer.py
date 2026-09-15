@@ -651,6 +651,9 @@ class RenderInputs:
     # 어긋났다(실측 최대 0.3초 — 덮개 꼬리 대사 유출). assemble.clip_frames 와 같은 식.
     # None = 종전과 완전히 동일한 필터그래프(회귀 0).
     source_fps: float | None = None
+    # Explicit CFR conversion for timelines assembled on a different frame grid.
+    # None preserves the source-rate rendering contract.
+    output_fps: float | None = None
 
 
 def render_short(inputs: RenderInputs) -> list[str]:
@@ -676,7 +679,13 @@ def render_short(inputs: RenderInputs) -> list[str]:
         print(f"  [WARN] 소스 길이 확인 실패 — 길이 검사 생략: {e}")
         source_duration = None
 
-    clean_clips, notes = sanitize_clips(list(inputs.clips), source_duration)
+    output_fps = inputs.output_fps
+    if output_fps is not None and not (1 < float(output_fps) < 1000):
+        raise ValueError("output_fps must be between 1 and 1000")
+    clean_clips, notes = sanitize_clips(list(inputs.clips), source_duration,
+        min_len_sec=(0.5 / float(output_fps) if output_fps else 0.2))
+    if output_fps and len(clean_clips) != len(inputs.clips):
+        raise ValueError(f"Explicit frame timeline lost clips: {notes}")
     for n in notes:
         print(f"  [WARN] 컷 검증: {n}")
     if not clean_clips:
@@ -1345,7 +1354,7 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
 
     # 프레임 고정에 쓸 fps(없으면 종전 동작). 0·음수·비정상은 없는 것으로 본다.
     try:
-        _clip_fps = float(getattr(inputs, "source_fps", None) or 0) or None
+        _clip_fps = float(getattr(inputs, "output_fps", None) or getattr(inputs, "source_fps", None) or 0) or None
     except (TypeError, ValueError):
         _clip_fps = None
     if _clip_fps is not None and not (1.0 < _clip_fps < 1000.0):
@@ -1378,7 +1387,8 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         if _clip_fps:
             n_fr = max(1, round((float(clip.end_sec) - float(clip.start_sec) + _hold) * _clip_fps))
             dur_q = n_fr / _clip_fps
-            pin_v = (f",tpad=stop_mode=clone:stop_duration={1 + _hold:.3f}"
+            rate_filter = f",fps={_clip_fps:.9f}" if inputs.output_fps else ""
+            pin_v = (rate_filter + f",tpad=stop_mode=clone:stop_duration={1 + _hold:.3f}"
                      f",trim=end_frame={n_fr},setpts=PTS-STARTPTS")
             pin_a = f"apad,atrim=end={dur_q:.6f},asetpts=PTS-STARTPTS"
         elif _hold > 0:

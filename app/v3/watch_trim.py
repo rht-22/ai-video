@@ -542,6 +542,7 @@ def run_watch_trim(gemini, draft_path: Path, *, timeline: list[dict],
                    importance: dict[str, tuple[bool, int]],
                    span_index: dict[str, dict] | None = None,
                    budget_deficit: float = 0.0,
+                   opening_focus: bool = False,
                    log=print) -> tuple[list[dict], dict]:
     """초안 시청 → (적용 컷 목록[편집본 좌표], 감사 기록). fail-soft.
 
@@ -585,16 +586,18 @@ def run_watch_trim(gemini, draft_path: Path, *, timeline: list[dict],
                                deficit=budget_deficit) if is_budget else ""),
                            material_block=build_material_block(
                                timeline, segments, resources))
+    if opening_focus:
+        prompt += "\n첫 3초의 훅을 별도로 평가하라. 중요해 보이는 소재라도 정적인 화면을 오래 유지하면 불필요한 무대사 부분을 cuts로 제안하라. 사건 변화·행동·반응이 빨리 시작되는지 pacing.note에 반드시 적어라. 대사/TTS 보호 구간은 그대로 지켜라."
     t0 = time.time()
     try:
         from app.v3.seq_analyze import _upload_video
         types = gemini.types
-        uploaded = _upload_video(gemini, draft_path, log=lambda *a: None)
+        inline = opening_focus and draft_path.stat().st_size <= 18 * 1024 * 1024
+        uploaded = None if inline else _upload_video(gemini, draft_path, log=lambda *a: None)
         try:
-            part = types.Part(
-                file_data=types.FileData(file_uri=uploaded.uri,
-                                         mime_type="video/mp4"),
-                video_metadata=types.VideoMetadata(fps=WATCH_SAMPLE_FPS))
+            media = {"inline_data": types.Blob(data=draft_path.read_bytes(), mime_type="video/mp4")} if inline else {
+                "file_data": types.FileData(file_uri=uploaded.uri, mime_type="video/mp4")}
+            part = types.Part(**media, video_metadata=types.VideoMetadata(fps=WATCH_SAMPLE_FPS))
             response = gemini.client.models.generate_content(
                 model=gemini.config.flash_model_name,
                 contents=[part, prompt],

@@ -79,6 +79,18 @@ def source_script(index: dict, transcript: dict, exclude: list[tuple[float, floa
             diegesis = moment.get("diegesis")
             if text or diegesis in {"imagined", "recalled", "unclear"}:
                 out.append(f"{moment['id']} · 화면 글자={text or '(없음)'} · 연출층위={diegesis}")
+    if index.get("v3_stage2"):
+        out.append("\n## v3 보충 기록 (관찰 근거 전용; 대사 선택 ID는 위 L-/S-만 사용)")
+        for scene in scenes:
+            out.append(f"{scene['id']} · 분위기={scene.get('mood')} · 중요도={scene.get('importance')}")
+        for sid, fact in index["grid_facts"].items():
+            ts = fact.get("time", {})
+            from app.v3.schemas import parse_ts
+            if in_excluded(parse_ts(ts['start']), parse_ts(ts['end']), ex):
+                continue
+            if fact.get("screen_text") or fact.get("diegesis", "actual") != "actual" or fact.get("is_claim"):
+                out.append(f"{sid} · 화면={fact.get('scene_script', '')} · 글자={fact.get('screen_text', '')}"
+                           f" · 연출층위={fact.get('diegesis', 'actual')} · 인물의 주장={bool(fact.get('is_claim'))}")
     return "\n".join(out)
 
 

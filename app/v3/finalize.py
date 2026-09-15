@@ -1747,9 +1747,11 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
             primary_color=design.tts_line_color, outline=SUB_OUTLINE_PX,
             margin_v=_tts_margin)
         from app.modules.subtitle import _width_max_chars
+        caption_files = ([{"cue": c} for c in resources["tts_caption_segments"]]
+                         if "tts_caption_segments" in resources else cue_files)
         _caps = [balance_narration_lines(narration_caption(str(f["cue"]["text"])),
                                          max_chars=_width_max_chars(getattr(design, "tts_width", None)))
-                 for f in cue_files]
+                 for f in caption_files]
         if _tts_off is not None:
             # 줄별 y — 한 줄 cue 도 두 줄 cue 도 윗변이 밴드 아래 같은 자리. 번인 회피가
             # 전역값을 올렸으면 그만큼 같이 올린다(lift). style.y 통로는 E18-2 와 동일.
@@ -1762,13 +1764,13 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                                          end_sec=float(f["cue"]["end_sec"]), text=c,
                                          style={"y": 1.0 - m / config.canvas_height,
                                                 "fx": NARRATION_FX})
-                         for f, c, m in zip(cue_files, _caps, _pm)]
+                         for f, c, m in zip(caption_files, _caps, _pm)]
             log(f"  [v3/자막배치] 내레이션 줄별 margin_v {sorted(set(_pm))} (cue {len(_pm)}개)")
         else:
             _tts_segs = [SimpleNamespace(start_sec=float(f["cue"]["start_sec"]),
                                          end_sec=float(f["cue"]["end_sec"]), text=c,
                                          style={"fx": NARRATION_FX})
-                         for f, c in zip(cue_files, _caps)]
+                         for f, c in zip(caption_files, _caps)]
         build_tts_ass(_tts_segs, tts_path, tts_style)
 
     # 괄호 라벨 — 편집실 자유 텍스트 레이어 재사용(비트 창 전체에 표시)
@@ -2042,6 +2044,7 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
         muted_windows=muted_windows or None,
         muted_gain_db=muted_gain_db,
         source_fps=plan.get("source_fps"),
+        output_fps=plan.get("output_fps"),
         sfx_audio=_all_sfx or None,
         work_min_top=_work_min_top,
         title_prefit=True,          # 줄별 크기는 위 fit_title_sizes 가 폰트 실측으로 맞췄다

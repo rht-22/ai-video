@@ -15,6 +15,9 @@ import time
 from app.v3 import timegrid
 
 SCHEMA = "tikitaka_grid/v1"
+# Scribe returns some words with start == end (지금불륜 EP01: 73/3182, e.g. 173.19~173.19 「네,」 in the raw
+# response). The grid copy gives them this much time, never past the next later-starting word or the source end.
+ZERO_WORD_SEC = 0.1
 
 
 def fingerprint(value) -> str:
@@ -53,16 +56,24 @@ def build_grid(info: dict, transcript: dict, cuts: list[float], *, silence=None,
         raise ValueError("grid: invalid source duration")
     for w in words:
         if not (math.isfinite(w["t0"]) and math.isfinite(w["t1"])
-                and 0 <= w["t0"] < w["t1"] <= duration + .05):
+                and 0 <= w["t0"] <= w["t1"] <= duration + .05 and w["t0"] < duration):
             raise ValueError(f"grid: invalid STT word timing: {w}")
     words.sort(key=lambda w: (w["t0"], w["t1"]))
+    starts = sorted({w["t0"] for w in words})
+    padded = 0
+    for w in words:
+        if w["t1"] == w["t0"]:
+            later = next((t for t in starts if t > w["t0"]), duration)
+            w["t1"] = round(min(w["t0"] + ZERO_WORD_SEC, later, duration), 3)
+            padded += 1
     cuts = sorted({float(t) for t in cuts if math.isfinite(float(t)) and 0 < float(t) < duration})
     spans = timegrid.carve_spans(words, cuts, silence or [], duration)
     return timegrid.build_grid_doc(
         source=dict(info), words=words, scene_cuts=cuts, silence=silence or [], arousal=arousal or [],
         span_candidates=spans,
         transcript_meta={"backend": transcript.get("backend"), "model": transcript.get("model"),
-                         "authority": "tikitaka_stt", "schema": SCHEMA})
+                         "authority": "tikitaka_stt", "schema": SCHEMA,
+                         "zero_length_words_padded": padded})
 
 
 PROMPT = """작품 {title}의 영상 인덱스를 작성하라. 시각 정본은 아래 grid 표다.
@@ -150,7 +161,8 @@ def stage2_document(grid: dict, facts: dict) -> dict:
             "sequences": [{"chunks": [{"meanings": meanings}]}]}
 
 
-def build_index(job, gemini, transcript, proxy, info, cuts, *, title, cast, get_v3):
+def build_index(job, gemini, transcript, proxy, info, cuts, *, title, cast, get_v3,
+                research_context: str = ""):
     from app.tikitaka.index import make_windows, _cut_window_clip, _lines_block
     from app.v3.screen_text import run_screen_text_pass
     from app.v3.audio import detect_silence_intervals, load_pcm
@@ -165,7 +177,7 @@ def build_index(job, gemini, transcript, proxy, info, cuts, *, title, cast, get_
                     "arousal": compute_arousal(load_pcm(audio), info["duration_sec"], grid["words"])}
         job.save("grid_audio.json", measured)
     grid = build_grid(info, transcript, cuts, silence=measured["silence"], arousal=measured["arousal"])
-    fp = fingerprint([SCHEMA, PROMPT, getattr(gemini, "video_model", None), source_identity(job.source), grid,
+    fp = fingerprint([SCHEMA, PROMPT, research_context, cast, getattr(gemini, "video_model", None), source_identity(job.source), grid,
                       [(l["id"], l["text"]) for l in transcript["lines"]]])
     saved = job.load("grid_index.json") if job.has("grid_index.json") else {}
     if saved.get("fingerprint") == fp:
@@ -179,6 +191,9 @@ def build_index(job, gemini, transcript, proxy, info, cuts, *, title, cast, get_
             line["speaker"] = data["speakers"].get(line["id"])
         job.save("transcript.json", transcript)
         return data, grid
+    # 새 인물 정보로 관찰을 만들 때, 옛 관찰에 대한 화자 다수결을 재사용하지 않는다.
+    if job.has("voice_check.json"):
+        job.path("voice_check.json").rename(job.path(f"voice_check.json.prev_{time.time_ns()}"))
     facts, scenes, speakers, issues = {}, [], {}, []
     for i, (ws, we) in enumerate(make_windows(info["duration_sec"])):
         spans = [s for s in grid["span_candidates"] if ws <= s["t_in"] < we]
@@ -193,6 +208,10 @@ def build_index(job, gemini, transcript, proxy, info, cuts, *, title, cast, get_
         prompt = PROMPT.format(title=title, start=ws,
             spans="\n".join(f"{s['id']} {s['t_in']-ws:.3f}~{s['t_out']-ws:.3f} {s['text']}" for s in spans),
             lines=_lines_block(lines, ws))
+        if research_context:
+            prompt += "\n\n" + research_context
+        elif cast:
+            prompt += "\n등장인물 후보: " + ", ".join(cast) + "\n불확실한 인물은 미상으로 기록하라."
         from app.v3.chunk_analyze import verify_scene_binding, BINDING_REJECT_MIN, binding_problems
         rejection = ""
         for attempt in range(3):
