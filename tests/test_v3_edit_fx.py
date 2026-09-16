@@ -268,6 +268,7 @@ def test_adjacent_emphasis_sfx_use_different_sounds(tmp_path):
         if b["start_sec"] - a["start_sec"] <= 3.0:
             assert fam[k] != fam[k + 1], (k, fam)
     assert fam[0] == "hit"                      # 떨어진 강조는 종전(soft 풀) 그대로
+    assert all(o["gain_db"] == -12.0 for o in out)  # 최종 loudnorm을 흔들지 않는 상한
 
 
 def test_adjacent_emphasis_chain_stays_in_hit_family(tmp_path):

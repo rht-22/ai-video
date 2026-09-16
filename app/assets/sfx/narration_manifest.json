@@ -16,9 +16,9 @@
     },
     "emphasis": {
       "enabled": true,
-      "gain_db": -6.0,
+      "gain_db": -12.0,
       "no_repeat_window": 3,
-      "note": "강조 자막(Stage 4 emphasis) 줄 시작에 타격음 — v9/v10 수작업 실측(강조 줄 = 줌 단계 = 효과음 한 쌍). 태그 emphasis_soft 우선, 없으면 label 풀."
+      "note": "강조 자막 타격음은 원음보다 앞으로 튀지 않도록 -12dB. 연속 강조에서도 서로 다른 계열을 쓰되 최종 loudnorm을 흔들지 않는 크기로 제한한다."
     }
   },
   "sfx": [

@@ -781,6 +781,76 @@ def cover_mute_windows(timeline: list[dict],
     return out
 
 
+def with_tts_audible_bounds(cue_files: list[dict], *, bounds_fn=None) -> list[dict]:
+    """체크포인트를 바꾸지 않고 렌더용 cue 사본에 실제 발화 끝을 붙인다."""
+    if bounds_fn is None:
+        from app.modules.sfx_narration import audible_bounds_sec
+        bounds_fn = audible_bounds_sec
+    out: list[dict] = []
+    for cf in cue_files:
+        item = dict(cf)
+        cue = dict(cf.get("cue") or {})
+        item["cue"] = cue
+        if cue.get("audible_end_sec") is not None:
+            out.append(item)
+            continue
+        try:
+            _lead, audible_end = bounds_fn(Path(cf["path"]))
+            if audible_end > 0:
+                cue["audible_end_sec"] = round(float(cue["start_sec"]) + audible_end, 3)
+        except (KeyError, TypeError, ValueError, OSError):
+            pass
+        out.append(item)
+    return out
+
+
+def fit_mute_windows_to_tts(muted: list[tuple[float, float]],
+                            cue_files: list[dict], *, tail_pad_sec: float = 0.04,
+                            bounds_fn=None) -> list[tuple[float, float]]:
+    """계획 cue의 빈 꼬리를 원음 뮤트 창에서 제거한다.
+
+    TTS 계획 창은 화면 예산이고 MP3의 실제 발화 길이와 다르다. 계획 끝까지 원음을
+    완전 뮤트하면 발화 뒤 무음이 생긴 다음 현장음이 갑자기 복귀한다. 실제 발화 끝에
+    짧은 여유만 더한 시각으로 창을 줄인다. cue와 무관한 기존 뮤트 창은 보존한다.
+    """
+    if not muted or not cue_files:
+        return list(muted)
+    measured = with_tts_audible_bounds(cue_files, bounds_fn=bounds_fn)
+    cues: list[tuple[float, float, float]] = []
+    for cf in measured:
+        cue = cf.get("cue") or {}
+        try:
+            start, planned_end = float(cue["start_sec"]), float(cue["end_sec"])
+        except (KeyError, TypeError, ValueError, OSError):
+            continue
+        if planned_end <= start:
+            continue
+        effective_end = planned_end
+        audible_end = cue.get("audible_end_sec")
+        if audible_end is not None:
+            effective_end = min(planned_end, float(audible_end) + tail_pad_sec)
+        cues.append((start, planned_end, effective_end))
+    out: list[tuple[float, float]] = []
+    for a, z in muted:
+        related = [c for c in cues if c[0] < z and a < c[1]]
+        if not related:
+            out.append((a, z))
+            continue
+        for start, _planned_end, effective_end in related:
+            lo, hi = max(a, start), min(z, effective_end)
+            if hi > lo:
+                out.append((round(lo, 3), round(hi, 3)))
+    # 한 cue가 여러 렌더 클립에 걸리면 창도 잘려 나온다. 조각마다 페이드하면
+    # 내레이션 도중 원음이 반복해서 솟으므로 맞닿은 창은 다시 하나로 합친다.
+    merged: list[tuple[float, float]] = []
+    for a, z in sorted(out):
+        if merged and a <= merged[-1][1] + 0.002:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], z))
+        else:
+            merged.append((a, z))
+    return merged
+
+
 def place_above_burned(margin_v: int, burned: list[tuple[int, int]], *,
                        canvas_height: int, subtitle_height: int,
                        floor_top: int, gap: int = SUB_GAP_PX) -> tuple[int, str | None]:
@@ -1739,6 +1809,7 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     cue_files = [f for f in (resources.get("tts_cue_files") or [])
                  if f.get("cue", {}).get("start_sec") is not None
                  and Path(f.get("path", "")).exists()]
+    cue_files = with_tts_audible_bounds(cue_files)
     tts_path = None
     if cue_files:
         tts_path = output_dir / "v3_tts.ass"
@@ -1833,6 +1904,7 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     all_windows = sorted(w for wins in src_windows.values() for w in wins)
     muted_windows = cover_mute_windows(render_tl, all_windows,
                                        plan.get("source_fps"))
+    muted_windows = fit_mute_windows_to_tts(muted_windows, cue_files)
 
     out_path = output_dir / out_name
     audio_mix = plan.get("audio_mix") or {}

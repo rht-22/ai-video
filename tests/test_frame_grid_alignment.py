@@ -120,7 +120,11 @@ def test_renderer_pins_each_clip_to_its_frame_count():
     for i, d in enumerate((2.288, 6.070)):
         n = assemble.clip_frames(d, FPS)
         assert f"trim=end_frame={n},setpts=PTS-STARTPTS[v{i}]" in fg
-        assert f"[{i}:a]apad,atrim=end={n / FPS:.6f},asetpts=PTS-STARTPTS[a{i}]" in fg
+        assert f"[{i}:a]apad,atrim=end={n / FPS:.6f},asetpts=PTS-STARTPTS" in fg
+        assert f"[a{i}]" in fg
+    # 서로 다른 원본 시각으로 점프하는 경계는 짧게 페이드해 음악의 하드 컷을 막는다.
+    assert "afade=t=out:st=2.214:d=0.080[a0]" in fg
+    assert "afade=t=in:st=0:d=0.080[a1]" in fg
     # 소스 끝에 걸려 프레임이 모자랄 때를 대비한 복제(남으면 trim 이 잘라낸다)
     assert fg.count("tpad=stop_mode=clone") == 2
 
@@ -170,3 +174,29 @@ def test_partial_window_keeps_original_audio_after_narration():
     # 내레이션이 클립 끝까지 가면 창도 **격자 끝**까지 — 계획 길이로 끊으면 샌다
     tail = finalize.cover_mute_windows(tl, [(106.0, 110.0)], FPS)
     assert tail[-1][1] == pytest.approx(assemble.clip_duration(10.0, FPS), abs=5e-4)
+
+
+def test_mute_window_ends_at_actual_tts_audio_not_planned_slot():
+    """발화가 끝난 뒤 계획 창까지 무음으로 기다렸다가 원음이 튀는 회귀를 막는다."""
+    cue = {"path": Path("voice.mp3"),
+           "cue": {"start_sec": 49.2, "end_sec": 50.872}}
+    got = finalize.fit_mute_windows_to_tts(
+        [(49.2, 50.9)], [cue], tail_pad_sec=0.04,
+        bounds_fn=lambda _p: (0.12, 1.41))
+    assert got == [(49.2, 50.65)]
+
+
+def test_split_mute_windows_merge_before_fade():
+    cue = {"path": Path("voice.mp3"),
+           "cue": {"start_sec": 2.0, "end_sec": 4.0}}
+    got = finalize.fit_mute_windows_to_tts(
+        [(2.0, 3.0), (3.0, 4.0)], [cue], tail_pad_sec=0,
+        bounds_fn=lambda _p: (0.0, 1.8))
+    assert got == [(2.0, 3.8)]
+
+
+def test_unrelated_mute_window_is_preserved():
+    cue = {"path": Path("voice.mp3"),
+           "cue": {"start_sec": 2.0, "end_sec": 4.0}}
+    assert finalize.fit_mute_windows_to_tts(
+        [(8.0, 9.0)], [cue], bounds_fn=lambda _p: (0.0, 1.0)) == [(8.0, 9.0)]

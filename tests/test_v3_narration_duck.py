@@ -25,10 +25,18 @@ def _inputs(**kw) -> RenderInputs:
 _CUE = [{"path": Path("c.mp3"), "cue": {"start_sec": 2.0, "end_sec": 4.0}}]
 
 
-def test_none_is_byte_identical_mute():
+def test_none_uses_soft_mute_boundaries():
     a = _build_audio_filter(_inputs(muted_windows=[(2.0, 4.0)]), 1, 0)
     b = _build_audio_filter(_inputs(muted_windows=[(2.0, 4.0)], muted_gain_db=None), 1, 0)
-    assert a == b and "volume=enable='between(t,2.000,4.000)':volume=0," in a
+    assert a == b
+    assert "volume='if(between(t,1.880,4.120)" in a
+    assert "(2.000-t)/0.12" in a and "(t-4.000)/0.12" in a
+    assert "eval=frame" in a
+
+
+def test_zero_fade_preserves_hard_mute_for_explicit_legacy_use():
+    f = _build_audio_filter(_inputs(muted_windows=[(2.0, 4.0)], mute_fade_sec=0), 1, 0)
+    assert "volume=enable='between(t,2.000,4.000)':volume=0," in f
 
 
 def test_gain_db_replaces_zero():
@@ -44,6 +52,45 @@ def test_duck_excludes_mute_window_only_when_gain_set():
                                          muted_gain_db=-10), 1, 1)
     assert "volume=enable='(between(t,2.000,4.000))*not(between(t,2.000,4.000))':volume=0.5" \
         in ducked
+
+
+def test_amix_never_renormalizes_when_cues_end():
+    f = _build_audio_filter(_inputs(tts_cue_files=_CUE), 1, 1)
+    assert "amix=inputs=2:duration=longest:dropout_transition=0:normalize=0" in f
+    assert "dropout_transition=2" not in f
+
+
+def test_duck_ends_at_measured_speech_end():
+    cue = [{"path": Path("c.mp3"), "cue": {
+        "start_sec": 2.0, "end_sec": 4.0, "audible_end_sec": 3.72}}]
+    f = _build_audio_filter(_inputs(tts_cue_files=cue), 1, 1)
+    assert "between(t,2.000,3.720)" in f
+    assert "between(t,2.000,4.000)" not in f
+
+
+def test_non_contiguous_source_cuts_get_short_audio_fades():
+    clips = [
+        StoryClip(role="hook", start_sec=10, end_sec=12, subtitle="", use_original_audio=True),
+        StoryClip(role="build", start_sec=40, end_sec=42, subtitle="", use_original_audio=True),
+    ]
+    inputs = _inputs()
+    import dataclasses
+    from app.modules.renderer import _build_filtergraph
+    fg = _build_filtergraph(dataclasses.replace(inputs, clips=clips, source_fps=30), 2, 0)
+    assert "afade=t=out:st=1.920:d=0.080" in fg
+    assert "afade=t=in:st=0:d=0.080" in fg
+
+
+def test_contiguous_source_cuts_do_not_fade_dialogue_edges():
+    clips = [
+        StoryClip(role="hook", start_sec=10, end_sec=12, subtitle="", use_original_audio=True),
+        StoryClip(role="build", start_sec=12.03, end_sec=14, subtitle="", use_original_audio=True),
+    ]
+    inputs = _inputs()
+    import dataclasses
+    from app.modules.renderer import _build_filtergraph
+    fg = _build_filtergraph(dataclasses.replace(inputs, clips=clips, source_fps=30), 2, 0)
+    assert "afade=" not in fg
 
 
 def test_cli_and_pipeline_threading():

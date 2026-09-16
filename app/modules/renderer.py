@@ -630,6 +630,9 @@ class RenderInputs:
     # 트랙([acat])에만 volume=0 을 걸어 cue 오디오는 그대로 산다. None/빈 목록 =
     # 필터 종전과 완전히 동일(v1 회귀 0 — sfx_audio 와 같은 additive 규약).
     muted_windows: list[tuple[float, float]] | None = None
+    # 완전 뮤트 창의 원음 복귀 페이드. 0이면 예전의 즉시 on/off 동작.
+    # TTS 뒤 현장음이 한 샘플 경계에서 튀는 것을 막는다.
+    mute_fade_sec: float = 0.12
     # 2026-09-04(사용자 요청): 뮤트 창의 원본 볼륨 — None = 종전 volume=0(완전 무음).
     # dB 음수(예: -12)를 주면 그 창에서 원본을 **줄이기만** 한다(내레이션 밑에 현장음이
     # 남는다). 이때 cue 덕킹(×0.5)은 뮤트 창 **밖**에서만 걸어 두 감쇠가 겹쳐 쌓이지
@@ -1043,6 +1046,8 @@ def _parse_drawtext_color(color: str) -> tuple[int, int, int, int]:
 
 PF_LINE_GAP = 16   # 작품명 위 플랫폼 줄과 작품명/로고 사이 여백(px)
 WORK_CAPTION_GAP = 12   # 작품명/로고와 그 아래 캡션 줄 사이 여백(px)
+AUDIO_CUT_FADE_SEC = 0.08   # 비연속 소스 컷의 현장음 하드 점프 방지
+AUDIO_CONTIGUOUS_EPS_SEC = 0.15
 
 
 def work_caption_block(design) -> int:
@@ -1384,6 +1389,7 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         # 소리도 같은 길이로 맞춰야(apad→atrim) concat 이 영상을 덧대지 않는다.
         pin_v, pin_a = "", "anull"
         _hold = float(getattr(clip, "hold_sec", 0.0) or 0.0)   # 정보 화면 붙잡기(2026-09-03)
+        _audio_len = float(clip.end_sec) - float(clip.start_sec) + _hold
         if _clip_fps:
             n_fr = max(1, round((float(clip.end_sec) - float(clip.start_sec) + _hold) * _clip_fps))
             dur_q = n_fr / _clip_fps
@@ -1391,10 +1397,24 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
             pin_v = (rate_filter + f",tpad=stop_mode=clone:stop_duration={1 + _hold:.3f}"
                      f",trim=end_frame={n_fr},setpts=PTS-STARTPTS")
             pin_a = f"apad,atrim=end={dur_q:.6f},asetpts=PTS-STARTPTS"
+            _audio_len = dur_q
         elif _hold > 0:
             _len = float(clip.end_sec) - float(clip.start_sec) + _hold
             pin_v = f",tpad=stop_mode=clone:stop_duration={_hold:.3f},setpts=PTS-STARTPTS"
             pin_a = f"apad,atrim=end={_len:.6f},asetpts=PTS-STARTPTS"
+
+        # 서로 이어진 원본 구간은 손대지 않는다. 전혀 다른 소스 시각으로 점프하는
+        # 편집점만 양쪽 80ms를 페이드해 음악·함성이 한 샘플에서 튀는 것을 막는다.
+        _fade = min(AUDIO_CUT_FADE_SEC, max(0.0, _audio_len / 3))
+        if _fade > 0:
+            _prev = inputs.clips[i - 1] if i > 0 else None
+            _next = inputs.clips[i + 1] if i + 1 < len(inputs.clips) else None
+            _fade_in = _prev is not None and abs(float(_prev.end_sec) - float(clip.start_sec)) > AUDIO_CONTIGUOUS_EPS_SEC
+            _fade_out = _next is not None and abs(float(clip.end_sec) - float(_next.start_sec)) > AUDIO_CONTIGUOUS_EPS_SEC
+            if _fade_in:
+                pin_a += f",afade=t=in:st=0:d={_fade:.3f}"
+            if _fade_out:
+                pin_a += f",afade=t=out:st={max(0.0, _audio_len - _fade):.3f}:d={_fade:.3f}"
 
         _fit = getattr(clip, "fit_picture", None)
         if _fit:
@@ -2136,7 +2156,21 @@ def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, num_cue_inpu
     if _mw:
         _mute_expr = "+".join(f"between(t,{s:.3f},{e:.3f})" for s, e in _mw)
         _mute_vol = "0" if _mute_gain is None else f"{float(_mute_gain):g}dB"
-        _mute = f"volume=enable='{_mute_expr}':volume={_mute_vol},"
+        fade = max(0.0, float(getattr(inputs, "mute_fade_sec", 0.0) or 0.0))
+        if _mute_gain is None and fade > 0:
+            # 각 창 전에는 원음을 부드럽게 내리고, 창 끝부터 다시 올린다. 창끼리
+            # 가까우면 곱셈으로 합쳐져 1.0을 넘지 않는다.
+            gains = []
+            for s, e in _mw:
+                fade_start = max(0.0, s - fade)
+                gains.append(
+                    f"if(between(t,{fade_start:.3f},{e + fade:.3f}),"
+                    f"if(lt(t,{s:.3f}),({s:.3f}-t)/{max(s - fade_start, 1e-6):g},"
+                    f"if(gt(t,{e:.3f}),(t-{e:.3f})/{fade:g},0)),1)"
+                )
+            _mute = f"volume='{'*'.join(gains)}':eval=frame,"
+        else:
+            _mute = f"volume=enable='{_mute_expr}':volume={_mute_vol},"
 
     # E19-5: SFX 는 cue 와 같은 믹스 경로(입력 + volume dB + adelay + amix)를 탄다.
     # 다만 원본 오디오를 **덕킹하지 않는다**(짧은 스팅에 덕킹을 걸면 원음이 펌핑한다).
@@ -2152,7 +2186,9 @@ def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, num_cue_inpu
     for cf in cue_files:
         cue = cf.get("cue") or {}
         s = float(cue.get("start_sec", 0.0)) / speed
-        e = float(cue.get("end_sec", 0.0)) / speed
+        # 계획 창보다 합성 파일의 실제 발화가 먼저 끝나면 그 시각에 덕킹도 푼다.
+        # 그렇지 않으면 뮤트 페이드 뒤에도 0.5배 감쇠가 남았다가 다시 튄다.
+        e = float(cue.get("audible_end_sec", cue.get("end_sec", 0.0))) / speed
         if e > s:
             duck_ranges.append((s, e))
 
@@ -2216,6 +2252,8 @@ def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, num_cue_inpu
     mix_inputs_str = "".join(mix_inputs)
     mix_filter = (
         f"{';'.join(tts_filters)};{mix_inputs_str}"
-        f"amix=inputs={len(mix_inputs)}:duration=longest:dropout_transition=2[aout]"
+        # normalize 기본값(true)은 입력이 끝날 때마다 남은 트랙을 2초 동안 자동으로
+        # 키운다. cue/SFX가 많은 편의 후반 원음이 7~10dB 솟았던 원인이다.
+        f"amix=inputs={len(mix_inputs)}:duration=longest:dropout_transition=0:normalize=0[aout]"
     )
     return f"{original_vol};{mix_filter}"

@@ -165,6 +165,7 @@ def test_audio_filter_sfx_only():
     assert "[1:a]atrim=end=8.000,volume=-6dB[sfx0_vol]" in af   # 입력 idx = 클립 1 + cue 0 · 영상 끝(8s)까지 트림
     assert "adelay=2000|2000" in af
     assert "amix=inputs=2" in af
+    assert "normalize=0" in af and "dropout_transition=0" in af
 
 
 def test_audio_filter_sfx_after_cues(tmp_path):

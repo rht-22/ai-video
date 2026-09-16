@@ -66,8 +66,14 @@ def load_narration_manifest(app_root: Path) -> dict[str, Any]:
     return {"config": cfg, "items": items}
 
 
-def lead_in_sec(audio_path: Path) -> float:
-    """파일 앞쪽 무음 길이(초). 디코드 실패·무음 파일은 0.0(보정 없음 = 종전 동작)."""
+def audible_bounds_sec(audio_path: Path) -> tuple[float, float]:
+    """합성 음성에서 실제 소리가 있는 첫/마지막 시각을 반환한다.
+
+    ElevenLabs MP3에는 앞뒤 무음이 붙는다. 계획 cue 끝을 그대로 원음 뮤트 끝으로
+    쓰면 발화가 끝난 뒤에도 현장음을 끈 채 기다렸다가 갑자기 켜는 팝이 생긴다.
+    피크 대비 -34dB(기존 lead-in 기준) 이상인 구간을 실제 발화 범위로 본다.
+    디코드 실패·무음 파일은 ``(0, 0)`` 이며 호출자가 기존 계획값을 유지한다.
+    """
     try:
         pcm = subprocess.run(
             ["ffmpeg", "-v", "quiet", "-i", str(audio_path), "-ac", "1",
@@ -78,13 +84,19 @@ def lead_in_sec(audio_path: Path) -> float:
     a = array.array("h")
     a.frombytes(pcm[:len(pcm) // 2 * 2])
     if not a:
-        return 0.0
+        return (0.0, 0.0)
     peak = max(max(a), -min(a))
     if peak <= 0:
-        return 0.0
+        return (0.0, 0.0)
     thr = peak * _ONSET_REL
-    idx = next((i for i, v in enumerate(a) if abs(v) >= thr), 0)
-    return idx / _PROBE_SR
+    first = next((i for i, v in enumerate(a) if abs(v) >= thr), 0)
+    last = next((len(a) - 1 - i for i, v in enumerate(reversed(a)) if abs(v) >= thr), first)
+    return (first / _PROBE_SR, (last + 1) / _PROBE_SR)
+
+
+def lead_in_sec(audio_path: Path) -> float:
+    """파일 앞쪽 무음 길이(초). 디코드 실패·무음 파일은 0.0(보정 없음)."""
+    return audible_bounds_sec(audio_path)[0]
 
 
 def _pick(items: list[dict], tag: str, seed: str, step: int,
@@ -351,4 +363,3 @@ def place_emphasis_sfx(lines: list[dict], *, app_root: Path, run_dir: Path, seed
         recent.append(it.get("family") or it["id"])
         prev_at, prev_family = at, (it.get("family") or it["id"])
     return out
-

@@ -219,7 +219,9 @@ def test_renderer_muted_windows_additive():
     assert "volume=enable" not in _build_audio_filter(RenderInputs(**base), 1, 0)
     muted = _build_audio_filter(
         RenderInputs(**base, muted_windows=[(5.0, 10.0)]), 1, 0)
-    assert "volume=enable='between(t,5.000,10.000)':volume=0," in muted
+    assert "volume='if(between(t,4.880,10.120)" in muted
+    assert "(5.000-t)/0.12" in muted and "(t-10.000)/0.12" in muted
+    assert "eval=frame" in muted
 
 
 # ── M12: 라벨 위치를 Stage 4 가 화면 보고 정한다 ──────────────────────────
