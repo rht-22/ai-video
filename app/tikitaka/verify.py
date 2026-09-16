@@ -35,17 +35,18 @@ VERIFY_PROMPT = """# 📜 티키타카 스크립트 리빌딩 — 영상 확인 
 2. 각 S/A 항목이 가리키는 구간을 영상에서 본다. 초안이 말하는 상황·표정·소리가 화면에 실제로 있는지 확인하고, 없거나 약하면
    빼거나 바꾼다. 제목·내레이션의 **신체 동작 묘사는 화면에 실제로 있는 것만**(비유적 동작 금지 — 시청자가 화면과 대조한다).
 3. 텍스트 요약(60자)에 안 잡힌 **시각 비트**(표정 변화, 손·소품 클로즈업, 정적, 소리)가 그 장면에 있으면 A 항목이나 N 문장으로
-   살린다. 소스 스크립트의 순간(S-xxx) ID 를 쓰되, 딱 맞는 순간이 없으면 가장 가까운 순간 ID 를 쓰고 desc 대신 N 문장으로 묘사한다.
+   살린다. A는 소스 스크립트의 정확한 순간(S-xxx) ID만 쓴다. N은 문장과 실제 덮개 sp ID를 함께 지정한다. 딱 맞는 화면이 없으면
+   가장 가까운 순간으로 대신하지 말고, 확인한 화면이 실제로 보여주는 내용으로 문장을 바꾸거나 그 N을 쓰지 않는다.
 4. 이야기를 통째로 바꿔야 할 **명백한 이유**(초안의 핵심 장면이 화면에 없다, 훨씬 강한 장면을 확인했다)가 있을 때만 바꾸고
    `changes` 에 이유를 적는다. 확인하지 않은 장면은 쓰지 않는다.
-5. 원본 대사는 줄(L-xxx) ID 로만, 같은 화자의 연속 줄만 묶는다. 합계 {target_min}~{target_max}초(N=글자수/4초, S=줄 길이, A=순간 길이).
+5. 원본 대사는 줄(L-xxx) ID 로만, 화자가 바뀌어도 의미가 이어지는 연속 줄은 함께 묶는다. 대화·듀엣의 응답과 문장 끝을 빠뜨리지 않는다. 비연속 줄은 별도 S 항목으로 나눈다. 합계 {target_min}~{target_max}초(N=글자수/4초, S=줄 길이, A=순간 길이).
 6. 내레이션은 설명만 늘어놓지 말고 절반쯤은 **크리에이터의 리액션·의견**(시청자에게 말 걸기 · 1인칭 감상 · 드립 · 팩폭)으로 — 초안이
    해설 위주면 몇 줄을 의견형으로 바꾼다(8~30자 · 화면에 있는 사실만).
 7. **내레이션이 바로 뒤 대사의 내용을 미리 말하지 않는다** — 대사가 말할 것을 내레이션이 먼저 요약하면 같은 말이 두 번 나온다(실측: "무시하기로
    합의!" 뒤에 "인사도 안 해" 대사). 내레이션은 앞 대사의 반응/의견이거나 건너뛴 시간을 잇는 말이어야 한다.
 8. **제목이 약속한 것은 대본 안에 있어야 한다** — 제목이 "전말·이유·정체·결말"을 말하면 그 내용이 실제로 나오는 대사/장면이 있어야 한다.
    없으면 제목을 대본 내용에 맞게 고쳐라(제목이 대본을 과장하면 시청자가 속았다고 느낀다).
-9. 1.2초 미만의 짧은 대사 조각은 앞뒤 줄과 묶거나(같은 화자 연속 줄) 뺀다 — "싹 무시해." 처럼 맥락 없는 꼬리만 남기지 않는다. 단독으로
+9. 1.2초 미만의 짧은 대사 조각은 앞뒤 줄과 묶거나(화자 전환을 포함한 연속 줄) 뺀다 — "싹 무시해." 처럼 맥락 없는 꼬리만 남기지 않는다. 단독으로
    훅이 되는 짧은 말("어?", "뭐?")은 예외.
 10. **화자 확인**: 소스 스크립트의 화자 표기가 영상과 다르면(입이 움직이는 사람이 다른 인물) `speaker_fixes` 에 줄 ID → 맞는 인물 이름을
     적어라(실측: "조심 좀 하지." 를 임재홍으로 적었지만 화면에선 박경희가 말했다). 확인한 줄만.
@@ -135,7 +136,17 @@ def verify_version(job: Job, gemini: Gemini, rebuild: dict, version_n: int, inde
     sfx = f"_{tag}" if tag else ""
     name = f"verified_v{version_n}{sfx}.json"
     if job.has(name):
-        return job.load(name)["version"]
+        cached = job.load(name)
+        if not index.get("grid_facts"):
+            return cached["version"]
+        from app.tikitaka.production import SCHEMA as production_schema
+        if cached.get("production_plan_schema") == production_schema:
+            from app.tikitaka.production import enforce_joint_plans
+            enforce_joint_plans(job, gemini, cached["version"], index, transcript,
+                                sorted(excluded_ranges(guide, max((l["end"] for l in transcript["lines"]), default=0.0) + 3600.0) + list(extra_exclude or [])))
+            job.save(name, cached)
+            return cached["version"]
+        job.log(f"[verify] 문장·덮개 공동 계획 스키마 변경 → v{version_n} 확인 패스 재실행")
     draft = next(v for v in rebuild["versions"] if v["n"] == version_n)
     exclude = sorted(excluded_ranges(guide, max((l["end"] for l in transcript["lines"]), default=0.0) + 3600.0) + list(extra_exclude or []))
     strategy_note = ""
@@ -151,6 +162,13 @@ def verify_version(job: Job, gemini: Gemini, rebuild: dict, version_n: int, inde
                                   draft=draft_block(draft), script=source_script(index, transcript, exclude),
                                   target_min=TARGET_MIN_SEC, target_max=TARGET_MAX_SEC, guide=guide_block(guide), strategy_note=strategy_note,
                                   digest=digest_block(digest))
+    feedback_name = f"production_retry_v{version_n}{sfx}.json"
+    if job.has(feedback_name):
+        feedback = job.load(feedback_name)
+        prompt += ("\n## 이전 조립 실패 피드백\n" + str(feedback.get("error") or "")
+                   + "\n실패한 항목의 문장·화면 계획만 실제 재료에 맞게 다시 작성하라. "
+                   "같은 주제와 정상 대사를 보존하고, 없는 행동이나 감정을 지어내지 마라. "
+                   "길이가 부족해도 내레이션을 축약하지 마라. 문구를 유지하고 덮개 확장·추가·뒤 대사 화면 재사용으로 충분한 ID를 지정하라.")
     prompt += TITLE_PROMPT
     if index.get("grid_facts"):
         from app.tikitaka.production import planning_rules, preflight
@@ -162,8 +180,12 @@ def verify_version(job: Job, gemini: Gemini, rebuild: dict, version_n: int, inde
     except Exception as e:  # noqa: BLE001
         job.log(f"[verify] ⚠ 확인 패스 실패 → 초안 그대로 진행: {type(e).__name__}: {str(e)[:200]}")
         job.record_step(f"verify_v{version_n}", status="failed", error=str(e)[:300])
+        from app.tikitaka.production import enforce_joint_plans
+        enforce_joint_plans(job, gemini, draft, index, transcript, exclude)
         return draft
-    job.save(f"verify_raw_v{version_n}{sfx}.json", {"meta": meta, "raw": raw})
+    from app.tikitaka.production import SCHEMA as production_schema
+    job.save(f"verify_raw_v{version_n}{sfx}.json", {"meta": meta, "raw": raw,
+                                                     "production_plan_schema": production_schema})
     return finalize_verified(job, gemini, rebuild, version_n, index, transcript, raw, meta, draft=draft, exclude=exclude,
                              title=title, guide=guide, tag=tag)
 
@@ -177,6 +199,10 @@ def finalize_from_raw(job: Job, gemini: Gemini, rebuild: dict, version_n: int, i
     if not job.has(name):
         return None
     doc = job.load(name)
+    if index.get("grid_facts"):
+        from app.tikitaka.production import SCHEMA as production_schema
+        if doc.get("production_plan_schema") != production_schema:
+            return None
     draft = next(v for v in rebuild["versions"] if v["n"] == version_n)
     exclude = sorted(excluded_ranges(guide, max((l["end"] for l in transcript["lines"]), default=0.0) + 3600.0) + list(extra_exclude or []))
     job.log(f"[verify] v{version_n} 원응답 캐시로 후처리 재실행(재호출 없음)")
@@ -198,6 +224,8 @@ def finalize_verified(job: Job, gemini: Gemini, rebuild: dict, version_n: int, i
     if not final["items"] or sum(1 for it in final["items"] if it["type"] == "S") == 0:
         job.log("[verify] ⚠ 확인 패스 산출이 비었거나 대사가 없다 → 초안 그대로 진행")
         job.record_step(f"verify_v{version_n}", status="empty", agentic=meta)
+        from app.tikitaka.production import enforce_joint_plans
+        enforce_joint_plans(job, gemini, draft, index, transcript, exclude)
         return draft
     final.setdefault("strategy", draft["strategy"])
     if final.get("literal_flags"):
@@ -206,11 +234,15 @@ def finalize_verified(job: Job, gemini: Gemini, rebuild: dict, version_n: int, i
     if guide:
         polish_guide(gemini, final, guide, log=job.log)
         apply_name_map(final, guide.get("actors") or {}, log=job.log)
+    from app.tikitaka.production import enforce_joint_plans
+    enforce_joint_plans(job, gemini, final, index, transcript, exclude)
     final["looked_at"] = raw.get("looked_at") or []
     final["changes"] = [str(c) for c in (raw.get("changes") or [])]
     final["verified"] = True
     diff = diff_summary(draft, final)
-    job.save(name, {"version": final, "draft_title": draft["title"], "diff": diff, "agentic": meta})
+    from app.tikitaka.production import SCHEMA as production_schema
+    job.save(name, {"version": final, "draft_title": draft["title"], "diff": diff, "agentic": meta,
+                    "production_plan_schema": production_schema})
     job.path(f"verified_v{version_n}{sfx}.md").write_text(verified_md(final, draft, diff, title=title), encoding="utf-8")
     job.log(f"[verify] 완료 — 항목 {diff['items']} · 계획 {diff['plan_sec']}s · 대사 유지 {diff['lines_kept']} · 추가 {diff['lines_added']} · "
             f"제거 {diff['lines_removed']} · 확인 {len(final['looked_at'])}곳 · 토큰 {meta.get('total_tokens')}")

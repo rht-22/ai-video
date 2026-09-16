@@ -433,7 +433,9 @@ def render(job: Job, table: dict, *, title: str, out_name: str | None = None, la
     for r in table["rows"]:
         mute = r["mode"] == "N"
         for c in r["cuts"]:
-            cmd += ["-ss", f"{c['in']:.3f}", "-t", f"{c['dur']:.3f}", "-i", str(job.source)]
+            source_dur = c["out"] - c["in"]
+            clip_speed = float(c.get("playback_speed") or 1.0)
+            cmd += ["-ss", f"{c['in']:.3f}", "-t", f"{source_dur:.3f}", "-i", str(job.source)]
             crop = L["crop"]
             if c.get("frame_segs"):                                # 5.5단계 샷별 주인물 크롭 x(같은 샷 안에서만 팬 · 경계에서 점프)
                 from app.tikitaka.framing import crop_x_expr_segs
@@ -444,16 +446,19 @@ def render(job: Job, table: dict, *, title: str, out_name: str | None = None, la
                 cx = crop_x_expr(c["frame_x0"], c.get("frame_x1", c["frame_x0"]), src_w=L["src_w"], crop_w=L["crop_w"], dur=c["dur"])
                 crop = f"crop={L['crop_w']}:{L['src_h']}:{cx}:0"
             if c.get("frame_wide"):                               # 와이드: 흐린 배경(중앙 크롭) 위에 전체 프레임을 폭 맞춰 얹는다
-                seg_filters.append(f"[{k}:v]fps={FPS},{pre}trim=duration={c['dur']:.3f},setpts=PTS-STARTPTS,split=2[v{k}a][v{k}b]")
+                seg_filters.append(f"[{k}:v]{pre}setpts=(PTS-STARTPTS)/{clip_speed:g},fps={FPS},"
+                                   f"trim=duration={c['dur']:.3f},setpts=PTS-STARTPTS,split=2[v{k}a][v{k}b]")
                 seg_filters.append(f"[v{k}a]{L['crop']},scale={W}:{L['band_h']}:flags=bicubic,boxblur=luma_radius=30:luma_power=2:"
                                    f"chroma_radius=15:chroma_power=1,eq=brightness=-0.12[v{k}bg]")
                 seg_filters.append(f"[v{k}b]scale={W}:-2:flags=bicubic[v{k}fg]")
                 seg_filters.append(f"[v{k}bg][v{k}fg]overlay=(W-w)/2:(H-h)/2,setsar=1,pad={W}:{H}:0:{L['band_y']}:color=black[v{k}]")
             else:
-                seg_filters.append(f"[{k}:v]fps={FPS},{pre}{crop},scale={W}:{L['band_h']}:flags=bicubic,setsar=1,"
-                                   f"pad={W}:{H}:0:{L['band_y']}:color=black,trim=duration={c['dur']:.3f},setpts=PTS-STARTPTS[v{k}]")
+                seg_filters.append(f"[{k}:v]{pre}{crop},scale={W}:{L['band_h']}:flags=bicubic,setsar=1,"
+                                   f"pad={W}:{H}:0:{L['band_y']}:color=black,setpts=(PTS-STARTPTS)/{clip_speed:g},"
+                                   f"fps={FPS},trim=duration={c['dur']:.3f},setpts=PTS-STARTPTS[v{k}]")
             vol = ",volume=0" if mute else ""
-            seg_filters.append(f"[{k}:a]aresample=48000,aformat=channel_layouts=stereo,atrim=duration={c['dur']:.3f},"
+            tempo = f",atempo={clip_speed:g}" if clip_speed != 1.0 else ""
+            seg_filters.append(f"[{k}:a]aresample=48000,aformat=channel_layouts=stereo{tempo},atrim=duration={c['dur']:.3f},"
                                f"asetpts=PTS-STARTPTS{vol}[a{k}]")
             k += 1
     n_clips = k

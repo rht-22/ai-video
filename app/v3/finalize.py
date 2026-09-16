@@ -769,13 +769,14 @@ def cover_mute_windows(timeline: list[dict],
     off = 0.0
     for c in timeline:
         cs, ce = float(c["clip_start_sec"]), float(c["clip_end_sec"])
+        speed = float(c.get("playback_speed") or 1.0)
         dur = assemble.clip_duration(assemble.clip_len(c), fps)
         if not c.get("use_original_audio"):
             for a, z, on in assemble.split_by_windows(cs, ce, narration_windows_src):
                 if on:
                     continue
-                r0 = min(a - cs, dur)
-                r1 = dur if z >= ce - 1e-6 else min(z - cs, dur)
+                r0 = min((a - cs) / speed, dur)
+                r1 = dur if z >= ce - 1e-6 else min((z - cs) / speed, dur)
                 out.append((round(off + r0, 3), round(off + r1, 3)))
         off += dur
     return out
@@ -1466,25 +1467,35 @@ def apply_zoom_splits(timeline: list[dict], zooms: list[dict], fps: float | None
             p2r[i] = [len(out) - 1]
             continue
         s0, e0 = float(c["clip_start_sec"]), float(c["clip_end_sec"])
+        speed = float(c.get("playback_speed") or 1.0)
+        output_len = (e0 - s0) / speed
         stages = list(z.get("stages") or [{"from_sec": z.get("from_sec") or 0.0,
                                            "factor": z.get("factor"), "anchor": z.get("anchor")}])
+        # 원본 음성을 쓰는 클립을 발화 중간에서 별도 ffmpeg 입력으로 쪼개면 새 입력의
+        # AAC 프리롤/seek 경계에서 음절이 통째로 유실될 수 있다. 줌은 장식이므로 음성을
+        # 희생하지 않는다: 처음부터 적용하는 줌만 단일 클립으로 허용하고, 중간 줌은 버린다.
+        # (영상/음성 타임라인을 분리하기 전까지의 안전 규칙.)
+        if c.get("use_original_audio") and any(float(st.get("from_sec") or 0.0) > 0 for st in stages):
+            out.append(dict(c))
+            p2r[i] = [len(out) - 1]
+            continue
         # 단계 경계(클립 시작 기준) → 프레임 격자 반올림, 조각 하한 미만은 앞 단계에 흡수
         bounds: list[tuple[float, dict]] = []
         for st in stages:
             fs = max(0.0, float(st.get("from_sec") or 0.0))
             if fps:
                 fs = round(round(fs * fps) / fps, 3)
-            if bounds and (fs - bounds[-1][0] < stage4.ZOOM_MIN_PART_SEC or (e0 - s0) - fs < stage4.ZOOM_MIN_PART_SEC):
+            if bounds and (fs - bounds[-1][0] < stage4.ZOOM_MIN_PART_SEC or output_len - fs < stage4.ZOOM_MIN_PART_SEC):
                 continue
-            if not bounds and fs > 0 and (fs < stage4.ZOOM_MIN_PART_SEC or (e0 - s0) - fs < stage4.ZOOM_MIN_PART_SEC):
+            if not bounds and fs > 0 and (fs < stage4.ZOOM_MIN_PART_SEC or output_len - fs < stage4.ZOOM_MIN_PART_SEC):
                 fs = 0.0
             bounds.append((fs, st))
         if bounds and bounds[0][0] > 0:
             bounds.insert(0, (0.0, {"factor": 1.0, "anchor": bounds[0][1].get("anchor")}))
         idxs: list[int] = []
         for j, (fs, st) in enumerate(bounds):
-            a = s0 + fs
-            zz = s0 + bounds[j + 1][0] if j + 1 < len(bounds) else e0
+            a = s0 + fs * speed
+            zz = s0 + bounds[j + 1][0] * speed if j + 1 < len(bounds) else e0
             part = {**c, "clip_start_sec": round(a, 3), "clip_end_sec": round(zz, 3)}
             if j > 0:
                 part["zoom_part"] = True
@@ -1630,6 +1641,7 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
                        subtitle=str(c.get("subtitle") or ""),
                        use_original_audio=bool(c.get("use_original_audio", True)),
                        hold_sec=float(c.get("hold_sec") or 0.0),
+                       playback_speed=float(c.get("playback_speed") or 1.0),
                        fit_picture=None)
              for c in render_tl]
 
@@ -2074,27 +2086,12 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
         _n = _s["_label"]
         log(f"  [sfx-label] 내레이션과 동시 타격 → 드롭: {_n['at']:.3f}s "
             f"「{_n['text']}」 ({_n['id']})")
-    # 강조 자막 타격음(2026-09-08, v9/v10 규칙: 강조 줄 = 줌 = 효과음 한 쌍). 강조가 없으면 빈 리스트.
+    # 강조 자막은 원본 대사 세그먼트이므로 타격음을 같은 시각에 얹지 않는다. 짧은 음절은
+    # 0.4초 hit 에 통째로 묻혀 실제 파일에 있어도 안 들릴 수 있다. 강조는 글자·팝으로만
+    # 표현하고, 효과음은 대사가 없는 라벨/내레이션 전환에 한정한다.
     _emph_sfx: list = []
     if _emph:
-        try:
-            from app.modules.sfx_narration import place_emphasis_sfx
-            # `sfx: false` 인 강조 줄은 소리 없이 글자·팝만(2026-09-11 — 한 문장을 여러 줄로 나눠 전부 강조하면
-            # 줄마다 타격음이 겹친다. 문장 첫 줄만 소리를 낸다).
-            _no_sfx = {i for i in (resolve_emphasis_index(e, segments) for e in (_v3s.get("emphasis") or [])
-                                   if e.get("sfx") is False) if i is not None}
-            _emph_lines = [{"start_sec": float(segments[i]["start_sec"]), "text": segments[i].get("text")}
-                           for i in sorted(_emph) if 0 <= i < len(segments) and i not in _no_sfx]
-            _emph_sfx = place_emphasis_sfx(_emph_lines, app_root=_root, run_dir=output_dir,
-                                           seed=output_dir.name + ":emph",
-                                           speed=float(getattr(design, "video_speed", 1.0) or 1.0))
-            _emph_sfx, _c2 = drop_label_collisions(_narr_sfx + _label_sfx, _emph_sfx)
-            for _s in _emph_sfx:
-                _n = _s["_label"]
-                log(f"  [sfx-emphasis] {_n['at']:.3f}s 「{_n['text']}」 ← {_n['id']}")
-        except Exception as _e:                # 효과음 때문에 편이 죽지 않는다
-            log(f"  [sfx-emphasis] 배치 실패 — 효과음 없이 계속: {_e}")
-            _emph_sfx = []
+        log(f"  [sfx-emphasis] 원본 대사 보호 — 강조 {len(_emph)}줄 타격음 생략")
     _all_sfx = _narr_sfx + _label_sfx + _emph_sfx
     inputs = RenderInputs(
         video_path=Path(video_path),

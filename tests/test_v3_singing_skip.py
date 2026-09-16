@@ -192,13 +192,13 @@ def test_design_preset_fills_only_unset_flags_and_bundled_gawangsho_loads():
     preset = load_design_preset("gawangsho")
     assert set(preset["design"]) <= set(CHANNEL_DESIGN_ARGS)
     assert preset["design"]["work_caption"] == "티빙에서 풀버전 시청 및 투표 가능!"
-    assert preset["options"] == {"no_reframe": True, "subtitle_skip_singing": True, "skip_broadcast_text": True}
+    assert preset["options"] == {"no_reframe": True, "subtitle_skip_singing": False, "skip_broadcast_text": True}
     args = build_parser().parse_args(["--video", "x.mp4", "--work-title", "가왕쇼",
                                       "--design-video-y", "440"])
     filled = apply_design_preset(args, preset)
     assert args.design_video_y == 440 and "video_y" not in filled       # 명시가 이긴다
     assert args.design_work_caption == preset["design"]["work_caption"]
-    assert args.no_reframe is True and args.subtitle_skip_singing is True
+    assert args.no_reframe is True and not args.subtitle_skip_singing
 
 
 def test_design_preset_unknown_name_or_key_fails_loud(tmp_path):

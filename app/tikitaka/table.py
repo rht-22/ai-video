@@ -78,7 +78,7 @@ def _tts_cached(job: Job, text: str, voice: str, speed: str) -> tuple[Path, floa
 
 
 def rows_from_items(version: dict, index: dict, transcript: dict, cuts: list[float], duration: float,
-                    tts_fn, end_fn=None) -> list[dict]:
+                    tts_fn, end_fn=None, *, strict_action_bounds=False) -> list[dict]:
     """항목 → 행(타임코드 확정 전 N 은 tts 길이만). 순수 함수에 가깝다(tts_fn·end_fn 주입).
     end_fn(word_end, limit) → 실제 발성 끝(무음 기반). 없으면 whisper 끝 +0.15s 그대로."""
     lines_by_id = {l["id"]: l for l in transcript["lines"]}
@@ -108,7 +108,14 @@ def rows_from_items(version: dict, index: dict, transcript: dict, cuts: list[flo
                          "dur": ms3(b["end"] - b["start"])})
         elif t == "A":
             m = moments_by_id[it["moment_id"]]
-            a, b_ = action_window(cuts, m["start"], m["end"], duration, min_sec=0.8)
+            if strict_action_bounds:
+                # Grid observations certify only this interval. A minimum duration
+                # must never manufacture footage beyond the observed moment.
+                a, b_ = max(0.0, m["start"]), min(duration, m["end"])
+                if b_ <= a:
+                    raise ValueError(f"현장음 장면의 유효 구간 없음: {it['moment_id']}")
+            else:
+                a, b_ = action_window(cuts, m["start"], m["end"], duration, min_sec=0.8)
             rows.append({"i": k, "mode": "A", "text": f"(현장음) ({m.get('sound') or m['desc']})", "effect": it.get("effect"),
                          "src": [it["moment_id"]],
                          "cuts": [{"src": it["moment_id"], "in": a, "out": b_, "dur": ms3(b_ - a),

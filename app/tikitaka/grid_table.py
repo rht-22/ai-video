@@ -10,15 +10,13 @@ from app.tikitaka.grid import fingerprint, source_identity
 from app.tikitaka.table import (rows_from_items, _tts_cached, speech_end_after, cuts_in_excluded,
                                 trim_a_rows_off_dialogue, trim_a_rows_off_black)
 from app.tikitaka.timing import narration_plan_sec
-from app.v3.story_flow.cover import is_info_screen
-
 MAX_REASKS = 2
 MAX_STACK = 4
 MIN_CUT = .6
 MAX_CUT = 2.0
-MAX_HOLD = 2.0
+MAX_COVER_SPEED = 1.2
 FPS = 30
-SCHEMA = "tikitaka_grid_table/v7_joint_plan"
+SCHEMA = "tikitaka_grid_table/v9_joint_plan_speed_cover_frames"
 PROBE_SCHEMA = "visual_consistency/v5_shared_semantics"
 MAX_NARRATION_REWRITES = 3
 
@@ -80,101 +78,68 @@ def before_dialogue_windows(candidates):
     return windows
 
 
-def assemble_before_dialogue(candidates, target, *, opening=False):
-    """Back-fill from the dialogue boundary; no hold, speed change or new shot."""
-    remaining = math.ceil(target * FPS - 1e-7) / FPS
-    result = []
-    for sid, sp, start, end in before_dialogue_windows(candidates):
-        if remaining < 1/FPS - 1e-7:
+def _fit_cover_windows(windows, target, *, take_from_end=False):
+    """Use up to 1.2x source time, then trim; never freeze a cover frame."""
+    target = math.ceil(target * FPS - 1e-7) / FPS
+    wanted_source = target * MAX_COVER_SPEED
+    picked, source_total = [], 0.0
+    for sid, sp, start, end in windows:
+        take = min(end - start, wanted_source - source_total)
+        if take < 1 / FPS - 1e-7:
             break
-        sec = min(end-start, remaining)
-        result.append({"src": sid, "span_ids": [sid], "in": end-sec, "out": end,
-                       "dur": sec, "authority": "grid+tts", "desc": sp["scene_script"],
+        take = math.floor(take * FPS + 1e-7) / FPS
+        if take <= 0:
+            break
+        picked.append((sid, sp, end - take if take_from_end else start,
+                       end if take_from_end else start + take))
+        source_total += take
+        if source_total >= wanted_source - 1 / FPS:
+            break
+    if source_total + 1e-6 < target:
+        raise CoverDurationError(target - source_total, source_total)
+    speed = min(MAX_COVER_SPEED, source_total / target)
+    result = []
+    for sid, sp, start, end in picked:
+        # Every input is rendered as its own integer-frame clip. Round each
+        # duration upward so the effective per-cut speed never exceeds 1.2x.
+        # The row may end up a few frames longer than TTS, which is safe and
+        # avoids either a frozen frame or an accidental >1.2x micro-cut.
+        frames = max(1, math.ceil(((end - start) / speed) * FPS - 1e-7))
+        dur = frames / FPS
+        actual_speed = (end - start) / dur
+        result.append({"src": sid, "span_ids": [sid], "in": start, "out": end,
+                       "dur": dur, "playback_speed": actual_speed,
+                       "authority": "grid+tts", "desc": sp["scene_script"],
                        "subject_pos": sp.get("subject_pos"), "fact": copy.deepcopy(sp)})
-        remaining -= sec
-    if remaining > 1e-6 or not result:
+    return result
+
+
+def assemble_before_dialogue(candidates, target, *, opening=False):
+    """Back-fill from the dialogue boundary; speed at most 1.2x and never hold."""
+    windows = before_dialogue_windows(candidates)
+    # These windows are newest-first. Take from the dialogue boundary, then
+    # restore source order for playback.
+    reverse = _fit_cover_windows(windows, target, take_from_end=True)
+    result = []
+    for cut in reversed(reverse):
+        result.append({**cut, "in": cut["in"], "out": cut["out"]})
+    if not result:
         raise NarrationFitError("내레이션이 고정한 대사 앞 장면의 컷 수·길이 한도보다 길다")
-    result.reverse()
-    if opening and result[0]["fact"]["importance"] < 4:
-        raise NarrationFitError("훅 첫 화면은 중요도 4 이상이어야 한다")
     return result
 
 
 def fit_before_dialogue(job, gemini, row, candidates, rows, *, voice, speed, key, guide=None,
                         budget_sec=None, placement="before_dialogue"):
-    """Rewrite then re-synthesize within a fixed source window, transactionally."""
-    from app.tikitaka.production import SEMANTIC_RULES, narration_context
-    context = narration_context(rows, row)
+    """Check a fixed window without ever changing narration text or audio."""
     budget = (sum(z-a for _, _, a, z in before_dialogue_windows(candidates))
               if budget_sec is None else budget_sec)
-    if not math.isfinite(budget) or budget < 1 / FPS:
-        raise NarrationFitError("내레이션을 넣을 유효한 화면 길이 없음")
-    original = row["text"]
-    candidate_text, measured = original, float(row["dur"])
+    measured = float(row["dur"])
     if not math.isfinite(measured) or measured <= 0:
         raise NarrationFitError("잘못된 TTS 실측 길이")
-    audit = {"kind": placement, "budget_sec": budget, "original_text": original,
-             "original_sec": measured, "span_ids": list(candidates), "attempts": []}
-    attempt_file = f"narration_fit/{key}.json"
-    if math.ceil(measured * FPS - 1e-7) / FPS <= budget + 1e-6:
-        return audit
-    for attempt in range(MAX_NARRATION_REWRITES):
-        # Character count is guidance only; actual synthesized duration decides.
-        hint = max(1, int(len(candidate_text.replace(" ", "")) * budget / measured * .85))
-        prompt = ("선택된 고정 화면에 넣을 한국어 내레이션을 다시 써라. "
-                  "장면 길이가 우선이다. 핵심 인물·행동·다음 대사로 이어지는 의미를 유지하고 군더더기를 빼라. "
-                  "새 사실·인물·시간 단정은 추가하지 말고, 화면 글자는 기록된 원문만 인용하라. "
-                  "문장을 기계적으로 잘라내지 말고 자연스러운 짧은 문장으로 다시 써라. "
-                  "속도 변경·정지·다른 장면 추가로 길이를 늘릴 수 없다. "
-                  'JSON {"text": "새 문장"}.\n'
-                  f"원문: {original}\n직전 시도: {candidate_text} ({measured:.3f}초)\n"
-                  f"허용 길이: {budget:.3f}초 / 공백 제외 약 {hint}자 이내 권장\n"
-                  f"문장 역할·인접 대본: {context}\n" + SEMANTIC_RULES + "\n"
-                  f"고정 화면: {list(candidates.values())}\n제작 가이드: {guide or {}}")
-        if audit["attempts"]:
-            prompt += f"\n직전 검수: {audit['attempts'][-1]}"
-        name = f"narration_fit/{fingerprint([key, attempt, prompt])}_rewrite.json"
-        raw = job.load(name) if job.has(name) else gemini.text_json(prompt, kind="grid_narration_fit")
-        job.save(name, raw)
-        text = raw.get("text") if isinstance(raw, dict) else None
-        if not isinstance(text, str) or not text.strip():
-            audit["attempts"].append({"error": "재작성 문장 없음"})
-            job.save(attempt_file, audit)
-            continue
-        candidate_text = text.strip()
-        path, measured = _tts_cached(job, candidate_text, voice, speed)
-        measured = float(measured)
-        if not math.isfinite(measured) or measured <= 0:
-            raise NarrationFitError("재합성 TTS 길이가 유효하지 않다")
-        entry = {"text": candidate_text, "measured_sec": measured, "tts": str(path)}
-        audit["attempts"].append(entry)
-        if math.ceil(measured * FPS - 1e-7) / FPS > budget + 1e-6:
-            entry["error"] = "고정 화면 길이 초과"
-            job.save(attempt_file, audit)
-            continue
-        check_prompt = ("내레이션 재작성 검수. 짧아진 문장이 원문의 핵심 인물·행동·다음 대사로의 연결을 "
-                        "보존하고 새 사실·시간 단정·가이드 위반을 추가하지 않았는지 판단하라. "
-                        'JSON {"meaning_preserved": boolean, "reason": string}.\n'
-                        f"원문: {original}\n재작성: {candidate_text}\n"
-                        f"문장 역할·인접 대본: {context}\n" + SEMANTIC_RULES + "\n"
-                        f"화면: {list(candidates.values())}\n제작 가이드: {guide or {}}")
-        check_name = f"narration_fit/{fingerprint([key, check_prompt])}_meaning.json"
-        verdict = job.load(check_name) if job.has(check_name) else gemini.text_json(check_prompt, kind="grid_narration_fit_check")
-        job.save(check_name, verdict)
-        entry["meaning_review"] = verdict
-        if not isinstance(verdict, dict) or verdict.get("meaning_preserved") is not True:
-            entry["error"] = "핵심 의미 보존 실패"
-            job.save(attempt_file, audit)
-            continue
-        row.update(text=candidate_text, tts=str(path), dur=measured,
-                   plan_sec=narration_plan_sec(candidate_text), original_text=row.get("original_text", original))
-        audit.update(final_text=candidate_text, final_sec=measured)
-        job.save(attempt_file, audit)
-        job.log(f"[grid/narration_fit] {original!r} → {candidate_text!r} ({measured:.2f}/{budget:.2f}초)")
-        return audit
-    audit["blocked"] = True
-    job.save(attempt_file, audit)
-    raise NarrationFitError(f"내레이션 재작성 {MAX_NARRATION_REWRITES}회 소진: {budget:.2f}초 장면에 맞출 수 없음")
+    if not math.isfinite(budget) or math.ceil(measured * FPS - 1e-7) / FPS > budget + 1e-6:
+        raise NarrationFitError("덮개 길이 부족: 내레이션은 유지하고 화면 확장·추가·뒤 대사 재사용으로 재계획 필요")
+    return {"kind": placement, "budget_sec": budget, "original_text": row["text"],
+            "original_sec": measured, "span_ids": list(candidates), "attempts": []}
 
 
 def overlap(a, z, ranges):
@@ -211,37 +176,16 @@ def assemble_cover(ids, candidates, target, *, opening=False):
         raise ValueError(f"덮개 ID는 1~{MAX_STACK}개")
     if any(not isinstance(s, str) or s not in candidates for s in ids) or len(set(ids)) != len(ids):
         raise ValueError("덮개 ID가 후보 밖이거나 중복")
-    if opening and candidates[ids[0]]["importance"] < 4:
-        raise ValueError("훅 첫 화면은 중요도 4 이상")
-    remaining = math.ceil(target * FPS - 1e-7) / FPS
-    cuts = []
+    windows = []
     for sid in ids:
-        if remaining < 1 / FPS - 1e-7:
-            break
         sp = candidates[sid]
-        # Full frame windows inside measured source boundaries. Last partial cut
-        # is a TTS-derived trim, not a model timestamp.
         a = math.ceil(sp["t_in"] * FPS - 1e-7) / FPS
         end = math.floor(sp["t_out"] * FPS + 1e-7) / FPS
-        sec = min(end-a, MAX_CUT, remaining)
-        sec = round(sec * FPS) / FPS
-        if sec < MIN_CUT and remaining >= MIN_CUT:
+        sec = min(end-a, MAX_CUT)
+        if sec < MIN_CUT:
             continue
-        if sec < 1 / FPS:
-            continue
-        cuts.append({"src": sid, "span_ids": [sid], "in": a, "out": a+sec,
-                     "dur": sec, "desc": sp["scene_script"], "authority": "grid+tts",
-                     "subject_pos": sp.get("subject_pos"), "fact": copy.deepcopy(sp)})
-        remaining -= sec
-    if remaining > 1e-6 and cuts and remaining <= MAX_HOLD:
-        fact = cuts[-1]["fact"]
-        if is_info_screen([cuts[-1]["src"]], {cuts[-1]["src"]: fact}):
-            cuts[-1]["hold_sec"] = remaining
-            cuts[-1]["dur"] += remaining
-            remaining = 0
-    if remaining > 1e-6:
-        raise CoverDurationError(remaining, sum(c["dur"] for c in cuts))
-    return cuts
+        windows.append((sid, sp, a, a + sec))
+    return _fit_cover_windows(windows, target)
 
 
 def probe_cover(job, gemini, cut, text, *, key, context=None):
@@ -261,6 +205,8 @@ def probe_cover(job, gemini, cut, text, *, key, context=None):
               "기록은 후보를 찾기 위한 참고이며 오기나 더 긴 구간의 설명일 수 있다. "
               "text_matches는 내레이션과 실제 선택 화면이 맞는지 판단한다. 기록과의 불일치는 record_matches와 reason에 별도로 남기고 그것만으로 text_matches=false를 주지 마라. "
               "구체 행동을 말하는 내레이션은 그 행동의 직접 장면이어야 한다. 단순히 같은 인물이 등장하는 다른 행동은 불일치다. "
+              "cover_role=support이면 같은 사건의 반응·연결 화면인지 확인하고 핵심 행동 자체의 재현은 요구하지 마라. "
+              "cover_role=evidence이면 핵심 인물·행동이 직접 확인되어야 한다. "
               + SEMANTIC_RULES + "\n"
               "시각을 제안하지 마라. JSON {text_matches: boolean, record_matches: boolean, narration_kind: string, seen: string, reason: string}.\n"
               f"내레이션: {text}\n기록: {cut['desc']}\n인접 대본(S=원본 대사, A=현장음 설명, N=내레이션): {context or []}")
@@ -291,7 +237,7 @@ def share_adjacent_action_boundary(rows, transcript):
             continue
         protected_end = bind_dialogue(lines, transcript["words"], speech["src"])["end"]
         boundary = max(protected_end, a["in"])
-        if boundary >= s["out"] or a["out"] - boundary < 0.8:
+        if boundary >= s["out"] or a["out"] - boundary < MIN_CUT:
             continue
         old_end = s["out"]
         s["out"] = a["in"] = boundary
@@ -307,7 +253,7 @@ def build_table(job, gemini, rebuild, index, transcript, cuts, duration, proxy, 
     version = next(v for v in rebuild["versions"] if v["n"] == version_n)
     exclude, black = exclude or [], black or []
     from app.tikitaka.production import SEMANTIC_RULES, narration_context, preflight
-    fp = fingerprint([SCHEMA, SEMANTIC_RULES, version, index, transcript, grid, voice, speed,
+    fp = fingerprint([SCHEMA, "bounded-action/no-narration-shortening/v2", SEMANTIC_RULES, version, index, transcript, grid, voice, speed,
                       exclude, black, guide, source_identity(job.source)])
     name = f"grid_table_v{version_n}{'_'+tag if tag else ''}.json"
     cached = job.load(name) if job.has(name) else {}
@@ -321,15 +267,15 @@ def build_table(job, gemini, rebuild, index, transcript, cuts, duration, proxy, 
         job.save(f"production_preflight_v{version_n}{'_'+tag if tag else ''}.json", preflight_result)
     rows = rows_from_items(version, index, transcript, cuts, duration,
         lambda text: _tts_cached(job, text, voice, speed),
-        end_fn=lambda we, limit: speech_end_after(job, we, limit=limit))
+        end_fn=lambda we, limit: speech_end_after(job, we, limit=limit), strict_action_bounds=True)
     notes = share_adjacent_action_boundary(rows, transcript)
     notes += trim_a_rows_off_dialogue(rows) + trim_a_rows_off_black(rows, black)
     for note in notes:
         job.log(f"[table] {note}")
     spoken = [(c["in"], c["out"]) for r in rows if r["mode"] == "S" for c in r["cuts"]]
     by = {s["id"]: s for s in grid["span_candidates"]}
-    used, audit = [], []
-    for row in rows:
+    used, audit, fixed_ranges = [], [], []
+    for row_pos, row in enumerate(rows):
         if row["mode"] == "N":
             continue
         for cut in row["cuts"]:
@@ -341,10 +287,12 @@ def build_table(job, gemini, rebuild, index, transcript, cuts, duration, proxy, 
             if row["mode"] == "A" and overlap(a, z, used + spoken + black):
                 raise ValueError("현장음 컷이 대사·기존 컷·암전과 중복; 대본을 다시 선택해야 함")
             used.append((a, z))
+            fixed_ranges.append((a, z, row["mode"], row_pos))
     from app.tikitaka.cover_evidence import retrieve, tighten_opening
     opening_audit = tighten_opening(job, gemini, rows, grid)
     evidence = retrieve(job, gemini, rows, index, grid, exclude + black, guide)
-    for row in rows:
+    narration_used = []
+    for row_pos, row in enumerate(rows):
         if row["mode"] != "N":
             continue
         candidates = candidates_for(row, rows, index, grid, exclude + black, used)
@@ -353,31 +301,45 @@ def build_table(job, gemini, rebuild, index, transcript, cuts, duration, proxy, 
                  if not overlap(sp["t_in"], sp["t_out"], used)}
         candidates.update(proof)
         context = narration_context(rows, row, index, transcript)
-        moments = {m["id"]: m for m in index.get("moments", [])}
-        planned_ids = list(dict.fromkeys(sid for mid in (row.get("production_plan") or {}).get("cover_moment_ids", [])
-                                        for sid in moments.get(mid, {}).get("span_ids", [])))
+        from app.tikitaka.production import planned_cover_span_ids
+        planned_ids = planned_cover_span_ids(row.get("production_plan"), index)
+        later_s = [(a, z) for a, z, mode, pos in fixed_ranges if mode == "S" and pos > row_pos]
+        hard_reserved = exclude + black + narration_used + [
+            (a, z) for a, z, mode, pos in fixed_ranges if mode == "A" or pos <= row_pos
+        ]
+        reusable_later_dialogue = set()
         for sid in planned_ids:
             sp, fact = by.get(sid), index.get("grid_facts", {}).get(sid)
-            if sp is None or fact is None or overlap(sp["t_in"], sp["t_out"], exclude + black + used):
+            if sp is None or fact is None or overlap(sp["t_in"], sp["t_out"], hard_reserved):
+                continue
+            fixed_overlap = overlap(sp["t_in"], sp["t_out"], [(a, z) for a, z, _, _ in fixed_ranges])
+            later_reuse = fixed_overlap and overlap(sp["t_in"], sp["t_out"], later_s)
+            if fixed_overlap and not later_reuse:
                 continue
             if any(word in fact.get("scene_script", "") for word in (guide or {}).get("avoid", []) if word):
                 continue
             candidates[sid] = {**sp, **fact}
+            if later_reuse:
+                reusable_later_dialogue.add(sid)
+        if planned_ids:
+            candidates = {sid: sp for sid, sp in candidates.items() if sid in planned_ids}
+            proof = {sid: sp for sid, sp in proof.items() if sid in candidates}
+            before = {sid: sp for sid, sp in before.items() if sid in planned_ids}
         rejection = ""
         failed_selections = []
-        for attempt in range(MAX_REASKS + 1):
+        for attempt in range(1 if planned_ids else MAX_REASKS + 1):
             prompt = ("내레이션 아래 화면을 골라라. 아래 후보 ID만 1~4개. "
                       "슬로우 금지, 글자 인용은 기록 원문만, 무관한 화면 금지. "
-                      "첫 내레이션이 첫 행이면 첫 화면 중요도 4 이상. "
+                      "첫 화면은 내레이션·제목과 이어져 사건에 대한 궁금증을 만드는지 판단하라. 중요도 숫자는 반려 기준이 아니다. "
                       "우선순위: 설명한 행동/장면을 직접 보여주는 화면 > 관련 상황 > 대사 직전 연결 화면. "
                       "실제 행동 후보가 있으면 그 행동을 보여줘야 한다. 지도나 운전으로 추적기 심는 행동을 대체하지 마라. "
                       "같은 인물이라는 이유만으로 다른 행동을 고르지 마라. 앞선 실제 사건의 자료화면은 허용한다. "
                       "before_dialogue는 직접 행동 화면이 없고 문장에 맞을 때만 선택한다. "
-                      "이 배치는 아래 고정 앞 장면 전체를 선택하며, 짧으면 내레이션을 다시 쓴다. "
-                      "앞 장면에 자료화면 정지·슬로우·다른 씬 추가로 시간을 늘리지 않는다. "
-                      "그 외 same_scene 배치는 화면을 이어 TTS 길이를 채우고 자료화면만 최대 2초 정지 가능. "
-                      "문장과 화면을 함께 결정하라. 계획한 화면을 우선 검토하되 사용할 수 없거나 의미가 맞지 않으면 새 조합을 골라라. "
-                      "다른 화면에 맞추려 새 사실을 만들지 마라. 문장은 필요할 때만 고치고 핵심 의미·연결을 보존하라. "
+                      "이 배치는 아래 고정 앞 장면 전체를 선택하며, 짧으면 다른 덮개 조합을 선택한다. 내레이션 축약 금지. "
+                      "모든 덮개에서 정지·슬로우는 금지한다. 화면이 길면 전체 동작을 살리도록 최대 1.2배속하고 그래도 길면 끝을 자른다. "
+                      "뒤쪽 대사 재사용 후보는 내레이션 내용과 직접 맞을 때만 여기서 원음을 끄고 먼저 쓴다. 이후 S에서는 원음으로 다시 나오며, 여러 N에서 반복 사용하면 안 된다. "
+                      "문장과 화면을 함께 결정하라. 확정 계획 화면 ID 안에서만 조합을 골라라. action의 evidence 화면을 반드시 포함하라. "
+                      "다른 화면에 맞추려 새 사실을 만들지 마라. 내레이션 문장은 그대로 유지하라. "
                       "JSON {text: string, placement: before_dialogue|same_scene, span_ids: [string]}. 시간은 쓰지 마라.\n"
                       + SEMANTIC_RULES + "\n"
                       f"문장: {row['text']} / 길이: {row['dur']:.3f}s\n"
@@ -385,6 +347,7 @@ def build_table(job, gemini, rebuild, index, transcript, cuts, duration, proxy, 
                       f"작성 단계의 계획 화면(현재 후보에 있는 ID만 가능): {planned_ids}\n"
                       f"행동/장면 검색 근거: {evidence.get(row['i'], {}).get('reason', '')}\n"
                       f"행동/장면 후보 ID: {list(proof)}\n"
+                      f"뒤쪽 대사 화면 1회 재사용 후보 ID: {sorted(reusable_later_dialogue)}\n"
                       f"일반 후보: {[dict(v, usable_sec=max(0, min(MAX_CUT, math.floor(v['t_out']*FPS+1e-7)/FPS-math.ceil(v['t_in']*FPS-1e-7)/FPS))) for v in candidates.values()]}\n"
                       f"이미 반려된 선택(재사용 금지): {failed_selections}\n"
                       f"고정 앞 장면(선택 시 ID 전부): {list(before.values())}\n반려 사유: {rejection}")
@@ -392,31 +355,27 @@ def build_table(job, gemini, rebuild, index, transcript, cuts, duration, proxy, 
             selection_name = f"grid_cover_probes/{request_key}_selection.json"
             raw = None
             try:
-                raw = job.load(selection_name) if job.has(selection_name) else gemini.text_json(prompt, kind="grid_cover_select")
+                if planned_ids:
+                    # Execute the writer's plan. No second author selects new shots.
+                    cover = (row.get("production_plan") or {}).get("cover", [])
+                    ordered = sorted(cover, key=lambda x: x.get("role") != "evidence")
+                    raw = {"text": row["text"], "placement": "same_scene",
+                           "span_ids": [x["span_id"] for x in ordered]}
+                else:
+                    raw = job.load(selection_name) if job.has(selection_name) else gemini.text_json(prompt, kind="grid_cover_select")
                 job.save(selection_name, raw)
                 if raw in failed_selections:
                     raise ValueError("이미 반려된 동일 화면 조합; 다른 ID 또는 배치를 선택")
                 working = copy.deepcopy(row)
                 fit_audit = None
                 ids = raw.get("span_ids")
+                from app.tikitaka.production import validate_cover_selection
+                validate_cover_selection(row.get("production_plan"), ids)
                 revised = raw.get("text", row["text"])
                 if not isinstance(revised, str) or not revised.strip():
                     raise ValueError("빈 내레이션 재선택")
                 if revised.strip() != row["text"]:
-                    rewrite_check = ("내레이션·화면 재선택의 문장 수정 검수. 핵심 의미와 앞뒤 연결을 유지하고 "
-                                     "새 사실·인물·시간 단정을 만들지 않았는지 판단하라. "
-                                     'JSON {meaning_preserved: boolean, reason: string}.\n' + SEMANTIC_RULES +
-                                     f"\n원문: {row['text']}\n수정: {revised.strip()}\n맥락: {context}\n가이드: {guide or {}}")
-                    check_name = f"narration_fit/{fingerprint([SCHEMA, rewrite_check])}_joint_meaning.json"
-                    verdict = job.load(check_name) if job.has(check_name) else gemini.text_json(rewrite_check, kind="grid_narration_revision_check")
-                    job.save(check_name, verdict)
-                    if not isinstance(verdict, dict) or verdict.get("meaning_preserved") is not True:
-                        raise ValueError(f"내레이션 재선택의 핵심 의미 보존 실패: {verdict}")
-                    path, measured = _tts_cached(job, revised.strip(), voice, speed)
-                    if not math.isfinite(measured) or measured <= 0:
-                        raise ValueError("내레이션 재합성 길이가 유효하지 않음")
-                    working.update(text=revised.strip(), original_text=row["text"], tts=str(path), dur=measured,
-                                   plan_sec=narration_plan_sec(revised.strip()))
+                    raise ValueError("덮개 선택 단계는 내레이션 문구를 변경할 수 없음; 화면을 다시 계획하라")
                 placement = raw.get("placement", "same_scene")
                 if placement not in {"before_dialogue", "same_scene"}:
                     raise ValueError("알 수 없는 덮개 배치")
@@ -443,8 +402,10 @@ def build_table(job, gemini, rebuild, index, transcript, cuts, duration, proxy, 
                             key=request_key, guide=guide, budget_sec=e.available, placement="same_scene")
                         selected = assemble_cover(ids, candidates, working["dur"], opening=row is rows[0])
                 for cut in selected:
+                    if cut["src"] in reusable_later_dialogue:
+                        cut["dialogue_reuse"] = True
                     result = probe_cover(job, gemini, cut, working["text"],
-                        key=fingerprint([request_key, cut, working["text"]]), context=context)
+                        key=fingerprint([request_key, cut, working["text"]]), context=dict(context, cover_role=next((x.get("role") for x in (row.get("production_plan") or {}).get("cover", []) if x.get("span_id") == cut["src"]), "evidence")))
                     if not result["text_matches"]:
                         raise ValueError(f"{cut['src']} 모순: {result.get('seen')} / {result.get('reason')}")
                 working["cuts"] = selected
@@ -452,6 +413,7 @@ def build_table(job, gemini, rebuild, index, transcript, cuts, duration, proxy, 
                 row.update(working)
                 audit.append({"row": row["i"], "attempts": attempt+1, "previous_rejection": rejection,
                               "narration_fit": fit_audit, "context": context,
+                              "reused_later_dialogue_span_ids": [c["src"] for c in selected if c.get("dialogue_reuse")],
                               "original_text": row.get("original_text"), "final_text": row["text"]})
                 break
             except (ValueError, TypeError, AttributeError) as e:
@@ -467,6 +429,7 @@ def build_table(job, gemini, rebuild, index, transcript, cuts, duration, proxy, 
                      {"items": [{"kind": "cover", "row": row["i"], "error": rejection}], "blocked": True})
             raise ValueError(f"덮개 재검토 소진: 행{row['i']} {rejection}")
         used.extend((c["in"], c["out"]) for c in row["cuts"])
+        narration_used.extend((c["in"], c["out"]) for c in row["cuts"])
     bad = cuts_in_excluded(rows, exclude)
     if bad:
         raise ValueError(f"활용 불가 구간: {bad}")

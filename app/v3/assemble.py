@@ -334,12 +334,15 @@ def clip_duration(dur_sec: float, fps: float | None) -> float:
 
 
 def clip_len(c: dict) -> float:
-    """클립이 편집본에서 차지하는 길이(격자 반올림 전) = 소스 구간 + 붙잡은 시간(hold_sec).
+    """클립이 편집본에서 차지하는 길이 = 소스 구간/배속 + 붙잡은 시간.
 
     2026-09-03 '정보 화면 붙잡기': 덮개 화면(메시지·문서)이 내레이션보다 짧으면 마지막
     프레임을 hold_sec 만큼 붙잡는다. 편집본 길이를 더하는 곳은 **전부 이 함수**를 써야
     한다 — 한 곳이라도 (end−start) 를 직접 쓰면 좌표가 밀리고 프레임 격자 정렬이 깨진다."""
-    return float(c["clip_end_sec"]) - float(c["clip_start_sec"]) + float(c.get("hold_sec") or 0.0)
+    speed = float(c.get("playback_speed") or 1.0)
+    if not 1.0 <= speed <= 1.2:
+        raise ValueError(f"clip playback_speed out of range: {speed}")
+    return (float(c["clip_end_sec"]) - float(c["clip_start_sec"])) / speed + float(c.get("hold_sec") or 0.0)
 
 
 def edited_offsets(timeline: list[dict],

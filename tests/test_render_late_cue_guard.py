@@ -145,3 +145,11 @@ def test_the_late_cue_came_from_the_planned_total_not_a_bypass():
     kept, dropped = cues_within_video(
         [{"path": "x.mp3", "cue": resolved[0]}], CLIPS)
     assert kept == [] and len(dropped) == 1
+
+
+def test_duration_accounts_for_cover_speed_and_output_frames():
+    from types import SimpleNamespace
+    clips = [SimpleNamespace(start_sec=0., end_sec=2., playback_speed=1.2),
+             SimpleNamespace(start_sec=10., end_sec=11.05, playback_speed=1.)]
+    assert video_out_duration(clips, fps=30) == pytest.approx((50+32)/30)
+    assert video_out_duration(clips) < 3.05

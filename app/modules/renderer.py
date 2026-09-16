@@ -867,6 +867,7 @@ def render_short(inputs: RenderInputs) -> list[str]:
                 "-filter_complex_script", str(filter_relative),
                 "-map", "[vout]", "-map", "[aout]",
                 "-c:v", video_encoder, *encoder_args,
+                *(["-r", str(inputs.output_fps), "-fps_mode", "cfr"] if inputs.output_fps else []),
                 "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "192k",
                 str(output_relative),
@@ -1389,19 +1390,26 @@ def _build_filtergraph(inputs: RenderInputs, num_clip_inputs: int, num_cue_input
         # 소리도 같은 길이로 맞춰야(apad→atrim) concat 이 영상을 덧대지 않는다.
         pin_v, pin_a = "", "anull"
         _hold = float(getattr(clip, "hold_sec", 0.0) or 0.0)   # 정보 화면 붙잡기(2026-09-03)
-        _audio_len = float(clip.end_sec) - float(clip.start_sec) + _hold
+        _playback_speed = float(getattr(clip, "playback_speed", 1.0) or 1.0)
+        if not 1.0 <= _playback_speed <= 1.2:
+            raise ValueError(f"clip playback_speed out of range: {_playback_speed}")
+        if _playback_speed != 1.0 and clip.use_original_audio:
+            raise ValueError("clip playback_speed is allowed only for muted narration covers")
+        _source_len = float(clip.end_sec) - float(clip.start_sec)
+        _audio_len = _source_len / _playback_speed + _hold
+        _speed_v = f",setpts=(PTS-STARTPTS)/{_playback_speed:g}" if _playback_speed != 1.0 else ""
+        _speed_a = f"atempo={_playback_speed:g}," if _playback_speed != 1.0 else ""
         if _clip_fps:
-            n_fr = max(1, round((float(clip.end_sec) - float(clip.start_sec) + _hold) * _clip_fps))
+            n_fr = max(1, round(_audio_len * _clip_fps))
             dur_q = n_fr / _clip_fps
             rate_filter = f",fps={_clip_fps:.9f}" if inputs.output_fps else ""
-            pin_v = (rate_filter + f",tpad=stop_mode=clone:stop_duration={1 + _hold:.3f}"
+            pin_v = (_speed_v + rate_filter + f",tpad=stop_mode=clone:stop_duration={1 + _hold:.3f}"
                      f",trim=end_frame={n_fr},setpts=PTS-STARTPTS")
-            pin_a = f"apad,atrim=end={dur_q:.6f},asetpts=PTS-STARTPTS"
+            pin_a = f"{_speed_a}apad,atrim=end={dur_q:.6f},asetpts=PTS-STARTPTS"
             _audio_len = dur_q
-        elif _hold > 0:
-            _len = float(clip.end_sec) - float(clip.start_sec) + _hold
-            pin_v = f",tpad=stop_mode=clone:stop_duration={_hold:.3f},setpts=PTS-STARTPTS"
-            pin_a = f"apad,atrim=end={_len:.6f},asetpts=PTS-STARTPTS"
+        elif _hold > 0 or _playback_speed != 1.0:
+            pin_v = _speed_v + f",tpad=stop_mode=clone:stop_duration={_hold:.3f},setpts=PTS-STARTPTS"
+            pin_a = f"{_speed_a}apad,atrim=end={_audio_len:.6f},asetpts=PTS-STARTPTS"
 
         # 서로 이어진 원본 구간은 손대지 않는다. 전혀 다른 소스 시각으로 점프하는
         # 편집점만 양쪽 80ms를 페이드해 음악·함성이 한 샘플에서 튀는 것을 막는다.
@@ -2082,12 +2090,15 @@ def _apply_loudnorm(audio_filter: str, target_lufs: float | None) -> str:
             + f";[apremix]loudnorm=I={target_lufs}:TP=-1.5:LRA=11[aout]")
 
 
-def video_out_duration(clips, speed: float = 1.0) -> float:
+def video_out_duration(clips, speed: float = 1.0, fps: float | None = None) -> float:
     """출력 영상 길이(초) = 클립 길이 합 ÷ 배속. 순수(테스트 대상).
 
     `concat` 이 내는 길이와 같다 — 2026-08-24 실측으로 확인했다(클립 구간이 소스 끝을
     넘겨도 비디오·오디오가 함께 짧아지므로 이 합이 그대로 출력 길이다)."""
-    total = sum(max(0.0, float(c.end_sec) - float(c.start_sec)) for c in (clips or []))
+    durations = [max(0.0, float(c.end_sec) - float(c.start_sec))
+                 / float(getattr(c, "playback_speed", 1.0) or 1.0)
+                 + float(getattr(c, "hold_sec", 0.0) or 0.0) for c in (clips or [])]
+    total = sum(max(1, round(d * fps)) / fps if fps else d for d in durations)
     return total / speed if speed > 0 else total
 
 
@@ -2236,7 +2247,7 @@ def _build_audio_filter(inputs: RenderInputs, num_clip_inputs: int, num_cue_inpu
         # 영상 끝을 넘는 효과음 꼬리를 자른다(2026-09-03 실사고: 마지막 내레이션의 6.6s
         # whoosh 가 영상보다 3.7s 길어 amix=longest 가 컨테이너를 늘렸다 — 마지막 프레임이
         # 멈춘 채 소리만 흐른다). 파일이 그보다 짧으면 atrim 은 무해하다. cue 경로는 불변.
-        _remain = video_out_duration(inputs.clips, speed) - start_sec
+        _remain = video_out_duration(inputs.clips, speed, inputs.output_fps) - start_sec
         _trim = f"atrim=end={_remain:.3f}," if _remain > 0 else ""
         tts_filters.append(f"[{sfx_input_idx}:a]{_trim}volume={gain:g}dB[sfx{si}_vol]")
         if start_sec > 0:

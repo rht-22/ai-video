@@ -176,6 +176,13 @@ def test_partial_window_keeps_original_audio_after_narration():
     assert tail[-1][1] == pytest.approx(assemble.clip_duration(10.0, FPS), abs=5e-4)
 
 
+def test_sped_cover_mute_window_uses_output_clock():
+    tl = [{"role": "hook", "clip_start_sec": 100.0, "clip_end_sec": 106.0,
+           "playback_speed": 1.2, "subtitle": "", "use_original_audio": False,
+           "span_ids": []}]
+    assert finalize.cover_mute_windows(tl, [(101.2, 104.8)], FPS) == [(1.0, 4.0)]
+
+
 def test_mute_window_ends_at_actual_tts_audio_not_planned_slot():
     """발화가 끝난 뒤 계획 창까지 무음으로 기다렸다가 원음이 튀는 회귀를 막는다."""
     cue = {"path": Path("voice.mp3"),

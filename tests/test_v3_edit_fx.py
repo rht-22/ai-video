@@ -85,11 +85,10 @@ def test_apply_zoom_splits_frame_grid_and_total_unchanged():
     fps = 24000 / 1001
     out, zmap, p2r = finalize.apply_zoom_splits(tl, [{"clip": 0, "factor": 1.4, "anchor": "center", "from_sec": 0.9},
                                                      {"clip": 1, "factor": 1.2, "anchor": "left", "from_sec": 0.0}], fps)
-    assert len(out) == 3 and p2r == {0: [0, 1], 1: [2]} and set(zmap) == {1, 2}
-    cut = round(round(0.9 * fps) / fps, 3)
-    assert out[0]["clip_end_sec"] == pytest.approx(10.0 + cut) and out[1]["clip_start_sec"] == pytest.approx(10.0 + cut)
-    assert out[1].get("zoom_part") is True and "subtitle" not in out[1] and out[0]["subtitle"] == "x"
-    assert "hold_sec" not in out[0] and out[2]["hold_sec"] == 0.5
+    assert len(out) == 2 and p2r == {0: [0], 1: [1]} and set(zmap) == {1}
+    assert out[0]["clip_start_sec"] == 10.0 and out[0]["clip_end_sec"] == 14.0
+    assert out[0]["subtitle"] == "x" and not out[0].get("zoom_part")
+    assert out[1]["hold_sec"] == 0.5
     total = sum(float(c["clip_end_sec"]) - float(c["clip_start_sec"]) for c in out)
     assert total == pytest.approx(9.0)
     # 줌 없음 = plan 과 동일(사본)
@@ -97,7 +96,25 @@ def test_apply_zoom_splits_frame_grid_and_total_unchanged():
     assert same == tl and zm == {} and p == {0: [0], 1: [1]}
     # 남는 조각이 짧으면 통째 줌
     whole, zm2, _ = finalize.apply_zoom_splits(tl, [{"clip": 0, "factor": 1.4, "anchor": "center", "from_sec": 3.9}], None)
-    assert len(whole) == 2 and 0 in zm2
+    assert len(whole) == 2 and 0 not in zm2
+
+
+def test_mid_clip_zoom_never_splits_original_dialogue_audio():
+    tl = [{"role": "hook", "clip_start_sec": 844.63, "clip_end_sec": 849.0,
+           "use_original_audio": True, "span_ids": [], "subtitle": "박서진을 뽑아라"}]
+    out, zmap, p2r = finalize.apply_zoom_splits(
+        tl, [{"clip": 0, "factor": 1.2, "anchor": "center", "from_sec": 1.85}], 30)
+    assert out == tl
+    assert zmap == {} and p2r == {0: [0]}
+
+
+def test_zoom_split_uses_output_seconds_for_sped_cover():
+    tl = [{"role": "hook", "clip_start_sec": 10.0, "clip_end_sec": 12.4,
+           "playback_speed": 1.2, "use_original_audio": False, "span_ids": []}]
+    out, _, _ = finalize.apply_zoom_splits(
+        tl, [{"clip": 0, "factor": 1.2, "anchor": "center", "from_sec": 1.0}], 30)
+    assert out[0]["clip_end_sec"] == pytest.approx(11.2)
+    assert sum(finalize.assemble.clip_len(c) for c in out) == pytest.approx(2.0)
 
 
 def test_zoom_crop_rows_and_emphasis_styles():
@@ -139,6 +156,8 @@ def test_style_prompt_mentions_edit_fx_tasks():
     for k in ("`emphasis`", "`zooms`", "`fits`", "강조 자막", "줌인", "정보 화면 전체 맞춤"):
         assert k in p
     assert f"{stage4.ZOOM_FACTOR_RANGE[1]:.1f}" in p and str(stage4.EMPH_MAX_COUNT) in p
+    assert "바로 그 구간" in p and "뒤에 나올 내레이션·가사·반전" in p
+    assert "이 구간에 실제로 들리는 말" in stage4.LABEL_PROBE_PROMPT
 
 
 # ── 무관한 인서트(2026-09-08, EP01 42~46s 벽 파쇄 실사고) ─────────────────────
@@ -187,7 +206,7 @@ def test_multi_stage_zoom_validate_and_split():
     assert [st["factor"] for st in z["stages"]] == [1.0, 1.1, 1.22]      # 4단째는 0.3s 미만 → 흡수
     assert any("흡수" in n or "3단" in n for n in notes) and z["factor"] == 1.0
     tl = [{"role": "hook", "clip_start_sec": 0.0, "clip_end_sec": 4.0, "use_original_audio": True, "span_ids": []},
-          {"role": "hook", "clip_start_sec": 10.0, "clip_end_sec": 15.0, "use_original_audio": True, "span_ids": [], "subtitle": "x"}]
+          {"role": "hook", "clip_start_sec": 10.0, "clip_end_sec": 15.0, "use_original_audio": False, "span_ids": [], "subtitle": "x"}]
     out, zmap, p2r = finalize.apply_zoom_splits(tl, ok["zooms"], None)
     assert [(c["clip_start_sec"], c["clip_end_sec"]) for c in out[1:]] == [(10.0, 11.3), (11.3, 12.5), (12.5, 15.0)]
     assert set(zmap) == {2, 3} and zmap[2]["factor"] == 1.1 and zmap[3]["factor"] == 1.22 and p2r == {0: [0], 1: [1, 2, 3]}
@@ -220,7 +239,8 @@ def test_emphasis_pairs_with_zoom_and_sfx(tmp_path):
                              app_root=root, run_dir=tmp_path, seed="t")
     assert len(out) == 2 and all(Path(o["path"]).exists() for o in out)
     assert all(o["_label"]["kind"] == "emphasis" and abs(o["_label"]["at"] - o["start_sec"]) < 0.2 for o in out)
-    assert "한 쌍이다" in stage4.build_style_prompt(stage4.RECAP_PRESET, {"beats": []})
+    assert "원본 대사가 묻히지 않도록 타격음은 얹지 않는다" in stage4.build_style_prompt(
+        stage4.RECAP_PRESET, {"beats": []})
 
 
 def test_fixed_crop_from_beat_crop_x(tmp_path):
@@ -246,11 +266,11 @@ def test_fixed_crop_from_beat_crop_x(tmp_path):
                                    aspect_ratio="24:23", picture=None, video_path=tmp_path / "x.mp4") == ({}, [])
 
 
-def test_emphasis_sfx_opt_out_flag_is_wired():
-    """강조 줄 `sfx: false`(2026-09-11) — 한 문장을 여러 줄로 나눠 강조할 때 첫 줄만 타격음."""
+def test_emphasis_sfx_never_overlays_original_dialogue():
+    """강조는 원본 대사 위에 있으므로 타격음으로 음절을 가리지 않는다."""
     from pathlib import Path
     src = Path(__file__).resolve().parents[1].joinpath("app/v3/finalize.py").read_text()
-    assert 'e.get("sfx") is False' in src and "i not in _no_sfx" in src
+    assert "원본 대사 보호" in src and "_emph_sfx: list = []" in src
 
 
 def test_adjacent_emphasis_sfx_use_different_sounds(tmp_path):

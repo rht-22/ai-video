@@ -282,7 +282,7 @@ def main(argv: list[str] | None = None) -> int:
         preset_exclude = [tuple(x) for x in resolved["intervals"]]
         exclude = sorted(exclude + preset_exclude)
     if exclude:
-        job.log("[guide] 활용 불가 구간 " + ", ".join(f"{s0:.1f}~{e0:.1f}s" for s0, e0 in exclude) + " — 대본·컷 탐색·테이블에서 배제")
+        job.log("[source] 선택 제외 구간(가이드 제한·분석 미완료 포함) " + ", ".join(f"{s0:.1f}~{e0:.1f}s" for s0, e0 in exclude) + " — 대본·컷 탐색·테이블에서 배제")
     range_label = None
     range_exclude: list[tuple[float, float]] = []
     if a.range:
@@ -322,6 +322,8 @@ def main(argv: list[str] | None = None) -> int:
         if bad:
             ap.error(f"없는 버전 {bad} — 있는 버전: {[v['n'] for v in rebuild['versions']]}")
     job.log(f"[cli] 렌더 대상 버전 {targets}")
+    if a.pipeline == "grid-review":
+        job.save("planning_tts_settings.json", {"voice": a.voice, "speed": a.speed})
     for n in targets:
         if a.pipeline == "grid-review":
             from app.tikitaka.production import preflight
@@ -330,32 +332,38 @@ def main(argv: list[str] | None = None) -> int:
             job.save(f"production_preflight_v{n}{sfx}_draft.json", feasibility)
             job.log(f"[preflight] v{n} 조립 전 추정 검사 — 확인 항목 {feasibility['issue_count']}개 "
                     "(최종 길이·화면 판정은 TTS 실측·영상 검수)")
-        rb_for_table = rebuild
-        if not a.no_verify:                                   # 4.5 영상 확인 패스 — 고정 구성(2026-09-10 사용자 결정)
-            final = V.verify_version(job, gemini, rebuild, n, index, transcript, proxy, title=a.title, episode=a.episode, guide=guide,
-                                     extra_exclude=range_exclude + preset_exclude, tag=a.tag, digest=digest)
-            rb_for_table = {"versions": [final if v["n"] == n else v for v in rebuild["versions"]], "recommended": rebuild["recommended"]}
-        ver = next(v for v in rb_for_table["versions"] if v["n"] == n)
-        if R.apply_scene_order_version(ver, index, transcript, log=job.log):   # 장면 안 순서 벨트 — 캐시된 대본에도(멱등)
-            vf = f"verified_v{n}{sfx}.json"
-            if not a.no_verify and job.has(vf):
-                doc = job.load(vf); doc["version"] = ver; job.save(vf, doc)
-        if R.polish_character_names(gemini, ver, index, transcript, actors=(guide or {}).get("actors") or {}, digest=digest, log=job.log):
-            vf = f"verified_v{n}{sfx}.json"                      # 인물 벨트 — 캐시된 대본에도(멱등): 장면에 없는 인물명을 고쳐 쓴다
-            if not a.no_verify and job.has(vf):
-                doc = job.load(vf); doc["version"] = ver; job.save(vf, doc)
-        if guide:                                             # 가이드 벨트 — 캐시된 대본에도 지양 단어 문구 교정·배우 표기를 건다(멱등)
-            if R.polish_guide(gemini, ver, guide, log=job.log) + R.apply_name_map(ver, guide.get("actors") or {}, log=job.log):
+        resume_table = (a.pipeline == "grid-review" and redo == {"render"}
+                        and job.has(f"grid_table_v{n}{sfx}.json"))
+        if not resume_table:
+            rb_for_table = rebuild
+            if not a.no_verify:                                   # 4.5 영상 확인 패스 — 고정 구성(2026-09-10 사용자 결정)
+                final = V.verify_version(job, gemini, rebuild, n, index, transcript, proxy, title=a.title, episode=a.episode, guide=guide,
+                                         extra_exclude=range_exclude + preset_exclude, tag=a.tag, digest=digest)
+                rb_for_table = {"versions": [final if v["n"] == n else v for v in rebuild["versions"]], "recommended": rebuild["recommended"]}
+            ver = next(v for v in rb_for_table["versions"] if v["n"] == n)
+            if R.apply_scene_order_version(ver, index, transcript, log=job.log):   # 장면 안 순서 벨트 — 캐시된 대본에도(멱등)
                 vf = f"verified_v{n}{sfx}.json"
                 if not a.no_verify and job.has(vf):
-                    doc = job.load(vf)
-                    doc["version"] = ver
-                    job.save(vf, doc)
-                elif a.no_verify:
-                    job.save(rebuild_name, rebuild)
+                    doc = job.load(vf); doc["version"] = ver; job.save(vf, doc)
+            if R.polish_character_names(gemini, ver, index, transcript, actors=(guide or {}).get("actors") or {}, digest=digest, log=job.log):
+                vf = f"verified_v{n}{sfx}.json"                      # 인물 벨트 — 캐시된 대본에도(멱등): 장면에 없는 인물명을 고쳐 쓴다
+                if not a.no_verify and job.has(vf):
+                    doc = job.load(vf); doc["version"] = ver; job.save(vf, doc)
+            if guide:                                             # 가이드 벨트 — 캐시된 대본에도 지양 단어 문구 교정·배우 표기를 건다(멱등)
+                if R.polish_guide(gemini, ver, guide, log=job.log) + R.apply_name_map(ver, guide.get("actors") or {}, log=job.log):
+                    vf = f"verified_v{n}{sfx}.json"
+                    if not a.no_verify and job.has(vf):
+                        doc = job.load(vf)
+                        doc["version"] = ver
+                        job.save(vf, doc)
+                    elif a.no_verify:
+                        job.save(rebuild_name, rebuild)
         if a.until == "verify":
             continue
-        if a.pipeline == "grid-review":
+        if resume_table:
+            table = job.load(f"grid_table_v{n}{sfx}.json")
+            job.log(f"[resume] v{n} 저장된 대본·덮개·TTS로 렌더만 재실행")
+        elif a.pipeline == "grid-review":
             from app.tikitaka import grid_table
             table = grid_table.build_table(job, gemini, rb_for_table, index, transcript, cuts, info["duration_sec"], proxy,
                 version_n=n, title=a.title, grid=grid, voice=a.voice, speed=a.speed, exclude=exclude, tag=a.tag, black=black,

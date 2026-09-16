@@ -2,7 +2,7 @@
 
 입력: 인덱스(장면·화자 배정 대사·순간) → '소스 스크립트' 텍스트
 출력 `rebuild.json`: versions[10]{n, strategy, title, structure, items[], analysis, plan_sec, issues[]}, recommended
-검증(코드): S 항목의 line_ids 가 실재·연속·동일 화자인가, A 의 moment_id 가 실재하는가, 합계가 상한 안인가.
+검증(코드): S 항목의 line_ids 가 실재하는가(화자 전환 보존·비연속 구간 분리), A 의 moment_id 가 실재하는가, 합계가 상한 안인가.
 위반 항목은 **버리고 기록**한다(버전 전체를 죽이지 않는다 — 다른 항목은 멀쩡하다).
 """
 from __future__ import annotations
@@ -64,14 +64,17 @@ def source_script(index: dict, transcript: dict, exclude: list[tuple[float, floa
             m = moments[mi]
             who = f"{m['who']} — " if m.get("who") else ""
             snd = f" (소리: {m['sound']})" if m.get("sound") else ""
-            entries.append((m["start"], f"{m['id']} [{fmt_tc(m['start'])}~{fmt_tc(m['end'])}] ({m['kind']}) {who}{m['desc']}{snd}"))
+            spans = ",".join(m.get("span_ids") or []) or "(없음)"
+            entries.append((m["start"], f"{m['id']} [{fmt_tc(m['start'])}~{fmt_tc(m['end'])}] ({m['kind']}) "
+                                         f"{who}{m['desc']}{snd} · 덮개 sp={spans}"))
             mi += 1
         entries += [(t, txt) for t, txt in markers if sc["start"] <= t < sc["end"]]
         entries.sort(key=lambda e: e[0])
         out.extend(e[1] for e in entries)
     # 장면 밖 잔여
     rest = [f"{l['id']} [{fmt_tc(l['start'])}~{fmt_tc(l['end'])}] {l.get('speaker') or '미상'}: \"{l['text']}\"" for l in lines[li:]]
-    rest += [f"{m['id']} [{fmt_tc(m['start'])}~{fmt_tc(m['end'])}] ({m['kind']}) {m['desc']}" for m in moments[mi:]]
+    rest += [f"{m['id']} [{fmt_tc(m['start'])}~{fmt_tc(m['end'])}] ({m['kind']}) {m['desc']}"
+             f" · 덮개 sp={','.join(m.get('span_ids') or []) or '(없음)'}" for m in moments[mi:]]
     if rest:
         out.append("\n## (장면 미분류)")
         out.extend(rest)
@@ -197,21 +200,6 @@ def validate_versions(raw: dict, index: dict, transcript: dict, *, hard_max: flo
                     issues.append(f"item{k}: 없는 줄 ID {ids} — 드롭")
                     continue
                 ids = sorted(set(ids), key=lambda i: order[i])
-                ks = [order[i] for i in ids]
-                if ks[-1] - ks[0] != len(ks) - 1:
-                    issues.append(f"item{k}: 비연속 줄 {ids} → 첫 연속 구간만")
-                    keep = [ids[0]]
-                    for i in ids[1:]:
-                        if order[i] == order[keep[-1]] + 1:
-                            keep.append(i)
-                        else:
-                            break
-                    ids = keep
-                sp = {lines_by_id[i].get("speaker") for i in ids}
-                if len(sp) > 1:
-                    issues.append(f"item{k}: 화자 섞임 {sp} → 첫 화자 줄만")
-                    first = lines_by_id[ids[0]].get("speaker")
-                    ids = [i for i in ids if lines_by_id[i].get("speaker") == first]
                 if any(in_excluded(lines_by_id[i]["start"], lines_by_id[i]["end"], ex) for i in ids):
                     issues.append(f"item{k}: [가이드] 활용 불가 구간의 대사 {ids} — 드롭")
                     continue
@@ -219,10 +207,25 @@ def validate_versions(raw: dict, index: dict, transcript: dict, *, hard_max: flo
                 if bad:
                     issues.append(f"item{k}: [가이드] 지양 단어 {sorted({w for w, _ in bad})} 대사 {sorted({i for _, i in bad})} — 드롭")
                     continue
-                sec = ms3(lines_by_id[ids[-1]]["end"] - lines_by_id[ids[0]]["start"] + 0.2)
-                items.append({"type": "S", "line_ids": ids, "speaker": lines_by_id[ids[0]].get("speaker"),
-                              "text": " ".join(lines_by_id[i]["text"] for i in ids), "effect": eff, "plan_sec": sec})
-                total += sec
+                # Preserve every selected utterance, including duet/call-and-response.
+                # Split only at unselected lines so a cut cannot include omitted speech.
+                groups: list[list[str]] = []
+                for lid in ids:
+                    if not groups or order[lid] != order[groups[-1][-1]] + 1:
+                        groups.append([])
+                    groups[-1].append(lid)
+                if len(groups) > 1:
+                    issues.append(f"item{k}: 비연속 줄 {ids} → 연속 구간 {len(groups)}개로 분리(전량 보존)")
+                for group in groups:
+                    speakers = list(dict.fromkeys(
+                        name.strip() for lid in group
+                        for name in str(lines_by_id[lid].get("speaker") or "").split(",")
+                        if name.strip()))
+                    sec = ms3(lines_by_id[group[-1]]["end"] - lines_by_id[group[0]]["start"] + 0.2)
+                    items.append({"type": "S", "line_ids": group, "speaker": ", ".join(speakers) or None,
+                                  "text": " ".join(lines_by_id[lid]["text"] for lid in group),
+                                  "effect": eff, "plan_sec": sec})
+                    total += sec
             elif t == "A":
                 mid = str(it.get("moment_id") or "")
                 m = moments_by_id.get(mid)
@@ -439,7 +442,13 @@ def rebuild(job: Job, gemini: Gemini, index: dict, transcript: dict, *, title: s
             guide: dict | None = None, extra_exclude: list[tuple[float, float]] | None = None, range_label: str | None = None,
             seq_hook: bool = True, cache_name: str = "rebuild.json", digest: dict | None = None) -> dict:
     if job.has(cache_name):
-        return job.load(cache_name)
+        cached = job.load(cache_name)
+        if not index.get("grid_facts"):
+            return cached
+        from app.tikitaka.production import SCHEMA as production_schema
+        if cached.get("production_plan_schema") == production_schema:
+            return cached
+        job.log(f"[rebuild] 문장·덮개 공동 계획 스키마 변경 → {cache_name} 재구성")
     exclude = sorted(excluded_ranges(guide, duration) + list(extra_exclude or []))
     script = source_script(index, transcript, exclude)
     job.path(cache_name.replace("rebuild", "source_script").replace(".json", ".md")).write_text(script, encoding="utf-8")
@@ -472,8 +481,11 @@ def rebuild(job: Job, gemini: Gemini, index: dict, transcript: dict, *, title: s
         if guide and guide.get("actors"):           # 극중 이름 → 배우 이름(프롬프트가 놓친 것만 치환)
             apply_name_map(v, guide["actors"], log=job.log)
     if index.get("grid_facts"):
-        from app.tikitaka.production import preflight
+        from app.tikitaka.production import SCHEMA as production_schema, preflight
+        data["production_plan_schema"] = production_schema
+        from app.tikitaka.production import enforce_joint_plans
         for version in data["versions"]:
+            enforce_joint_plans(job, gemini, version, index, transcript, exclude)
             version["production_preflight"] = preflight(version, index, transcript, exclude)
     apply_rerank(job, gemini, data, title=title, episode=episode_label, basis="draft")   # 리빌딩 호출의 순위는 예시에 끌린다 — 별도 호출로
     n_issues = sum(len(v["issues"]) for v in data["versions"])

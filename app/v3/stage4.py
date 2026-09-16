@@ -205,17 +205,19 @@ def render_draft(video_path: Path, timeline: list[dict], out_path: Path,
     filters = []
     for i, c in enumerate(timeline):
         s, e = float(c["clip_start_sec"]), float(c["clip_end_sec"])
+        speed = float(c.get("playback_speed") or 1.0)
         # 정보 화면 붙잡기(2026-09-03): 초안도 마지막 프레임을 hold_sec 만큼 유지해야
         # watch_trim·style 이 보는 시계가 최종과 같다
         _h = float(c.get("hold_sec") or 0.0)
         _hold_v = f",tpad=stop_mode=clone:stop_duration={_h:.3f}" if _h > 0 else ""
-        _hold_a = f",apad,atrim=end={e - s + _h:.3f}" if _h > 0 else ""
+        _hold_a = f",apad,atrim=end={(e - s) / speed + _h:.3f}" if _h > 0 else ""
         filters.append(
-            f"[0:v]trim=start={s:.3f}:end={e:.3f},setpts=PTS-STARTPTS,"
+            f"[0:v]trim=start={s:.3f}:end={e:.3f},setpts=(PTS-STARTPTS)/{speed:g},"
             f"scale=-2:{height}{_hold_v}[v{i}]")
         vol = "" if c.get("use_original_audio", True) else ",volume=0"
+        tempo = f",atempo={speed:g}" if speed != 1.0 else ""
         filters.append(
-            f"[0:a]atrim=start={s:.3f}:end={e:.3f},asetpts=PTS-STARTPTS{vol}{_hold_a}[a{i}]")
+            f"[0:a]atrim=start={s:.3f}:end={e:.3f},asetpts=PTS-STARTPTS{tempo}{vol}{_hold_a}[a{i}]")
         parts_v.append(f"[v{i}]")
         parts_a.append(f"[a{i}]")
     n = len(timeline)
@@ -247,7 +249,8 @@ def edited_clip_windows(timeline: list[dict]) -> list[dict]:
     """타임라인 → 편집본 좌표 클립 창 [{clip, start, end}] (hold_sec 포함). 순수."""
     out, t = [], 0.0
     for k, c in enumerate(timeline or []):
-        dur = float(c["clip_end_sec"]) - float(c["clip_start_sec"]) + float(c.get("hold_sec") or 0.0)
+        from app.v3.assemble import clip_len
+        dur = clip_len(c)
         out.append({"clip": k, "start": round(t, 3), "end": round(t + dur, 3)})
         t += dur
     return out
@@ -355,7 +358,7 @@ LABEL_PROBE_PROMPT = """당신은 쇼츠 편집자다. 첨부한 클립은 편�
 이 자리에 괄호 라벨 {text} 를 띄우려 한다. 라벨은 화면에 대한 반응이다 — 표정이 꺾이는 순간, 인물 정체, 눈에 띄는 행동.
 {context}
 질문:
-1. 이 클립 안에 이 라벨이 **맞는** 표정·행동이 있는가? 인물의 감정이 라벨과 반대이거나(웃는 얼굴에 '충격') 그런 순간이 없으면 fit=false. 라벨이 **누가 무엇을 했는지 틀리게 말하거나 그렇게 읽힐 수 있어도**(남이 쏜 소화기를 '본인한테 쏨'처럼 스스로 한 짓으로 읽히는 문구) fit=false.
+1. 이 클립의 화면 또는 아래 **이 구간에 실제로 들리는 말**이 라벨의 뜻을 직접 뒷받침하는가? 분위기가 비슷하다는 추측만으로는 fit=false. 뒤에 나올 설명·가사로 현재 라벨을 미리 정당화해도 fit=false. 인물의 감정이 라벨과 반대이거나(웃는 얼굴에 '충격'), 라벨이 누가 무엇을 했는지 틀리게 말하거나 그렇게 읽힐 수 있어도 fit=false.
 2. 있다면 그 표정·행동이 **시작하는** 시각(클립 안 초, 0~{length:.1f})은? 라벨은 그 순간부터 {dur:.1f}초 뜬다.
 ## 출력 (JSON 만)
 {{"fit": true, "start_sec": 0.8, "reason": "한 문장"}}"""
@@ -433,7 +436,8 @@ def edited_beat_windows(story_doc: dict, timeline: list[dict]) -> list[dict]:
     windows: list[dict] = []
     off = 0.0
     for c in timeline:
-        dur = float(c["clip_end_sec"]) - float(c["clip_start_sec"]) + float(c.get("hold_sec") or 0.0)
+        from app.v3.assemble import clip_len
+        dur = clip_len(c)
         owner = next((i for i, s in enumerate(spans_of_beat)
                       if set(c.get("span_ids") or []) & s), None)
         if owner is not None:
@@ -968,6 +972,7 @@ STYLE_PROMPT = """당신은 쇼츠 아트디렉터다. 첨부한 영상은 리�
 ## 판단 기준
 0. **라벨 작성 + 배치** — 초안을 보고 괄호 라벨 **0~3개를 직접 써라**(문구·시각·위치 전부 네 몫이다). 라벨은 화면에 대한 반응이다 — 표정이 꺾이는 순간, 정체를 알려야 할 인물, 눈에 띄는 행동. **없으면 안 써도 된다(0개가 정상일 수 있다).**
    - `text`: 괄호 심리·행동·정체 강조, 괄호 제외 12자 이내. **이 편의 화면·대사에서 뽑아라** — 특히 값진 것은 ① 인물 정체(작품을 모르는 시청자가 누군지 그 자리에서 알게) ② 심리가 꺾이는 순간 ③ 눈에 띄는 행동. 페이오프(핵심 대답·반전) 순간에는 얹지 마라 — 웃기는 것은 대사 자신이다.
+   - **라벨의 뜻은 그 라벨이 뜨는 바로 그 구간의 화면이나 실제로 들리는 말로 이해돼야 한다.** 뒤에 나올 내레이션·가사·반전을 미리 끌어와 붙이지 마라. 단지 분위기가 비슷하다는 이유도 근거가 아니다. 예: 아직 일반 가사만 들리는 구간에 `(대놓고 선거송)`을 붙이지 말고, 실제 투표 가사가 들리는 줄에 붙인다.
    - **시각은 절대초가 아니라 앵커로 적어라.** `anchor` = 위 표의 이벤트 id 하나(L=그 대사 줄, G=그 대사 직후 정적, C=컷 시작 — 대사 없는 장면). 리액션 라벨은 보통 그 대사 **직후 정적(G)** 이나 다음 컷 시작(C)이다. `offset_sec`(-1.0~2.0): 앵커 시작에서 표정·행동이 보이기까지의 지연. `duration_sec`: 0.6~2.5(길게 띄우지 않는다). 코드가 앵커 시각을 표에서 뽑아 그 컷 안으로 가둔 뒤 그 창을 다시 보며 프레임을 맞춘다 — 절대초를 세지 마라. 표에 없는 순간엔 라벨을 달 수 없다.
    - **종류별 배치.** ⓐ **인물 지목 라벨**(호칭·직업·정체·이름)은 **그 인물 바로 옆**: 머리 위나 어깨 옆, 얼굴을 가리지 않는 **가장 가까운** 여백(화면 반대편에 두면 여러 명 중 누구를 가리키는지 모른다). ⓑ 심리·행동·훈수 라벨은 빈 곳으로.
    - `x`·`y`(0~1 비율): (ⓑ 기준) 인물 얼굴·방송 자체 자막·자막 밴드를 **피해서** 빈 곳에. 세로는 영상 밴드({band_lo:.2f}~{band_hi:.2f}) 안. 인물이 왼쪽이면 오른쪽 여백, 오른쪽이면 왼쪽 — 가운데(0.5)는 양쪽이 다 막혔을 때만. 긴 라벨일수록 가장자리 금지(잘리면 코드가 안쪽으로 당긴다). ⓐ 는 이 규칙의 예외다 — 인물을 따라가되 얼굴·자막은 가리지 않는다.
@@ -980,7 +985,7 @@ STYLE_PROMPT = """당신은 쇼츠 아트디렉터다. 첨부한 영상은 리�
 1. 자막 가독성: 화면 하단이 밝거나 복잡하면 subtitle_color/외곽선 대비, 필요시 subtitle_y_margin 조정.
 2. 제목 밴드: 기본 유지 — 화면과 무관(검정 밴드 위)이라 특별한 사유 없으면 손대지 않는다.
 3. 비트별: crop(인물이 왼/오른쪽에 쏠린 구간 → left/right, 기본 center) · pop(팝인 강도 none/soft/strong — **실제 컷 리듬을 보고**: 컷이 잦고 호흡 빠른 비트만 soft+) · sfx(리듬 전환점의 효과음 큐 한 줄, 필수 아님).
-5. **강조 자막**(`emphasis`, 0~{emph_max}줄): 사건을 뒤집는 한마디·펀치라인·훅 대사 줄만 골라 `line`(위 표의 L id) · `color`({emph_palette_names} — yellow 는 내레이션 자막 색이라 못 쓴다) · `scale`(자막 기준 크기 대비 {emph_lo:.2f}~{emph_hi:.2f}). 강조 줄은 붉게·크게·강한 팝인으로 나가고 **그 줄이 시작하는 순간 화면도 한 단계 당겨진다(줌) + 타격음** — 강조·줌·효과음은 한 쌍이다. 그러니 강조 줄이 있는 컷에는 그 줄 시작 시각을 단계 경계로 하는 줌(6번)을 함께 내라(안 내면 코드가 {emph_zoom:.2f}배로 채운다). 연달아 강조하지 마라(전부 강조 = 강조 없음). 없으면 빈 배열.
+5. **강조 자막**(`emphasis`, 0~{emph_max}줄): 사건을 뒤집는 한마디·펀치라인·훅 대사 줄만 골라 `line`(위 표의 L id) · `color`({emph_palette_names} — yellow 는 내레이션 자막 색이라 못 쓴다) · `scale`(자막 기준 크기 대비 {emph_lo:.2f}~{emph_hi:.2f}). 강조 줄은 붉게·크게·강한 팝인으로 나간다. 원본 대사가 묻히지 않도록 타격음은 얹지 않는다. 화면 줌은 원본 음성을 자르지 않는 범위에서만 적용된다. 연달아 강조하지 마라(전부 강조 = 강조 없음). 없으면 빈 배열.
 6. **줌인**(`zooms`, 0~{zoom_max}컷): 줌은 시청자의 시선을 좁히는 장치다 — 카메라가 안 한 일을 편집이 한다. 쓰는 자리: ① 감정이 한 단계 오르는 순간(의심→확신, 태연→굳음)에 얼굴로 당긴다 ② 강조 대사가 떨어지는 순간에 말하는 인물로 당긴다 ③ 글자를 읽혀야 하는 화면은 글자 쪽으로 당긴다. 한 컷 안에서 **단계**(`stages`, ≤{zoom_stages}단)로 계단식으로 들어간다 — 단계 경계는 대사 줄이 바뀌거나 감정이 꺾이는 시각(클립 시작 기준 초). 예: 「내가 이 나이 들어가지고 / 무슨 스캔들이 다 나네」 → 1.0(첫 줄) → 1.10(둘째 줄) → 1.22(강조 대사). `factor`({zoom_lo:.1f}~{zoom_hi:.1f}, 1.0 은 원래 크기 — 첫 단계로만 허용) · `anchor`(left/center/right — 인물·글자가 있는 쪽). 연속한 컷마다 줌하지 마라(어지럽다). 단계 하나뿐이면 `stages` 대신 `factor`·`from_sec` 로 적어도 된다.
 7. **정보 화면 전체 맞춤**(`fits`, 0~{fit_max}컷): 카톡·기사·문서·검색창처럼 **글자가 정보인 화면**은 가로 크롭에서 이름과 문장 끝이 잘린다 — 그런 컷은 `clip`(C id)을 적어라. 그림 전체를 밴드 폭에 넣고 위아래는 흐린 배경으로 채운다. 줌과 같은 컷에 두지 마라.
 4. 허용 design 키(이 밖은 금지): {allowed_keys}
@@ -1091,7 +1096,8 @@ def _call_style_model(gemini, draft_path: Path, prompt: str) -> dict:
         raise ValueError(f"응답 JSON 파싱 실패: {e} — 앞 200자: {text[:200]!r}") from e
 
 
-def _default_label_probe(gemini, draft_path: Path, *, log=print):
+def _default_label_probe(gemini, draft_path: Path, *, dialogue: list[dict] | None = None,
+                         log=print):
     """draft(편집본 좌표)를 창으로 잘라 Flash 에 묻는 ask(t0, t1, label). refine 의 프로브
     기계 재사용(480p·10fps 재단 · 6fps 표본 · JSON 응답)."""
     from app.modules.ffmpeg_utils import find_ffmpeg_command
@@ -1104,6 +1110,11 @@ def _default_label_probe(gemini, draft_path: Path, *, log=print):
         clip = out_dir / f"label_{int(round(t0 * 100)):06d}.mp4"
         _cut_probe_clip(ffmpeg, Path(draft_path), t0, t1, clip)
         ctx = f"앵커: {lb.get('anchor')} · 라벨 창(편집본): {lb['start_sec']:.1f}~{lb['end_sec']:.1f}s"
+        audible = [str(s.get("text") or "").strip() for s in (dialogue or [])
+                   if float(s.get("end_sec") or 0.0) > t0
+                   and float(s.get("start_sec") or 0.0) < t1
+                   and str(s.get("text") or "").strip()]
+        ctx += "\n이 프로브 구간에 실제로 들리는 말: " + (" / ".join(audible) if audible else "(없음)")
         if lb.get("person"):
             ctx += (f"\n이 라벨은 **{lb['person']}** 의 반응이다 — 그 인물의 얼굴이 보이고 그 표정이 라벨과 맞아야 fit=true. "
                     "다른 인물의 표정으로 판정하지 마라. 그 인물이 화면에 없거나 얼굴이 안 보이면 fit=false.")
@@ -1177,7 +1188,7 @@ def run_style(gemini, draft_path: Path, story_doc: dict, *,
     # ── 라벨 프로브 — 앵커된 라벨만(절대초 폴백 라벨은 그대로) ──
     _labels = list(styled.get("labels") or [])
     if clips is not None and any(lb.get("anchor") for lb in _labels):
-        ask = probe_ask or _default_label_probe(gemini, draft_path, log=log)
+        ask = probe_ask or _default_label_probe(gemini, draft_path, dialogue=dialogue, log=log)
         anchored = [lb for lb in _labels if lb.get("anchor")]
         others = [lb for lb in _labels if not lb.get("anchor")]
         probed, paudit = probe_labels(anchored, clips, ask=ask, log=log)

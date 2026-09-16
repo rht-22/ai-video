@@ -74,7 +74,7 @@ def test_validate_versions_binds_ids_and_drops_bad_items(index, transcript):
     raw = {"versions": [{"n": 1, "strategy": "결말 선공개형", "title": "T", "structure": "s",
                          "items": [{"type": "N", "text": "승일이 결국 참지 못하고 폭발합니다.", "effect": "[부들부들]"},
                                    {"type": "S", "line_ids": ["L-001"], "effect": None},
-                                   {"type": "S", "line_ids": ["L-002", "L-003"]},          # 화자 섞임 → 첫 화자만
+                                   {"type": "S", "line_ids": ["L-002", "L-003"]},          # 화자 전환도 보존
                                    {"type": "S", "line_ids": ["L-999"]},                   # 없는 ID → 드롭
                                    {"type": "A", "moment_id": "S-002", "effect": "[쾅]"},
                                    {"type": "A", "moment_id": "S-999"},                    # 없는 순간 → 드롭
@@ -86,9 +86,9 @@ def test_validate_versions_binds_ids_and_drops_bad_items(index, transcript):
     assert [it["type"] for it in v["items"]] == ["N", "S", "S", "A"]
     assert v["items"][0]["plan_sec"] == 4.0
     assert v["items"][1]["text"] == "나 나가고 싶어." and v["items"][1]["speaker"] == "강비호"
-    assert v["items"][2]["line_ids"] == ["L-002"]
+    assert v["items"][2]["line_ids"] == ["L-002", "L-003"]
     assert v["items"][3]["moment_id"] == "S-002" and v["items"][3]["sound"] == "쾅"
-    assert len(v["issues"]) == 4
+    assert len(v["issues"]) == 3
     assert out["recommended"] == 1            # 없는 추천 번호 → 첫 버전
 
 
@@ -1450,3 +1450,28 @@ def test_speaker_consistency_flags_two_names_on_one_voice():
     assert e["ambiguous"] == ["안수정", "박경희"] and not e["fixed"] and not any(k.startswith("L-0") for k in fixes)
     e5 = next(r for r in report if r["voice"] == "g:speaker_5")
     assert "ambiguous" not in e5
+
+
+def test_dialogue_selection_survives_speaker_changes_and_repeat_validation(index):
+    """EP9: duet lyric and call/response must survive both rebuild and verify."""
+    transcript = {"lines": [
+        {"id": "L-001", "start": 1., "end": 2., "text": "봤냐고", "speaker": "박서진, 윤수현"},
+        {"id": "L-002", "start": 2.1, "end": 4., "text": "내가 다른 여자 만나는 거 봤냐고", "speaker": "박서진"},
+        {"id": "L-003", "start": 5., "end": 6., "text": "박서진을", "speaker": "박서진"},
+        {"id": "L-004", "start": 6.1, "end": 6.4, "text": "푹!", "speaker": "윤수현"},
+        {"id": "L-005", "start": 6.5, "end": 8., "text": "뽑아라", "speaker": "박서진"},
+        {"id": "L-006", "start": 9., "end": 10., "text": "박서진을", "speaker": "윤수현"},
+        {"id": "L-007", "start": 10.1, "end": 12., "text": "뽑아라", "speaker": "박서진"},
+    ]}
+    for selections in [
+        [["L-001", "L-002"], ["L-003", "L-004", "L-005"], ["L-006", "L-007"]],
+        [["L-003", "L-005"]],
+    ]:
+        raw = {"versions": [{"n": 1, "items": [{"type": "S", "line_ids": ids} for ids in selections]}]}
+        expected = [lid for ids in selections for lid in ids]
+        for _ in range(2):
+            raw = validate_versions(raw, index, transcript)
+            items = raw["versions"][0]["items"]
+            assert [lid for it in items for lid in it.get("line_ids", [])] == expected
+            if len(selections) == 1:
+                assert len(items) == 2  # skipped ad-lib stays excluded; both selected lines survive

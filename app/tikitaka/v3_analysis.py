@@ -119,6 +119,9 @@ def build_index(job, gemini, transcript, proxy, info, cuts, *, title, cast, get_
             raise ValueError("저장된 분석의 작품·인물·백엔드가 다릅니다")
         job.record_step("analysis_reuse", fingerprint=cached_index["grid_fingerprint"],
                         mode="explicit_saved_analysis", grid_verified=True)
+        empty = [x for x in cached_index.get("windows", []) if x.get("status") == "failed"]
+        if empty:
+            job.log(f"[v3/index] 분석 실패 구간 {len(empty)}개 재사용 — 채널 금지가 아니라 분석 미완료. --retry-failed-chunks로 복구 필요")
         job.log("[v3/index] 저장된 영상 분석 재사용 — 시간 격자·전사 일치, 영상 분석 호출 0")
         return cached_index, grid
     client = get_v3()

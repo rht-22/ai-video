@@ -90,15 +90,24 @@ def bundle(table, grid, *, title):
         for cut in row["cuts"]:
             s = float(cut["in"])
             hold = float(cut.get("hold_sec") or 0)
-            dur = math.floor((float(cut["out"])-s+hold)*FPS + 1e-6)/FPS
+            speed = float(cut.get("playback_speed") or 1.0)
+            # grid_table has already quantized the output clock. Re-deriving it
+            # from source/speed and flooring can lose one frame to float error,
+            # making a valid cover appear shorter than its TTS.
+            derived = (float(cut["out"])-s)/speed+hold
+            dur = round(float(cut.get("dur", derived))*FPS)/FPS
             if dur <= 0:
                 raise ValueError("grid adapter: sub-frame clip")
-            end = s + dur - hold
+            end = float(cut["out"])
             spids = list(cut.get("span_ids") or [])
             ids.extend(spids)
             c = {"clip_start_sec": s, "clip_end_sec": end, "span_ids": spids,
                  "role": role, "beat": bi, "use_original_audio": row["mode"] != "N",
                  "subtitle": "", "time_authority": cut["authority"]}
+            if speed != 1.0:
+                if row["mode"] != "N":
+                    raise ValueError("덮개 배속은 원음이 꺼진 N 행에서만 허용됩니다")
+                c["playback_speed"] = speed
             if hold:
                 c["hold_sec"] = hold
             if row["mode"] == "N":
@@ -140,7 +149,7 @@ def bundle(table, grid, *, title):
 
 def validate_bundle(plan, grid, segments, resources, *, exclude=()):
     ids = {s["id"] for s in grid["span_candidates"]}
-    total = sum(assemble.clip_len(c) for c in plan["timeline"])
+    total = sum(assemble.clip_duration(assemble.clip_len(c), plan.get("output_fps")) for c in plan["timeline"])
     if not plan["timeline"]:
         raise ValueError("review removed all clips")
     for c in plan["timeline"]:
@@ -259,7 +268,7 @@ def run(job, table, grid, index, *, get_gemini, design=None, redo=False, force_r
                 raise ValueError("review cut overlaps protected dialogue/TTS")
         if cuts:
             plan["timeline"] = watch_trim.apply_cuts_to_timeline(plan["timeline"], cuts, grid, set())
-            total = sum(assemble.clip_len(c) for c in plan["timeline"])
+            total = sum(assemble.clip_duration(assemble.clip_len(c), plan.get("output_fps")) for c in plan["timeline"])
             segments = watch_trim.remap_segments(segments, cuts, total)
             resources = watch_trim.remap_resources(resources, cuts, total)
             render_draft(job.source, plan["timeline"], draft, resources, log=work.log)
