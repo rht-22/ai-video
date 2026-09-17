@@ -2086,12 +2086,28 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
         _n = _s["_label"]
         log(f"  [sfx-label] 내레이션과 동시 타격 → 드롭: {_n['at']:.3f}s "
             f"「{_n['text']}」 ({_n['id']})")
-    # 강조 자막은 원본 대사 세그먼트이므로 타격음을 같은 시각에 얹지 않는다. 짧은 음절은
-    # 0.4초 hit 에 통째로 묻혀 실제 파일에 있어도 안 들릴 수 있다. 강조는 글자·팝으로만
-    # 표현하고, 효과음은 대사가 없는 라벨/내레이션 전환에 한정한다.
+    # 강조 자막 타격음(2026-09-08, v9/v10 규칙: 강조 줄 = 줌 = 효과음 한 쌍). 강조가 없으면 빈 리스트.
+    # b3bd45a(2026-09-17 01:06)가 '원본 대사 보호'로 전부 생략했던 것을 사용자 지시("강조 효과음 다시 켜고", 같은 날 저녁)로 복원.
     _emph_sfx: list = []
     if _emph:
-        log(f"  [sfx-emphasis] 원본 대사 보호 — 강조 {len(_emph)}줄 타격음 생략")
+        try:
+            from app.modules.sfx_narration import place_emphasis_sfx
+            # `sfx: false` 인 강조 줄은 소리 없이 글자·팝만(2026-09-11 — 한 문장을 여러 줄로 나눠 전부 강조하면
+            # 줄마다 타격음이 겹친다. 문장 첫 줄만 소리를 낸다).
+            _no_sfx = {i for i in (resolve_emphasis_index(e, segments) for e in (_v3s.get("emphasis") or [])
+                                   if e.get("sfx") is False) if i is not None}
+            _emph_lines = [{"start_sec": float(segments[i]["start_sec"]), "text": segments[i].get("text")}
+                           for i in sorted(_emph) if 0 <= i < len(segments) and i not in _no_sfx]
+            _emph_sfx = place_emphasis_sfx(_emph_lines, app_root=_root, run_dir=output_dir,
+                                           seed=output_dir.name + ":emph",
+                                           speed=float(getattr(design, "video_speed", 1.0) or 1.0))
+            _emph_sfx, _c2 = drop_label_collisions(_narr_sfx + _label_sfx, _emph_sfx)
+            for _s in _emph_sfx:
+                _n = _s["_label"]
+                log(f"  [sfx-emphasis] {_n['at']:.3f}s 「{_n['text']}」 ← {_n['id']}")
+        except Exception as _e:                # 효과음 때문에 편이 죽지 않는다
+            log(f"  [sfx-emphasis] 배치 실패 — 효과음 없이 계속: {_e}")
+            _emph_sfx = []
     _all_sfx = _narr_sfx + _label_sfx + _emph_sfx
     inputs = RenderInputs(
         video_path=Path(video_path),
