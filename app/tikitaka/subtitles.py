@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import difflib
+import re
 
 from app.v3.assemble import _lines_for_span, strip_dialogue_period
 
@@ -71,13 +72,46 @@ def corrected_words(line, words):
     return out
 
 
+# 성+직함·이름+호칭은 한 덩어리 — 줄이 그 사이에서 갈리면 '입사 선배인 양 / 대리가 탕비실에서' ·
+# '말을 튕겨내자, 공 / 팀장은' 처럼 성이 앞 줄 꼬리에 매달린다(2026-09-18 로또 clip01 내레이션 실측).
+# 규칙은 둘뿐이다: (1) 한 글자 어절(성씨·'그'·'두' 같은 관형사) 뒤 어절이 직함으로 시작 (2) 뒤 어절이 '씨'·'님'(+조사).
+TITLE_WORDS = ("본부장", "팀장", "과장", "부장", "차장", "실장", "대리", "사원", "주임", "선배", "후배", "사장", "회장", "이사",
+               "상무", "전무", "대표", "선생", "기자", "형사", "반장", "계장", "국장", "소장", "원장", "교수", "박사", "작가", "감독")
+_ONE_SYLLABLE = re.compile(r"[가-힣]")
+_HONORIFIC = re.compile(r"(씨|님)(이|가|은|는|을|를|도|의|께|께서|한테|에게|랑|이랑|요|이요)?")
+_PUNCT = ".,!?…~'\"“”‘’"
+
+
+def glues_to_next(prev: str, nxt: str) -> bool:
+    """두 어절 사이에서 줄을 끊으면 안 되는가(성+직함 · 이름+호칭). 순수 — 테스트 대상."""
+    prev, nxt = str(prev or "").strip(), str(nxt or "").strip()
+    if not prev or not nxt or prev[-1] in _PUNCT:
+        return False
+    core = nxt.strip(_PUNCT)
+    if _HONORIFIC.fullmatch(core):
+        return True
+    return bool(_ONE_SYLLABLE.fullmatch(prev)) and any(core.startswith(t) and len(core) - len(t) <= 3 for t in TITLE_WORDS)
+
+
+def glue_name_titles(aligned):
+    """측정된 어절 목록에서 끊으면 안 되는 두 어절을 한 어절로 묶는다(시각은 앞 t0 ~ 뒤 t1, 표시 텍스트는 공백 그대로).
+    원본 목록은 건드리지 않는다. 순수 — 테스트 대상."""
+    out = []
+    for w in aligned:
+        if out and glues_to_next(out[-1]['text'].split()[-1], w['text']):
+            out[-1] = {**out[-1], 't1': w['t1'], 'text': out[-1]['text'] + ' ' + w['text']}
+        else:
+            out.append(dict(w))
+    return out
+
+
 def phrase_lines(line, words):
     aligned = corrected_words(line, words)
     if not aligned or any(w['t1'] <= w['t0'] for w in aligned):
         return [{'start': line['start'], 'end': line['end'], 'text': line['text'],
                  'timing': 'line_fallback'}]
     return [{**p, 'text': strip_dialogue_period(p['text']), 'timing': 'stt_words'}
-            for p in _lines_for_span(aligned, line['start'], line['end'])
+            for p in _lines_for_span(glue_name_titles(aligned), line['start'], line['end'])
             if p['end'] > p['start']]
 
 
@@ -122,6 +156,10 @@ def narration_captions(job, resources, *, transcribe=None):
         name = f'tts_word_alignment/{key}.json'
         if job.has(name):
             cached = job.load(name)
+            # 캐시는 측정(단어 시각)이다 — 구절은 지금 규칙으로 다시 나눈다(줄 나눔 규칙이 바뀌어도 STT 를 다시 부르지 않는다)
+            words = cached['words']
+            cached['phrases'] = phrase_lines({'text': cue['text'], 'start': 0., 'end': cue['duration_sec'],
+                                              'word_i': list(range(len(words)))}, words)
         else:
             payload = transcribe(path)
             words = scribe_words_to_words(payload.get('words', []), 0.)

@@ -18,7 +18,7 @@ from app.tikitaka.title import TITLE_PROMPT
 from app.tikitaka.common import Job, fmt_tc, ms3
 from app.tikitaka.llm import Gemini
 from app.tikitaka.rebuild import (validate_versions, source_script, polish_literal_actions, polish_guide, apply_name_map, TARGET_MIN_SEC,
-                                  TARGET_MAX_SEC, LINEAR_STRATEGIES, HOOK_STRATEGIES, polish_character_names)
+                                  TARGET_MAX_SEC, LINEAR_STRATEGIES, HOOK_STRATEGIES, SHORT_FORM_STRATEGIES, polish_character_names)
 from app.tikitaka.guide import guide_block, excluded_ranges
 from app.tikitaka.digest import digest_block
 from app.tikitaka.timing import narration_plan_sec
@@ -31,7 +31,10 @@ VERIFY_PROMPT = """# 📜 티키타카 스크립트 리빌딩 — 영상 확인 
 네 일은 **초안이 가리키는 장면들을 영상에서 직접 확인하고** 최종 대본을 내는 것이다.
 
 ## 확인 규칙
-1. 초안의 전략({strategy})과 이야기 골격을 **기본으로 유지**한다. 잘 서 있으면 그대로 둬도 된다.
+1. 초안의 포맷({strategy})과 이야기 골격을 **기본으로 유지**한다. 잘 서 있으면 그대로 둬도 된다. 단 포맷은 도구이지 틀이 아니다 —
+   재료가 포맷을 못 받쳐 주면(질문을 던졌는데 답 장면이 없다 · 반전을 예고했는데 반전이 없다) 포맷을 버리고 자연스러운 흐름으로 고쳐라.
+   **마지막 항목은 이야기를 닫아야 한다** — 마지막 내레이션이 "…싶었지만"처럼 이어질 듯 끝나거나, 던진 질문이 회수되지 않으면 고친다.
+   가장 중요한 기준은 보는 사람이 자연스럽게 이해되는가다.
 2. 각 S/A 항목이 가리키는 구간을 영상에서 본다. 초안이 말하는 상황·표정·소리가 화면에 실제로 있는지 확인하고, 없거나 약하면
    빼거나 바꾼다. 제목·내레이션의 **신체 동작 묘사는 화면에 실제로 있는 것만**(비유적 동작 금지 — 시청자가 화면과 대조한다).
 3. 텍스트 요약(60자)에 안 잡힌 **시각 비트**(표정 변화, 손·소품 클로즈업, 정적, 소리)가 그 장면에 있으면 A 항목이나 N 문장으로
@@ -158,6 +161,11 @@ def verify_version(job: Job, gemini: Gemini, rebuild: dict, version_n: int, inde
             strategy_note += ("\n12. 루프형의 끝: 마지막 항목은 **첫 대사를 직접 유발하는 같은 대화의 바로 앞 대사(S)** 여야 하고, 혼자 들어도 뜻이 통해야"
                               " 한다(맥락 없는 조각 금지 — 실측: \"그것도 막 빨간 하트로.\"). \"그리고 다시—\" 같은 메타 내레이션은 쓰지 않는다 —"
                               " 마지막은 대사로 끝난다. 초안이 이 조건에 안 맞으면 마지막 두 항목을 고쳐라.")
+        if draft["strategy"] in SHORT_FORM_STRATEGIES:
+            lo, hi = SHORT_FORM_STRATEGIES[draft["strategy"]]
+            strategy_note += (f"\n12. 이 포맷은 **길이 예외 {lo}~{hi}초**다(위 {TARGET_MIN_SEC}초 하한을 따르지 않는다). 내레이션은 0~3줄 —"
+                              " 이유·배경·인과·교훈(\"~때문에\", \"사실은\")을 말하지 않고, 끝은 해결·사이다가 아니라 리액션이다."
+                              " 길이를 채우려고 넣은 설명 내레이션은 빼라.")
     prompt = VERIFY_PROMPT.format(title=title, episode=episode, strategy=draft["strategy"], n=version_n, draft_title=draft["title"],
                                   draft=draft_block(draft), script=source_script(index, transcript, exclude),
                                   target_min=TARGET_MIN_SEC, target_max=TARGET_MAX_SEC, guide=guide_block(guide), strategy_note=strategy_note,
@@ -168,7 +176,11 @@ def verify_version(job: Job, gemini: Gemini, rebuild: dict, version_n: int, inde
         prompt += ("\n## 이전 조립 실패 피드백\n" + str(feedback.get("error") or "")
                    + "\n실패한 항목의 문장·화면 계획만 실제 재료에 맞게 다시 작성하라. "
                    "같은 주제와 정상 대사를 보존하고, 없는 행동이나 감정을 지어내지 마라. "
-                   "길이가 부족해도 내레이션을 축약하지 마라. 문구를 유지하고 덮개 확장·추가·뒤 대사 화면 재사용으로 충분한 ID를 지정하라.")
+                   "피드백이 화면과 문장의 사실 모순이면 사건의 의미는 유지하되 영상에서 직접 관찰되는 사실로 내레이션을 다시 쓰고, "
+                   "그 사실을 실제로 보여 주는 덮개만 지정하라. 이때 실패한 내레이션을 같은 문장으로 반환하면 안 된다. "
+                   "피드백의 seen 설명을 우선 근거로 삼고, 고친 문장과 이유를 changes에도 명시하라. "
+                   "화면 길이 부족만 문제라면 내레이션 문구를 유지하고 "
+                   "덮개 확장·추가·뒤 대사 화면 재사용으로 충분한 ID를 지정하라.")
     prompt += TITLE_PROMPT
     if index.get("grid_facts"):
         from app.tikitaka.production import planning_rules, preflight

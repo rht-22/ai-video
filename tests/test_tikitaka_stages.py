@@ -971,10 +971,16 @@ def test_ranges_complement_and_prompt_has_linear_patterns():
     assert ranges_complement([(180.0, 420.0)], 600.0) == [(0.0, 180.0), (420.0, 600.0)]
     assert ranges_complement([(0.0, 100.0), (300.0, 600.0)], 600.0) == [(100.0, 300.0)]
     assert ranges_complement([], 50.0) == [(0.0, 50.0)]
-    assert len(STRATEGIES) == 14 and STRATEGIES[10:] == ["구간 순차형", "루프형", "장면 통째 압축형", "점층 빌드업형"] and LINEAR_STRATEGIES == set(STRATEGIES[10:])
+    assert len(STRATEGIES) == 15 and STRATEGIES[10:] == ["구간 순차형", "루프형", "장면 통째 압축형", "점층 빌드업형", "공감형"]
+    assert LINEAR_STRATEGIES == set(STRATEGIES[10:])
     p = REBUILD_PROMPT.format(title="t", episode_label="1화", duration_label="45분", target_min=45, target_max=70, hard_max=75, script="(s)", digest="",
                               guide="", material_note="", seq_hook_rule=SEQ_HOOK_RULES[True])
     assert "11 구간 순차형" in p and "12 루프형" in p and "13 장면 통째 압축형" in p and "14 점층 빌드업형" in p and "콜드오픈" in p and "… 14개 …" in p
+    # 15 공감형(2026-09-18): 뼈대가 아니라 톤(설명 금지·리액션 종결·집단 제목) · 포맷은 15개지만 요청 대본은 14개 그대로 · 이 포맷만 길이 예외 25~45초
+    from app.tikitaka.rebuild import SHORT_FORM_STRATEGIES, N_VERSIONS
+    assert "15 공감형" in p and "25~45초" in p and "설명하지 마라" in p and "리액션" in p and SHORT_FORM_STRATEGIES == {"공감형": (25, 45)} and N_VERSIONS == 14
+    # 포맷은 골라 쓰는 도구(강제 배정 아님) · 마지막 항목은 이야기를 닫는다 · 던진 질문은 회수된다 — 규칙(검증기)이 아니라 작가 지침
+    assert "골라" in p and "강제 배정 아님" in p and "마지막 항목은 이야기를 닫는다" in p and "답이 되는 장면" in p and "자연 흐름" in p
 
 
 def test_enforce_linear_order_reorders_and_keeps_hook(index, transcript):
@@ -1026,8 +1032,11 @@ def test_effects_drop_captions_without_room(tmp_path, index, transcript):
 def test_canonical_strategy_tolerates_model_suffixes():
     from app.tikitaka.rebuild import canonical_strategy, STRATEGIES
     assert canonical_strategy("점층 빌드업형(슬로우 번)", 14) == "점층 빌드업형" and canonical_strategy("루프형 ", 12) == "루프형"
-    assert canonical_strategy("구간 순차형 — 03:00~07:00", 11) == "구간 순차형" and canonical_strategy(None, 3) == STRATEGIES[2]
-    assert canonical_strategy("모르는 이름", 99) == STRATEGIES[-1] and canonical_strategy("결말 선공개형", 1) == "결말 선공개형"
+    # 2026-09-17 사용자 결정: 포맷은 재료에 맞을 때 고르는 도구다 — 모르는 이름·빈 이름을 버전 번호로 강제 배정하지 않는다(자연 흐름)
+    from app.tikitaka.rebuild import FREE_FORMAT
+    assert canonical_strategy("구간 순차형 — 03:00~07:00", 11) == "구간 순차형" and canonical_strategy(None, 3) == FREE_FORMAT
+    assert canonical_strategy("모르는 이름", 99) == FREE_FORMAT and canonical_strategy("결말 선공개형", 1) == "결말 선공개형"
+    assert canonical_strategy("자연 흐름", 5) == FREE_FORMAT and FREE_FORMAT not in STRATEGIES
 
 
 def test_loop_tail_and_copy_narration_drop(index, transcript):

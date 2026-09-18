@@ -23,17 +23,21 @@ TARGET_MIN_SEC = 45
 TARGET_MAX_SEC = 70
 STRATEGIES = ["결말 선공개형", "충격 폭로형", "감정 폭발형", "인지부조화/급발진형", "미스터리 떡밥형",
               "제3자 관찰자/리액션 먼저형", "타임어택 카운트다운형", "시점 교차/핑퐁형", "사이다/참교육형", "만약에/분기점형",
-              "구간 순차형", "루프형", "장면 통째 압축형", "점층 빌드업형"]          # 11~14: 선형 서사 계열(2026-09-11 사용자 요청)
-LINEAR_STRATEGIES = {"구간 순차형", "루프형", "장면 통째 압축형", "점층 빌드업형"}
+              "구간 순차형", "루프형", "장면 통째 압축형", "점층 빌드업형",           # 11~14: 선형 서사 계열(2026-09-11 사용자 요청)
+              "공감형"]                                                             # 15: 몽테라스 두 편 해부 + 예시뱅크 대조(2026-09-18 사용자 결정 — 뼈대가 아니라 톤)
+LINEAR_STRATEGIES = {"구간 순차형", "루프형", "장면 통째 압축형", "점층 빌드업형", "공감형"}
+SHORT_FORM_STRATEGIES = {"공감형": (25, 45)}           # 목표 길이 예외(초) — 45초를 채우려고 설명 내레이션을 넣지 않는다
+N_VERSIONS = 14                                  # 요청 대본 수 — 포맷 수와 무관(포맷은 골라 쓰는 도구)
 HOOK_STRATEGIES = {"구간 순차형"}                # 콜드오픈(첫 항목만 순서 밖) 허용 — --seq-hook on 일 때
+FREE_FORMAT = "자연 흐름"                        # 포맷 없이 짠 버전(2026-09-17 사용자 결정: 포맷은 골라 쓰는 것, 강제 배정 아님)
 def canonical_strategy(name, n: int) -> str:
-    """모델이 적은 전략 이름 → STRATEGIES 정본. 모델이 "점층 빌드업형(슬로우 번)" 처럼 꼬리를 붙여 와도 선형 벨트가 걸리게(2026-09-11 실측).
-    못 맞추면 번호 순서의 기본 전략. 순수 — 테스트 대상."""
+    """모델이 적은 포맷 이름 → STRATEGIES 정본. 모델이 "점층 빌드업형(슬로우 번)" 처럼 꼬리를 붙여 와도 선형 벨트가 걸리게(2026-09-11 실측).
+    못 맞추면 FREE_FORMAT — 버전 번호로 포맷을 강제 배정하지 않는다(2026-09-17: 포맷은 재료에 맞을 때 고르는 도구다). 순수 — 테스트 대상."""
     raw = " ".join(str(name or "").split())
     for st in STRATEGIES:
         if raw == st or raw.startswith(st) or st in raw:
             return st
-    return STRATEGIES[min(max(n, 1) - 1, len(STRATEGIES) - 1)]
+    return FREE_FORMAT
 
 
 SEQ_HOOK_RULES = {
@@ -461,7 +465,7 @@ def rebuild(job: Job, gemini: Gemini, index: dict, transcript: dict, *, title: s
     if index.get("grid_facts"):
         from app.tikitaka.production import planning_rules
         prompt += planning_rules()
-    job.log(f"[rebuild] 소스 스크립트 {len(script):,}자 → {len(STRATEGIES)}버전 요청" + (f" (제작 가이드 {guide['sha']})" if guide else "")
+    job.log(f"[rebuild] 소스 스크립트 {len(script):,}자 → {N_VERSIONS}버전 요청" + (f" (제작 가이드 {guide['sha']})" if guide else "")
             + (" · 작품 이해 문서 첨부" if digest else " · ⚠ 작품 이해 문서 없음")
             + (f" · 재료 구간 {range_label}" if range_label else "") + f" · 순차형 콜드오픈 {'on' if seq_hook else 'off'}")
     raw = gemini.text_json(prompt, kind="rebuild", thinking="high")
@@ -484,10 +488,36 @@ def rebuild(job: Job, gemini: Gemini, index: dict, transcript: dict, *, title: s
         from app.tikitaka.production import SCHEMA as production_schema, preflight
         data["production_plan_schema"] = production_schema
         from app.tikitaka.production import enforce_joint_plans
+        blocked_versions: list[int] = []
         for version in data["versions"]:
-            enforce_joint_plans(job, gemini, version, index, transcript, exclude)
+            try:
+                enforce_joint_plans(job, gemini, version, index, transcript, exclude)
+            except ValueError as exc:
+                # 14개 대본 중 하나의 화면 선택이 수정 횟수를 소진했다고 이미
+                # 검증을 마친 대본과 최종 렌더까지 전부 버리지 않는다. 원본 대본은
+                # 감사용으로 남기되, 자동 추천·렌더 후보에서는 빼야 한다.
+                reason = f"{type(exc).__name__}: {exc}"
+                version["production_plan_blocked"] = reason
+                version.setdefault("issues", []).append(f"[화면 계획 실패] {str(exc)[:300]}")
+                blocked_versions.append(int(version["n"]))
+                job.log(f"[joint_plan] v{version['n']} 자동 후보 제외 — {str(exc)[:240]}")
+                continue
             version["production_preflight"] = preflight(version, index, transcript, exclude)
-    apply_rerank(job, gemini, data, title=title, episode=episode_label, basis="draft")   # 리빌딩 호출의 순위는 예시에 끌린다 — 별도 호출로
+        if blocked_versions:
+            data["production_plan_blocked_versions"] = blocked_versions
+        eligible_versions = [v for v in data["versions"] if not v.get("production_plan_blocked")]
+        if not eligible_versions:
+            raise ValueError("모든 대본의 문장·화면 계획이 검증에 실패했습니다.")
+        # 순위 모델에는 실제로 조립 가능한 후보만 보여 준다. 전체 14개
+        # 대본은 복구해 rebuild.json에 모두 보존한다.
+        all_versions = data["versions"]
+        data["versions"] = eligible_versions
+        try:
+            apply_rerank(job, gemini, data, title=title, episode=episode_label, basis="draft")
+        finally:
+            data["versions"] = all_versions
+    else:
+        apply_rerank(job, gemini, data, title=title, episode=episode_label, basis="draft")   # 리빌딩 호출의 순위는 예시에 끌린다 — 별도 호출로
     n_issues = sum(len(v["issues"]) for v in data["versions"])
     job.save(cache_name, data)
     for v in data["versions"]:
@@ -817,7 +847,7 @@ def apply_name_map(version: dict, actors: dict[str, str], *, log=print) -> int:
 # ── 재순위(2026-09-11): 리빌딩 호출의 ranking 은 프롬프트 예시를 베끼거나 예시의 추천 번호(3)에 끌렸다 — 예시 없는 별도 호출로 다시 매긴다 ──
 RERANK_PROMPT = """너는 드라마 쇼츠 채널의 편집장이다. 아래는 작품 「{title}」 {episode} 로 만든 쇼츠 대본 {k}개다(번호·전략·제목·항목).
 **조회수 기대가 높은 순**으로 줄 세워라. 기준: ① 첫 3초 훅의 강도(대사 자체의 자극·의외성) ② 갈등의 선명함과 대사 티키타카 밀도
-③ 결말의 미끼(다음이 궁금한가) ④ 같은 장면을 재탕한 대본은 뒤로 ⑤ 선형 계열(구간 순차형·루프형·장면 통째 압축형·점층 빌드업형)은
+③ 결말의 미끼(다음이 궁금한가) ④ 같은 장면을 재탕한 대본은 뒤로 ⑤ 선형 계열(구간 순차형·루프형·장면 통째 압축형·점층 빌드업형·공감형)은
 흐름이 매끄럽고 끝이 잘 닫히는지. 번호는 아무 의미가 없다 — 앞 번호를 우대하지 마라. 각 대본을 실제로 읽고 비교해 정한다.
 
 {blocks}

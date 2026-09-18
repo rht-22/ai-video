@@ -60,3 +60,22 @@ def test_narration_phrase_clock_tracks_audio_and_reuses_alignment(tmp_path):
     resources['tts_cue_files'][0]['cue'].update(start_sec=30.,end_sec=34.)
     shifted=narration_captions(job,resources,transcribe=transcribe)
     assert shifted[0]['start_sec']==30. and calls==[p]
+
+
+def test_surname_and_title_never_split_across_lines():
+    """2026-09-18 로또 clip01 실측: '입사 선배인 양 / 대리가 탕비실에서' · '말을 튕겨내자, 공 / 팀장은' — 성이 앞 줄 꼬리에 매달렸다."""
+    from app.tikitaka.subtitles import glues_to_next, glue_name_titles
+    assert glues_to_next('양', '대리가') and glues_to_next('공', '팀장은') and glues_to_next('민준', '씨가') and glues_to_next('팀장', '님')
+    assert not glues_to_next('공,', '팀장은')            # 문장부호 뒤는 원래 경계
+    assert not glues_to_next('선배인', '대리가')         # 두 글자 이상 어절 + 직함은 묶지 않는다(이름 아님)
+    assert not glues_to_next('양', '탕비실에서')
+    for text in ['회의 시작 전부터 입사 선배인 양 대리가 탕비실에서 밍기적댔기 때문이죠.',
+                 '입사 선배랍시고 대놓고 말을 튕겨내자, 공 팀장은 회의 말미에 정곡을 찌르는 일침을 날리는데요.']:
+        tokens = text.split()
+        words = [{'text': t, 'start': i * .4, 'end': (i + 1) * .4} for i, t in enumerate(tokens)]
+        line = {'text': text, 'start': 0., 'end': len(tokens) * .4, 'word_i': list(range(len(tokens)))}
+        parts = [p['text'] for p in phrase_lines(line, words)]
+        assert not any(p.endswith((' 양', ' 공', ', 공')) for p in parts), parts
+        assert any('양 대리가' in p or '공 팀장은' in p for p in parts), parts
+    aligned = [{'text': '양', 't0': 1., 't1': 1.2}, {'text': '대리가', 't0': 1.2, 't1': 1.6}]
+    assert glue_name_titles(aligned) == [{'text': '양 대리가', 't0': 1., 't1': 1.6}] and len(aligned) == 2
