@@ -1,0 +1,15 @@
+{
+  "_doc": "로또 1등도 출근합니다 — 지금 불륜이 문제가 아닙니다의 제목·자막 기하를 유지하고 TVING 브랜딩만 적용하는 실행 프리셋.",
+  "design": {
+    "title_font": "JalnanGothic",
+    "title_color": "#FFFFFF",
+    "title_color2": "#FF3C3C",
+    "platform_text": "티빙",
+    "platform_font_size": 56,
+    "platform_align": "right",
+    "subtitle_size": 62,
+    "tts_size": 62,
+    "tts_color": "#FFE23C"
+  },
+  "options": {}
+}

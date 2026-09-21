@@ -1,0 +1,16 @@
+{
+  "_doc": "로또 1등도 출근합니다 — lotto_tving 과 같되 제목 2줄 색만 작품 로고(노란판 -04)의 노랑 #FBC001 로. 로고는 --logo(흰판 -03) + --logo-width 로 넘긴다 (2026-09-17). 대사·내레이션 자막은 밴드 하단 기준 앵커(subtitle_band_offset)로 종전보다 80px 위(margin_v 455 → 535, 2026-09-17 확정) — 내레이션은 대사와 같은 줄을 따라간다.",
+  "design": {
+    "title_font": "JalnanGothic",
+    "title_color": "#FFFFFF",
+    "title_color2": "#FBC001",
+    "platform_text": "티빙",
+    "platform_font_size": 56,
+    "platform_align": "right",
+    "subtitle_size": 62,
+    "tts_size": 62,
+    "tts_color": "#FFE23C",
+    "subtitle_band_offset": -202
+  },
+  "options": {}
+}

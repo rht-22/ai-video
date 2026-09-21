@@ -62,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-framing", action="store_true", help="5.5단계 Gemini 주인물 크롭을 건너뛴다(중앙 크롭)")
     ap.add_argument("--guide", action="append", default=None, help="제작 가이드 파일(반복 가능). 미지정이면 guides/tikitaka/<작품명>.md · <작품명>/<회차>.md 자동 탐색")
     ap.add_argument("--logo", default=None, help="작품명 대신 넣을 로고 이미지(PNG 알파). 가이드의 '로고:' 키보다 우선")
+    ap.add_argument("--logo-width", type=int, default=600, help="grid-review 로고 상자 폭(px, 기본 600 = 종전). 가로로 긴 한 줄 로고는 960 처럼 넓혀 세로를 살린다 — 상자 높이 240 은 그대로")
     ap.add_argument("--copy", default=None, help="작품명/로고 위·아래 카피 문구. 가이드의 '카피:' 키보다 우선")
     ap.add_argument("--copy-pos", choices=("above", "below"), default=None, help="카피 위치(기본 below). 가이드의 '카피 위치:' 키보다 우선")
     ap.add_argument("--voice", default="ko_female", help="내레이션 목소리 라벨(ko_female·ko_female_high·ko_male·ko_male_low·chat_*)")
@@ -395,7 +396,7 @@ def main(argv: list[str] | None = None) -> int:
                 design["platform_image"] = get_logo_path(design["platform_image"], Path(__file__).resolve().parents[1])
             if logo:
                 design.update(work_type="image", work_value=str(logo.resolve()),
-                              work_image_width=600, work_image_height=240, work_image_align="center")
+                              work_image_width=int(a.logo_width), work_image_height=240, work_image_align="center")
             if copy_text:
                 if copy_text == design.get("platform_text"):
                     # The channel already places this same copy above its logo.
