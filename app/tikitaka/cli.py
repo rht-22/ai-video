@@ -75,10 +75,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-transcript-polish", action="store_true", help="1.5단계 Gemini 글자 교정을 건너뛴다")
     ap.add_argument("--no-voice-check", action="store_true", help="3.5단계 목소리(diarize) 기준 화자 대조를 건너뛴다")
     ap.add_argument("--no-verify", action="store_true", help="4.5단계 영상 확인 패스를 건너뛴다(텍스트 리빌딩 버전 그대로)")
+    ap.add_argument("--cover-cut-guard", action="store_true", help="덮개 컷 경계 정밀 검사·수정(시험 옵션). TTS 길이 고정, 미해결 덮개는 렌더 차단")
     ap.add_argument("--redo", default="", help="다시 만들 단계(쉼표): research,transcribe,polish,index,digest,rebuild,verify,agentic,table,review,style,render. grid-review의 render는 관찰/연출을 재사용")
     ap.add_argument("--no-digest", action="store_true", help="3.7단계 작품 이해 문서(digest)를 만들지 않는다(종전 프롬프트)")
     ap.add_argument("--until", default="render", choices=("research", "transcribe", "polish", "index", "digest", "rebuild", "verify", "table", "render"))
     a = ap.parse_args(argv)
+    if a.cover_cut_guard and a.pipeline != "grid-review":
+        ap.error("--cover-cut-guard는 grid-review 전용입니다")
     if a.pipeline == "legacy" and a.layout is None:
         a.layout = "fill"
     from app.tikitaka import research as research_module
@@ -375,6 +378,14 @@ def main(argv: list[str] | None = None) -> int:
         else:
             table = TB.build_table(job, gemini, rb_for_table, index, transcript, cuts, info["duration_sec"], proxy, version_n=n,
                                    title=a.title, cut_search=a.cut_search, voice=a.voice, speed=a.speed, exclude=exclude, tag=a.tag, black=black)
+        if a.cover_cut_guard:
+            from app.tikitaka.cut_guard import guard_table
+            table, cut_audit = guard_table(job, table, grid, blocked=exclude + black)
+            job.save(f"cut_guard_v{n}{sfx}.json", cut_audit)
+            # Keep the input table intact: opting out restores the original.
+            job.save(f"grid_table_guarded_v{n}{sfx}.json", table)
+            if cut_audit["blocked"]:
+                raise ValueError(f"v{n}: 컷 검사 미해결 덮개 — cut_guard_v{n}{sfx}.json 확인·화면 재선택 필요")
         job.path(f"master_table_v{n}{sfx}.md").write_text(RP.table_md(table, title=a.title), encoding="utf-8")
         if a.until == "table":
             continue
