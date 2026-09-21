@@ -95,6 +95,7 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
                    episode_map: dict | None = None,
                    corrections: list[dict] | None = None,
                    topic_override: dict | None = None,
+                   title_fit: dict | None = None,
                    log=print) -> tuple[dict, dict]:
     """exclude_topics / exclude_ranges: 이미 만든 쇼츠(주제 문장 · 원본 초 구간) — 걸음
     1·2 프롬프트에 제외 블록으로 싣고, 구간과 겹치는 사건 단위는 검증기가 반려한다
@@ -208,7 +209,8 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
     _purposes, _axis, _choices = sl.purpose_axis(topic.get("kind") or "event")
     scenes_doc = _loop("scenes", lambda rej: sl.SCENES_PROMPT.format(
         topic=topic["topic"], min_scenes=sl.MIN_SCENES, max_scenes=sl.MAX_SCENES,
-        target_sec=target_sec, title_max=sl.TITLE_MAX_CHARS, work_title=work_title,
+        target_sec=target_sec, title_len_rule=sl.title_len_rule(sl.TITLE_MAX_CHARS, title_fit),
+        work_title=work_title,
         research_block=research_block, meaning_block=meaning_block,
         silent_block=silent_blk, exclude_block=exclude_blk, map_block=map_blk,
         purpose_axis=_axis, purpose_choices=_choices, strategy_line=_strat,
@@ -216,7 +218,7 @@ def run_story_flow(gemini, stage2_doc: dict, grid: dict, *, work_title: str,
                            if _hook_disp else ""),
         reveal_line=sl.reveal_line(_reveal),
         reject_block=rej), lambda r: sl.validate_scenes(r, rows, excluded=excluded, purposes=_purposes,
-                                                        reveal=_reveal),
+                                                        reveal=_reveal, title_fit=title_fit),
         gemini, audit, log)
     scenes, title = scenes_doc["scenes"], scenes_doc["title"]
     log("  [v3/flow/scenes] " + " → ".join(f"m{s['meaning']:03d}[{s['purpose']}]" for s in scenes)

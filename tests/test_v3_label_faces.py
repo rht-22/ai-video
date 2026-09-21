@@ -31,8 +31,13 @@ def test_avoid_faces_falls_to_side_when_no_room_above_and_records_when_impossibl
     face = (380.0, 432.0, 560.0, 900.0)             # 얼굴이 밴드 꼭대기까지 — 위엔 자리 없음, 옆은 됨
     lb = {"text": "(단호한 거절)", "start_sec": 10.0, "end_sec": 11.0, "x": 0.5, "y": 0.32, "size": 56}
     moved, rec = lf.avoid_faces(lb, [face], GEOM)
-    assert rec["moved"] and rec["why"].startswith("side")
+    # 2026-09-18 폰 안전 박스: 옆자리(오른쪽 글자 끝 1002px)는 가로 980 을 넘어 탈락 → 아래로 간다
+    assert rec["moved"] and rec["why"] in ("side-far", "side-near", "below")
     assert not lf._overlaps(lf.label_box(moved), face)
+    from app.v3.safe_zone import SAFE_X0, SAFE_X1
+    from app.v3.stage4 import LABEL_EDGE_PAD
+    bx = lf.label_box(moved)
+    assert bx[0] + LABEL_EDGE_PAD >= SAFE_X0 - 0.5 and bx[2] - LABEL_EDGE_PAD <= SAFE_X1 + 0.5
     wall = [(0.0, 432.0, 1080.0, 1154.0)]           # 밴드 전체가 얼굴 — 어디도 안 됨
     same, rec2 = lf.avoid_faces(lb, wall, GEOM)
     assert same == lb and rec2["moved"] is False

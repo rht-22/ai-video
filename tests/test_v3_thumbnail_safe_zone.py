@@ -37,7 +37,8 @@ def _jigeum_like(tmp_path: Path, **kw) -> DesignConfig:
 
 
 def test_inside_design_is_returned_untouched(tmp_path):
-    d = F.design_from_style(stage4.get_style_preset(None))       # 로고 없음 — 작품명 텍스트 1400
+    # 로고 없음 — 작품명 텍스트. 2026-09-18 윗변 기준이 200 으로 올라 프리셋 그대로(189)는 밖이다 → 밴드를 내려 안에 둔다
+    d = dc.replace(F.design_from_style(stage4.get_style_preset(None)), video_y=460)
     e = F.layout_extents(d)
     assert e["title_top"] >= F.THUMB_SAFE_TOP and e["bottom"] <= F.THUMB_SAFE_BOTTOM
     out, info = F.fit_thumbnail_safe_zone(d)
@@ -52,11 +53,12 @@ def test_jigeum_like_logo_is_pulled_in(tmp_path):
     assert e0["bottom"] > F.THUMB_SAFE_BOTTOM                      # 1831 — 잘리던 배치
     out, info = F.fit_thumbnail_safe_zone(d)
     a = info["after"]
-    assert a["title_top"] >= F.THUMB_SAFE_TOP and a["bottom"] <= F.THUMB_SAFE_BOTTOM
+    assert a["title_top"] >= F.THUMB_SAFE_TOP - F.SAFE_TOP_TOLERANCE_PX and a["bottom"] <= F.THUMB_SAFE_BOTTOM
     assert info["unmet"] is None
-    # ① 가운데 정렬 해제(밴드 +20) → ② 밴드 위로(제목 여유만큼) → ③ 로고 축소, 제목은 안 건드린다
+    # ① 가운데 정렬 해제(밴드 +20) → ③ 로고 축소 → ② 밴드 이동, 제목은 안 건드린다
+    # (2026-09-18: 윗변 200 — 제목 여유가 없어 밴드는 아래로 간다)
     assert out.work_band_offset == F.WORK_GAP_BELOW_VIDEO
-    assert out.video_y < 443 and info["band_shift"] == out.video_y - 443
+    assert info["band_shift"] == out.video_y - 443
     assert out.work_image_height < F.LOGO_BOX_HEIGHT
     assert F._work_item_height(out) >= int(194 * F.LOGO_MIN_SCALE)
     assert list(out.title_sizes) == list(d.title_sizes)
@@ -69,7 +71,7 @@ def test_top_short_moves_band_down_when_bottom_has_room(tmp_path):
     e0 = F.layout_extents(d)
     assert e0["title_top"] < F.THUMB_SAFE_TOP and e0["bottom"] <= F.THUMB_SAFE_BOTTOM
     out, info = F.fit_thumbnail_safe_zone(d)
-    assert info["after"]["title_top"] >= F.THUMB_SAFE_TOP
+    assert info["after"]["title_top"] >= F.THUMB_SAFE_TOP - F.SAFE_TOP_TOLERANCE_PX
     assert out.video_y > 300 and list(out.title_sizes) == list(d.title_sizes)
 
 

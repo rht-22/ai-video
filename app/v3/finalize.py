@@ -219,7 +219,8 @@ def video_band_ratio(design, *, canvas_height: int = 1920) -> tuple[float, float
 
 LOGO_WIDTH = 620                  # 하단 밴드 로고 박스(가로) — 수동 제작본 "가왕쇼" 폭 근사
 LOGO_BOX_HEIGHT = 300             # 세로 상한(contain) — 세로형 로고가 밴드를 넘지 않게
-TITLE_MAX_WIDTH = 980             # 템플릿 max_width_px — 좌우 여백 각 50px
+from app.v3 import safe_zone as _sz  # noqa: E402 — 폰 재생 화면 안전 박스(2026-09-18)
+TITLE_MAX_WIDTH = _sz.SAFE_WIDTH  # 880 — 폰 재생 화면 좌우 잘림(가로 100~980). 종전 980(좌우 50)
 TITLE_CHAR_W = 1.0                # 한글 1자 폭 ÷ 글자크기 (Jalnan 92px 프레임 실측)
 TITLE_SPACE_W = 0.3               # 공백은 좁다 — 1.0 으로 세면 멀쩡한 제목을 줄인다
 
@@ -632,7 +633,8 @@ def base_text_margins(design, *, channel_design: dict | None, geom, ref_geom, wo
 # 가왕쇼 네 편 썸네일 스크린샷을 완성본 밴드 경계에 맞대어 잰 값 — docs/shorts_thumbnail_safe_zone.md).
 # 경계는 사용자가 "맨 위와 맨 아래 경계 자체는 참고할 만 해" 라고 지목한 가왕쇼 템플릿에 맞췄다
 # (제목 블록 윗변 187 · 캡션 블록 아랫변 1711 → 둘 다 안). 지금불륜은 로고가 1831 까지 내려가 잘렸다.
-THUMB_SAFE_TOP = 180          # 제목 블록 윗변(렌더러 drawtext y) 하한
+SAFE_TOP_TOLERANCE_PX = 2
+THUMB_SAFE_TOP = _sz.SAFE_TOP   # 200 — 제목 블록 윗변 하한(재생 화면 상단 아이콘 · 종전 180 = 썸네일만)
 THUMB_SAFE_BOTTOM = 1715      # 하단 블록(플랫폼 줄·작품명/로고·캡션) 아랫변 상한
 LOGO_MIN_SCALE = 0.7          # 로고 축소 하한(채널 박스에 contain 한 크기 대비)
 TITLE_MIN_SCALE = 0.8         # 제목 크기 상한 축소 하한
@@ -671,7 +673,7 @@ def fit_thumbnail_safe_zone(design, *, channel_design: dict | None = None,
     이미 안이면 **design 그대로**(회귀 0). 밖이면 이 순서로 — 앞 단계일수록 화면 손실이 없다:
       ① 작품 로고 가운데 정렬의 빈 공간을 걷는다(밴드 +20 에 붙임)
       ② 반대쪽 여유만큼 밴드를 옮긴다(제목·자막·로고가 전부 밴드 상대라 같이 움직인다)
-      ③ 로고를 줄인다(contain 박스 높이, 하한 LOGO_MIN_SCALE)
+      ③ 로고를 줄인다(contain 박스 높이, 하한 LOGO_MIN_SCALE) — 위가 모자랄 때도 로고를 줄여 아래 여유를 만들고 ②
       ④ 제목 크기 상한을 줄이고(하한 TITLE_MIN_SCALE) 다시 ②
     그래도 밖이면 unmet 에 모자란 px 을 남긴다(렌더는 막지 않는다 — 템플릿을 사람이 고칠 몫).
 
@@ -687,7 +689,8 @@ def fit_thumbnail_safe_zone(design, *, channel_design: dict | None = None,
         return layout_extents(dd, **kw)
 
     def _viol(e):
-        return max(0, e["bottom"] - THUMB_SAFE_BOTTOM), max(0, THUMB_SAFE_TOP - e["title_top"])
+        # 위는 2px 까지 봐준다 — 로고 하한에 걸린 1px 때문에 제목 글자를 줄이지 않게(2026-09-18 "크기는 고정")
+        return max(0, e["bottom"] - THUMB_SAFE_BOTTOM), max(0, THUMB_SAFE_TOP - e["title_top"] - SAFE_TOP_TOLERANCE_PX)
 
     def _shift(dd, e):
         over, short = _viol(e)
@@ -724,9 +727,14 @@ def fit_thumbnail_safe_zone(design, *, channel_design: dict | None = None,
         e = e2
     d, e = _shift(d, e)
     over, _short = _viol(e)
-    if over and is_logo:
+    # 위가 모자라도(제목 윗변 < 상한) 로고를 먼저 줄여 아래 여유를 만들고 밴드를 내린다(2026-09-18 사용자
+    # 결정 "제목 글자 크기는 줄이지 않는다" — 안전 박스 윗변 180→200 으로 가왕쇼 제목이 92/112→78/95 로
+    # 줄던 것). 제목 축소(④)는 로고 하한까지 쓰고도 모자랄 때만.
+    _room_bottom = THUMB_SAFE_BOTTOM - e["bottom"]
+    _need = over + max(0, _short - max(0, _room_bottom))
+    if _need and is_logo:
         cur_h = _work_item_height(d)
-        new_h = max(int(math.ceil(cur_h * LOGO_MIN_SCALE)), cur_h - over)
+        new_h = max(int(math.ceil(cur_h * LOGO_MIN_SCALE)), cur_h - _need)
         new_h -= new_h % 2                     # 렌더러가 짝수로 내린다 — 올리면 1px 넘쳐 ④까지 번진다(실측)
         if new_h < cur_h:
             d = _dc.replace(d, work_image_height=new_h)
@@ -734,6 +742,7 @@ def fit_thumbnail_safe_zone(design, *, channel_design: dict | None = None,
             actions.append(f"작품 로고 높이 {cur_h} → {_work_item_height(d)}px — 아랫변 "
                            f"{e['bottom']} → {e2['bottom']}")
             e = e2
+            d, e = _shift(d, e)
     over, short = _viol(e)
     if over or short:
         sizes = [int(s) for s in (d.title_sizes or [d.title_size])]
@@ -1570,17 +1579,79 @@ def resolve_emphasis_index(e: dict, segments: list[dict] | None) -> int | None:
 
 
 def emphasis_styles(v3_style: dict | None, base_size: int,
-                    segments: list[dict] | None = None) -> dict[int, dict]:
+                    segments: list[dict] | None = None, *,
+                    font_path: str | None = None, em_ratio: float = 1.0,
+                    notes: list[str] | None = None) -> dict[int, dict]:
     """강조 줄 → {자막 세그먼트 idx: {size, color, fx}}. 강한 팝인(pop_strong)은 build12 EPOP 의 대응.
-    segments 를 주면 줄 번호를 글자·시각으로 다시 맞춘다(resolve_emphasis_index)."""
+    segments 를 주면 줄 번호를 글자·시각으로 다시 맞춘다(resolve_emphasis_index).
+    font_path 를 주면(2026-09-18 폰 안전 박스) 키운 줄이 가로 안전 폭(880px)을 넘지 않게 **배율만** 낮춘다 —
+    기준 자막 크기는 그대로. em_ratio = libass 줄높이 비(ASS 크기 ÷ 실제 em)."""
     out: dict[int, dict] = {}
     for e in (v3_style or {}).get("emphasis") or []:
         idx = resolve_emphasis_index(e, segments)
         if idx is None:
             continue
-        out[idx] = {"size": int(round(base_size * float(e.get("scale") or stage4.EMPH_DEFAULT_SCALE))),
+        scale = float(e.get("scale") or stage4.EMPH_DEFAULT_SCALE)
+        if font_path and segments is not None and 0 <= idx < len(segments):
+            text = str(segments[idx].get("text") or "")
+            em = base_size / max(0.1, float(em_ratio))
+            w1 = _sz.line_width_px(text, font_path, int(round(em))) + 2 * SUB_OUTLINE_PX
+            if w1 > 0 and w1 * scale > _sz.SAFE_WIDTH:
+                new = max(1.0, _sz.SAFE_WIDTH / w1)
+                if new < scale:
+                    if notes is not None:
+                        notes.append(f"강조 「{text}」 배율 {scale:.2f} → {new:.2f}(안전 폭 {_sz.SAFE_WIDTH}px)")
+                    scale = new
+        out[idx] = {"size": int(round(base_size * scale)),
                     "color": str(e.get("color") or stage4.EMPH_DEFAULT_COLOR), "fx": EMPHASIS_FX}
     return out
+
+
+def enforce_safe_box(design) -> tuple[Any, list[str]]:
+    """가운데 정렬 오버레이를 폰 안전 폭(가로 SAFE_X0~SAFE_X1) 안으로 맞춘다 — 순수(폰트 실측만).
+
+    대상: 작품 로고 이미지 폭 · 로고 아래 캡션 · 작품명 위 플랫폼 줄(아이콘+글자) · 작품명 텍스트.
+    넘치면 그 요소의 크기만 줄인다(템플릿 고정 문구라 글자 수를 바꿀 수 없다 — 제목과 다르다).
+    밴드 모서리 플랫폼 표기는 render_final 이 오프셋을 끌어올린다(오른쪽 끝 = 마지노선 SAFE_X1).
+    반환 (design, 메모). 안이면 design 그대로(회귀 0)."""
+    import dataclasses as _dc
+    from app.modules.renderer import _measure_title_text_width, platform_line_geometry
+    notes: list[str] = []
+    font = str(getattr(design, "title_font", "") or "")
+    limit = _sz.SAFE_WIDTH
+
+    def _w(text: str, size: int) -> int:
+        return int(_measure_title_text_width(str(text), font, int(size)))
+
+    if getattr(design, "work_type", "text") == "image" and int(getattr(design, "work_image_width", 0) or 0) > limit:
+        notes.append(f"작품 로고 폭 {design.work_image_width} → {limit}px")
+        design = _dc.replace(design, work_image_width=limit)
+    cap = str(getattr(design, "work_caption", "") or "")
+    if cap:
+        fs = int(getattr(design, "work_caption_font_size", 40) or 40)
+        w = _w(cap, fs)
+        if w > limit:
+            nfs = max(20, int(fs * limit / float(w)))
+            notes.append(f"로고 아래 문구 「{cap}」 폭 {w}px > {limit} — 글자 {fs} → {nfs}px")
+            design = _dc.replace(design, work_caption_font_size=nfs)
+    if getattr(design, "platform_placement", "band") == "above_work" and \
+            (getattr(design, "platform_text", None) or getattr(design, "platform_image", None)):
+        g = platform_line_geometry(design)
+        txt = str(getattr(design, "platform_text", "") or "")
+        gap = g["font_size"] // 2 if (txt and getattr(design, "platform_image", None)) else 0
+        total = g["icon_w"] + gap + (_w(txt, g["font_size"]) if txt else 0)
+        if total > limit:
+            nfs = max(20, int(g["font_size"] * limit / float(total)))
+            notes.append(f"작품명 위 플랫폼 줄 폭 {total}px > {limit} — 글자 {g['font_size']} → {nfs}px")
+            design = _dc.replace(design, platform_font_size=nfs)
+    if getattr(design, "work_type", "text") != "image":
+        wt = str(getattr(design, "work_value", "") or "")
+        fs = int(getattr(design, "work_font_size", 40) or 40)
+        if wt and "\n" not in wt and _w(wt, fs) > limit:
+            nfs = max(20, int(fs * limit / float(_w(wt, fs))))
+            notes.append(f"작품명 「{wt}」 폭 > {limit} — 글자 {fs} → {nfs}px")
+            design = _dc.replace(design, work_font_size=nfs)
+    return design, notes
 
 
 def render_final(*, video_path: Path, plan: dict, style_doc: dict,
@@ -1673,6 +1744,28 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
             log(f"  [v3/썸네일] ⚠ 다 못 넣음 {_thumb['unmet']} — 템플릿(화면비·로고·제목 크기) 조정 필요")
     _label_dy = _thumb["band_shift"] / float(config.canvas_height)
     # 제목 줄별 크기를 이 편의 실제 글자수로 맞춘다
+    # 안전 폭(2026-09-18 사용자 결정 "글자 크기를 줄일 게 아니라 글자 수를 줄여") — 제목은 스토리 걸음 2 가
+    # 폭으로 반려해 상한 크기 그대로 880px 에 들어오게 만든다. 여기서 넘치면 손으로 넣은 제목(오버라이드)이다 —
+    # 폰에서 잘리지 않게 크기를 줄여 넣되(최후 수단) ⚠ 로 크게 알린다: 고칠 것은 글자 수다.
+    _title_over = _sz.title_overflow([ln for ln in _title_text.split("\n") if ln.strip()],
+                                     str(design.title_font), list(design.title_sizes))
+    for _o in _title_over:
+        log(f"  [v3/render] ⚠ 제목 {_o['line']}줄 「{_o['text']}」 폭 {_o['width']}px > 안전 폭 {_sz.SAFE_WIDTH}px "
+            f"({_o['size']}px 기준 약 {_o['cut_chars']}자 초과) — 글자 수를 줄여야 한다(지금은 크기를 줄여 넣음)")
+    # 밴드 모서리 플랫폼 표기(「티빙」 등)도 안전 박스 안으로(2026-09-18 실사고 — 밴드 모서리 24px 이라 폰에서
+    # 「빙」이 잘렸다). 오프셋은 앵커 쪽 **밴드** 모서리 기준이므로, 캔버스 끝에서 SAFE_X0 이상이 되게 올린다.
+    if (design.platform_text or design.platform_image) and design.platform_placement != "above_work":
+        from app.modules.subtitle_region import band_geometry as _bg
+        _pg = _bg(design, canvas_width=config.canvas_width, canvas_height=config.canvas_height)
+        _need_off = max(0, _sz.SAFE_X0 - int(_pg.pad_x))
+        if int(design.platform_x) < _need_off:
+            log(f"  [v3/안전구역] 플랫폼 표기 오프셋 {design.platform_x} → {_need_off}px(캔버스 끝에서 {_sz.SAFE_X0}px 안쪽)")
+            design = _dc.replace(design, platform_x=_need_off)
+    # 가로 마지노선(2026-09-18 사용자 지시 "오른쪽 마지노선을 정해두고 다른 로고·글씨들도") — 가운데 정렬
+    # 요소(작품 로고·로고 아래 문구·작품명 위 플랫폼 줄·작품명 글자)도 가로 SAFE_X0~SAFE_X1 안으로.
+    design, _box_notes = enforce_safe_box(design)
+    for _n in _box_notes:
+        log(f"  [v3/안전구역] {_n}")
     _fitted = fit_title_sizes(_title_text, list(design.title_sizes),
                               font_path=str(design.title_font))   # 경로화된 제목 폰트로 실측
     if _fitted != list(design.title_sizes):
@@ -1786,7 +1879,12 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     if _moved:
         log(f"  [v3/자막회피] 자막 {_moved}/{len(segments)}줄을 구간별로 더 올렸습니다")
 
-    _emph = emphasis_styles(_v3s, design.subtitle_size, segments)   # 강조 자막(2026-09-08) — 없으면 빈 dict · 줄 번호는 글자·시각으로 재확인(09-11)
+    _emph_notes: list[str] = []
+    _emph = emphasis_styles(_v3s, design.subtitle_size, segments,       # 강조 자막(2026-09-08) — 없으면 빈 dict · 줄 번호는 글자·시각으로 재확인(09-11)
+                            font_path=str(design.subtitle_font),
+                            em_ratio=libass_line_height_ratio(_text_font_name), notes=_emph_notes)
+    for _n in _emph_notes:
+        log(f"  [v3/안전구역] {_n}")
 
     def _seg_style(seg: dict, idx: int = 0) -> dict | None:
         st: dict[str, Any] = {}
@@ -2150,13 +2248,32 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     _tt_actual = _sr.estimate_title_block(
         design, _geom, line_count=max(1, len([ln for ln in _title_text.split("\n") if ln.strip()])))[0]
     _bottom_actual = int(_work_top_final) + estimate_work_height(design)
+    if _title_over:
+        cost["title_overflow"] = _title_over
     cost["thumb_safe"] = {"safe": [THUMB_SAFE_TOP, THUMB_SAFE_BOTTOM],
                           "title_top": int(_tt_actual), "bottom": int(_bottom_actual),
                           "band": [int(_geom.top), int(_geom.bottom)],
                           "actions": _thumb["actions"], "unmet": _thumb["unmet"],
                           "band_shift": _thumb["band_shift"]}
-    if _tt_actual < THUMB_SAFE_TOP or _bottom_actual > THUMB_SAFE_BOTTOM:
+    if _tt_actual < THUMB_SAFE_TOP - SAFE_TOP_TOLERANCE_PX or _bottom_actual > THUMB_SAFE_BOTTOM:
         log(f"  [v3/썸네일] ⚠ 최종 배치가 안전 구역 밖 — 제목 윗변 {_tt_actual} · 하단 아랫변 {_bottom_actual}")
+    # 인물 가장자리 점검(2026-09-18 사용자 결정) — 영상 밴드는 꽉 채운 채 두고, 폰 재생 화면이 잘라내는
+    # 좌우 100px 띠에 **인물 얼굴이 걸린 구간**만 알린다. 완성본 프레임에서 직접 재므로 크롭 방식과 무관.
+    # 고치는 건 사람 몫(손편집 비트 crop_x · 컷 선택) — 엔진은 자동으로 크롭을 옮기지 않는다.
+    try:
+        _edges = _sz.edge_faces_in_video(out_path, int(_geom.top), int(_geom.bottom),
+                                         canvas_w=config.canvas_width, canvas_h=config.canvas_height)
+    except Exception as _e:  # noqa: BLE001 — 점검은 안전장치, 렌더 결과는 그대로
+        _edges = []
+        log(f"  [v3/안전구역] 인물 가장자리 점검 실패({_e}) — 건너뜀")
+    if _edges:
+        cost["edge_faces"] = _edges
+        for _r in _edges:
+            _side = "왼" if _r["side"] == "left" else "오른"
+            log(f"  [v3/안전구역] ⚠ {_r['start']:.0f}~{_r['end']:.0f}s 인물 얼굴이 {_side}쪽 잘림 띠에 걸림 "
+                f"(얼굴 x {_r['box'][0]}~{_r['box'][2]} · 잘리는 비율 최대 {int(_r['max_cut'] * 100)}%) — 배치 확인")
+    else:
+        log(f"  [v3/안전구역] 인물 가장자리 점검 — 걸린 얼굴 없음(잘림 띠 0~{_sz.SAFE_X0} · {_sz.SAFE_X1}~{config.canvas_width})")
     if picture:
         cost["letterbox_crop"] = {**picture, "clips": len(crop_map)}   # 회귀 0: 없으면 키 없음
     if speaker_audit:

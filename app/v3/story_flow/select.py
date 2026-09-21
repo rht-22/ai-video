@@ -146,7 +146,7 @@ SCENES_PROMPT = """당신은 리캡 쇼츠 편집자다. 영상은 볼 수 없�
 ## 2단계 — 사용 씬 고르기
 주제: {topic}{strategy_line}
 이 사건을 **작품을 모르는 사람이 봐도 다 이해하고 재미있으려면** 어떤 씬을 보여줘야 하나. 각 씬의 쓰임을 정하라 — {purpose_axis}. 필요한 것만 {min_scenes}~{max_scenes}개, **원본 시간 순서**로. 씬 = 아래 사건 단위(id). 길이 감각: 완성본 {target_sec:.0f}초이고 씬 원본 합계는 그 2~3배까지 허용된다(다음 단계에서 대사를 골라 줄인다).
-제목 두 줄도 정하라 — line1(위) = 상황·도입, line2(아래) = 후킹. **각 줄 7~{title_max}자(공백 포함) — 짧을수록 좋다.** 썸네일에서 한눈에 읽혀야 하므로 조사·수식어·부사를 빼고 구어체 명사구로 끝내라(…당함 · …해버림 · …들킴 · …입성함 · …전락). 예: 「이사 인사 갔다가 / 앞집한테 개무시당함」 「옥탑방서 울던 부부 / 청담동 대저택 입성함」. 이어 읽어 한 호흡. **대사의 화자를 틀리지 마라** — 어떤 말을 누가 했는지는 재료 기록(화자 표기)이 정본이다. '통화 상대'·'미상'으로 표기된 말을 화면 속 인물의 말로 쓰면 제목이 거짓이 된다.{hook_speaker_line} 결말을 다 말하지 마라(읽은 사람이 '그래서?'를 묻게). 아랫줄이 사건의 **결과·반전 자체**(누가 무엇을 했다/당했다)를 말해버리면 볼 이유가 사라진다 — 결과 대신 그 직전의 질문·위기를 남겨라. `title_review.line2_reveals_ending` 에 네 판정을 적고, true 면 고쳐서 내라.{reveal_line} `title_review.hook_answers_title` 에는 **훅 한마디가 제목 아랫줄의 질문에 답하는가**를 적고, true 면 아랫줄을 고쳐서 내라(훅은 걸음 1 이 정했다 — 제목이 맞춘다).
+제목 두 줄도 정하라 — line1(위) = 상황·도입, line2(아래) = 후킹. **{title_len_rule}** 썸네일에서 한눈에 읽혀야 하므로 조사·수식어·부사를 빼고 구어체 명사구로 끝내라(…당함 · …해버림 · …들킴 · …입성함 · …전락). 예: 「이사 인사 갔다가 / 앞집한테 개무시당함」 「옥탑방서 울던 부부 / 청담동 대저택 입성함」. 이어 읽어 한 호흡. **대사의 화자를 틀리지 마라** — 어떤 말을 누가 했는지는 재료 기록(화자 표기)이 정본이다. '통화 상대'·'미상'으로 표기된 말을 화면 속 인물의 말로 쓰면 제목이 거짓이 된다.{hook_speaker_line} 결말을 다 말하지 마라(읽은 사람이 '그래서?'를 묻게). 아랫줄이 사건의 **결과·반전 자체**(누가 무엇을 했다/당했다)를 말해버리면 볼 이유가 사라진다 — 결과 대신 그 직전의 질문·위기를 남겨라. `title_review.line2_reveals_ending` 에 네 판정을 적고, true 면 고쳐서 내라.{reveal_line} `title_review.hook_answers_title` 에는 **훅 한마디가 제목 아랫줄의 질문에 답하는가**를 적고, true 면 아랫줄을 고쳐서 내라(훅은 걸음 1 이 정했다 — 제목이 맞춘다).
 
 ## 작품
 {work_title}{research_block}
@@ -293,6 +293,7 @@ def purpose_axis(kind: str) -> tuple[tuple[str, ...], str, str]:
 
 def validate_scenes(resp: Any, rows: list[dict], *,
                     title_max: int = TITLE_MAX_CHARS,
+                    title_fit: dict | None = None,
                     excluded: set[int] | None = None,
                     purposes: tuple[str, ...] = PURPOSES,
                     reveal: str | None = None) -> tuple[dict | None, list[str], list[str]]:
@@ -344,6 +345,8 @@ def validate_scenes(resp: Any, rows: list[dict], *,
     for name, line in (("line1", l1), ("line2", l2)):
         if len(line) > title_max:
             problems.append(f"title.{name} 이 {len(line)}자 — {title_max}자 이내로")
+    if l1 and l2:
+        problems.extend(title_width_problems(l1, l2, title_fit))
     # 스포 판정은 모델의 것(title_review) — 코드는 되돌려 보낼 뿐
     tr = resp.get("title_review") if isinstance(resp.get("title_review"), dict) else {}
     if tr.get("line2_reveals_ending") is True:
@@ -774,6 +777,29 @@ def lines_material(scenes: list[dict], rows: list[dict],
     return "\n".join(out), allowed
 
 
+def title_len_rule(title_max: int = TITLE_MAX_CHARS, title_fit: dict | None = None) -> str:
+    """걸음 2 제목 길이 규칙 문장. title_fit 이 없으면 종전 문장 그대로(프롬프트 바이트 동일)."""
+    if not title_fit:
+        return f"각 줄 7~{title_max}자(공백 포함) — 짧을수록 좋다."
+    from app.v3.safe_zone import title_char_budget
+    a, b = (title_char_budget(int(x)) for x in list(title_fit["sizes"])[:2])
+    return (f"윗줄은 한글 {a}자, 아랫줄은 한글 {b}자 안팎까지(공백 1~2개 포함) — 폰 화면에서 잘리지 않는 폭이고 "
+            f"글자 크기는 고정이라 넘치면 반려된다. 짧을수록 좋다.")
+
+
+def title_width_problems(l1: str, l2: str, title_fit: dict | None) -> list[str]:
+    """폰 안전 폭 판정(2026-09-18 사용자 결정 "글자 크기를 줄일 게 아니라 글자 수를 줄여") — 순수.
+    제목 폰트로 **상한 크기 그대로** 재서 안전 폭(880px)을 넘는 줄을 반려 사유로."""
+    if not title_fit:
+        return []
+    from app.v3.safe_zone import title_overflow
+    out = []
+    for o in title_overflow([l1, l2], title_fit.get("font"), list(title_fit["sizes"])):
+        out.append(f"title.line{o['line']} 「{o['text']}」 이 폭 {o['width']}px — 폰 화면 안전 폭 880px 을 넘는다"
+                   f"(글자 크기는 고정). 약 {o['cut_chars']}자 줄여라 — 조사·수식어를 빼거나 더 짧은 말로")
+    return out
+
+
 def title_len_ok(title: dict, title_max: int = TITLE_MAX_CHARS) -> bool:
     return all(0 < len(str(title.get(k) or "")) <= title_max for k in ("line1", "line2"))
 
@@ -783,5 +809,5 @@ __all__ = ["TOPIC_PROMPT", "SCENES_PROMPT", "LINES_PROMPT", "validate_topic",
            "lines_material", "meaning_table", "nospace_len", "reject_block", "PURPOSES",
            "silent_runs", "silent_block", "SILENT_RUN_MIN_SEC", "SILENT_BLOCK_MAX",
            "excluded_meaning_ids", "exclude_block", "EXCLUDE_OVERLAP_RATIO",
-           "ROLES", "TITLE_MAX_CHARS", "BUDGET_TOLERANCE", "SKIP_MAX_VOICED_SEC",
+           "ROLES", "TITLE_MAX_CHARS", "title_len_rule", "title_width_problems", "BUDGET_TOLERANCE", "SKIP_MAX_VOICED_SEC",
            "SKIP_MAX_LINES", "JUMP_GAP_SEC"]

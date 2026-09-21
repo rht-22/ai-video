@@ -183,10 +183,14 @@ def label_x_range(text: str, *, size: int = LABEL_SIZE,
     ASS 는 \an5\pos = **글자 중심** 기준이라 반폭이 캔버스를 넘으면 그냥 잘린다
     (libass 는 \pos 에서 자동 줄바꿈을 하지 않는다). 13자 라벨은 x=0.82 에서
     106px 잘린다 — 적대 리뷰 H1 실측."""
+    from app.v3.safe_zone import SAFE_X0, SAFE_X1
     half = (len(str(text)) * size * LABEL_CHAR_W * LABEL_FX_OVERSHOOT) / 2
-    half += size * 0.07 + LABEL_EDGE_PAD           # 외곽선 + 가장자리 여백
-    lo = max(LABEL_X_RANGE[0], half / canvas_w)
-    hi = min(LABEL_X_RANGE[1], 1.0 - half / canvas_w)
+    half += size * 0.07                            # 외곽선
+    # 폰 재생 화면 안전 박스(2026-09-18) — 글자 끝이 가로 SAFE_X0~SAFE_X1 안(종전: 캔버스 끝 24px)
+    edge_lo = max(SAFE_X0, LABEL_EDGE_PAD) * canvas_w / 1080.0
+    edge_hi = min(SAFE_X1, 1080 - LABEL_EDGE_PAD) * canvas_w / 1080.0
+    lo = max(LABEL_X_RANGE[0], (edge_lo + half) / canvas_w)
+    hi = min(LABEL_X_RANGE[1], (edge_hi - half) / canvas_w)
     return (0.5, 0.5) if lo >= hi else (lo, hi)
 
 
@@ -986,7 +990,7 @@ STYLE_PROMPT = """당신은 쇼츠 아트디렉터다. 첨부한 영상은 리�
 2. 제목 밴드: 기본 유지 — 화면과 무관(검정 밴드 위)이라 특별한 사유 없으면 손대지 않는다.
 3. 비트별: crop(인물이 왼/오른쪽에 쏠린 구간 → left/right, 기본 center) · pop(팝인 강도 none/soft/strong — **실제 컷 리듬을 보고**: 컷이 잦고 호흡 빠른 비트만 soft+) · sfx(리듬 전환점의 효과음 큐 한 줄, 필수 아님).
 5. **강조 자막**(`emphasis`, 0~{emph_max}줄): 사건을 뒤집는 한마디·펀치라인·훅 대사 줄만 골라 `line`(위 표의 L id) · `color`({emph_palette_names} — yellow 는 내레이션 자막 색이라 못 쓴다) · `scale`(자막 기준 크기 대비 {emph_lo:.2f}~{emph_hi:.2f}). 강조 줄은 붉게·크게·강한 팝인으로 나간다. 원본 대사가 묻히지 않도록 타격음은 얹지 않는다. 화면 줌은 원본 음성을 자르지 않는 범위에서만 적용된다. 연달아 강조하지 마라(전부 강조 = 강조 없음). 없으면 빈 배열.
-6. **줌인**(`zooms`, 0~{zoom_max}컷): 줌은 시청자의 시선을 좁히는 장치다 — 카메라가 안 한 일을 편집이 한다. 쓰는 자리: ① 감정이 한 단계 오르는 순간(의심→확신, 태연→굳음)에 얼굴로 당긴다 ② 강조 대사가 떨어지는 순간에 말하는 인물로 당긴다 ③ 글자를 읽혀야 하는 화면은 글자 쪽으로 당긴다. 한 컷 안에서 **단계**(`stages`, ≤{zoom_stages}단)로 계단식으로 들어간다 — 단계 경계는 대사 줄이 바뀌거나 감정이 꺾이는 시각(클립 시작 기준 초). 예: 「내가 이 나이 들어가지고 / 무슨 스캔들이 다 나네」 → 1.0(첫 줄) → 1.10(둘째 줄) → 1.22(강조 대사). `factor`({zoom_lo:.1f}~{zoom_hi:.1f}, 1.0 은 원래 크기 — 첫 단계로만 허용) · `anchor`(left/center/right — 인물·글자가 있는 쪽). 연속한 컷마다 줌하지 마라(어지럽다). 단계 하나뿐이면 `stages` 대신 `factor`·`from_sec` 로 적어도 된다.
+6. **줌인**(`zooms`, 0~{zoom_max}컷): 줌은 시청자의 시선을 좁히는 장치다 — 카메라가 안 한 일을 편집이 한다. 쓰는 자리: ① 감정이 한 단계 오르는 순간(의심→확신, 태연→굳음)에 얼굴로 당긴다 ② 강조 대사가 떨어지는 순간에 말하는 인물로 당긴다 ③ 글자를 읽혀야 하는 화면은 글자 쪽으로 당긴다. 한 컷 안에서 **단계**(`stages`, ≤{zoom_stages}단)로 계단식으로 들어간다 — 단계 경계는 대사 줄이 바뀌거나 감정이 꺾이는 시각(클립 시작 기준 초). 예: 「내가 이 나이 들어가지고 / 무슨 스캔들이 다 나네」 → 1.0(첫 줄) → 1.10(둘째 줄) → 1.22(강조 대사). `factor`({zoom_lo:.1f}~{zoom_hi:.1f}, 1.0 은 원래 크기 — 첫 단계로만 허용) · `anchor`(left/center/right — 인물·글자가 있는 쪽). **폰 재생 화면은 캔버스 좌우 약 100px 을 잘라 보여준다** — 줌 때문에 인물 얼굴이 화면 가장자리로 밀려나지 않게 앵커를 골라라(가장자리 인물을 당길 땐 그 인물 쪽 앵커). 연속한 컷마다 줌하지 마라(어지럽다). 단계 하나뿐이면 `stages` 대신 `factor`·`from_sec` 로 적어도 된다.
 7. **정보 화면 전체 맞춤**(`fits`, 0~{fit_max}컷): 카톡·기사·문서·검색창처럼 **글자가 정보인 화면**은 가로 크롭에서 이름과 문장 끝이 잘린다 — 그런 컷은 `clip`(C id)을 적어라. 그림 전체를 밴드 폭에 넣고 위아래는 흐린 배경으로 채운다. 줌과 같은 컷에 두지 마라.
 4. 허용 design 키(이 밖은 금지): {allowed_keys}
    ⚠ **제목을 굵게 하지 마라** — `title_bold`·`title_bold2` 는 쓸 수 없다(보내면 그 키만 버려진다). 제목 폰트가 이미 굵어서 볼드를 얹으면 글자 속이 메워진다.

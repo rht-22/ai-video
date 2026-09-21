@@ -156,7 +156,11 @@ def avoid_faces(label: dict, faces: list[tuple[float, float, float, float]], geo
                        "from": [label.get("x"), label.get("y")], "to": None, "why": "자막 띠 위 자리 없음 — 그대로 둠(기록)"}
     half_w, half_h = (box[2] - box[0]) / 2, (box[3] - box[1]) / 2
     lo_y, hi_y = geom.top + BAND_PAD_PX + half_h, geom.bottom - BAND_PAD_PX - half_h
-    lo_x, hi_x = half_w, canvas_w - half_w
+    # 폰 재생 화면 안전 박스(2026-09-18): 글자 끝(= 박스 − LABEL_EDGE_PAD)이 가로 SAFE_X0~SAFE_X1 안
+    from app.v3.safe_zone import SAFE_X0, SAFE_X1
+    from app.v3.stage4 import LABEL_EDGE_PAD
+    lo_x = max(half_w, SAFE_X0 + half_w - LABEL_EDGE_PAD)
+    hi_x = min(canvas_w - half_w, SAFE_X1 - half_w + LABEL_EDGE_PAD)
     cx0, cy0 = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
     # 겹친 얼굴들의 합집합 기준으로 후보를 만든다
     fx0, fy0 = min(f[0] for f in hit), min(f[1] for f in hit)

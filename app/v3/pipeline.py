@@ -481,6 +481,7 @@ def run_v3(*, video_path: Path, work_title: str, outdir: Path,
                     subtitle_skip_singing=subtitle_skip_singing,
                     editorial=editorial, banned_ranges=banned_ranges,
                     use_episode_map=episode_map, plan_slot=plan_slot,
+                    title_fit=title_fit_spec(style_preset, channel_design),
                     get_gemini=get_gemini, step=step, log=log)
 
         # ── M6-A: 훅 변형 — M3 산출 위에(본편 불변 · 렌더는 변형 발주 시) ──
@@ -908,6 +909,22 @@ def stage2_schema_key(stage2_doc: dict) -> str | None:
     return sch
 
 
+def title_fit_spec(style_preset: str | None, channel_design: dict | None) -> dict | None:
+    """채널 제목 폰트(파일 경로)와 줄별 **상한** 크기 — 렌더(finalize.render_final)와 같은 병합 순서로 푼다.
+    스토리 걸음 2 가 이 크기 그대로 폰 안전 폭(880px)에 드는지 재서 제목 글자 수를 반려한다(2026-09-18
+    사용자 결정 "글자 크기를 줄일 게 아니라 글자 수를 줄여"). 실패하면 None(종전 글자 수 규칙만)."""
+    try:
+        import app.config as _cfgmod
+        from app.config import get_font_path
+        from app.v3 import finalize as _fz, stage4 as _s4
+        pre = _fz.merge_channel_preset(_s4.get_style_preset(style_preset), channel_design)
+        d = _fz.design_from_style(_fz.channel_design_over_ai(pre, channel_design))
+        font = get_font_path(d.title_font, Path(_cfgmod.__file__).resolve().parent)
+        return {"font": str(font) if font else None, "sizes": [int(x) for x in (d.title_sizes or [d.title_size])]}
+    except Exception:  # noqa: BLE001 — 폭 판정은 부가 규칙, 못 풀면 종전(글자 수) 규칙만
+        return None
+
+
 def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
             research: dict | None, from_step: str | None,
             story_target_sec: float | None, story_max_sec: float | None,
@@ -921,8 +938,10 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
             editorial: dict | None = None,
             banned_ranges: list[dict] | None = None,
             use_episode_map: bool = False,
-            plan_slot: int | None = None) -> None:
+            plan_slot: int | None = None,
+            title_fit: dict | None = None) -> None:
     """Stage 3(story) + 경계면 조립 + resources(TTS 합성) — 발주서 v3-m3.
+    title_fit(2026-09-18): 제목 폰트·줄별 상한 크기 — 걸음 2 가 폰 안전 폭(880px)으로 제목 글자 수를 반려한다.
 
     story 캐시는 M2 와 같은 규율로 **상류 지문**에 묶는다 — stage2 의 meaning/span
     편성이 바뀌면 같은 job 이라도 다른 재료다(사이드카 무효화 규율)."""
@@ -1081,7 +1100,7 @@ def _run_m3(*, output_dir: Path, video_path: Path, work_title: str, grid: dict,
                 tone_block=tone_block, exclude_topics=_ex_topics, exclude_ranges=_ex_ranges,
                 editorial_block=_ed_block, editorial_tone_block=_ed_tone,
                 banned=_banned,
-                episode_map=_map_doc, topic_override=_topic_override, log=log)
+                episode_map=_map_doc, topic_override=_topic_override, title_fit=title_fit, log=log)
             story_doc, audit = run_story_flow(get_gemini(), stage2_doc, grid, **_flow_kw)
             # 갭 8 역류(3단계 3-3): 덮개 프로브가 되돌림 상한 뒤에도 "문장·화면 모순"을 남기면
             # lines/topic 수준 모순이다 — 지도의 corrections 에 관측 스키마로 쓰고 **편당 1회**
