@@ -2991,3 +2991,64 @@ story 캐시는 그대로(제목은 오버라이드 `title.top_title` 로 — ep
   폭 180·높이 46 contain · 오른쪽 정렬).
 - ⚠ v1(E 계열) 렌더·ves 어댑터는 이 박스를 모른다(별건). 이미 업로드한 납품본은 재렌더하지 않는다(사용자).
 - 회귀 가드: `tests/test_v3_phone_safe_box.py`(10건) · 썸네일·라벨·제목 크기 테스트 갱신.
+
+## tikitaka staged 대본 흐름 — 뼈대 → 편별 문장·화면 (2026-09-21, 사용자 결정 · v3 human-flow 방식)
+
+`app/tikitaka/staged.py`(SCHEMA v2) · `--script-flow {single|staged}`(기본 single = 종전 · grid-review 전용) · `rebuild.rebuild(script_flow=)` ·
+`verify._gate` · 회귀 가드 `tests/test_tikitaka_staged.py`(16건). **전후 실측 뒤 single 을 지운다**(사용자 결정 — 영구 구분 아님).
+
+**왜**: 종전은 한 번의 호출로 14편의 문장·화면을 동시에 내는데, 작가가 받는 소스 스크립트에는 **말 있는 조각의 화면 묘사가 없다**
+(`v3_analysis.adapt` 가 `is_audio` 조각을 순간으로 안 만든다 — 지금불륜 3화 실측 722개 중 28개만 '보충 기록'으로 전달). 9/17 에
+"대사 화면도 덮개로"를 열었지만 그 화면이 무엇인지는 반려 뒤 수리 프롬프트에서야 보였다. 5개 잡 실측: 내레이션 255문장 중 75 수리
+(그중 문장이 바뀐 것 1) · 대본 56개 중 26개 탈락 · 반려 사유 = 화면≠문장 70 · 화면<문장 길이 57 · 이미 쓴/금지 화면 26.
+회차 전체 조각 표를 한 호출에 싣는 안(+11.9만 자 → 26만 자)은 human-flow 가 피하려던 단일 프롬프트(7.9만 자)의 세 배라 버렸다.
+
+- **걸음 ① 뼈대**(1회 · Flash high): 종전 소스 스크립트 + **눈길 끄는 화면**(말 없는 조각 중 importance ≥4, 맞닿은 순간은 묶음 길이와 함께).
+  산출 = 포맷·제목·`hook{with,why}`·**S·A 의 순서만**. 내레이션은 자리도 문장도 없다(모델이 N 을 섞으면 버리고 기록). 대사·현장음 합계는
+  목표의 50~75%(`SA_SHARE` — 나머지가 내레이션 몫). A 는 `moment_ids`(맞닿은 순간 묶음 = 3초 화면 훅)를 받아 연속 A 항목으로 풀린다
+  (하류 어휘 불변). 검증은 `validate_versions` **그 함수**. 포맷 상자·내레이션 원칙은 `REBUILD_PROMPT` 의 절을 빌려 쓴다(`prompt_sections`).
+- **걸음 ② 문장·화면**(편마다 1회 · Flash medium): 그 편의 S·A 가 속한 장면의 **조각 단위 화면 표**만(`cover_table` — human-flow
+  `available_block` 모양 + `묶음`(같은 장면에서 이어 쓸 수 있는 총 길이) · ★ · `[이 편의 대사 화면]` · `[현장음 — 고를 수 없음]`).
+  **내레이션을 어디에 넣을지도 여기서 정한다** — 원본에서 바로 붙은 질문과 대답 사이에도 들어갈 수 있다(사용자: "갑이 갑작스럽게 묻는데? →
+  질문 대사 → B가 이렇게 대답합니다 → 대답 대사" — 티키타카의 리듬). 출력 `narrations[{before|after_last, text, effect, production_plan}]`.
+  지시는 **자리 → 화면 → 문장** 순. 형식 검사(`validate_narration`)가 게이트 앞에서 거른다: 표 밖/금지 화면 · 두 내레이션 같은 화면 ·
+  **문장 길이 > 묶음(합성 실측 — human-flow 걸음 4 처럼 즉시 합성)** · 첫 항목 앞 내레이션은 ★ 화면 · ⚠ 이어야 하는 자리에 내레이션 없음.
+  근거 칸(`evidence_ids`) 오기는 버리고 덮개 화면의 기록으로 채운다(`fill_evidence` — 1차 실측 v12 가 이 형식 오류 하나로 탈락).
+- **`bridge_marks` — 원본 간격 계산은 자리를 정하지 않는다**(사용자 결정). 장면이 바뀜 · `JUMP_SEC` 5초 이상 건너뜀 · 되감기인 항목 앞을
+  '이어야 하는 자리'로 표시해 ① 그 자리에 내레이션이 꼭 있게 하고 ② **실패한 내레이션을 빼도 이야기가 이어지는가**를 판정한다
+  (N 항목의 `required`). `intent` 는 모델의 자유 서술이 아니라 코드가 위치에서 만든 '자리의 역할'(`slot_role`)이다.
+  ⚠ 1차판(v1)은 뼈대가 자리마다 자유 서술 intent 를 적었고, 작품 이해 문서 말투의 줄거리("결심"·"심경"·"속셈")가 그 칸을 타고 문장으로
+  흘러 첫 시도 통과율이 떨어졌다(아래 실측). human-flow 에는 그런 통로가 없었다 — 역할은 위치와 코드 표식이 말한다.
+- **게이트** `enforce_staged_plans` — 검사는 `production.enforce_joint_plans` 와 같은 헬퍼·같은 순서(TTS 실측 · `widen_cover_plan` ·
+  묶음 프로브). 고치는 순서만 다르다(사용자 확정): ① 화면 교체 1회(문장 고정) → ② **자리의 역할은 그대로**, 검사관이 **이미 본**
+  화면들(`seen`) 중 하나를 골라 그 내용으로 재작성(후보 밖 화면은 거절 · 새 문장도 TTS 재실측 + 재프로브) → ③ 빼도 이어지는 자리는 그
+  내레이션만 빼고, 이어야 하는 자리는 ValueError(= 편 탈락). **뺄 때마다 기록한다**(`record_drop` → `version["narration_dropped"]`
+  {slot, role, stage write|gate, text, tried, why} · 로그 `[staged/뺌]` · run_log `staged_narration_dropped` · `publish_vN.json`).
+  넓힐 때는 이 편의 대사 화면을 먼저 피하고 모자랄 때만 허용. 검사관 문맥에 **인물 표기 규칙**(가이드 actors: 극중=배우)을 싣는다
+  (`name_rule` · `staged_names.json` — 1차 실측 v5 가 배우 이름 표기를 '인물 불일치'로 오판).
+  ⚠ 검사 수식이 production 과 **두 곳**에 있다 — single 을 지울 때 한 곳으로 합친다.
+- **첫 3초는 반려하지 않고 기록한다**(사용자 결정): `opening_record` → `version["opening"]` `{strength 0~100, reason, facts{first_item,
+  cuts_in_3s, first_cut_sec, first_dialogue_sec, first_narration_sec, cover_importance, arousal_pct}, writer_why, weights}`.
+  가중치(`OPENING_WEIGHTS` 중요도 35·컷 20·발화 25·소리 20)는 **추정 초기값** — 시청 지속률과 대조해 맞춘다. `publish_vN.json` 에도 실린다.
+- **영상 확인 패스**: staged 대본이면 그 편의 범위 표를 프롬프트에 붙이고(`verify_table_block`), 산출의 N 에 slot·required·역할을
+  **위치에서 다시 계산해** 붙여(`carry_slots`) staged 게이트를 태운다.
+- **캐시**: `outline[_tag].json`(지문 = 스크립트·눈길 화면·가이드 sha·digest 유무·seq_hook) · `script_vN[_tag].json`(지문 = 그 편 뼈대 항목·
+  화면 표·목소리·목표 길이). `rebuild.json` 에 `script_flow` 가 실리고 **다른 흐름의 캐시를 만나면 즉시 실패**(같은 잡에서 비교하려면
+  `--tag`). `--redo rebuild` 가 outline·script 파일도 지운다.
+
+### 1차 실측 (2026-09-21 · 지금불륜 3화 복제본 `…_3_staged_ab` · v1 설계 = 뼈대가 intent 를 적던 판)
+
+| | single | staged v1 |
+|---|---|---|
+| 탈락 | 3/14 | 2/14 (v10 화면에 없는 개념 · v12 근거 칸 형식 오류) |
+| 첫 시도 게이트 통과 | 35/52 (67%) | 26/45 (58%) |
+| 고쳐서 통과(문장 바뀜) | 14 (0) | 17 (10) |
+| 길이·금지 화면 반려 | 7 | 0 (형식 검사가 미리) |
+| 첫 항목 | N 13 · S 1 | A 7 · S 3 · N 4 |
+| 입력 토큰 | 95만 | 125만 (걸음 ② 가 이웃 장면까지 실어 편당 2만~5만 자) |
+
+첫 시도 실패 19건 = 문장이 말한 동작·상황이 화면에 없음 14(대부분 줄거리식 intent 에서 온 문장) · 인물 이름 시비 4 · 형식 1. 뼈대는 자리
+45개를 **전부 필수**로 냈다(리액션 자리는 아예 안 냈다) — '선택 자리는 뺀다'가 작동할 자리가 없었다. v2 는 이 넷을 고친 것이다(자유 서술
+intent 제거 · 자리는 걸음 ② · 필수는 코드 계산 · 배우 이름 표 · 근거 칸 · 이웃 장면 제외 — v2 재료 실측 걸음 ② 1.7만~2.5만 자). **v2 재실측은 아직.**
+실행 절차: `tmp/jigeum_ep03_staged_ab/run_ab.sh`(복제본 · `--skip-research` · pristine 전사 복원 · digest sha 맞춤 · 재분석 징후 시 종료).
+줄 안 단어 단위 자르기(`trim`)는 실측상 드라마 대사 줄의 1~2%만 해당해 보류. 다음 예정: 내레이션 말투(종결 세 틀에 75% 몰림).

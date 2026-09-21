@@ -131,6 +131,15 @@ def diff_summary(draft: dict, final: dict) -> dict:
             "moments_added": sorted(set(f_mom) - set(d_mom)), "moments_removed": sorted(set(d_mom) - set(f_mom))}
 
 
+def _gate(rebuild: dict):
+    """대본 흐름에 맞는 게이트 — staged 는 고치는 순서가 다르다(화면 교체 → 의도 유지 재작성 → 선택 자리는 뺌)."""
+    if rebuild.get("script_flow") == "staged":
+        from app.tikitaka.staged import enforce_staged_plans
+        return enforce_staged_plans
+    from app.tikitaka.production import enforce_joint_plans
+    return enforce_joint_plans
+
+
 def verify_version(job: Job, gemini: Gemini, rebuild: dict, version_n: int, index: dict, transcript: dict, proxy: Path,
                    *, title: str, episode: str, guide: dict | None = None, extra_exclude: list[tuple[float, float]] | None = None,
                    tag: str = "", digest: dict | None = None) -> dict:
@@ -144,8 +153,7 @@ def verify_version(job: Job, gemini: Gemini, rebuild: dict, version_n: int, inde
             return cached["version"]
         from app.tikitaka.production import SCHEMA as production_schema
         if cached.get("production_plan_schema") == production_schema:
-            from app.tikitaka.production import enforce_joint_plans
-            enforce_joint_plans(job, gemini, cached["version"], index, transcript,
+            _gate(rebuild)(job, gemini, cached["version"], index, transcript,
                                 sorted(excluded_ranges(guide, max((l["end"] for l in transcript["lines"]), default=0.0) + 3600.0) + list(extra_exclude or [])))
             job.save(name, cached)
             return cached["version"]
@@ -186,14 +194,16 @@ def verify_version(job: Job, gemini: Gemini, rebuild: dict, version_n: int, inde
         from app.tikitaka.production import planning_rules, preflight
         prompt += planning_rules() + f"\n초안의 조립 사전검사(추정): {preflight(draft, index, transcript, exclude)}"
         prompt += "\n영상 확인 시 문제가 있는 N 문장과 화면 계획만 함께 고쳐라. 정상 대사·다른 항목은 보존하라."
+        if rebuild.get("script_flow") == "staged":
+            from app.tikitaka.staged import verify_table_block
+            prompt += verify_table_block(draft, index, transcript, exclude)
     job.log(f"[verify] v{version_n} 초안 항목 {len(draft['items'])} → 영상 확인 패스(agentic)" + (" · 작품 이해 문서 첨부" if digest else ""))
     try:
         raw, meta = gemini.agentic_video_json(prompt, proxy, kind="verify", upload_cache=job.path("files_cache.json"), max_output_tokens=16384)
     except Exception as e:  # noqa: BLE001
         job.log(f"[verify] ⚠ 확인 패스 실패 → 초안 그대로 진행: {type(e).__name__}: {str(e)[:200]}")
         job.record_step(f"verify_v{version_n}", status="failed", error=str(e)[:300])
-        from app.tikitaka.production import enforce_joint_plans
-        enforce_joint_plans(job, gemini, draft, index, transcript, exclude)
+        _gate(rebuild)(job, gemini, draft, index, transcript, exclude)
         return draft
     from app.tikitaka.production import SCHEMA as production_schema
     job.save(f"verify_raw_v{version_n}{sfx}.json", {"meta": meta, "raw": raw,
@@ -236,8 +246,7 @@ def finalize_verified(job: Job, gemini: Gemini, rebuild: dict, version_n: int, i
     if not final["items"] or sum(1 for it in final["items"] if it["type"] == "S") == 0:
         job.log("[verify] ⚠ 확인 패스 산출이 비었거나 대사가 없다 → 초안 그대로 진행")
         job.record_step(f"verify_v{version_n}", status="empty", agentic=meta)
-        from app.tikitaka.production import enforce_joint_plans
-        enforce_joint_plans(job, gemini, draft, index, transcript, exclude)
+        _gate(rebuild)(job, gemini, draft, index, transcript, exclude)
         return draft
     final.setdefault("strategy", draft["strategy"])
     if final.get("literal_flags"):
@@ -246,8 +255,12 @@ def finalize_verified(job: Job, gemini: Gemini, rebuild: dict, version_n: int, i
     if guide:
         polish_guide(gemini, final, guide, log=job.log)
         apply_name_map(final, guide.get("actors") or {}, log=job.log)
-    from app.tikitaka.production import enforce_joint_plans
-    enforce_joint_plans(job, gemini, final, index, transcript, exclude)
+    if rebuild.get("script_flow") == "staged":
+        from app.tikitaka.staged import carry_slots, opening_record
+        carry_slots(draft, final, index, transcript)
+    _gate(rebuild)(job, gemini, final, index, transcript, exclude)
+    if rebuild.get("script_flow") == "staged":
+        final["opening"] = opening_record(final, index, transcript, job.load("grid.json"))
     final["looked_at"] = raw.get("looked_at") or []
     final["changes"] = [str(c) for c in (raw.get("changes") or [])]
     final["verified"] = True

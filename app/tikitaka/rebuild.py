@@ -444,9 +444,16 @@ def rank_versions(raw_ranking, recommended, valid: list[int]) -> list[int]:
 
 def rebuild(job: Job, gemini: Gemini, index: dict, transcript: dict, *, title: str, episode_label: str, duration: float,
             guide: dict | None = None, extra_exclude: list[tuple[float, float]] | None = None, range_label: str | None = None,
-            seq_hook: bool = True, cache_name: str = "rebuild.json", digest: dict | None = None) -> dict:
+            seq_hook: bool = True, cache_name: str = "rebuild.json", digest: dict | None = None,
+            script_flow: str = "single") -> dict:
+    """script_flow: single = 한 번의 호출로 14편의 문장·화면을 동시에(종전) · staged = 뼈대 → 편별 문장·화면(app.tikitaka.staged).
+    2026-09-21 사용자 결정: 전후 실측 비교 뒤 single 을 지운다 — 그때까지만 둘이 같이 산다."""
+    staged_flow = script_flow == "staged"
     if job.has(cache_name):
         cached = job.load(cache_name)
+        if cached.get("script_flow", "single") != script_flow:
+            raise ValueError(f"{cache_name} 은 --script-flow {cached.get('script_flow', 'single')} 로 만든 대본이다 — 같은 잡에서 비교하려면 "
+                             f"--tag 를 달고, 다시 쓰려면 --redo rebuild")
         if not index.get("grid_facts"):
             return cached
         from app.tikitaka.production import SCHEMA as production_schema
@@ -467,15 +474,26 @@ def rebuild(job: Job, gemini: Gemini, index: dict, transcript: dict, *, title: s
         prompt += planning_rules()
     job.log(f"[rebuild] 소스 스크립트 {len(script):,}자 → {N_VERSIONS}버전 요청" + (f" (제작 가이드 {guide['sha']})" if guide else "")
             + (" · 작품 이해 문서 첨부" if digest else " · ⚠ 작품 이해 문서 없음")
-            + (f" · 재료 구간 {range_label}" if range_label else "") + f" · 순차형 콜드오픈 {'on' if seq_hook else 'off'}")
-    raw = gemini.text_json(prompt, kind="rebuild", thinking="high")
-    job.save(cache_name.replace(".json", "_raw.json"), raw)
-    data = validate_versions(raw, index, transcript, avoid=(guide or {}).get("avoid") or [], exclude=exclude, seq_hook=seq_hook,
-                             copy_text=(guide or {}).get("copy"))
+            + (f" · 재료 구간 {range_label}" if range_label else "") + f" · 순차형 콜드오픈 {'on' if seq_hook else 'off'}"
+            + f" · 흐름 {script_flow}")
+    if staged_flow:
+        from app.tikitaka import staged
+        data = staged.draft_versions(job, gemini, index, transcript, title=title, episode_label=episode_label,
+                                     duration_label=fmt_tc(duration)[:5] + "분", script=script, exclude=exclude, guide=guide,
+                                     digest=digest, material_note=material, seq_hook=seq_hook,
+                                     seq_hook_rule=SEQ_HOOK_RULES[bool(seq_hook)], n_versions=N_VERSIONS,
+                                     target_min=TARGET_MIN_SEC, target_max=TARGET_MAX_SEC,
+                                     sfx=cache_name[len("rebuild"):-len(".json")])
+    else:
+        raw = gemini.text_json(prompt, kind="rebuild", thinking="high")
+        job.save(cache_name.replace(".json", "_raw.json"), raw)
+        data = validate_versions(raw, index, transcript, avoid=(guide or {}).get("avoid") or [], exclude=exclude, seq_hook=seq_hook,
+                                 copy_text=(guide or {}).get("copy"))
     data["guide_sha"] = guide["sha"] if guide else None
     data["digest"] = bool(digest)
     data["range"] = range_label
     data["seq_hook"] = bool(seq_hook)
+    data["script_flow"] = script_flow
     for v in data["versions"]:                      # 화면에 없는 동작어 → 그 문구만 고쳐 쓴다(프롬프트 규칙의 벨트)
         if v.get("literal_flags"):
             polish_literal_actions(gemini, v, index, transcript, log=job.log)
@@ -489,7 +507,12 @@ def rebuild(job: Job, gemini: Gemini, index: dict, transcript: dict, *, title: s
         data["production_plan_schema"] = production_schema
         from app.tikitaka.production import enforce_joint_plans
         blocked_versions: list[int] = []
+        if staged_flow:
+            from app.tikitaka.staged import enforce_staged_plans as enforce_joint_plans, opening_record   # 검사는 같은 자 · 고치는 순서만 다르다
         for version in data["versions"]:
+            if version.get("production_plan_blocked"):          # 걸음 ② 에서 필수 자리를 못 채운 편
+                blocked_versions.append(int(version["n"]))
+                continue
             try:
                 enforce_joint_plans(job, gemini, version, index, transcript, exclude)
             except ValueError as exc:
@@ -503,6 +526,9 @@ def rebuild(job: Job, gemini: Gemini, index: dict, transcript: dict, *, title: s
                 job.log(f"[joint_plan] v{version['n']} 자동 후보 제외 — {str(exc)[:240]}")
                 continue
             version["production_preflight"] = preflight(version, index, transcript, exclude)
+            if staged_flow:                                      # 첫 3초 — 반려하지 않고 강도·사유를 기록한다
+                version["opening"] = opening_record(version, index, transcript, job.load("grid.json"))
+                job.log(f"[staged/첫3초] v{version['n']} 강도 {version['opening']['strength']} — {version['opening']['reason']}")
         if blocked_versions:
             data["production_plan_blocked_versions"] = blocked_versions
         eligible_versions = [v for v in data["versions"] if not v.get("production_plan_blocked")]

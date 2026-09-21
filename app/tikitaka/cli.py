@@ -17,7 +17,7 @@ from app.tikitaka.common import fmt_tc, Job, load_dotenv_if_any
 REDO_ORDER = ["transcribe", "polish", "index", "digest", "rebuild", "verify", "agentic", "table", "framing", "effects", "render"]
 REDO_FILES = [("transcribe", ["transcript.json", "transcript_polish.json", "stt_windows/*.json", "polish_windows/*.json"]),
               ("polish", ["transcript_polish.json", "polish_windows/*.json"]),
-              ("index", ["index.json", "index_windows/*.json"]), ("digest", ["digest.json", "digest.md"]), ("rebuild", ["rebuild.json", "rebuild_raw.json"]),
+              ("index", ["index.json", "index_windows/*.json"]), ("digest", ["digest.json", "digest.md"]), ("rebuild", ["rebuild.json", "rebuild_raw.json", "outline.json", "outline_raw.json", "script_v*.json"]),
               ("verify", ["verified_v*.json", "verify_raw_v*.json"]),
               ("agentic", ["table_agentic_raw_v*.json"]), ("table", ["table_v*.json"]), ("framing", ["framing_v*.json"]),
               ("effects", ["effects_v*.json"]), ("render", ["shorts_v*.mp4"])]
@@ -62,6 +62,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-framing", action="store_true", help="5.5단계 Gemini 주인물 크롭을 건너뛴다(중앙 크롭)")
     ap.add_argument("--guide", action="append", default=None, help="제작 가이드 파일(반복 가능). 미지정이면 guides/tikitaka/<작품명>.md · <작품명>/<회차>.md 자동 탐색")
     ap.add_argument("--logo", default=None, help="작품명 대신 넣을 로고 이미지(PNG 알파). 가이드의 '로고:' 키보다 우선")
+    ap.add_argument("--script-flow", choices=("single", "staged"), default="single",
+                    help="대본 흐름. single = 한 번의 호출로 문장·화면 동시(종전) · staged = 뼈대 → 편별 문장·화면(grid-review 전용). 실측 비교 뒤 single 은 지운다")
     ap.add_argument("--logo-width", type=int, default=600, help="grid-review 로고 상자 폭(px, 기본 600 = 종전). 가로로 긴 한 줄 로고는 960 처럼 넓혀 세로를 살린다 — 상자 높이 240 은 그대로")
     ap.add_argument("--copy", default=None, help="작품명/로고 위·아래 카피 문구. 가이드의 '카피:' 키보다 우선")
     ap.add_argument("--copy-pos", choices=("above", "below"), default=None, help="카피 위치(기본 below). 가이드의 '카피 위치:' 키보다 우선")
@@ -303,7 +305,8 @@ def main(argv: list[str] | None = None) -> int:
         ensure_story_inputs(job, [index["grid_fingerprint"], guide, exclude, a.seq_hook,
                                   [(l["id"], l["text"]) for l in transcript["lines"]]], tag=a.tag)
     rebuild = R.rebuild(job, gemini, index, transcript, title=a.title, episode_label=a.episode, duration=info["duration_sec"], guide=guide,
-                        extra_exclude=range_exclude + preset_exclude + [tuple(r) for r in analysis_exclude], range_label=range_label, seq_hook=(a.seq_hook == "on"), cache_name=rebuild_name, digest=digest)
+                        extra_exclude=range_exclude + preset_exclude + [tuple(r) for r in analysis_exclude], range_label=range_label, seq_hook=(a.seq_hook == "on"), cache_name=rebuild_name, digest=digest,
+                        script_flow=a.script_flow)
     if digest and not rebuild.get("digest"):
         job.log("[digest] ⚠ 리빌딩 캐시는 작품 이해 문서 없이 만든 것이다 — 처음부터 반영하려면 --redo rebuild")
     if not rebuild.get("rerank"):                                     # 재순위 단계 이전에 만든 캐시 — 초안 기준으로 한 번 매긴다(멱등)
@@ -412,7 +415,9 @@ def main(argv: list[str] | None = None) -> int:
                        style_preset=a.style_preset)
             job.save(f"publish_v{n}{sfx}.json", {"title": table["version"]["title"], "work": a.title,
                 "episode": a.episode, "hashtags": (guide or {}).get("hashtags") or [], "copy": copy_text,
-                "review": f"review_v{n}{sfx}.json", "pipeline": "grid-review"})
+                "review": f"review_v{n}{sfx}.json", "pipeline": "grid-review",
+                **({k: table["version"][k] for k in ("opening", "narration_dropped")
+                    if isinstance(table.get("version"), dict) and table["version"].get(k)})})
             continue
         if not a.no_framing and a.layout == "fill":              # 5.5 화면 잡기(Gemini · 클로즈/투샷/와이드) — band 레이아웃은 크롭이 없다
             FR.frame_cuts(job, gemini, table, scene_cuts=cuts)   # 컷 안 샷 경계는 샷별로 따로 판정
