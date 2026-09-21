@@ -122,7 +122,7 @@ def test_one_line_is_human_readable():
 def test_gemini_client_installs_the_proxy(monkeypatch):
     """GeminiClient 가 실제로 CountingClient 를 끼운다 — 이게 빠지면 원장이 비어 있다."""
     from google import genai
-    monkeypatch.setattr(genai, "Client", lambda api_key: SimpleNamespace(
+    monkeypatch.setattr(genai, "Client", lambda api_key, **_kw: SimpleNamespace(
         models=_FakeModels(), files=_FakeFiles()))
     from app.modules.gemini_client import GeminiClient, GeminiConfig
     gc = GeminiClient(GeminiConfig(api_key="k"))

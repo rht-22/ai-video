@@ -1611,7 +1611,13 @@ class GeminiClient:
         # 호출 원장(2026-09-03): 이 클라이언트를 지나는 generate_content·files.upload 를
         # 전부 센다. run_log["gemini_usage"] 의 출처. SDK 객체는 손대지 않는다.
         self.usage = GeminiUsage()
-        self.client = CountingClient(genai.Client(api_key=config.api_key), self.usage)
+        # 요청 타임아웃(2026-09-17): SDK 기본은 무한 대기 — 응답 없는 소켓에 Stage 1 이
+        # 56분 멈춘 실측(로또 clip01). 초과하면 httpx ReadTimeout 으로 크게 실패한다
+        # (조용한 행보다 낫다 — 재개는 캐시에서). 값은 GEMINI_REQUEST_TIMEOUT_SEC.
+        from app.model_policy import gemini_request_timeout_sec
+        http_options = types.HttpOptions(timeout=int(gemini_request_timeout_sec() * 1000))
+        self.client = CountingClient(
+            genai.Client(api_key=config.api_key, http_options=http_options), self.usage)
         self.types = types
 
     # ─────────────────────────────────────────

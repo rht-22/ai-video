@@ -24,3 +24,27 @@ def pro_model_name() -> str:
 
 def flash_model_name() -> str:
     return os.getenv("GEMINI_FLASH_MODEL_NAME", DEFAULT_FLASH_MODEL)
+
+
+# 요청 타임아웃(2026-09-17, 로또 clip01 실측): google-genai 기본은 **무한 대기**라 서버가
+# 응답 없이 소켓만 잡고 있으면(Stage 1 56분 · Flash 프로브 14분·15분) 파이프라인이 영영
+# 멈춘다 — 재시도도, 실패 기록도 없다. 두 클라이언트(gemini_client·tikitaka.llm)가 같은
+# 값을 읽는다. 초과하면 httpx ReadTimeout 이 올라온다(조용한 행보다 큰 실패가 낫다).
+DEFAULT_GEMINI_REQUEST_TIMEOUT_SEC = 600.0
+_TIMEOUT_MIN_SEC, _TIMEOUT_MAX_SEC = 30.0, 3600.0
+
+
+def gemini_request_timeout_sec() -> float:
+    """env `GEMINI_REQUEST_TIMEOUT_SEC`(초). 미지정 = 600. 숫자가 아니거나 30~3600 밖이면
+    즉시 실패 — 조용히 무시하면 오타가 무한 대기로 발행된다(transcribe-backend 규율)."""
+    raw = os.getenv("GEMINI_REQUEST_TIMEOUT_SEC")
+    if raw is None or not raw.strip():
+        return DEFAULT_GEMINI_REQUEST_TIMEOUT_SEC
+    try:
+        val = float(raw)
+    except ValueError as e:
+        raise ValueError(f"GEMINI_REQUEST_TIMEOUT_SEC 가 숫자가 아니다: {raw!r}") from e
+    if not (_TIMEOUT_MIN_SEC <= val <= _TIMEOUT_MAX_SEC):
+        raise ValueError(
+            f"GEMINI_REQUEST_TIMEOUT_SEC={val} 는 허용 범위({_TIMEOUT_MIN_SEC:.0f}~{_TIMEOUT_MAX_SEC:.0f}s) 밖")
+    return val

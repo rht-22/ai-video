@@ -16,7 +16,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from app.model_policy import DEFAULT_FLASH_MODEL, pro_model_name, flash_model_name
+from app.model_policy import (DEFAULT_FLASH_MODEL, pro_model_name, flash_model_name,
+                              gemini_request_timeout_sec)
 
 DEFAULT_MODEL = DEFAULT_FLASH_MODEL
 ALLOWED_MODELS = {DEFAULT_MODEL}
@@ -36,7 +37,15 @@ def resolve_model(env_value: str | None, *, log=print) -> str:
 UPLOAD_RETRIES = 5      # 2026-09-11 실측: 6창 동시 업로드에서 FAILED 가 3건 — 2회로는 두 창이 통째로 빠졌다
 INLINE_MAX_BYTES = 18 * 1024 * 1024   # generateContent 인라인 요청 상한(20MB) 안쪽 — 10분 360p 창 클립 ≈ 9~12MB
 
-_TRANSIENT = ("429", "500", "502", "503", "504", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "DEADLINE", "timed out", "Timeout")
+_TRANSIENT = ("429", "500", "502", "503", "504", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "DEADLINE", "timed out", "Timeout",
+              # 2026-09-17 로또 clip01 실측: 서버가 응답 없이 연결을 끊는 경우(httpx RemoteProtocolError)와
+              # 요청 타임아웃(httpx ReadTimeout — str() 이 비어 있을 수 있어 예외 **타입명**도 함께 본다)
+              "Server disconnected", "RemoteProtocolError")
+
+
+def _err_text(e: BaseException) -> str:
+    """재시도 판정용 문자열 — 타입명 + 메시지(httpx.ReadTimeout 은 메시지가 빈 경우가 있다)."""
+    return f"{type(e).__name__}: {e}"
 
 
 def extract_json(text: str, *, repair: bool = False) -> Any:
@@ -148,7 +157,12 @@ class Gemini:
         key = api_key or os.getenv("GEMINI_API_KEY")
         if not key:
             raise RuntimeError("GEMINI_API_KEY 가 없다 (.env 또는 환경변수)")
-        self.client = genai.Client(api_key=key)
+        # 요청 타임아웃(2026-09-17): SDK 기본은 무한이라 서버가 응답 없이 소켓만 잡고
+        # 있으면 파이프라인이 영영 멈춘다(로또 clip01 실측 — 56분·14분·15분 행). 시간이
+        # 지나면 httpx ReadTimeout 이 올라오고 아래 _TRANSIENT 가 재시도한다.
+        self.client = genai.Client(
+            api_key=key,
+            http_options=types.HttpOptions(timeout=int(gemini_request_timeout_sec() * 1000)))
         self.types = types
         self.video_model = pro_model_name()
         self.text_model = flash_model_name()
@@ -270,7 +284,7 @@ class Gemini:
                         response_format=response_format, **extra)
                 except Exception as e:  # noqa: BLE001
                     last = e
-                    msg = str(e)
+                    msg = _err_text(e)
                     if extra and ("400" in msg or "invalid" in msg.lower() or "Unknown name" in msg) and gci < len(gc_candidates) - 1:
                         gci += 1
                         extra = {"generation_config": gc_candidates[gci]} if gc_candidates[gci] else {}
@@ -352,7 +366,7 @@ class Gemini:
                 resp = self.client.models.generate_content(model=model, contents=contents, config=cfg)
             except Exception as e:  # noqa: BLE001
                 last = e
-                msg = str(e)
+                msg = _err_text(e)
                 if any(k in msg for k in _TRANSIENT) and attempt < self.max_retries - 1:
                     wait = 5 * (attempt + 1)
                     self.log(f"  [llm/{kind}] 일시 오류 — {wait}s 후 재시도 ({attempt+1}/{self.max_retries}): {msg[:120]}")
