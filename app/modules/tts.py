@@ -52,6 +52,23 @@ EL_SPEED: dict[str, float] = {
 # eleven_flash_v2_5 로 바꾼다(코드 배포 불필요).
 EL_MODEL_ID = os.environ.get("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
 EL_OUTPUT_FORMAT = "mp3_44100_128"
+# stability(2026-09-18, 로또 clip01 실측): 한국어 전문 보이스(KR Minjun)는 0.5 에서 단어 사이
+# 호흡이 잦고(무음 14%), 0.9 에서 고르게 줄었다(3회 평균 1~3%). 미지정 = 종전 0.5 그대로
+# (다른 채널 회귀 0). 값은 호출 시점에 읽는다 — 범위 밖·비숫자는 즉시 실패(조용한 기본값 금지).
+EL_STABILITY_DEFAULT = 0.5
+
+
+def el_stability() -> float:
+    raw = os.environ.get("ELEVENLABS_STABILITY")
+    if raw is None or not raw.strip():
+        return EL_STABILITY_DEFAULT
+    try:
+        val = float(raw)
+    except ValueError as e:
+        raise ValueError(f"ELEVENLABS_STABILITY 가 숫자가 아니다: {raw!r}") from e
+    if not 0.0 <= val <= 1.0:
+        raise ValueError(f"ELEVENLABS_STABILITY={val} 는 허용 범위(0~1) 밖")
+    return val
 _EL_RETRIES = 2      # 첫 시도 제외 재시도 횟수 — 429(쿼터·동시성)·5xx·네트워크만
 
 # ── E17 (2026-08-24): 토큰이 만료되면 기본 백엔드로 내려간다 ─────────────────────
@@ -392,7 +409,7 @@ def _synthesize_elevenlabs(
         "text": text,
         "model_id": EL_MODEL_ID,
         "voice_settings": {
-            "stability": 0.5,
+            "stability": el_stability(),
             "similarity_boost": 0.75,
             "speed": EL_SPEED[_resolve_label("speed", speed, EL_SPEED, DEFAULT_SPEED)],
         },
