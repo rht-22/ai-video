@@ -15,6 +15,9 @@ MAX_STACK = 4
 MIN_CUT = .6
 MAX_CUT = 2.0
 MAX_COVER_SPEED = 1.2
+MIN_TAIL_TAKE_SEC = 0.25         # 목표 길이를 채운 뒤 새 창에서 더 가져올 때의 최소 길이(짧은 플래시 컷 방지)
+A_CONTINUATION_MIN_SEC = 0.2     # 겹침을 걷어낸 반응 장면이 남아야 하는 최소 길이(한 컷으로 성립하는 하한)
+A_SWALLOWED_TAIL_SEC = 0.3     # 반응 순간이 앞 대사 발성 안에 통째로 들어 있을 때 발성 끝 뒤로 이어 줄 길이
 FPS = 30
 SCHEMA = "tikitaka_grid_table/v9_joint_plan_speed_cover_frames"
 PROBE_SCHEMA = "visual_consistency/v5_shared_semantics"
@@ -87,6 +90,8 @@ def _fit_cover_windows(windows, target, *, take_from_end=False):
         take = min(end - start, wanted_source - source_total)
         if take < 1 / FPS - 1e-7:
             break
+        if source_total + 1e-6 >= target and take < MIN_TAIL_TAKE_SEC:
+            break                          # 목표를 채운 뒤 몇 프레임짜리 다른 샷 꼬리는 붙이지 않는다(v4 행16 0.03s 컷 실측)
         take = math.floor(take * FPS + 1e-7) / FPS
         if take <= 0:
             break
@@ -107,7 +112,13 @@ def _fit_cover_windows(windows, target, *, take_from_end=False):
         frames = max(1, math.ceil(((end - start) / speed) * FPS - 1e-7))
         dur = frames / FPS
         actual_speed = (end - start) / dur
-        result.append({"src": sid, "span_ids": [sid], "in": start, "out": end,
+        # Frame quantization can leave a mathematically exact 1.0 speed a few
+        # ulps below the renderer's [1.0, 1.2] contract (for example
+        # 0.9999999999990905). Canonicalize only that floating-point dust;
+        # genuine slow-down is still forbidden and frame count is unchanged.
+        if math.isclose(actual_speed, 1.0, rel_tol=0.0, abs_tol=1e-9):
+            actual_speed = 1.0
+        result.append({"src": sid, "span_ids": list(sp.get("joined_span_ids") or [sid]), "in": start, "out": end,
                        "dur": dur, "playback_speed": actual_speed,
                        "authority": "grid+tts", "desc": sp["scene_script"],
                        "subject_pos": sp.get("subject_pos"), "fact": copy.deepcopy(sp)})
@@ -155,11 +166,15 @@ def candidates_for(row, rows, index, grid, exclude, used):
         return {}  # missing scene evidence must not open the entire episode
     a, z = scene
     by = {s["id"]: s for s in grid["span_candidates"]}
+    from app.tikitaka.production import planned_cover_span_ids
+    planned = set(planned_cover_span_ids(row.get("production_plan"), index))
     out = {}
     for sid, fact in index["grid_facts"].items():
         sp = by[sid]
         s, e = sp["t_in"], sp["t_out"]
-        if s < a or e > z or e-s < MIN_CUT or overlap(s, e, exclude + used):
+        # 작성 단계가 확정한 조각은 짧아도 남긴다 — 게이트가 이어진 묶음 단위로 길이를 봤고
+        # assemble_cover 가 인접 조각을 한 샷으로 잇는다(2026-09-17).
+        if s < a or e > z or (e-s < MIN_CUT and sid not in planned) or overlap(s, e, exclude + used):
             continue
         out[sid] = {**sp, **fact}
     return out
@@ -172,19 +187,35 @@ class CoverDurationError(ValueError):
 
 
 def assemble_cover(ids, candidates, target, *, opening=False):
-    if not isinstance(ids, list) or not ids or len(ids) > MAX_STACK:
+    """계획 덮개 ID → 컷 목록. 시각이 이어진 ID 들(틈 ≤ COVER_JOIN_GAP_SEC)은 **한 샷**으로 묶어
+    MAX_CUT 단위로 잘라 쓴다 — 조각 하나가 0.6s 미만이어도 묶음이 MIN_CUT 이상이면 쓴다
+    (게이트 `cover_runs` 와 같은 규칙, 2026-09-17). 홀로 짧은 조각만 버린다."""
+    if not isinstance(ids, list) or not ids:
         raise ValueError(f"덮개 ID는 1~{MAX_STACK}개")
-    if any(not isinstance(s, str) or s not in candidates for s in ids) or len(set(ids)) != len(ids):
-        raise ValueError("덮개 ID가 후보 밖이거나 중복")
+    missing = [s for s in ids if not isinstance(s, str) or s not in candidates]
+    dups = [s for s in set(ids) if ids.count(s) > 1]
+    if missing or dups:
+        raise ValueError(f"덮개 ID가 후보 밖이거나 중복 — 후보 밖 {missing} · 중복 {dups} · 후보 {sorted(candidates)[:12]}")
+    from app.tikitaka.production import cover_runs
+    runs = cover_runs(ids, candidates)
+    if len(runs) > MAX_STACK:
+        raise ValueError(f"덮개 묶음은 1~{MAX_STACK}개")
     windows = []
-    for sid in ids:
-        sp = candidates[sid]
-        a = math.ceil(sp["t_in"] * FPS - 1e-7) / FPS
-        end = math.floor(sp["t_out"] * FPS + 1e-7) / FPS
-        sec = min(end-a, MAX_CUT)
-        if sec < MIN_CUT:
+    for run_ids, _length in runs:
+        a = math.ceil(candidates[run_ids[0]]["t_in"] * FPS - 1e-7) / FPS
+        end = math.floor(candidates[run_ids[-1]]["t_out"] * FPS + 1e-7) / FPS
+        if end - a < MIN_CUT:
             continue
-        windows.append((sid, sp, a, a + sec))
+        cursor = a
+        while end - cursor >= 1 / FPS - 1e-7:
+            take = min(MAX_CUT, end - cursor)
+            src = next((x for x in run_ids if candidates[x]["t_in"] <= cursor + 1e-6 < candidates[x]["t_out"]), run_ids[0])
+            covered = [x for x in run_ids if candidates[x]["t_in"] < cursor + take - 1e-6 and candidates[x]["t_out"] > cursor + 1e-6]
+            sp = dict(candidates[src], t_in=cursor, t_out=cursor + take,
+                      scene_script=" / ".join(dict.fromkeys(candidates[x].get("scene_script", "") for x in covered)),
+                      joined_span_ids=covered)
+            windows.append((src, sp, cursor, cursor + take))
+            cursor += take
     return _fit_cover_windows(windows, target)
 
 
@@ -233,12 +264,19 @@ def share_adjacent_action_boundary(rows, transcript):
         if len(speech["cuts"]) != 1 or len(action["cuts"]) != 1:
             continue
         s, a = speech["cuts"][0], action["cuts"][0]
-        if not s["in"] < a["in"] < s["out"] < a["out"]:
+        if not s["in"] < a["in"] < s["out"]:
             continue
+        if a["out"] < s["out"]:
+            a["out"] = s["out"]            # 반응이 발성 안에 든 경우: 대사 컷의 나머지(발성 꼬리)까지 A 가 이어받는다 — 소리 손실 없음
         protected_end = bind_dialogue(lines, transcript["words"], speech["src"])["end"]
         boundary = max(protected_end, a["in"])
-        if boundary >= s["out"] or a["out"] - boundary < MIN_CUT:
+        # 2026-09-17 사용자 결정: 앞 대사와 겹친다고 반응 장면이 잘리거나 편이 실패하면 안 된다.
+        # 같은 소스가 이어지는 경계라 화면에 컷이 생기지 않으므로 꼬리가 짧아도 잇고(≥ 1프레임),
+        # 반응이 발성 안에 통째로 들어 있으면 발성 끝 뒤를 A_SWALLOWED_TAIL_SEC 만큼 이어 준다.
+        if boundary >= s["out"]:
             continue
+        if a["out"] - boundary < 1 / FPS - 1e-7:
+            a["out"] = round(boundary + A_SWALLOWED_TAIL_SEC, 3)
         old_end = s["out"]
         s["out"] = a["in"] = boundary
         s["dur"] = speech["dur"] = round(boundary - s["in"], 3)
@@ -285,7 +323,34 @@ def build_table(job, gemini, rebuild, index, transcript, cuts, duration, proxy, 
             cut.update({"in": a, "out": z, "dur": z-a, "authority": "stt" if row["mode"] == "S" else "grid+scene",
                         "span_ids": [sid for sid, sp in by.items() if min(z, sp["t_out"]) > max(a, sp["t_in"])]})
             if row["mode"] == "A" and overlap(a, z, used + spoken + black):
-                raise ValueError("현장음 컷이 대사·기존 컷·암전과 중복; 대본을 다시 선택해야 함")
+                # 2026-09-17 사용자 결정: 앞뒤 대사와 겹친다고 반응 장면이 잘리거나 편이 실패하면 안 된다.
+                # 겹친 부분은 그 대사 행에서 이미 보여준 화면이므로 겹치지 않는 부분만 쓰고(v3 행10: 두 행 앞
+                # 대사와 0.75s 겹침 · v2 행5: 다음 대사와 0.05s 겹침), MIN_CUT 에 못 미치면 비어 있는 쪽으로 늘린다.
+                blocked_ranges = used + spoken + black + exclude
+                free = [(a, z)]
+                for s0, e0 in blocked_ranges:
+                    free = [seg for a0, z0 in free for seg in ((a0, min(z0, s0)), (max(a0, e0), z0)) if seg[1] - seg[0] > 1e-6]
+                if free:
+                    a, z = max(free, key=lambda seg: seg[1] - seg[0])
+                    grow = MIN_CUT - (z - a)
+                    if grow > 0:
+                        nxt = min((s0 for s0, _e in blocked_ranges if s0 >= z - 1e-6), default=duration)
+                        z = min(nxt, z + grow, duration)
+                        grow = MIN_CUT - (z - a)
+                    if grow > 0:
+                        prv = max((e0 for _s, e0 in blocked_ranges if e0 <= a + 1e-6), default=0.0)
+                        a = max(prv, a - grow, 0.0)
+                    a, z = math.ceil(a * FPS - 1e-7) / FPS, math.floor(z * FPS + 1e-7) / FPS
+                    if z - a >= A_CONTINUATION_MIN_SEC:
+                        job.log(f"[table] 행{row['i']}: 현장음 {cut.get('src')} {cut['in']:.2f}~{cut['out']:.2f} 이 대사·기존 컷과 겹쳐 "
+                                f"겹치지 않는 부분으로 {a:.2f}~{z:.2f} ({z - a:.2f}s)")
+                        cut.update({"in": a, "out": z, "dur": z - a})
+                        row["dur"] = z - a
+            if row["mode"] == "A" and overlap(a, z, used + spoken + black):
+                hit = [(round(s0, 2), round(e0, 2)) for s0, e0 in used + spoken + black if s0 < z and e0 > a]
+                raise ValueError(f"행{row['i']} 현장음 {row.get('moment_id') or cut.get('src')} {a:.2f}~{z:.2f}s 가 "
+                                 f"대사·기존 컷·암전 {hit} 과 중복(인접 대사 꼬리는 자동으로 잇는다 — 이 경우는 떨어진 곳의 같은 화면); "
+                                 "이 A 를 빼거나 다른 순간으로 다시 선택해야 함")
             used.append((a, z))
             fixed_ranges.append((a, z, row["mode"], row_pos))
     from app.tikitaka.cover_evidence import retrieve, tighten_opening
@@ -304,23 +369,22 @@ def build_table(job, gemini, rebuild, index, transcript, cuts, duration, proxy, 
         from app.tikitaka.production import planned_cover_span_ids
         planned_ids = planned_cover_span_ids(row.get("production_plan"), index)
         later_s = [(a, z) for a, z, mode, pos in fixed_ranges if mode == "S" and pos > row_pos]
+        # 2026-09-17 사용자 결정: 대사(S) 화면은 앞뒤 어디든 원음을 끄고 덮개로 쓸 수 있다(N 컷은
+        # 렌더에서 원음이 꺼진다 — finish.bundle use_original_audio). 현장음(A)·다른 N 덮개·제외·암전만 막는다.
         hard_reserved = exclude + black + narration_used + [
-            (a, z) for a, z, mode, pos in fixed_ranges if mode == "A" or pos <= row_pos
+            (a, z) for a, z, mode, pos in fixed_ranges if mode == "A"
         ]
+        s_ranges = [(a, z) for a, z, mode, pos in fixed_ranges if mode == "S"]
         reusable_later_dialogue = set()
         for sid in planned_ids:
             sp, fact = by.get(sid), index.get("grid_facts", {}).get(sid)
             if sp is None or fact is None or overlap(sp["t_in"], sp["t_out"], hard_reserved):
                 continue
-            fixed_overlap = overlap(sp["t_in"], sp["t_out"], [(a, z) for a, z, _, _ in fixed_ranges])
-            later_reuse = fixed_overlap and overlap(sp["t_in"], sp["t_out"], later_s)
-            if fixed_overlap and not later_reuse:
-                continue
             if any(word in fact.get("scene_script", "") for word in (guide or {}).get("avoid", []) if word):
                 continue
             candidates[sid] = {**sp, **fact}
-            if later_reuse:
-                reusable_later_dialogue.add(sid)
+            if overlap(sp["t_in"], sp["t_out"], s_ranges):
+                reusable_later_dialogue.add(sid)                 # 대사 화면 재사용(무음) 표시 — 감사 기록용
         if planned_ids:
             candidates = {sid: sp for sid, sp in candidates.items() if sid in planned_ids}
             proof = {sid: sp for sid, sp in proof.items() if sid in candidates}
@@ -383,7 +447,10 @@ def build_table(job, gemini, rebuild, index, transcript, cuts, duration, proxy, 
                 # quietly hold it instead of fitting the narration to its length.
                 before_ids = list(before)
                 is_tail = isinstance(ids, list) and bool(ids) and before_ids[-len(ids):] == ids
-                is_before = placement == "before_dialogue" or is_tail
+                gate_ok = bool((row.get("production_plan") or {}).get("gate_verified"))
+                # 게이트가 검증한 계획은 그대로 조립한다 — '대사 직전 화면' 경로는 샷 경계로 창을 더 좁게 다시 재서
+                # 게이트를 지난 묶음을 길이 부족으로 되돌렸다(v2 항목6 실측). 2026-09-17.
+                is_before = placement == "before_dialogue" or (is_tail and not gate_ok)
                 if is_before:
                     if not before or not is_tail:
                         raise ValueError("대사 앞 고정 장면의 연속 ID를 대사 직전까지 순서대로 선택해야 함")
@@ -401,9 +468,15 @@ def build_table(job, gemini, rebuild, index, transcript, cuts, duration, proxy, 
                             {sid: candidates[sid] for sid in ids}, rows, voice=voice, speed=speed,
                             key=request_key, guide=guide, budget_sec=e.available, placement="same_scene")
                         selected = assemble_cover(ids, candidates, working["dur"], opening=row is rows[0])
+                gate_ok = bool((row.get("production_plan") or {}).get("gate_verified"))
                 for cut in selected:
                     if cut["src"] in reusable_later_dialogue:
                         cut["dialogue_reuse"] = True
+                    if gate_ok and set(cut.get("span_ids") or [cut["src"]]) <= set(planned_ids):
+                        # 게이트가 같은 문장으로 이 묶음을 통째로 이미 확인했다(2026-09-17). 2초 조각마다
+                        # 다시 물으면 동작이 안 보이는 조각 하나로 편이 죽고, 몇 프레임짜리 조각은 API 400 이 난다.
+                        cut["probe"] = "gate_verified"
+                        continue
                     result = probe_cover(job, gemini, cut, working["text"],
                         key=fingerprint([request_key, cut, working["text"]]), context=dict(context, cover_role=next((x.get("role") for x in (row.get("production_plan") or {}).get("cover", []) if x.get("span_id") == cut["src"]), "evidence")))
                     if not result["text_matches"]:

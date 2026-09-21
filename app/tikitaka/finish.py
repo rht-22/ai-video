@@ -91,6 +91,10 @@ def bundle(table, grid, *, title):
             s = float(cut["in"])
             hold = float(cut.get("hold_sec") or 0)
             speed = float(cut.get("playback_speed") or 1.0)
+            # Accept pre-fix cached tables that carry 1.0 minus floating-point
+            # dust, while keeping a real slow-down outside the contract.
+            if abs(speed - 1.0) <= 1e-9:
+                speed = 1.0
             # grid_table has already quantized the output clock. Re-deriving it
             # from source/speed and flooring can lose one frame to float error,
             # making a valid cover appear shorter than its TTS.

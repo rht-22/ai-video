@@ -218,6 +218,41 @@ def test_joint_gate_rejects_valid_ids_with_wrong_actual_footage(monkeypatch):
     assert version['items'][0] == item
 
 
+def test_joint_gate_retry_can_rewrite_only_contradicted_narration(monkeypatch):
+    index, transcript = material()
+    version = {'n': 3, 'items': [
+        {'type': 'N', 'text': '벌떡', 'production_plan': joint_plan()},
+        {'type': 'S', 'line_ids': ['L-1'], 'text': '원본 대사'},
+    ]}
+    speech = copy.deepcopy(version['items'][1])
+
+    class Job:
+        def has(self, name):
+            return name == 'production_retry_v3.json'
+
+        def load(self, name):
+            return {'span_candidates': [{'id': 'sp0', 't_in': 0, 't_out': 10}]}
+
+        def log(self, message):
+            pass
+
+    class Gemini:
+        def text_json(self, prompt, **kwargs):
+            assert 'seen에서 직접 관찰되는 사실' in prompt
+            return {'text': '앉았다', 'production_plan': joint_plan()}
+
+    def probe(*args, **kwargs):
+        text = args[3]
+        if '벌떡' in text:
+            return {'text_matches': False, 'seen': '남자가 소파에 앉았다'}
+        return {'text_matches': True, 'seen': '남자가 소파에 앉았다'}
+
+    monkeypatch.setattr(gt, 'probe_cover', probe)
+    p.enforce_joint_plans(Job(), Gemini(), version, index, transcript)
+    assert version['items'][0]['text'] == '앉았다'
+    assert version['items'][1] == speech
+
+
 def test_cover_reselection_cannot_replace_or_drop_planned_evidence():
     import pytest
     plan = joint_plan()
@@ -238,3 +273,89 @@ def test_spoken_cover_id_does_not_need_silent_moment():
     assert parsed['cover'][0]['span_id'] == 'spoken'
     _, issues = p.normalize_plan(joint_plan('spoken'), index, transcript, [(11., 13.)])
     assert any('제외 구간' in x for x in issues)
+
+
+def _scene_index(index):
+    index = copy.deepcopy(index)
+    index['scenes'] = [{'id': 'SC-A', 'start': 0.0, 'end': 4.0, 'place': '', 'summary': '', 'chars': []},
+                       {'id': 'SC-B', 'start': 4.0, 'end': 9.0, 'place': '', 'summary': '', 'chars': []}]
+    return index
+
+
+def test_widen_cover_plan_joins_adjacent_pieces_only_inside_the_same_scene():
+    """v3 designated_window 이식(2026-09-17): 지정 조각 앞뒤로 맞닿은 조각을 붙이되 **씬 경계를 넘지 않는다** —
+    장면이 바뀌는 경계에서 엉뚱한 배경이 붙을까 봐(사용자 우려). 붙인 조각은 role=support · auto=join."""
+    index, transcript = material()
+    index = _scene_index(index)
+    spans = {'sp0': {'t_in': 0.0, 't_out': 1.0}, 'sp1': {'t_in': 1.0, 't_out': 1.5}, 'sp2': {'t_in': 1.5, 't_out': 2.0},
+             'sp3': {'t_in': 2.0, 't_out': 3.9}, 'sp4': {'t_in': 4.0, 't_out': 6.0}}   # sp4 는 다음 씬(SC-B)
+    cover = [{'span_id': 'sp1', 'role': 'evidence'}]
+    added = p.widen_cover_plan(cover, spans, index, 3.0, [], max_runs=4)
+    ids = [x['span_id'] for x in cover]
+    assert 'sp4' not in ids                                             # 씬 경계를 안 넘는다
+    assert set(added) <= {'sp0', 'sp2', 'sp3'} and all(x.get('auto') == 'join' for x in cover[1:])
+    total = sum(l for _i, l in p.cover_runs(ids, spans))
+    assert total >= 3.0 - 1e-6
+
+
+def test_widen_cover_plan_stacks_same_scene_pieces_when_neighbours_are_blocked():
+    """이어 붙일 이웃이 막혀 있으면(현장음·다른 N 덮개) 같은 씬의 떨어진 조각을 쌓는다(≥0.6s · 묶음 ≤ max_runs)."""
+    index, transcript = material()
+    index = _scene_index(index)
+    spans = {'sp0': {'t_in': 0.0, 't_out': 0.5}, 'sp1': {'t_in': 0.5, 't_out': 1.0},
+             'sp2': {'t_in': 1.0, 't_out': 1.4},                       # 막힘(현장음)
+             'sp3': {'t_in': 2.0, 't_out': 3.0}}                       # 떨어진 같은 씬 조각
+    cover = [{'span_id': 'sp1', 'role': 'evidence'}]
+    p.widen_cover_plan(cover, spans, index, 1.8, [(1.0, 1.4)], max_runs=4)
+    ids = [x['span_id'] for x in cover]
+    assert 'sp2' not in ids and 'sp3' in ids
+    assert next(x for x in cover if x['span_id'] == 'sp3')['auto'] == 'stack'
+
+
+def test_joint_gate_widens_short_designated_piece_and_probes_the_joined_shot(monkeypatch):
+    """가왕쇼 10화: 「손을 뻗는다」 0.50s 를 지정 → 종전 '짧다' 거절. 이제 같은 씬 이웃을 붙여 통과하고, 프로브는 묶음째 한 번."""
+    index, transcript = material()
+    index = _scene_index(index)
+    item = {'type': 'N', 'text': '손을 뻗는다', 'production_plan': joint_plan()}
+    class Job:
+        def load(self, name):
+            return {'span_candidates': [{'id': 'sp0', 't_in': 0.0, 't_out': 0.5}, {'id': 'sp1', 't_in': 0.5, 't_out': 1.0},
+                                        {'id': 'sp2', 't_in': 1.0, 't_out': 1.6}]}
+        def log(self, message): pass
+    class Gemini:
+        def text_json(self, *a, **k): return item
+    probes = []
+    def probe(j, g, cut, text, **kw):
+        probes.append((round(cut['in'], 2), round(cut['out'], 2)))
+        return {'text_matches': True}
+    monkeypatch.setattr(gt, 'probe_cover', probe)
+    monkeypatch.setattr(p, 'narration_plan_sec', lambda text: 1.2)
+    version = {'n': 6, 'items': [copy.deepcopy(item)]}
+    p.enforce_joint_plans(Job(), Gemini(), version, index, transcript)
+    plan = version['items'][0]['production_plan']
+    assert plan['cover'][0]['span_id'] == 'sp0' and plan.get('auto_extended')
+    assert len(probes) == 1 and probes[0][0] == 0.0 and probes[0][1] >= 1.2      # 묶음 한 번
+
+
+def test_joint_gate_allows_dialogue_footage_but_not_action_footage(monkeypatch):
+    """2026-09-17 사용자 결정: 대사(S) 화면은 무음 덮개로 허용, 현장음(A) 화면은 여전히 불가."""
+    index, transcript = material()
+    index['moments'] = index['moments'] + [{'id': 'S-9', 'start': 5.0, 'end': 6.0, 'desc': '반응', 'span_ids': ['sp5']}]
+    plan_s = joint_plan(); plan_s['cover'] = [{'span_id': 'sp0', 'role': 'evidence'}]
+    version = {'n': 6, 'items': [
+        {'type': 'S', 'line_ids': ['L-1'], 'text': '원본 대사'},                     # L-1 = 5.0~6.0 (material)
+        {'type': 'N', 'text': '문장', 'production_plan': plan_s}]}
+    class Job:
+        def load(self, name):
+            return {'span_candidates': [{'id': 'sp0', 't_in': 5.0, 't_out': 6.0}, {'id': 'sp5', 't_in': 5.0, 't_out': 6.0}]}
+        def log(self, message): pass
+    class Gemini:
+        def text_json(self, *a, **k): return version['items'][1]
+    monkeypatch.setattr(gt, 'probe_cover', lambda *a, **k: {'text_matches': True})
+    monkeypatch.setattr(p, 'narration_plan_sec', lambda text: 0.8)
+    p.enforce_joint_plans(Job(), Gemini(), version, index, transcript)         # 대사 화면(sp0) 위에 N: 통과
+    version_a = {'n': 6, 'items': [{'type': 'A', 'moment_id': 'S-9'},
+                                   {'type': 'N', 'text': '문장', 'production_plan': copy.deepcopy(plan_s)}]}
+    import pytest
+    with pytest.raises(ValueError, match='현장음'):
+        p.enforce_joint_plans(Job(), Gemini(), version_a, index, transcript)

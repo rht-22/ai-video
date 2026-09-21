@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from app.tikitaka.guide import in_excluded
 from app.tikitaka.timing import narration_plan_sec
+from app.tikitaka.common import NARRATION_CHARS_PER_SEC
 
 SCHEMA = "production_plan/v2_joint_cover"
 KINDS = {"action", "rule_summary", "transition", "question", "evaluation"}
@@ -28,13 +29,14 @@ def planning_rules():
     # following a different hard-coded contract. Imported lazily to avoid cycles.
     from app.tikitaka import grid_table as gt
     return ("\n## 실제 조립 제약 — 문장과 화면을 함께 계획\n" + SEMANTIC_RULES +
-            f"\nN 화면은 미사용 ID 최대 {gt.MAX_STACK}컷, 일반 컷당 최대 {gt.MAX_CUT:g}초. "
+            f"\nN 화면은 최대 {gt.MAX_STACK}컷(시각이 이어진 인접 ID 들은 한 컷으로 센다), 일반 컷당 최대 {gt.MAX_CUT:g}초. "
             f"모든 덮개 정지·슬로우 금지; 긴 덮개는 최대 {gt.MAX_COVER_SPEED:g}배속. "
-            "원칙적으로 S/A 구간을 N 화면으로 다시 예약하지 마라. 아래의 뒤쪽 S 1회 재사용만 예외다. 인접 S/A 경계는 원본 순서대로 연결한다. "
-            "대사 직전 화면에 N을 넣으면 그 고정 화면 길이가 상한이다. 짧으면 문장을 줄이지 말고 다른 덮개를 확보하라. "
-            "길이는 계획 추정이며 합성 후 실측으로 다시 확인한다. 화면 부족이면 문장·TTS를 유지하고 덮개 계획만 바꿔라. "
-            "지정·support·같은 씬 미사용 화면으로도 길이가 부족할 때만, 문장 내용과 직접 맞는 뒤쪽 S 대사 화면을 "
-            "N에서 원음을 끄고 한 번 먼저 보여준 뒤 그 S에서 원음으로 한 번 더 쓸 수 있다. 같은 대사 화면을 여러 N이 재사용하면 안 된다. "
+            "N 이 나오는 동안 원음은 꺼지므로 **대사(S) 화면도 덮개로 쓸 수 있다** — 문장이 말하는 행동이 실제로 보이는 화면을 골라라. "
+            "현장음(A) 화면과 다른 N 이 이미 덮은 화면만 피하라. 인접 S/A 경계는 원본 순서대로 연결한다. "
+            "지정한 화면이 짧으면 코드가 같은 씬 안에서 앞뒤 인접 화면을 이어 붙이고 컷을 쌓아 길이를 채운다 — 그래도 그 씬에 화면이 "
+            f"모자라면 문장이 실패하니, N 문장은 처음부터 그 사건의 화면 길이 안에 들게 써라(계획 길이 = 공백 제외 글자수 ÷ {NARRATION_CHARS_PER_SEC:g}). "
+            "대사 직전 화면에 N을 넣으면 그 고정 화면 길이가 상한이다. "
+            "길이는 계획 추정이며 합성 후 실측으로 다시 확인한다. "
             "덮개 정지는 금지한다. 덮개가 내레이션보다 길면 전체 동작을 살리기 위해 최대 1.2배속으로 맞추고, 그래도 길면 자연스러운 경계에서 남는 부분을 자른다. "
             "대사만으로 설명된 내용을 N으로 반복하지 마라.\n"
             '각 N은 문장과 화면을 같은 단계에서 정하고 production_plan={'
@@ -133,9 +135,18 @@ def normalize_plan(raw, index, transcript, exclude=()):
             if sid not in seen:
                 kept_cover.append({"span_id": sid, "role": role})
                 seen.add(sid)
-        if len(kept_cover) > 4:
-            issues.append("cover: 4개 상한 초과")
-        out["cover"] = kept_cover[:4]
+        # 상한은 ID 개수가 아니라 이어진 묶음(컷) 수다 — 게이트가 붙여 저장한 인접 조각들이 재검증에서
+        # "4개 초과"로 거절되던 것(2026-09-17 v4 재조립 실측). 시각을 모르는 ID 는 각각 한 묶음으로 센다.
+        spans_t = {sid: {'t_in': span_sources[sid]['start'], 't_out': span_sources[sid]['end']}
+                   for sid in (x['span_id'] for x in kept_cover) if sid in span_sources}
+        runs = cover_runs([x['span_id'] for x in kept_cover], spans_t) if spans_t else []
+        loose = [x['span_id'] for x in kept_cover if x['span_id'] not in spans_t]
+        n_cuts = len(runs) + len(loose)
+        if n_cuts > 4:
+            issues.append(f"cover: 4컷 상한 초과({n_cuts}묶음)")
+            keep_ids = {sid for run_ids, _l in runs[:4] for sid in run_ids} if runs else set(loose[:4])
+            kept_cover = [x for x in kept_cover if x['span_id'] in keep_ids]
+        out["cover"] = kept_cover
         if kind == "action" and not any(x["role"] == "evidence" for x in out["cover"]):
             issues.append("action: 핵심 행동을 직접 보여주는 evidence 덮개 없음")
     else:
@@ -251,6 +262,133 @@ def preflight(version, index, transcript, exclude=()):
             "issue_count": sum(len(r["issues"]) for r in reports)}
 
 
+
+COVER_JOIN_GAP_SEC = 0.6      # 이 틈 이하로 떨어진 같은 씬 조각은 한 흐름으로 잇는다(틈의 영상도 그대로 들어간다). 격자 조각 사이엔 0.1~0.5s 틈이 흔하다(10화 실측 v6: 0.16·0.18s)
+STACK_MIN_PART_SEC = 0.6      # 컷 쌓기 조각 하한(v3 STACK_MIN_PART_SEC 와 같다)
+BUDGET_SLACK_SEC = 1 / 30     # 조립 클록 한 프레임(4.96 vs 4.96 류 측정 찌꺼기)
+
+
+def cover_runs(ids, spans, *, gap_sec=COVER_JOIN_GAP_SEC):
+    """덮개 조각을 소스 시각 순으로 이어진 묶음으로 → [(ids, 길이초)]. 순수."""
+    ordered = sorted((sid for sid in ids if sid in spans), key=lambda x: spans[x]['t_in'])
+    runs: list[tuple[list, float]] = []
+    for sid in ordered:
+        sp = spans[sid]
+        if runs and sp['t_in'] - spans[runs[-1][0][-1]]['t_out'] <= gap_sec:
+            runs[-1][0].append(sid)
+            runs[-1] = (runs[-1][0], spans[sid]['t_out'] - spans[runs[-1][0][0]]['t_in'])
+        else:
+            runs.append(([sid], sp['t_out'] - sp['t_in']))
+    return runs
+
+
+def scene_of_spans(index, spans):
+    """조각 → index 씬 id(중점 기준). 씬 밖이면 None. 순수."""
+    scenes = index.get('scenes', [])
+    out = {}
+    for sid, sp in spans.items():
+        mid = (sp['t_in'] + sp['t_out']) / 2
+        out[sid] = next((sc['id'] for sc in scenes if sc['start'] <= mid < sc['end']), None)
+    return out
+
+
+def widen_cover_plan(cover, spans, index, needed, blocked, *, max_runs):
+    """계획 덮개가 needed 초에 못 미치면 **같은 index 씬 안에서만** 화면을 넓힌다(v3-human-flow
+    designated_window·stack_window 이식, 2026-09-17 사용자 결정 — 대사 화면도 무음으로 덮개 가능).
+
+    ① 이어 붙이기: 지정 조각 묶음의 앞뒤로 틈 ≤ COVER_JOIN_GAP_SEC 인 조각을 뒤·앞 번갈아 붙인다
+       (묶음 창은 첫 조각 시작~마지막 조각 끝 — 틈의 영상도 포함). 다른 씬·blocked(제외 구간·현장음·다른 N 덮개) 는 넘지 않는다 → 장면이 바뀌는 경계에서
+       엉뚱한 배경이 붙지 않는다(사용자 우려).
+    ② 컷 쌓기: 그래도 모자라면 같은 씬의 미사용 조각(≥ STACK_MIN_PART_SEC)을 묶음에 가까운 순으로
+       더한다(묶음 수 ≤ max_runs).
+    cover 리스트를 제자리에서 늘리고(추가 항목 role='support', auto=join|stack) 추가한 id 목록을 돌려준다.
+    붙인 조각도 호출자가 전부 프로브한다."""
+    from app.tikitaka.grid_table import overlap
+    have = [x['span_id'] for x in cover]
+    if not have:
+        return []
+    scene_of = scene_of_spans(index, spans)
+    order = sorted(spans, key=lambda x: spans[x]['t_in'])
+    by_pos = dict(enumerate(order))
+    pos_of = {sid: i for i, sid in by_pos.items()}
+    home = {scene_of[x] for x in have if x in scene_of}
+    home.discard(None)
+    def total():
+        # 조립과 같은 프레임 단위 자(시작 올림·끝 내림) — 검사(budget)와 같은 값을 보고 멈춘다
+        from app.tikitaka.grid_table import FPS
+        import math
+        return sum(max(0.0, math.floor(spans[ids[-1]]['t_out'] * FPS + 1e-7) / FPS
+                       - math.ceil(spans[ids[0]]['t_in'] * FPS - 1e-7) / FPS)
+                   for ids, _length in cover_runs([x['span_id'] for x in cover], spans))
+    def usable(sid):
+        sp = spans[sid]
+        return (sid not in {x['span_id'] for x in cover} and scene_of.get(sid) in home
+                and not overlap(sp['t_in'], sp['t_out'], blocked))
+    added = []
+    grow_back = True
+    while total() + 1e-6 < needed:                                   # ① 이어 붙이기
+        runs = cover_runs([x['span_id'] for x in cover], spans)
+        ev = {x['span_id'] for x in cover if x.get('role') == 'evidence'}
+        runs.sort(key=lambda r: (not any(i in ev for i in r[0]), -r[1]))
+        moved = False
+        for run_ids, _length in runs:
+            for _ in range(2):
+                if grow_back:
+                    cand = by_pos.get(pos_of[run_ids[-1]] + 1)
+                    ok = cand is not None and usable(cand) and \
+                        spans[cand]['t_in'] - spans[run_ids[-1]]['t_out'] <= COVER_JOIN_GAP_SEC
+                else:
+                    cand = by_pos.get(pos_of[run_ids[0]] - 1)
+                    ok = cand is not None and usable(cand) and \
+                        spans[run_ids[0]]['t_in'] - spans[cand]['t_out'] <= COVER_JOIN_GAP_SEC
+                grow_back = not grow_back
+                if ok:
+                    cover.append({'span_id': cand, 'role': 'support', 'auto': 'join'})
+                    added.append(cand)
+                    moved = True
+                    break
+            if moved:
+                break
+        if not moved:
+            break
+    # ①-b 길이는 찼어도 MIN_CUT 미만으로 홀로 남은 묶음은 이웃을 붙여 컷으로 성립시킨다(v4 재조립 실측:
+    # 다른 덮개로 길이가 차 있어 0.3s 「버리지 마라」 조각이 '더 이을 조각 없음'으로 거절됐다).
+    from app.tikitaka.grid_table import MIN_CUT as _MIN_CUT
+    for _ in range(8):
+        short = [r for r in cover_runs([x['span_id'] for x in cover], spans) if r[1] < _MIN_CUT]
+        if not short:
+            break
+        run_ids = short[0][0]
+        grown = False
+        for cand in (by_pos.get(pos_of[run_ids[-1]] + 1), by_pos.get(pos_of[run_ids[0]] - 1)):
+            if cand is None or not usable(cand):
+                continue
+            gap = (spans[cand]['t_in'] - spans[run_ids[-1]]['t_out'] if pos_of[cand] > pos_of[run_ids[-1]]
+                   else spans[run_ids[0]]['t_in'] - spans[cand]['t_out'])
+            if gap <= COVER_JOIN_GAP_SEC:
+                cover.append({'span_id': cand, 'role': 'support', 'auto': 'join'})
+                added.append(cand)
+                grown = True
+                break
+        if not grown:
+            break
+    if total() + 1e-6 < needed:                                      # ② 컷 쌓기
+        runs = cover_runs([x['span_id'] for x in cover], spans)
+        center = sum((spans[r[0][0]]['t_in'] + spans[r[0][-1]]['t_out']) / 2 for r in runs) / len(runs)
+        pool = sorted((sid for sid in spans if usable(sid)
+                       and spans[sid]['t_out'] - spans[sid]['t_in'] >= STACK_MIN_PART_SEC),
+                      key=lambda sid: abs((spans[sid]['t_in'] + spans[sid]['t_out']) / 2 - center))
+        for sid in pool:
+            if total() + 1e-6 >= needed:
+                break
+            trial = cover + [{'span_id': sid, 'role': 'support', 'auto': 'stack'}]
+            if len(cover_runs([x['span_id'] for x in trial], spans)) > max_runs:
+                continue
+            cover.append(trial[-1])
+            added.append(sid)
+    return added
+
+
 def enforce_joint_plans(job, gemini, version, index, transcript, exclude=()):
     """Repair only a failing N; never approve missing or unobserved cover evidence."""
     if not index.get('grid_facts'):
@@ -277,10 +415,13 @@ def enforce_joint_plans(job, gemini, version, index, transcript, exclude=()):
     for pos, item in enumerate(version['items']):
         if item['type'] != 'N':
             continue
-        hard = reserved + [(a, b) for a, b, k, mode in fixed if k <= pos or mode == 'A']
+        # 2026-09-17 사용자 결정: 대사(S) 화면도 원음을 끄고 덮개로 쓸 수 있다(v3-human-flow 방식).
+        # 막는 것은 제외 구간·현장음(A) 화면·다른 N 이 이미 덮은 화면뿐. 길이는 조각이 아니라
+        # 이어진 묶음(cover_runs)에 본다 — 격자 조각 35% 가 0.6s 미만이라 조각 단위 하한은 작가가
+        # 정확히 고른 화면(「손을 뻗는다」 0.50s)까지 거절했다(10화 실측).
+        hard = reserved + [(a, b) for a, b, k, mode in fixed if mode == 'A']
         available = {sid for sid, sp in spans.items()
-                     if sid in index['grid_facts'] and sp['t_out']-sp['t_in'] >= MIN_CUT
-                     and not overlap(sp['t_in'], sp['t_out'], hard)}
+                     if sid in index['grid_facts'] and not overlap(sp['t_in'], sp['t_out'], hard)}
         candidate = dict(item)
         history = []
         for attempt in range(4):
@@ -292,37 +433,56 @@ def enforce_joint_plans(job, gemini, version, index, transcript, exclude=()):
             if plan:
                 unavailable = [x['span_id'] for x in plan.get('cover', []) if x['span_id'] not in available]
                 if unavailable:
-                    errors.append(f'이미 사용되었거나 짧거나 제외된 화면: {unavailable}')
+                    errors.append(f'제외 구간·현장음·다른 내레이션 덮개와 겹치는 화면: {unavailable}')
             if not errors:
-                from app.tikitaka.grid_table import MAX_CUT
-                budget = sum(min(MAX_CUT, spans[x['span_id']]['t_out']-spans[x['span_id']]['t_in']) for x in plan['cover'])
+                from app.tikitaka.grid_table import MAX_STACK, FPS
+                import math
                 needed = narration_plan_sec(candidate['text'])
                 if hasattr(job, 'has') and job.has('planning_tts_settings.json'):
                     from app.tikitaka.grid_table import _tts_cached
                     settings = job.load('planning_tts_settings.json')
                     _, needed = _tts_cached(job, candidate['text'], settings['voice'], settings['speed'])
-                if budget < needed:
-                    errors.append(f'화면 {budget:.2f}초 < 필요 발화 {needed:.2f}초: 문장은 고정이다. 사용 가능한 덮개를 확장·추가하거나 뒤 대사 화면을 재사용하라')
+                # 작가가 고른 화면이 짧으면 코드가 같은 씬 안에서 앞뒤로 잇고, 그래도 모자라면 컷을 쌓는다.
+                # 붙인 조각은 아래 프로브를 전부 지난다(장면 경계에서 다른 배경이 붙으면 거기서 걸린다).
+                # 조립은 프레임 단위로 내림(소스)·올림(TTS)하므로 게이트는 한 프레임 여유를 더 요구한다 —
+                # 게이트를 턱걸이로 지난 계획이 조립에서 한 프레임 모자라 죽지 않게(v2 항목6 실측 3.34 vs 3.29).
+                needed = math.ceil(needed * FPS - 1e-7) / FPS + 1 / FPS
+                auto = widen_cover_plan(plan['cover'], spans, index, needed, hard, max_runs=MAX_STACK)
+                if auto:
+                    plan['auto_extended'] = auto
+                    job.log(f'[joint_plan] v{version.get("n")} 항목{pos+1}: 화면 넓힘 {auto}')
+                runs = cover_runs([x['span_id'] for x in plan['cover']], spans)
+                short = [ids for ids, length in runs if length < MIN_CUT]
+                if short:
+                    errors.append(f'짧은 화면 {short}: 이어진 조각 합이 {MIN_CUT:g}초 미만이고 같은 씬에서 더 이을 조각이 없다 — 다른 화면을 지정하라')
+                if len(runs) > MAX_STACK:
+                    errors.append(f'덮개 묶음 {len(runs)}개 > 최대 {MAX_STACK}컷')
+                # 조립(assemble_cover)과 같은 자로 잰다 — 묶음 경계를 프레임 안쪽으로 맞추면(시작 올림·끝 내림)
+                # 묶음마다 최대 2프레임이 준다. 조각 합으로 재면 게이트 3.34s 가 조립 3.267s 로 줄어 TTS 3.29s 에
+                # 모자랐다(v2 항목6 실측).
+                budget = sum(max(0.0, math.floor(spans[ids[-1]]['t_out'] * FPS + 1e-7) / FPS
+                                 - math.ceil(spans[ids[0]]['t_in'] * FPS - 1e-7) / FPS) for ids, _length in runs)
+                if not errors and budget + BUDGET_SLACK_SEC < needed:
+                    errors.append(f'화면 {budget:.2f}초 < 필요 발화 {needed:.2f}초: 같은 씬에 더 이을 화면이 없다. '
+                                  f'다른 화면을 지정하거나 문장을 그 길이에 맞게 다시 써라')
             if not errors:
                 candidate['production_plan'] = plan
                 candidate_rows = list(rows)
                 candidate_rows[pos] = dict(candidate, mode='N')
                 context = narration_context(candidate_rows, candidate_rows[pos], index, transcript)
-                for cover in plan['cover']:
-                    sid = cover['span_id']
-                    sp = spans.get(sid)
-                    if sp is None:
-                        errors.append(f'{sid}: 실제 그리드 구간 없음')
-                        continue
-                    cut = {'in': sp['t_in'], 'out': sp['t_out'],
-                           'desc': index['grid_facts'][sid].get('scene_script', '')}
-                    # Support is allowed to show the same event, without repeating its action.
-                    ctx = dict(context, cover_role=cover['role'])
+                role_of = {x['span_id']: x.get('role') for x in plan['cover']}
+                for run_ids, _length in cover_runs([x['span_id'] for x in plan['cover']], spans):
+                    # 이어진 묶음은 한 샷이다 — 조각마다가 아니라 묶음째 한 번 본다
+                    cut = {'in': spans[run_ids[0]]['t_in'], 'out': spans[run_ids[-1]]['t_out'],
+                           'desc': ' / '.join(index['grid_facts'][x].get('scene_script', '') for x in run_ids)}
+                    role = 'evidence' if any(role_of.get(x) == 'evidence' for x in run_ids) else 'support'
+                    ctx = dict(context, cover_role=role)
                     result = probe_cover(job, gemini, cut, candidate['text'],
-                                         key=fingerprint(['joint-plan-gate/v1', cut, candidate['text'], ctx]), context=ctx)
+                                         key=fingerprint(['joint-plan-gate/v2', cut, candidate['text'], ctx]), context=ctx)
                     if not isinstance(result, dict) or result.get('text_matches') is not True:
-                        errors.append(f'{sid}: {result}')
+                        errors.append(f'{"+".join(run_ids)}: {result}')
             if not errors:
+                plan['gate_verified'] = True          # 조립(grid_table)은 이 계획 화면을 다시 프로브하지 않는다
                 reserved.extend((spans[x['span_id']]['t_in'], spans[x['span_id']]['t_out']) for x in plan['cover'])
                 old = dict(item)
                 item.update(text=candidate['text'], production_plan=plan,
@@ -345,8 +505,36 @@ def enforce_joint_plans(job, gemini, version, index, transcript, exclude=()):
                          'scene_script': index['grid_facts'][sid].get('scene_script', '')} for sid in nearby]
             references = {sid: x for sid, x in sources.items()
                           if any(abs(x['start']-t) < 35 for t in anchors)}
+            # Normal joint-plan repair keeps the approved sentence immutable.
+            # If a previous production run failed on a visual fact
+            # contradiction, however, changing covers alone can never recover:
+            # every candidate will correctly reject the same unsupported
+            # action.  In that explicit retry path only, let Gemini rewrite the
+            # one failing N from the probe's observed `seen` facts.  Dialogue
+            # and all other items remain immutable.
+            retry_name = f'production_retry_v{version.get("n")}.json'
+            retrying = hasattr(job, 'has') and job.has(retry_name)
+            if item.get('user_edits'):
+                # 사람이 고친 문장은 불변 — 덮개만 다시 계획한다(2026-09-17 v4 재조립 실측: 게이트가 사용자 문장을
+                # 옛 덮개에 맞춰 되돌려 썼다).
+                retrying = False
+            contradiction_retry = retrying and any(
+                'text_matches' in str(failure) and 'False' in str(failure) for failure in history)
+            # 코드가 같은 씬에서 넓히고 쌓아도 모자라면 그 씬에는 그만한 화면이 없는 것 — 덮개 교체를
+            # 한 번 해 본 뒤(이력 2건째)부터는 문장을 화면 길이에 맞게 다시 쓰게 한다(요약·절단이 아니라
+            # 같은 의미의 더 짧은 완결 문장). 첫 수정은 종전대로 덮개만.
+            budget_retry = (not item.get('user_edits')) and (retrying or len(history) >= 2) and any('필요 발화' in str(failure) for failure in history)
+            if contradiction_retry:
+                sentence_rule = ('실패 이력의 seen에서 직접 관찰되는 사실만 사용해 이 N 문장도 다시 써라. '
+                                 '사건의 의미는 유지하고 보이지 않는 행동·감정은 쓰지 마라. ')
+            elif budget_retry:
+                sentence_rule = ('같은 씬에 화면이 그만큼 없다. 같은 사건·의미를 유지한 채, 확보 가능한 덮개 길이 안에 드는 '
+                                 '더 짧은 완결 문장으로 이 N 문장을 다시 써라(요약체·절단 금지). 보이지 않는 행동·감정은 쓰지 마라. ')
+            else:
+                sentence_rule = '문장은 한 글자도 바꾸지 말고 덮개만 다시 계획하라. '
             prompt = (planning_rules() + '\n문제가 있는 N 한 개만 수정하라. 대사나 다른 항목은 수정하지 마라. '
-                      '문장은 한 글자도 바꾸지 말고 덮개만 다시 계획하라. 지정 화면의 미사용 앞뒤 부분, 같은 사건 support, 같은 씬 미사용 반응 화면 순으로 확보하라. 그래도 부족하면 내용에 맞는 뒤 대사 화면을 한 번 재사용하라. 정지·슬로우 금지. '
+                      + sentence_rule + '지정한 화면이 짧으면 코드가 같은 씬 안에서 앞뒤 인접 화면을 이어 붙이고 컷을 쌓아 준다 — '
+                      '문장이 말하는 행동이 실제로 보이는 화면을 고르는 데 집중하라. 지정 화면의 미사용 앞뒤 부분, 같은 사건 support, 같은 씬 미사용 반응 화면 순으로 확보하라. 그래도 부족하면 내용에 맞는 뒤 대사 화면을 한 번 재사용하라. 정지·슬로우 금지. '
                       '검사를 피하려 action을 evaluation으로 이름만 바꾸지 마라. '
                       'JSON {text: string, production_plan: object}.\n'
                       f'대본: {version["items"]}\n대상: {candidate}\n실패 이력: {history}\n사용 가능한 화면(아래 span_id만 사용): {material}\n'
@@ -355,6 +543,8 @@ def enforce_joint_plans(job, gemini, version, index, transcript, exclude=()):
             if not isinstance(raw, dict) or not isinstance(raw.get('text'), str) or not raw['text'].strip():
                 continue
             candidate = dict(item, production_plan=raw.get('production_plan'))
+            if contradiction_retry or budget_retry:
+                candidate['text'] = raw['text'].strip()
 
 
 def validate_cover_selection(plan, ids):

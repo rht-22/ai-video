@@ -131,6 +131,23 @@ def test_finish_bundle_preserves_grid_output_frame_after_speed_rounding():
     assert finish.assemble.clip_len(plan["timeline"][0]) == pytest.approx(5/3)
 
 
+def test_cover_speed_one_is_canonical_after_float_quantizing():
+    # Decimal source timestamps can make the ratio a few ulps smaller than
+    # one.  That is not an intentional slow-down and must not trip the v3
+    # renderer's [1.0, 1.2] validation.
+    candidates = {
+        "sp0": {**fact("sp0"), "t_in": 0.0, "t_out": 1.099999999999},
+    }
+    cuts = gt.assemble_cover(["sp0"], candidates, 1.1)
+    assert cuts[0]["playback_speed"] == 1.0
+    table = {"version": {"n": 1, "title": "t"}, "rows": [{
+        "mode": "N", "text": "x", "dur": cuts[0]["dur"], "tts": "/tmp/x.mp3",
+        "cuts": cuts,
+    }]}
+    plan, _, _, _ = finish.bundle(table, {}, title="t")
+    assert "playback_speed" not in plan["timeline"][0]
+
+
 def test_same_scene_candidates_do_not_leak_to_middle_scene():
     rows = [{"mode": "S", "cuts": [{"in": 0., "out": 1.}]},
             {"mode": "N", "cuts": []}, {"mode": "S", "cuts": [{"in": 9., "out": 10.}]}]
@@ -582,14 +599,21 @@ def test_adjacent_action_reclaims_only_optional_tail_without_losing_audio():
 
 
 @pytest.mark.parametrize('word_end,action_end', [(3247.2, 3247.9), (3246.58, 3247.0)])
-def test_action_boundary_does_not_hide_real_conflicts(word_end, action_end):
+def test_action_boundary_joins_overlapping_reaction_after_protected_words(word_end, action_end):
+    """2026-09-17 사용자 결정: 앞 대사와 겹친다고 반응 장면이 잘리거나 편이 실패하면 안 된다(종전 판은 이 두 경우를
+    '진짜 충돌'로 남겨 조립을 실패시켰다). 대사의 STT 단어 구간(protected_end)은 그대로 두고 그 뒤부터 A 가 이어받는다 —
+    꼬리가 짧아도, 반응이 발성 안에 통째로 들어 있어도(발성 끝 뒤 0.3s 이어 줌)."""
     transcript = {'lines': [{'id': 'L', 'word_i': [0], 'text': '대사'}],
                   'words': [{'start': 3246.06, 'end': word_end}]}
     rows = [{'i': 1, 'mode': 'S', 'src': ['L'], 'cuts': [{'in': 3246.01, 'out': 3247.48}]},
             {'i': 2, 'mode': 'A', 'cuts': [{'in': 3246.58, 'out': action_end}]}]
-    before = copy.deepcopy(rows)
-    assert gt.share_adjacent_action_boundary(rows, transcript) == []
-    assert rows == before
+    from app.tikitaka.timing import bind_dialogue
+    protected_end = bind_dialogue({'L': transcript['lines'][0]}, transcript['words'], ['L'])['end']
+    notes = gt.share_adjacent_action_boundary(rows, transcript)
+    assert len(notes) == 1
+    s, a = rows[0]['cuts'][0], rows[1]['cuts'][0]
+    assert s['out'] == a['in'] >= protected_end                      # 대사 단어는 한 글자도 안 잘린다
+    assert a['out'] - a['in'] >= 1 / gt.FPS - 1e-7                   # 반응 행은 사라지지 않는다
 
 
 def test_failed_narration_fit_reselects_and_preserves_original_row(tmp_path, monkeypatch):
@@ -694,3 +718,15 @@ def test_short_cover_never_rewrites_or_resynthesizes_narration(tmp_path, monkeyp
         gt.fit_before_dialogue(job, Model(), n, {}, [], voice='ko_female', speed='normal',
                                key='no-shortening', budget_sec=.5, placement=placement)
     assert n == original
+
+
+def test_assemble_cover_joins_adjacent_short_pieces_into_one_shot():
+    """가왕쇼 10화(2026-09-17): 0.5s 조각도 이웃과 이어지면 한 샷. 홀로 짧은 조각만 버린다."""
+    cands = {'sp0': {'t_in': 0.0, 't_out': 0.5, 'scene_script': 'a'},
+             'sp1': {'t_in': 0.5, 't_out': 1.0, 'scene_script': 'b'},
+             'sp9': {'t_in': 7.0, 't_out': 7.4, 'scene_script': 'z'}}
+    cuts = gt.assemble_cover(['sp0', 'sp1'], cands, 0.9)
+    assert sum(c['dur'] for c in cuts) >= 0.9 - 1e-6
+    assert cuts[0]['span_ids'] == ['sp0', 'sp1'] and cuts[0]['src'] == 'sp0'
+    with pytest.raises(gt.CoverDurationError):
+        gt.assemble_cover(['sp9'], cands, 0.3)
