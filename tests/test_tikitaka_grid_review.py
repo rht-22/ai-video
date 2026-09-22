@@ -730,3 +730,48 @@ def test_assemble_cover_joins_adjacent_short_pieces_into_one_shot():
     assert cuts[0]['span_ids'] == ['sp0', 'sp1'] and cuts[0]['src'] == 'sp0'
     with pytest.raises(gt.CoverDurationError):
         gt.assemble_cover(['sp9'], cands, 0.3)
+
+
+def test_visual_preview_is_separate_and_strict_blocks_before_final_render(tmp_path,monkeypatch):
+    from app.tikitaka import visual_edit as ve
+    job,grid,index,table=fixtures(tmp_path)
+    job.save('picture_area.json',{'x':0,'y':0,'w':640,'h':360})
+    monkeypatch.setattr(finish,'render_draft',lambda video,tl,out,resources,**kw:out.write_bytes(b'draft'))
+    monkeypatch.setattr(finish.watch_trim,'run_watch_trim',lambda *a,**kw:([],{}))
+    monkeypatch.setattr(finish.stage4,'run_style',lambda *a,**kw:({'design':kw['preset'],'v3_style':{}},{}))
+    monkeypatch.setattr(ve,'scan',lambda *a:[.2])
+    calls=[]
+    def render(**kw):
+        calls.append(1);out=kw['output_dir']/'final_1080x1920.mp4';out.write_bytes(b'preview');return out,{}
+    monkeypatch.setattr(finish.finalize,'render_final',render)
+    monkeypatch.setattr(finish,'validate_media',lambda *a:{'mock':True})
+    # Original export remains untouched, and absent crop analysis is also pending.
+    job.path('shorts_v1.mp4').write_bytes(b'approved original')
+    preview=finish.run(job,table,grid,index,get_gemini=lambda:None,visual_edit='preview')
+    assert preview.name=='shorts_v1_visual_preview.mp4' and len(calls)==1
+    assert job.path('shorts_v1.mp4').read_bytes()==b'approved original'
+    assert job.load('review_v1.json')['preview_only']
+    with pytest.raises(ValueError,match='시각 편집 검토 필요'):
+        finish.run(job,table,grid,index,get_gemini=lambda:None,visual_edit='strict')
+    assert len(calls)==1 and job.has('review_v1/visual_review.md')
+
+
+def test_strict_blocks_export_on_rendered_face_warning(tmp_path,monkeypatch):
+    from app.tikitaka import visual_edit as ve
+    job,grid,index,table=fixtures(tmp_path)
+    table['rows'][2]['cuts'][0]['reframe']={'mode':'fixed','x':320}
+    job.save('picture_area.json',{'x':0,'y':0,'w':640,'h':360})
+    monkeypatch.setattr(finish,'render_draft',lambda video,tl,out,resources,**kw:out.write_bytes(b'draft'))
+    monkeypatch.setattr(finish.watch_trim,'run_watch_trim',lambda *a,**kw:([],{}))
+    monkeypatch.setattr(finish.stage4,'run_style',lambda *a,**kw:({'design':kw['preset'],'v3_style':{}},{}))
+    monkeypatch.setattr(ve,'scan',lambda *a:[])
+    def render(**kw):
+        out=kw['output_dir']/'final_1080x1920.mp4';out.write_bytes(b'inspection')
+        return out,{'edge_faces':[{'start':3,'end':3,'side':'left','max_cut':.5,'box':[0,400,200,600]}]}
+    monkeypatch.setattr(finish.finalize,'render_final',render)
+    monkeypatch.setattr(finish,'validate_media',lambda *a:{'mock':True})
+    with pytest.raises(ValueError,match='시각 편집 검토 필요'):
+        finish.run(job,table,grid,index,get_gemini=lambda:None,visual_edit='strict')
+    assert not job.has('shorts_v1.mp4')
+    report=job.load('review_v1/visual_edit.json')
+    assert report['review_items'][0]['kind']=='face_safe' and report['blocked']

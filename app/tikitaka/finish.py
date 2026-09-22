@@ -196,7 +196,7 @@ def label_facts(timeline, facts):
 
 def run(job, table, grid, index, *, get_gemini, design=None, redo=False, force_render=False,
         force_style=False, exclude=(), tag="", split_narration=False, subtitle_skip_singing=False,
-        style_preset="drama_clip"):
+        style_preset="drama_clip", get_cover_gemini=None, visual_edit="off"):
     n = table["version"]["n"]
     suffix = f"v{n}{'_'+tag if tag else ''}"
     work = Job(job.source.resolve(), job.path(f"review_{suffix}").resolve(), job.title)
@@ -248,7 +248,8 @@ def run(job, table, grid, index, *, get_gemini, design=None, redo=False, force_r
         audit = prior["audit"]
         work.log("[review] 같은 편의 재관찰 결과 재사용")
     else:
-        plan, story, segments, resources = initial
+        # Keep the authoritative manual reframes intact for the reapply pass.
+        plan, story, segments, resources = copy.deepcopy(initial)
         validate_bundle(plan, grid, segments, resources, exclude=exclude)
         draft = work.path("draft_480.mp4")
         if prior.get("fingerprint") != input_fp or not draft.exists() or redo:
@@ -292,6 +293,21 @@ def run(job, table, grid, index, *, get_gemini, design=None, redo=False, force_r
                          and x["clip_end_sec"] >= c["clip_end_sec"]-1e-6), None)
         if original and original.get("reframe"):
             c["reframe"] = copy.deepcopy(original["reframe"])
+    visual_audit = None
+    if visual_edit != "off":
+        if visual_edit not in {"preview", "strict"}:
+            raise ValueError("visual_edit must be off, preview or strict")
+        from app.tikitaka.visual_edit import run as edit_visuals
+        evidence = {x["span_id"] for row in table["rows"]
+                    for x in (row.get("production_plan") or {}).get("cover", [])
+                    if x.get("role") == "evidence"}
+        plan, segments, resources, visual_audit = edit_visuals(
+            job, plan, segments, resources, grid, blocked=exclude, protected_spans=evidence)
+        work.save("visual_edit.json", visual_audit)
+        validate_bundle(plan, grid, segments, resources, exclude=exclude)
+        # Style must see the edited draft, with its new frame clock. Shared source
+        # records stay on disk; no episode-wide shot table is sent to the model.
+        render_draft(job.source, plan["timeline"], work.path("draft_visual.mp4"), resources, log=work.log)
     if split_narration:
         from app.tikitaka.subtitles import narration_captions
         resources["tts_caption_segments"] = narration_captions(job, resources)
@@ -315,11 +331,41 @@ def run(job, table, grid, index, *, get_gemini, design=None, redo=False, force_r
             else:
                 windows.append({"beat": c["beat"], "start": off, "end": z})
             off = z
-        style_doc, style_audit = stage4.run_style(get_gemini(), work.path("draft_480.mp4"), story,
+        style_doc, style_audit = stage4.run_style(get_gemini(), work.path("draft_visual.mp4" if visual_audit is not None else "draft_480.mp4"), story,
             preset=preset, windows=windows, labels=[], dialogue=segments, duration=off,
             band=finalize.video_band_ratio(finalize.design_from_style(preset)), timeline=plan["timeline"],
             label_facts=label_facts(plan["timeline"], index["grid_facts"]), log=work.log)
         work.save("checkpoint_style.json", {"fingerprint": style_fp, "style": style_doc, "audit": style_audit})
+    if get_cover_gemini is not None:
+        from app.tikitaka.cover_framing import apply as frame_covers
+        from app.v3.narration_framing import resolve as resolve_frame
+        probe = work.load("checkpoint_probe.json")
+        geo = finalize.band_crop_size(preset["aspect_ratio"], (probe["width"], probe["height"]), probe.get("picture"))
+        info_clips = ((style_doc.get("v3_style") or {}).get("fits") or []) if visual_audit is not None else []
+        plan, framing_audit = frame_covers(work, plan, story, get_gemini=get_cover_gemini,
+            enabled=design.get("face_tracking", True), include_clips=info_clips,
+            crop_width_ratio=round(geo[0]/probe["width"], 3) if geo else None)
+        work.record_step("cover_framing", **framing_audit)
+        framing_issues = []
+        for i, c in enumerate(plan["timeline"]):
+            if c.get("narration_framing"):
+                resolved = resolve_frame(c["narration_framing"], src_size=(probe["width"], probe["height"]),
+                    picture=probe.get("picture"), aspect_ratio=preset["aspect_ratio"], band_width=design.get("video_width") or 1080)
+                if resolved["mode"] != "focus":
+                    framing_issues.append({"clip": i, "reason": resolved["reason"]})
+        work.save("framing_issues.json", framing_issues)
+        if visual_audit is not None:
+            visual_audit["framing_issues"] = framing_issues
+        work.save("edit_plan.json", plan)
+    if visual_audit is not None:
+        from app.tikitaka.visual_edit import review as review_visuals
+        # Disabling analysis is not evidence of a safe crop. Manual reframes are
+        # intentional, but unobserved automatic cover/info crops need review.
+        info_clips = (style_doc.get("v3_style") or {}).get("fits") or []
+        visual_audit.setdefault("framing_issues", []).extend(
+            {"clip": i, "reason": "구도 검사 미실행"} for i, c in enumerate(plan["timeline"])
+            if (c.get("cover") or i in info_clips) and not c.get("reframe") and not c.get("narration_framing"))
+        visual_audit = review_visuals(work, plan, visual_audit, mode=visual_edit)
     assets = [(k, hashlib.sha256(Path(v).read_bytes()).hexdigest()) for k,v in design.items()
               if k in {"work_value", "platform_image", "title_font", "subtitle_font"}
               and isinstance(v, str) and Path(v).is_file()]
@@ -333,6 +379,21 @@ def run(job, table, grid, index, *, get_gemini, design=None, redo=False, force_r
             segments=segments, resources=resources, story_doc=story, output_dir=work.out_dir,
             channel_design=design, muted_gain_db=None, style_preset=style_preset, log=work.log)
         work.record_step("render", **render_audit)
+        if visual_audit is not None:
+            work.save("visual_render_checks.json", {"fingerprint": render_fp,
+                "edge_faces": render_audit.get("edge_faces", []),
+                "edge_faces_error": render_audit.get("edge_faces_error")})
+    if visual_audit is not None:
+        checks = work.load("visual_render_checks.json") if work.has("visual_render_checks.json") else {}
+        visual_audit["render_issues"] = [{"kind": "face_safe", "time": [e["start"], e["end"]],
+            "reason": f"얼굴이 폰 가장자리 잘림 영역에 걸림 ({e['side']}, {e['max_cut']:.0%})",
+            "box": e["box"], "render_fingerprint": render_fp} for e in checks.get("edge_faces", [])]
+        if checks.get("fingerprint") != render_fp or checks.get("edge_faces_error"):
+            visual_audit["render_issues"].append({"kind": "face_safe", "time": [0, 0],
+                "reason": "렌더 후 얼굴 안전 영역 점검 실패/기록 없음", "render_fingerprint": render_fp})
+        # A rendered inspection file may exist; unresolved face warnings must not
+        # become an exported final or receive publish metadata.
+        visual_audit = review_visuals(work, plan, visual_audit, mode=visual_edit)
     validation = validate_bundle(plan, grid, segments, resources, exclude=exclude)
     validation["media"] = validate_media(final, validation["duration_sec"])
     work.save("render_fingerprint.json", {"fingerprint": render_fp})
@@ -343,9 +404,10 @@ def run(job, table, grid, index, *, get_gemini, design=None, redo=False, force_r
     if audit.get("error"):
         issues.append({"kind": "watch_trim", "detail": audit["error"]})
     review = {"schema": SCHEMA, "items": issues, "watch_trim": audit, "validation": validation,
+              "visual_edit": visual_audit, "preview_only": visual_edit == "preview",
               "output": str(final), "render_fingerprint": render_fp}
     work.save("review.json", review); job.save(f"review_{suffix}.json", review)
-    output = job.path(f"shorts_{suffix}.mp4")
+    output = job.path(f"shorts_{suffix}{'_visual_preview' if visual_edit == 'preview' else ''}.mp4")
     temp = output.with_suffix(".tmp.mp4")
     shutil.copy2(final, temp); os.replace(temp, output)
     job.record_step(f"review_{suffix}", **validation, review=str(work.path("review.json")))

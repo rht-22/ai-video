@@ -76,12 +76,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-voice-check", action="store_true", help="3.5단계 목소리(diarize) 기준 화자 대조를 건너뛴다")
     ap.add_argument("--no-verify", action="store_true", help="4.5단계 영상 확인 패스를 건너뛴다(텍스트 리빌딩 버전 그대로)")
     ap.add_argument("--cover-cut-guard", action="store_true", help="덮개 컷 경계 정밀 검사·수정(시험 옵션). TTS 길이 고정, 미해결 덮개는 렌더 차단")
+    ap.add_argument("--visual-edit", choices=("off", "preview", "strict"), default="off",
+                    help="샷 단위 시각 편집·가로 축소 금지. strict는 미해결 대사/구도 검토가 있으면 발행 렌더 차단")
     ap.add_argument("--redo", default="", help="다시 만들 단계(쉼표): research,transcribe,polish,index,digest,rebuild,verify,agentic,table,review,style,render. grid-review의 render는 관찰/연출을 재사용")
     ap.add_argument("--no-digest", action="store_true", help="3.7단계 작품 이해 문서(digest)를 만들지 않는다(종전 프롬프트)")
     ap.add_argument("--until", default="render", choices=("research", "transcribe", "polish", "index", "digest", "rebuild", "verify", "table", "render"))
     a = ap.parse_args(argv)
     if a.cover_cut_guard and a.pipeline != "grid-review":
         ap.error("--cover-cut-guard는 grid-review 전용입니다")
+    if a.visual_edit != "off" and a.pipeline != "grid-review":
+        ap.error("--visual-edit는 grid-review 전용입니다")
     if a.pipeline == "legacy" and a.layout is None:
         a.layout = "fill"
     from app.tikitaka import research as research_module
@@ -146,10 +150,6 @@ def main(argv: list[str] | None = None) -> int:
         guide = dict(guide or {"files": [], "avoid": [], "text": ""})
         guide["text"] += "\n채널 편집 지침:\n" + json.dumps(preset["editorial"], ensure_ascii=False)
         guide["sha"] = fingerprint([guide.get("sha"), preset["editorial"]])
-    logo = Path(a.logo) if a.logo else (Path(guide["logo"]) if guide and guide.get("logo") else None)
-    copy_text = a.copy if a.copy is not None else ((guide or {}).get("copy") or None)
-    copy_pos = a.copy_pos or (guide or {}).get("copy_pos") or "below"
-    if guide:
     if preset and a.pipeline == "grid-review":
         # 제목 줄당 글자 수 — 채널 템플릿의 제목 폰트·상한 크기에서 계산해 제목 프롬프트에 **처음부터** 싣는다(v3 와 같은 자).
         from app.tikitaka.grid import fingerprint
@@ -159,6 +159,10 @@ def main(argv: list[str] | None = None) -> int:
             guide = dict(guide or {"files": [], "avoid": [], "text": ""})
             guide["title_fit"] = title_fit
             guide["sha"] = fingerprint([guide.get("sha"), "title_fit", Path(title_fit["font"] or "").name, title_fit["sizes"]])
+    logo = Path(a.logo) if a.logo else (Path(guide["logo"]) if guide and guide.get("logo") else None)
+    copy_text = a.copy if a.copy is not None else ((guide or {}).get("copy") or None)
+    copy_pos = a.copy_pos or (guide or {}).get("copy_pos") or "below"
+    if guide:
         job.log(f"[guide] 제작 가이드 {len(guide['files'])}개 로드({guide['sha']}) — 지양 단어 {guide['avoid']} · 로고 {logo} · 카피 {copy_text!r}({copy_pos})")
         job.log("[guide]   " + " · ".join(guide["files"]))
     if logo and not logo.exists():
@@ -432,7 +436,10 @@ def main(argv: list[str] | None = None) -> int:
                        redo=bool(redo & {"review", "table"}), force_render="render" in redo,
                        force_style="style" in redo, exclude=exclude, tag=a.tag, split_narration=True,
                        subtitle_skip_singing=bool(preset and preset["options"].get("subtitle_skip_singing")),
-                       style_preset=a.style_preset)
+                       style_preset=a.style_preset, get_cover_gemini=lambda: gemini, visual_edit=a.visual_edit)
+            if a.visual_edit == "preview":
+                job.log("[visual-edit] 검토 미리보기 저장 — 발행 메타데이터 생성 안 함")
+                continue
             job.save(f"publish_v{n}{sfx}.json", {"title": table["version"]["title"], "work": a.title,
                 "episode": a.episode, "hashtags": (guide or {}).get("hashtags") or [], "copy": copy_text,
                 "review": f"review_v{n}{sfx}.json", "pipeline": "grid-review",

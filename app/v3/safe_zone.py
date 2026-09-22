@@ -67,7 +67,8 @@ def edge_cut_ratio(x0: float, x1: float, *, canvas_w: int = 1080) -> float:
 
 
 def edge_faces_in_video(video_path: Path, band_top: int, band_bottom: int, *,
-                        fps: float = EDGE_FACE_FPS, canvas_w: int = 1080, canvas_h: int = 1920
+                        fps: float = EDGE_FACE_FPS, canvas_w: int = 1080, canvas_h: int = 1920,
+                        require_success: bool = False
                         ) -> list[dict]:
     """완성본을 fps 로 훑어 **밴드 안 인물 얼굴이 폰 잘림 가장자리에 걸린 구간**을 돌려준다.
 
@@ -80,6 +81,7 @@ def edge_faces_in_video(video_path: Path, band_top: int, band_bottom: int, *,
         from app.v3.label_faces import YUNET_PATH, _detect
         from app.modules.reframe import yunet_plausible
     except ImportError:
+        if require_success: raise
         return []
 
     def _faces(im):
@@ -105,14 +107,18 @@ def edge_faces_in_video(video_path: Path, band_top: int, band_bottom: int, *,
             ["ffmpeg", "-v", "error", "-i", str(video_path), "-vf", f"fps={fps},scale={hw}:{hh}",
              "-f", "rawvideo", "-pix_fmt", "bgr24", "-"], capture_output=True, check=True).stdout
     except Exception:  # noqa: BLE001
+        if require_success: raise
         return []
     frame_bytes = hw * hh * 3
+    if require_success and (not raw or len(raw) % frame_bytes):
+        raise ValueError("얼굴 점검용 프레임을 완전히 디코드하지 못함")
     hits: list[dict] = []
     for k in range(len(raw) // frame_bytes):
         im = np.frombuffer(raw[k * frame_bytes:(k + 1) * frame_bytes], dtype=np.uint8).reshape(hh, hw, 3)
         try:
             faces = _faces(im)
         except Exception:  # noqa: BLE001
+            if require_success: raise
             continue
         t = k / float(fps)
         for (x, y, w, h) in faces:

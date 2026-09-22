@@ -1699,7 +1699,10 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     render_tl, _zoom_by_idx, _p2r = apply_zoom_splits(plan["timeline"], _v3s.get("zooms") or [],
                                                       plan.get("source_fps"))
     _fit_render_idx: set[int] = set()
-    for _p in (_v3s.get("fits") or []):
+    _fill_only = bool((plan.get("visual_policy") or {}).get("fill_only"))
+    if _fill_only and _v3s.get("fits"):
+        log("  [v3/시각편집] 자료 화면 포함 가로 전체 축소 금지 — 저장된 핵심 영역 크롭 사용")
+    for _p in ([] if _fill_only else (_v3s.get("fits") or [])):
         for _ri in _p2r.get(int(_p), []):
             _fit_render_idx.add(_ri)
     if _zoom_by_idx or _fit_render_idx:
@@ -2135,6 +2138,15 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
             edit_fx_audit = {"zooms": zoomed, "fits": fitted,
                              "emphasis": [{"index": e.get("index"), "text": e.get("text"), "scale": e.get("scale"),
                                            "color": e.get("color")} for e in _v3s.get("emphasis") or []]}
+    # Narration targets are selected from narration + uncropped source, never mouth motion.
+    # Apply after automatic zooms so they cannot crop away the selected action/person.
+    _narration_framing_audit = []
+    if getattr(design, "enable_reframe", True) and any(c.get("narration_framing") for c in render_tl):
+        from app.v3.narration_framing import apply as _apply_narration_framing
+        _probe = json.loads((output_dir / "checkpoint_probe.json").read_text(encoding="utf-8"))
+        _narration_framing_audit = _apply_narration_framing(
+            render_tl, clips, crop_map, output_dir=output_dir,
+            src_size=(int(_probe["width"]), int(_probe["height"])), picture=picture, design=design, log=log)
     # 내레이션 시작 효과음 — cue 와 같은 믹스 경로(E19-5 sfx_audio)를 탄다.
     # 번들에 narration_manifest.json 이 없으면 빈 리스트라 RenderInputs 도 필터그래프도
     # 종전과 완전히 같다. 자리는 cue_files 가 확정된 뒤(존재하는 파일만 남은 목록) —
@@ -2262,9 +2274,12 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
     # 고치는 건 사람 몫(손편집 비트 crop_x · 컷 선택) — 엔진은 자동으로 크롭을 옮기지 않는다.
     try:
         _edges = _sz.edge_faces_in_video(out_path, int(_geom.top), int(_geom.bottom),
-                                         canvas_w=config.canvas_width, canvas_h=config.canvas_height)
+                                         canvas_w=config.canvas_width, canvas_h=config.canvas_height,
+                                         **({"require_success": True} if _fill_only else {}))
     except Exception as _e:  # noqa: BLE001 — 점검은 안전장치, 렌더 결과는 그대로
         _edges = []
+        if _fill_only:
+            cost["edge_faces_error"] = str(_e)
         log(f"  [v3/안전구역] 인물 가장자리 점검 실패({_e}) — 건너뜀")
     if _edges:
         cost["edge_faces"] = _edges
@@ -2280,6 +2295,8 @@ def render_final(*, video_path: Path, plan: dict, style_doc: dict,
         cost["speaker_tracking"] = {"detector": (channel_design or {}).get("face_detector") or FACE_DETECTOR_DEFAULT,
                                     "mode": "pan" if str((channel_design or {}).get("speaker_tracking") or "").lower() == "pan" else "hold",
                                     "clips": speaker_audit}            # 갭 12: 켠 실행만
+    if _narration_framing_audit:
+        cost["narration_framing"] = _narration_framing_audit
     if edit_fx_audit or _emph:
         cost["edit_fx"] = {**edit_fx_audit, "emphasis_lines": len(_emph)}   # 2026-09-08: 있을 때만
     if _label_face_records:
