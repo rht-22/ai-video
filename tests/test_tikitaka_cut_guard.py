@@ -162,3 +162,10 @@ def test_cli_records_unresolved_covers_instead_of_blocking_render():
     src = (Path(__file__).resolve().parents[1] / "app" / "tikitaka" / "cli.py").read_text(encoding="utf-8")
     assert "컷 검사 미해결 덮개" not in src
     assert 'record_step("cut_guard_unresolved"' in src and "[cut-guard] ⚠" in src
+
+
+def test_finish_recheck_uses_pad_stripped_narration_guards():
+    """absorb_slivers 와 같은 창으로 재검사 — 패드 안으로 들어간 흡수가 편을 죽이지 않는다(2026-09-22 fast11pov v1·v2)."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app" / "tikitaka" / "finish.py").read_text(encoding="utf-8")
+    assert 'if n == "내레이션 창"' in src and "watch_trim.GUARD_PAD_SEC" in src

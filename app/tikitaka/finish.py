@@ -127,7 +127,7 @@ def bundle(table, grid, *, title):
                     if z > a:
                         segments.append({"start_sec": offset+a-s, "end_sec": offset+z-s,
                                          "source_time_sec": a, "text": sub["text"],
-                                         "speaker": row.get("speaker") or "미상"})
+                                         "speaker": sub.get("speaker") or row.get("speaker") or "미상"})
             offset += dur
         if not ids:
             raise ValueError(f"row {row['i']}: no grid provenance")
@@ -182,7 +182,7 @@ def render_dependencies():
     root = Path(__file__).resolve().parents[1]
     paths = list((root / "v3").rglob("*.py")) + list((root / "modules").glob("*.py"))
     paths += list((root / "assets/sfx").glob("*"))
-    paths += [Path(__file__)]
+    paths += list(Path(__file__).parent.glob("*.py"))
     return fingerprint([(str(p.relative_to(root)), hashlib.sha256(p.read_bytes()).hexdigest())
                         for p in sorted(paths) if p.is_file()])
 
@@ -196,7 +196,7 @@ def label_facts(timeline, facts):
 
 def run(job, table, grid, index, *, get_gemini, design=None, redo=False, force_render=False,
         force_style=False, exclude=(), tag="", split_narration=False, subtitle_skip_singing=False,
-        style_preset="drama_clip", get_cover_gemini=None, visual_edit="off"):
+        style_preset="drama_clip", get_cover_gemini=None, visual_edit="off", cover_cut_guard=False):
     n = table["version"]["n"]
     suffix = f"v{n}{'_'+tag if tag else ''}"
     work = Job(job.source.resolve(), job.path(f"review_{suffix}").resolve(), job.title)
@@ -268,8 +268,11 @@ def run(job, table, grid, index, *, get_gemini, design=None, redo=False, force_r
         cuts = [c for c in cuts if c["end"] > c["start"]]
         cuts = watch_trim.absorb_slivers(cuts, plan["timeline"], guards)
         # Re-check cached/helper output against protected intervals before mutation.
+        # 2026-09-22: absorb_slivers 가 내레이션 창의 GUARD_PAD 를 벗기고 판정하므로(조각 흡수는 클립 경계까지만 — cue 본체는 못 건드린다)
+        # 재검사도 같은 창으로 — 패드 붙은 창으로 재면 흡수가 패드 안으로 들어갈 때마다 죽었다(로또 fast11pov v1·v2 · clip01 결함 ①).
+        body = [((a + watch_trim.GUARD_PAD_SEC, z - watch_trim.GUARD_PAD_SEC) if n == "내레이션 창" else (a, z)) for a, z, n in guards]
         for cut in cuts:
-            if overlap(cut["start"], cut["end"], [(a,z) for a,z,_ in guards]):
+            if overlap(cut["start"], cut["end"], [(a, z) for a, z in body if z > a]):
                 raise ValueError("review cut overlaps protected dialogue/TTS")
         if cuts:
             plan["timeline"] = watch_trim.apply_cuts_to_timeline(plan["timeline"], cuts, grid, set())
@@ -293,6 +296,21 @@ def run(job, table, grid, index, *, get_gemini, design=None, redo=False, force_r
                          and x["clip_end_sec"] >= c["clip_end_sec"]-1e-6), None)
         if original and original.get("reframe"):
             c["reframe"] = copy.deepcopy(original["reframe"])
+    if cover_cut_guard:
+        from app.v3.shot_framing import measure_boundaries, native_fps
+        from app.tikitaka.cut_guard import trim_dialogue_tails
+        boundaries = measure_boundaries(job.source, plan['timeline'],
+            cache_dir=work.path('shot_sources'), fps=native_fps(job.source))
+        transcript = job.load('transcript.json') if job.has('transcript.json') else {}
+        plan, segments, resources, tail_audit = trim_dialogue_tails(
+            plan, segments, resources, boundaries, transcript.get('words', []))
+        work.save('dialogue_tail_guard.json', tail_audit)
+        for r in tail_audit:
+            work.log(f"[cut-guard] 대사 뒤 다음 샷 제거 clip{r['clip']}: {r['source_before'][1]:.6f} → {r['source_after'][1]:.6f}")
+        if tail_audit:
+            render_draft(job.source, plan['timeline'], work.path('draft_tail_guard.mp4'), resources, log=work.log)
+    else:
+        tail_audit = []
     visual_audit = None
     if visual_edit != "off":
         if visual_edit not in {"preview", "strict"}:
@@ -331,7 +349,7 @@ def run(job, table, grid, index, *, get_gemini, design=None, redo=False, force_r
             else:
                 windows.append({"beat": c["beat"], "start": off, "end": z})
             off = z
-        style_doc, style_audit = stage4.run_style(get_gemini(), work.path("draft_visual.mp4" if visual_audit is not None else "draft_480.mp4"), story,
+        style_doc, style_audit = stage4.run_style(get_gemini(), work.path("draft_visual.mp4" if visual_audit is not None else "draft_tail_guard.mp4" if tail_audit else "draft_480.mp4"), story,
             preset=preset, windows=windows, labels=[], dialogue=segments, duration=off,
             band=finalize.video_band_ratio(finalize.design_from_style(preset)), timeline=plan["timeline"],
             label_facts=label_facts(plan["timeline"], index["grid_facts"]), log=work.log)
