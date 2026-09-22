@@ -308,3 +308,26 @@ def test_fingerprints_ignore_speaker_labels():
     assert script_fingerprint(va, [], {}, None, None, 60) == script_fingerprint(vb, [], {}, None, None, 60)
     assert digest_sha(index, tr_a, None) == digest_sha(index, tr_b, None) and digest_sha(index, tr_a, None) != digest_sha(index, tr_c, None)
     assert "speaker" not in speaker_neutral(tr_a)["lines"][0] and tr_a["lines"][0]["speaker"] == "양준호"   # 원본 불변
+
+
+def test_outline_context_reaches_step_two_without_a_gate():
+    """뼈대 `context`(처음 보는 사람을 위한 맥락, 2026-09-22 사용자 결정): 검사는 없고 — 걸음 ② 프롬프트 머리에 실리고, 그 장면의
+    화면이 표에 들어오고, 작품 이해는 편의 장면으로 좁히지 않는다. 비어 있어도 통과하고 프롬프트는 종전과 같다."""
+    index, tr, _ = material()
+    raw = outline_raw()
+    raw["versions"][0]["items"] = [{"type": "S", "line_ids": ["L-002"]}, {"type": "S", "line_ids": ["L-003"]}]   # SC-001 만 쓰는 편
+    raw["versions"][0]["context"] = {"why": "13억이 생긴 뒤 처음으로 화를 내기로 한 날이다", "scene_ids": ["SC-002", "SC-999", "SC-001", "SC-002"],
+                                     "how": "훅 직후 한 줄 + 복권 화면"}
+    v = st.normalize_outline(raw, index, tr)["versions"][0]
+    assert v["context"]["scene_ids"] == ["SC-002", "SC-001"] and any("SC-999" in i for i in v["issues"])   # 없는 장면만 빼고 상한 2
+    assert st.scope_scenes(v, index, tr) == ["SC-001", "SC-002"]                                              # 맥락 장면의 화면이 표에 들어온다
+    digest = {"characters": [{"name": "공은태", "role": "팀장", "wants": "", "why": ""}],
+              "scene_notes": [{"id": "SC-002", "what": "세탁소에서 화를 못 낸다", "why": "습관", "sets_up": "참기를 멈춘다"}]}
+    p = st.narration_prompt(v, index, tr, [], title="작품", episode="1화", guide=None, digest=digest, scenes=["SC-001"])
+    assert "이 편의 맥락(처음 보는 사람이 알아야 할 이유): 13억이 생긴 뒤" in p and "보이는 장면: SC-002, SC-001 · 알리는 법: 훅 직후" in p
+    assert "세탁소에서 화를 못 낸다" in p                                                                   # 회차 전체 동기 — 편 밖 장면도
+    assert "**맥락**" in p and "편집실" in st.OUTLINE_RULES and '"context"' in st.OUTLINE_OUTPUT
+    # 비어 있으면: 반려 없음 · 머리 줄 없음 · 지문은 맥락 유무로 갈린다
+    v2 = st.normalize_outline(outline_raw(), index, tr)["versions"][0]
+    assert v2["context"] == {"why": "", "scene_ids": [], "how": ""} and st.context_block(v2["context"]) == ""
+    assert st.script_fingerprint(v, [], {}, None, None, 60) != st.script_fingerprint(dict(v, context=v2["context"]), [], {}, None, None, 60)

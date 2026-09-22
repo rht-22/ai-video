@@ -35,13 +35,14 @@ from app.tikitaka.prompts import REBUILD_PROMPT
 from app.tikitaka.timing import narration_plan_sec, bind_dialogue
 from app.tikitaka.title import title_prompt
 
-SCHEMA = "tikitaka_staged/v3"
+SCHEMA = "tikitaka_staged/v4"   # v4: 뼈대 `context`(처음 보는 사람을 위한 맥락) + 걸음 ② 회차 전체 동기
 SA_SHARE = (0.5, 0.75)           # 뼈대의 대사·현장음 합계가 목표 길이에서 차지할 몫 — 나머지는 걸음 ② 의 내레이션(종전 대본 실측 N 비중 30~60%)
 JUMP_SEC = 5.0                   # 이 이상 건너뛰거나 장면이 바뀌거나 되감으면 '이어야 하는 자리'(v3 human-flow compute_jumps 와 같은 값)
 NAR_COUNT_HINT = (3, 7)          # 편당 내레이션 개수 안내(공감형은 0~3)
 EYE_MIN_IMPORTANCE = 4           # 눈길 끄는 화면 · ★ 기준(v3 HOOK_COVER_MIN_IMPORTANCE 와 같은 값)
 EYE_JOIN_GAP_SEC = 0.6           # 눈길 끄는 화면 묶기 — production.COVER_JOIN_GAP_SEC 와 같은 값
-SCOPE_NEIGHBOR_SCENES = 0        # 걸음 ② 화면 표: 그 편이 쓰는 장면만(1차 실측: 이웃까지 실으면 편당 2만~5만 자)
+SCOPE_NEIGHBOR_SCENES = 0        # 걸음 ② 화면 표: 그 편이 쓰는 장면만(1차 실측: 이웃까지 실으면 편당 2만~5만 자) + 뼈대 context 의 장면
+CONTEXT_MAX_SCENES = 2           # context.scene_ids 상한 — 맥락 장면이 많아지면 화면 표가 다시 부푼다
 NAR_MIN_CHARS, NAR_MAX_CHARS = 4, 34   # 공백 제외. 프롬프트는 8~30자를 말하고 코드는 여유를 둔다
 REASK_MAX = 2                    # 걸음 ①·② 형식 위반 재질의 횟수
 OPENING_SEC = 3.0
@@ -82,6 +83,12 @@ OUTLINE_RULES = """## [이번 걸음: 뼈대만 짠다 — 내레이션은 자�
   서 있기·걷기·뒷모습·풍경으로 열지 마라. 내레이션으로 여는 편이면 `hook.with` 에 "N" 이라고만 적는다(문장은 다음 걸음).
   `hook.why` 에 무엇으로 여는지와 왜 센지 적는다.
 - A 는 원본에서 **맞닿은** 순간을 묶어 한 덩어리로 쓸 수 있다(`moment_ids` — 3초짜리 화면 훅). 떨어진 순간은 별도 A 로.
+- **맥락(`context`) — 이 쇼츠로 이 작품을 처음 접하는 사람도 이 편의 사건이 왜 일어나는지 알아야 한다.** 이 편의 장면 안에서는
+  안 보이는 이유(회차 앞쪽의 사건·인물의 변화 — [작품 이해]의 줄기·전환점·장면별 동기에서 찾는다)가 있으면 `context.why` 에 그 사실을
+  한두 문장으로 적고, 그 이유가 **보이는 장면**(1~{context_max}개, SC id)을 `context.scene_ids` 에 적는다. 다음 걸음이 그 장면의 화면을
+  받아 내레이션 한 줄로 깔거나 화면을 몇 초 쓴다 — 짧은 조각을 여럿 끼우는 게 아니라 **한 자리에서 확실히** 알리는 방식이다.
+  `context.how` 에 어느 자리에서 어떻게 알릴지 한 줄(예: "훅 직후 내레이션 한 줄 + 복권 화면 3초"). 이 편 안에서 이유가 다 보이면
+  `why` 를 비운다. 검사는 없다 — 편집실이 본다.
 """
 
 OUTLINE_VOCAB = """## 항목(items) 어휘 — **타임코드를 쓰지 마라. ID 로만 가리킨다.**
@@ -94,6 +101,7 @@ OUTLINE_OUTPUT = """## 출력 JSON (하나만, 코드블록 금지)
 {{"versions": [
   {{"n": 1, "strategy": "<고른 포맷 이름 또는 자연 흐름>", "title": {{"line1": "상황·조건", "line2": "핵심 행동·반응"}}, "structure": "⑤하이라이트 → ②리액션 → ①발단 …",
     "hook": {{"with": "S|A|N", "why": "첫 3초가 왜 센가(화면·대사 근거)"}},
+    "context": {{"why": "이 편 밖에 있는 사건의 이유(처음 보는 사람이 알아야 할 것) — 없으면 빈 문자열", "scene_ids": ["SC-018"], "how": "어느 자리에서 어떻게 알릴지 한 줄"}},
     "items": [ … ],
     "analysis": {{"grade": "매우 안전|안전|보통", "viral_point": "…", "comment": "…"}} }},
   … {n_versions}개 …],
@@ -105,7 +113,7 @@ NARRATION_HEAD = """# 📜 티키타카 스크립트 리빌딩 — 걸음 ② �
 ## [System Role]
 너는 이미 짜인 쇼츠 뼈대(대사·현장음의 순서)에 **접착용 티키타카 내레이션**을 써 넣는 작가이자 편집자다. 작품 「{title}」 {episode}.
 이번에 쓰는 편: 버전 {n} · 포맷 {strategy} · 제목 "{title_text}" · 구조 {structure}
-이 편의 훅: {hook}{guide}{digest}
+이 편의 훅: {hook}{context}{guide}{digest}
 
 ## 할 일 — 내레이션을 **어디에 넣을지**부터 정하고, 화면을 고르고, 문장을 쓴다
 1. [편성표]는 대사(S)·현장음(A)의 순서다. 내레이션은 **어느 항목 앞에든** 넣을 수 있다 — 원본에서 바로 붙은 질문과 대답 사이에도
@@ -121,6 +129,9 @@ NARRATION_HEAD = """# 📜 티키타카 스크립트 리빌딩 — 걸음 ② �
    휴대폰)을 주어로 써라.
 - **길이**: 문장은 즉시 합성해 길이를 잰다(대략 공백 제외 글자수÷{cps:g}초). 고른 화면의 「묶음」 길이 안에 들어야 한다. 묶음 = 같은 장면에서
   그 조각과 맞닿아 이어 쓸 수 있는 화면의 총 길이(코드가 앞뒤로 이어 붙인다). 묶음이 짧으면 문장을 줄이거나 화면을 {max_stack}컷까지 쌓아라.
+- **맥락**: 위 「이 편의 맥락」이 있으면 이 쇼츠로 작품을 처음 접하는 사람도 사건의 이유를 알게 **한 자리에서** 알린다 — 보통 훅 직후나
+  첫 `⚠ 이어야 하는 자리`. 그 장면의 화면이 [쓸 수 있는 화면]에 실려 있으니 거기서 고른다(화면 몇 초 + 한 줄, 또는 한 줄만). 회차 앞쪽의
+  사실을 말할 때는 [작품 이해]의 줄기·동기에 있는 것만. 짧은 조각을 여럿 끼우지 마라 — 정신없어지고 더 안 이어진다.
 - 이 편의 **첫 항목 앞**(before: 1)에 넣는 내레이션은 훅이다 — ★ 화면에서 고른다(서 있기·걷기·뒷모습·풍경 와이드 금지). ★ 는 첫 화면에만
   쓰는 기준이고 나머지 자리는 관련성·자연스러움이 먼저다.
 - `[이 편의 대사 화면]` 은 같은 화면이 두 번 나오게 되므로 피한다 — 그 사건의 화면이 정말 그것뿐일 때만.
@@ -276,7 +287,7 @@ def outline_prompt(*, title: str, episode_label: str, duration_label: str, scrip
     kw = dict(title=title, episode_label=episode_label, duration_label=duration_label, target_min=target_min, target_max=target_max,
               hard_max=int(MAX_SHORTS_SEC), material_note=material_note, guide=guide_block(guide), digest=digest_block(digest),
               seq_hook_rule=seq_hook_rule, n_versions=n_versions,
-              sa_min=int(target_min * SA_SHARE[0]), sa_max=int(target_max * SA_SHARE[1]))
+              sa_min=int(target_min * SA_SHARE[0]), sa_max=int(target_max * SA_SHARE[1]), context_max=CONTEXT_MAX_SCENES)
     parts = ["# 📜 티키타카 스크립트 리빌딩 — 걸음 ① 뼈대\n\n",
              _section("[System Role]").format(**kw), "\n", _section("입력").format(**kw), "\n",
              _section("[제1원칙").format(**kw), "\n", _section("[제2원칙").format(**kw), "\n",
@@ -332,14 +343,32 @@ def normalize_outline(raw: dict, index: dict, transcript: dict, *, avoid=None, e
                 items.append(it)
         n = int(v.get("n") or len(staged_raw["versions"]) + 1)
         hook = v.get("hook") if isinstance(v.get("hook"), dict) else {}
-        extra[n] = {"notes": notes, "hook": {"with": str(hook.get("with") or "")[:1].upper(), "why": str(hook.get("why") or "")[:160]}}
+        extra[n] = {"notes": notes, "hook": {"with": str(hook.get("with") or "")[:1].upper(), "why": str(hook.get("why") or "")[:160]},
+                    "context": normalize_context(v.get("context"), scenes, notes)}
         staged_raw["versions"].append(dict(v, n=n, items=items))
     data = validate_versions(staged_raw, index, transcript, avoid=avoid or [], exclude=exclude or [], seq_hook=seq_hook, copy_text=copy_text)
     for v in data["versions"]:
         v["issues"] += [f"[뼈대] {x}" for x in extra.get(v["n"], {}).get("notes", [])]
         v["hook"] = extra.get(v["n"], {}).get("hook") or {"with": "", "why": ""}
+        v["context"] = extra.get(v["n"], {}).get("context") or {"why": "", "scene_ids": [], "how": ""}
         v["script_flow"] = "staged"
     return data
+
+
+def normalize_context(raw, scenes: list[dict], notes: list[str]) -> dict:
+    """뼈대의 `context`(처음 보는 사람을 위한 맥락) — 모양만 다듬는다. 없는 장면 id 는 빼고 기록, 상한을 넘으면 앞에서 자른다.
+    **검사가 아니다**(사용자 결정 2026-09-22 — 거르는 건 편집실 몫): 비어 있어도 통과. 순수 — 테스트 대상."""
+    raw = raw if isinstance(raw, dict) else {}
+    known = {sc["id"] for sc in scenes}
+    ids = [str(x) for x in (raw.get("scene_ids") or []) if isinstance(raw.get("scene_ids"), list)]
+    missing = [x for x in ids if x not in known]
+    if missing:
+        notes.append(f"context.scene_ids 에 없는 장면 {missing} — 뺌")
+    kept = [x for x in ids if x in known]
+    if len(kept) > CONTEXT_MAX_SCENES:
+        notes.append(f"context.scene_ids {len(kept)}개 → 앞 {CONTEXT_MAX_SCENES}개만")
+        kept = kept[:CONTEXT_MAX_SCENES]
+    return {"why": str(raw.get("why") or "").strip()[:400], "scene_ids": kept, "how": str(raw.get("how") or "").strip()[:200]}
 
 
 # ── 걸음 ② 문장·화면 ─────────────────────────────────────────────────────────────
@@ -368,7 +397,8 @@ def outline_fingerprint(index: dict, transcript: dict, exclude, *, eye: str, gui
 def script_fingerprint(version: dict, table, voice, guide: dict | None, digest, target) -> str:
     """걸음 ② 캐시 지문 — 항목의 화자 표기는 빼고 센다. 순수 — 테스트 대상."""
     from app.tikitaka.grid import fingerprint
-    return fingerprint([SCHEMA, items_neutral(version["items"]), version["title"], table, voice, (guide or {}).get("sha"), bool(digest), target])
+    return fingerprint([SCHEMA, items_neutral(version["items"]), version["title"], table, voice, (guide or {}).get("sha"), bool(digest), target,
+                        version.get("context") or None])
 
 
 def item_windows(version: dict, index: dict, transcript: dict) -> list[tuple[float, float, str, int]]:
@@ -416,6 +446,8 @@ def scope_scenes(version: dict, index: dict, transcript: dict, *, neighbor: int 
                 ts.append((src["start"] + src["end"]) / 2)
     hit = {k for k, sc in enumerate(scenes) for t in ts if sc["start"] <= t < sc["end"]}
     wide = {j for k in hit for j in range(k - neighbor, k + neighbor + 1) if 0 <= j < len(scenes)}
+    ctx = set((version.get("context") or {}).get("scene_ids") or [])          # 뼈대가 정한 맥락 장면 — 그 화면이 표에 있어야 걸음 ② 가 깔 수 있다
+    wide |= {k for k, sc in enumerate(scenes) if sc["id"] in ctx}
     return [scenes[k]["id"] for k in sorted(wide)]
 
 
@@ -476,18 +508,26 @@ def lineup_block(version: dict, index: dict, transcript: dict) -> str:
     return "\n".join(out)
 
 
+def context_block(ctx: dict | None) -> str:
+    """걸음 ② 머리에 붙는 「이 편의 맥락」 — 뼈대가 정한 것. 비어 있으면 빈 문자열(프롬프트 바이트 동일). 순수 — 테스트 대상."""
+    if not ctx or not str(ctx.get("why") or "").strip():
+        return ""
+    ids = ", ".join(ctx.get("scene_ids") or []) or "(장면 미지정)"
+    how = f" · 알리는 법: {ctx['how']}" if ctx.get("how") else ""
+    return f"\n이 편의 맥락(처음 보는 사람이 알아야 할 이유): {ctx['why']} · 보이는 장면: {ids}{how}"
+
+
 def narration_prompt(version: dict, index: dict, transcript: dict, table: list[str], *, title: str, episode: str,
                      guide: dict | None, digest: dict | None, scenes: list[str], problems: list[str] | None = None,
                      target: tuple[int, int] = (45, 70)) -> str:
     from app.tikitaka.production import planning_rules
     from app.tikitaka.grid_table import MAX_STACK
-    scoped = dict(digest or {})
-    if scoped.get("scene_notes"):
-        scoped["scene_notes"] = [n for n in scoped["scene_notes"] if n.get("id") in set(scenes)]
+    # 작품 이해는 **회차 전체**를 싣는다(2026-09-22 사용자 결정 — 종전엔 이 편의 장면으로 좁혀 "왜 이번엔"의 근거가 걸음 ② 에 없었다)
     hook = version.get("hook") or {}
     head = NARRATION_HEAD.format(title=title, episode=episode, n=version["n"], strategy=version["strategy"],
                                  title_text=str(version["title"]).replace("\n", " / "), structure=version.get("structure", ""),
-                                 hook=(hook.get("why") or "(미정)"), guide=guide_block(guide), digest=digest_block(scoped),
+                                 hook=(hook.get("why") or "(미정)"), context=context_block(version.get("context")),
+                                 guide=guide_block(guide), digest=digest_block(digest),
                                  cps=NARRATION_CHARS_PER_SEC, max_stack=MAX_STACK, n_lo=NAR_COUNT_HINT[0], n_hi=NAR_COUNT_HINT[1],
                                  sa_sec=sum(b - a for a, b, _k, _p in item_windows(version, index, transcript)), jump=JUMP_SEC,
                                  target_min=target[0], target_max=target[1], hard_max=int(MAX_SHORTS_SEC))
@@ -1014,3 +1054,5 @@ def carry_slots(draft: dict, final: dict, index: dict, transcript: dict) -> None
     final["script_flow"] = "staged"
     if draft.get("hook"):
         final.setdefault("hook", draft["hook"])
+    if draft.get("context"):
+        final.setdefault("context", draft["context"])
