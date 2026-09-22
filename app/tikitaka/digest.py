@@ -58,7 +58,7 @@ def digest_sha(index: dict, transcript: dict, guide: dict | None) -> str:
     for m in index.get("moments") or []:
         h.update(f"{m.get('id')}|{m.get('desc')}".encode("utf-8"))
     for l in transcript.get("lines") or []:
-        h.update(f"{l.get('id')}|{l.get('speaker')}|{l.get('text')}".encode("utf-8"))
+        h.update(f"{l.get('id')}|{l.get('text')}".encode("utf-8"))      # 화자 제외(2026-09-22) — 확인 패스의 화자 교정으로 매 실행 재생성되던 것
     h.update(((guide or {}).get("sha") or "").encode("utf-8"))
     return h.hexdigest()[:12]
 

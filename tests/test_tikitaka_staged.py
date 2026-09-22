@@ -289,3 +289,22 @@ def test_rebuild_refuses_a_cache_made_by_the_other_flow():
     job.files["rebuild.json"] = {"versions": [], "script_flow": "staged"}
     with pytest.raises(ValueError, match="--script-flow staged"):
         rebuild(job, None, index, tr, title="t", episode_label="1", duration=20.0, script_flow="single")
+
+
+# ── 캐시 지문은 화자 표기에 흔들리지 않는다 (2026-09-22 실사고: 확인 패스 화자 교정 4줄에 뼈대 14편 재생성) ──
+def test_fingerprints_ignore_speaker_labels():
+    from app.tikitaka.staged import outline_fingerprint, script_fingerprint, speaker_neutral
+    from app.tikitaka.digest import digest_sha
+    index = {"scenes": [{"id": "SC-001", "start": 0.0, "end": 10.0, "place": "", "summary": "", "chars": []}],
+             "moments": [], "grid_facts": {}}
+    tr_a = {"lines": [{"id": "L-001", "start": 1.0, "end": 2.0, "speaker": "양준호", "text": "야, 뭐해?"}]}
+    tr_b = {"lines": [{"id": "L-001", "start": 1.0, "end": 2.0, "speaker": "정선혁", "text": "야, 뭐해?"}]}
+    tr_c = {"lines": [{"id": "L-001", "start": 1.0, "end": 2.0, "speaker": "정선혁", "text": "야, 뭐 해?"}]}
+    kw = dict(eye="", guide=None, digest=None, material_note="", seq_hook=True, n_versions=14)
+    assert outline_fingerprint(index, tr_a, [], **kw) == outline_fingerprint(index, tr_b, [], **kw)     # 화자만 다름 → 같은 대본
+    assert outline_fingerprint(index, tr_a, [], **kw) != outline_fingerprint(index, tr_c, [], **kw)     # 대사가 다르면 다른 재료
+    va = {"items": [{"type": "S", "line_ids": ["L-001"], "speaker": "양준호", "text": "야, 뭐해?"}], "title": "t"}
+    vb = {"items": [{"type": "S", "line_ids": ["L-001"], "speaker": "정선혁", "text": "야, 뭐해?"}], "title": "t"}
+    assert script_fingerprint(va, [], {}, None, None, 60) == script_fingerprint(vb, [], {}, None, None, 60)
+    assert digest_sha(index, tr_a, None) == digest_sha(index, tr_b, None) and digest_sha(index, tr_a, None) != digest_sha(index, tr_c, None)
+    assert "speaker" not in speaker_neutral(tr_a)["lines"][0] and tr_a["lines"][0]["speaker"] == "양준호"   # 원본 불변

@@ -1042,17 +1042,18 @@ def test_canonical_strategy_tolerates_model_suffixes():
     assert canonical_strategy("자연 흐름", 5) == FREE_FORMAT and FREE_FORMAT not in STRATEGIES
 
 
-def test_loop_tail_and_copy_narration_drop(index, transcript):
+def test_loop_falls_back_to_natural_ending_and_drops_copy(index, transcript):
     from app.tikitaka.rebuild import validate_versions
     from app.tikitaka.guide import guide_block
-    # 루프형인데 끝(L-003 105s)이 처음(L-002 102s) 앞으로 안 돌아온다 → 첫 대사 직전 줄 L-001 을 꼬리로 붙인다(마지막 N 앞에)
+    # 끝을 원본 앞 대사로 되감아 붙이지 않고 자연스러운 종결을 유지한다.
     raw = {"versions": [{"n": 12, "strategy": "루프형", "title": "t", "items": [
         {"type": "S", "line_ids": ["L-002"]}, {"type": "S", "line_ids": ["L-003"]}, {"type": "N", "text": "그리고 다시."},
         {"type": "N", "text": "풀 영상은 쿠팡플레이에서 시청하세요."}]}]}
     v = validate_versions(raw, index, transcript, copy_text="풀 영상은 쿠팡플레이에서 시청하세요")["versions"][0]
     kinds = [(it["type"], it.get("line_ids", [None])[0]) for it in v["items"]]
-    assert kinds == [("S", "L-002"), ("S", "L-003"), ("S", "L-001")]                       # "그리고 다시." 는 메타 내레이션으로 드롭
-    assert any("[루프] 끝이 처음으로 안 돌아와" in x for x in v["issues"]) and any("카피 문구를 읽는 내레이션 1건 드롭" in x for x in v["issues"])
+    assert kinds == [("S", "L-002"), ("S", "L-003")]                       # "그리고 다시." 는 메타 내레이션으로 드롭
+    assert v["strategy"] == "자연 흐름"
+    assert any("[루프] 자연스러운 종결 유지" in x for x in v["issues"]) and any("카피 문구를 읽는 내레이션 1건 드롭" in x for x in v["issues"])
     assert any("메타 내레이션 1건 드롭" in x for x in v["issues"])
     # 이미 되돌아오면 안 붙인다
     raw2 = {"versions": [{"n": 12, "strategy": "루프형", "title": "t", "items": [{"type": "S", "line_ids": ["L-002"]}, {"type": "S", "line_ids": ["L-001"]}]}]}
@@ -1320,7 +1321,9 @@ def test_digest_block_and_sha(index, transcript):
     assert "[작품 이해" in blk and "강비호 — 학생" in blk and "SC-001: 다툼 — 왜: 압박" in blk and "두 남자 구분" in blk and "인물 식별은" in blk
     s1 = digest_sha(index, transcript, None)
     tr2 = {"lines": [dict(transcript["lines"][0], speaker="홍재인")] + transcript["lines"][1:], "words": transcript["words"]}
-    assert s1 != digest_sha(index, tr2, None) and s1 != digest_sha(index, transcript, {"sha": "abc"})   # 화자·가이드가 바뀌면 다시 만든다
+    tr3 = {"lines": [dict(transcript["lines"][0], text="다른 대사")] + transcript["lines"][1:], "words": transcript["words"]}
+    # 2026-09-22: 화자 교정은 같은 대본의 표기 수정 — 지문을 흔들지 않는다(확인 패스가 되쓴 화자 4줄에 뼈대 14편이 재생성된 실사고). 대사·가이드는 다시 만든다.
+    assert s1 == digest_sha(index, tr2, None) and s1 != digest_sha(index, tr3, None) and s1 != digest_sha(index, transcript, {"sha": "abc"})
 
 
 def test_prompts_carry_digest_slot():

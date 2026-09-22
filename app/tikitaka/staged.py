@@ -35,7 +35,7 @@ from app.tikitaka.prompts import REBUILD_PROMPT
 from app.tikitaka.timing import narration_plan_sec, bind_dialogue
 from app.tikitaka.title import title_prompt
 
-SCHEMA = "tikitaka_staged/v2"
+SCHEMA = "tikitaka_staged/v3"
 SA_SHARE = (0.5, 0.75)           # 뼈대의 대사·현장음 합계가 목표 길이에서 차지할 몫 — 나머지는 걸음 ② 의 내레이션(종전 대본 실측 N 비중 30~60%)
 JUMP_SEC = 5.0                   # 이 이상 건너뛰거나 장면이 바뀌거나 되감으면 '이어야 하는 자리'(v3 human-flow compute_jumps 와 같은 값)
 NAR_COUNT_HINT = (3, 7)          # 편당 내레이션 개수 안내(공감형은 0~3)
@@ -75,7 +75,8 @@ OUTLINE_RULES = """## [이번 걸음: 뼈대만 짠다 — 내레이션은 자�
 - 버전마다 **어느 장면의 어느 대사(S)·현장음(A)을 어떤 순서로 쓸지**만 정한다. 내레이션(N)은 항목에 넣지 마라 — 다음 걸음이
   그 편의 화면 목록을 직접 보면서 **어디에 넣을지부터** 정하고 문장을 쓴다(붙어 있는 질문과 대답 사이에도 들어갈 수 있다).
 - 그래서 **대사·현장음 합계는 {sa_min}~{sa_max}초**로 짠다(목표 {target_min}~{target_max}초에서 내레이션 몫을 남긴 길이). 공감형은 20~40초.
-- 순서를 크게 건너뛰거나 되감는 자리는 다음 걸음이 내레이션으로 잇는다 — 이을 수 없을 만큼 동떨어진 조각을 나열하지 마라.
+- 제목을 회수하는 결말 대사·반응을 먼저 확보하고 앞부분을 길이에 맞춘다. 요약 내레이션으로 결말을 대신할 생각으로 핵심 S를 빼지 마라.
+- 순서를 크게 건너뛰거나 되감는 본문 자리는 다음 걸음이 내레이션으로 잇는다 — 이을 수 없을 만큼 동떨어진 조각을 나열하지 마라.
 - **첫 3초(훅)**: 첫 항목은 대사(S)일 수도, 말 없는 화면(A)일 수도 있다. 아래 [눈길 끄는 화면]에 이 편의 사건에 속한 센 화면이
   있으면 **그 화면으로 열고 내레이션이 뒤에서 받는** 구성을 먼저 고려하라. 첫 3초 안에 컷이 바뀌거나 말이 시작돼야 한다 —
   서 있기·걷기·뒷모습·풍경으로 열지 마라. 내레이션으로 여는 편이면 `hook.with` 에 "N" 이라고만 적는다(문장은 다음 걸음).
@@ -111,7 +112,8 @@ NARRATION_HEAD = """# 📜 티키타카 스크립트 리빌딩 — 걸음 ② �
    ("갑이 갑작스럽게 묻는데?" → 질문 대사 → "을의 대답은," → 대답 대사). 리듬은 [N]→[S]→[N]→[S]→[S]→[A]→[N] … 보통 {n_lo}~{n_hi}개
    (공감형은 0~3개). 이 편의 대사·현장음 합계는 {sa_sec:.0f}초다 — 내레이션까지 합쳐 {target_min}~{target_max}초(절대 상한 {hard_max}초).
 2. `⚠ 이어야 하는 자리` 표식(코드가 원본 시각으로 계산: 장면이 바뀜 · {jump:g}초 이상 건너뜀 · 되감기)에는 **반드시** 내레이션을 넣는다 —
-   시청자가 다음 장면을 따라오게 잇는 말이다. 되감기 자리는 시간을 되돌린다는 표지를 문장에 넣는다("사실 시작은,").
+   시청자가 다음 장면을 따라오게 잇는 말이다. 본문 회상은 시간 관계를 짧게 알린다.
+   루프 끝에서는 되감기 설명을 넣지 않는다. 설명이 필요한 루프는 버리고 실제 결말 대사·반응에서 끝낸다.
 3. 자리를 정했으면 [쓸 수 있는 화면]에서 그 자리에 깔 화면을 **먼저** 고른다. 표의 묘사는 영상을 보고 적은 **실제로 보이는 것**이다.
    대사를 소개하는 내레이션이면 그 대사 조각 **바로 앞뒤 행**(말하려는 얼굴 · 듣는 표정)이 제 화면이다.
 4. 그 화면에 보이는 것으로 문장을 쓴다. 화면에 없는 동작·물건·인물·속마음("결심했다"·"속셈")을 말하지 마라 — 네 문장과 고른 화면은 코드가
@@ -124,7 +126,8 @@ NARRATION_HEAD = """# 📜 티키타카 스크립트 리빌딩 — 걸음 ② �
 - `[이 편의 대사 화면]` 은 같은 화면이 두 번 나오게 되므로 피한다 — 그 사건의 화면이 정말 그것뿐일 때만.
 - `[현장음 — 고를 수 없음]` 과 표에 없는 sp ID 는 고를 수 없다. 두 내레이션이 같은 화면을 쓰지 않는다. 한 자리에는 내레이션 하나.
 - 내레이션이 **바로 뒤 대사의 내용을 미리 말하지 않는다**(같은 말이 두 번 나온다). 상황만 깔고 대사가 답하게.
-- 마지막에 넣는 내레이션(after_last)은 이야기를 닫는 종결형 문장으로. 질문을 던졌으면 답이 되는 대사가 [편성표] 뒤쪽에 실제로 있어야 한다.
+- 결말은 제목이 약속한 실제 대사(S)·행동·반응(A)으로 보여준다. 결론을 내레이션으로 대신하지 않는다.
+  after_last는 기본적으로 생략한다. 실제 결말 뒤에 꼭 필요한 새 정보가 있을 때만 쓴다. 길이가 부족하면 내레이션부터 줄인다.
 """
 
 NARRATION_OUTPUT = """## 출력 JSON (하나만, 코드블록 금지)
@@ -340,6 +343,34 @@ def normalize_outline(raw: dict, index: dict, transcript: dict, *, avoid=None, e
 
 
 # ── 걸음 ② 문장·화면 ─────────────────────────────────────────────────────────────
+def speaker_neutral(transcript: dict) -> dict:
+    """캐시 지문용 전사 사본 — `speaker` 를 뺀다(2026-09-22 실사고: 확인 패스의 화자 교정 4줄이 transcript.json 에 되써져 소스 스크립트가
+    달라지자 같은 잡의 뼈대·걸음 ② 14편이 통째로 다시 만들어졌다). 화자 교정은 같은 대본의 표기 수정이지 다른 재료가 아니다. 순수."""
+    out = dict(transcript)
+    out["lines"] = [{k: v for k, v in l.items() if k != "speaker"} for l in transcript.get("lines") or []]
+    return out
+
+
+def items_neutral(items: list[dict]) -> list[dict]:
+    """version items 의 지문용 사본 — S 항목의 `speaker` 를 뺀다(같은 이유). 순수."""
+    return [{k: v for k, v in it.items() if k != "speaker"} for it in items]
+
+
+def outline_fingerprint(index: dict, transcript: dict, exclude, *, eye: str, guide: dict | None, digest, material_note: str,
+                        seq_hook: bool, n_versions: int) -> str:
+    """뼈대 캐시 지문 — 소스 스크립트를 **화자 없이** 다시 만들어 센다(프롬프트에 실리는 스크립트는 화자가 있다). 순수 — 테스트 대상."""
+    from app.tikitaka.grid import fingerprint
+    from app.tikitaka.rebuild import source_script
+    return fingerprint([SCHEMA, source_script(index, speaker_neutral(transcript), exclude), eye, (guide or {}).get("sha"), bool(digest),
+                        material_note, seq_hook, n_versions])
+
+
+def script_fingerprint(version: dict, table, voice, guide: dict | None, digest, target) -> str:
+    """걸음 ② 캐시 지문 — 항목의 화자 표기는 빼고 센다. 순수 — 테스트 대상."""
+    from app.tikitaka.grid import fingerprint
+    return fingerprint([SCHEMA, items_neutral(version["items"]), version["title"], table, voice, (guide or {}).get("sha"), bool(digest), target])
+
+
 def item_windows(version: dict, index: dict, transcript: dict) -> list[tuple[float, float, str, int]]:
     """이 편의 S·A 항목이 차지하는 원본 구간 [(t0, t1, 'S'|'A', 항목 위치)]. 순수."""
     lines = {l["id"]: l for l in transcript.get("lines") or []}
@@ -396,6 +427,10 @@ def bridge_marks(version: dict, index: dict, transcript: dict) -> dict[int, dict
     wins = sorted(item_windows(version, index, transcript), key=lambda w: w[3])
     out: dict[int, dict] = {}
     for (a0, b0, _k0, _p0), (a1, _b1, _k1, p1) in zip(wins, wins[1:]):
+        # A real replay loop must work without a rewind explanation at its tail.
+        if (version.get("strategy") == "루프형" and p1 == len(version["items"]) - 1
+                and _k1 == "S" and a1 < wins[0][0]):
+            continue
         gap = a1 - b0
         sc0, sc1 = _scene_id_at(scenes, (a0 + b0) / 2), _scene_id_at(scenes, a1 + 1e-3)
         if a1 < a0 - 1e-6:
@@ -414,7 +449,7 @@ def slot_role(mark: dict | None, *, first: bool = False, last: bool = False) -> 
     if first:
         return "편의 첫 항목(훅) — 첫 3초에 시선을 잡는다"
     if last:
-        return "편의 마지막 — 이야기를 닫는다"
+        return "편의 마지막 — 실제 결말 뒤 꼭 필요한 새 정보만; 결말 요약이면 생략"
     return "붙어 있는 두 항목 사이의 리듬 내레이션 — 앞 항목에 대한 한마디이거나 다음 대사를 소개한다"
 
 
@@ -513,6 +548,11 @@ def validate_narration(raw, version: dict, info: dict[str, dict], index: dict, t
         if n_chars < NAR_MIN_CHARS:
             problems.append(f"{tag}: 문장이 없다")
             continue
+        if version.get("strategy") == "루프형" and (pos == n_items or pos == n_items - 1):
+            from app.tikitaka.rebuild import _is_meta_loop_narration
+            if _is_meta_loop_narration(text, ending=True):
+                problems.append(f"{tag}: 루프 끝의 되감기 설명은 금지 — 실제 결말에서 끝내거나 설명 없이 이어지는 대사를 고르세요")
+                continue
         taken.add(pos)
         if n_chars > NAR_MAX_CHARS:
             problems.append(f"{tag}: {n_chars}자 — 한 항목 8~30자. 두 자리로 나누거나 핵심만 남겨 줄여라")
@@ -615,7 +655,7 @@ def write_narration(job, gemini, version: dict, index: dict, transcript: dict, e
     if voice:
         from app.tikitaka.grid_table import _tts_cached
         measure = lambda text: _tts_cached(job, text, voice["voice"], voice["speed"])[1]   # noqa: E731
-    fp = fingerprint([SCHEMA, version["items"], version["title"], table, voice, (guide or {}).get("sha"), bool(digest), target])
+    fp = script_fingerprint(version, table, voice, guide, digest, target)
     name = f"script_v{version['n']}{sfx}.json"
     if job.has(name) and job.load(name).get("fingerprint") == fp:
         narrations = job.load(name)["narrations"]
@@ -892,7 +932,8 @@ def draft_versions(job, gemini, index: dict, transcript: dict, *, title: str, ep
         raise ValueError("--script-flow staged 는 화면 기록(grid_facts)이 있는 grid-review 분석에서만 쓴다")
     from app.tikitaka.grid import fingerprint
     eye = eye_block(index, exclude)
-    fp = fingerprint([SCHEMA, script, eye, (guide or {}).get("sha"), bool(digest), material_note, seq_hook, n_versions])
+    fp = outline_fingerprint(index, transcript, exclude, eye=eye, guide=guide, digest=digest, material_note=material_note,
+                             seq_hook=seq_hook, n_versions=n_versions)
     name = f"outline{sfx}.json"
     if job.has(name) and job.load(name).get("fingerprint") == fp:
         data = job.load(name)["data"]
@@ -908,8 +949,16 @@ def draft_versions(job, gemini, index: dict, transcript: dict, *, title: str, ep
                 job.log(f"[staged/①] 뼈대 요청 — 프롬프트 {len(prompt):,}자 · 눈길 끄는 화면 {len(eye_catchers(index, exclude))}묶음")
             raw = gemini.text_json(prompt, kind="staged_outline", thinking="high")
             job.save(f"outline{sfx}_raw.json", raw)
-            data = normalize_outline(raw, index, transcript, avoid=(guide or {}).get("avoid") or [], exclude=exclude,
-                                     seq_hook=seq_hook, copy_text=(guide or {}).get("copy"))
+            from app.tikitaka.rebuild import StoryBudgetError
+            try:
+                data = normalize_outline(raw, index, transcript, avoid=(guide or {}).get("avoid") or [], exclude=exclude,
+                                         seq_hook=seq_hook, copy_text=(guide or {}).get("copy"))
+            except StoryBudgetError as exc:
+                problems = [str(exc)]
+                job.log(f"[staged/①] 결말 보존 재구성({attempt + 1}/{1 + REASK_MAX}): {exc}")
+                if attempt == REASK_MAX:
+                    raise
+                continue
             problems = [f"버전 {v['n']}: 대사(S) 항목이 없다" for v in data["versions"] if not any(it["type"] == "S" for it in v["items"])]
             if not data["versions"]:
                 problems = ["versions 가 비었다"]
