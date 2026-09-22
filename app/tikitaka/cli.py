@@ -69,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--copy-pos", choices=("above", "below"), default=None, help="카피 위치(기본 below). 가이드의 '카피 위치:' 키보다 우선")
     ap.add_argument("--voice", default="ko_female", help="내레이션 목소리 라벨(ko_female·ko_female_high·ko_male·ko_male_low·chat_*)")
     ap.add_argument("--tag", default="", help="산출 접미사 — table/effects/shorts/publish 를 v{n}_{tag} 로 따로 만든다(다른 목소리·속도 변형 등). 전사·인덱스·대본·컷 탐색·프레이밍 캐시는 공유")
-    ap.add_argument("--speed", default="normal")
+    ap.add_argument("--speed", default="fast", help="내레이션 속도 라벨(very_slow~very_fast). 기본 fast(1.1배) — 2026-09-22 사용자 결정: 로또 1-2화 very_fast(1.2배) 실청취 '생각보다 빠르다', v3 human 흐름과 같은 값")
     ap.add_argument("--workers", type=int, default=3, help="인덱스 창 병렬 수")
     ap.add_argument("--stt", choices=("elevenlabs", "whisper"), default="elevenlabs", help="1단계 전사 백엔드(기본 ElevenLabs Scribe v2 · 키 없으면 즉시 실패)")
     ap.add_argument("--no-transcript-polish", action="store_true", help="1.5단계 Gemini 글자 교정을 건너뛴다")
