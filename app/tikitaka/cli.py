@@ -397,8 +397,13 @@ def main(argv: list[str] | None = None) -> int:
             job.save(f"cut_guard_v{n}{sfx}.json", cut_audit)
             # Keep the input table intact: opting out restores the original.
             job.save(f"grid_table_guarded_v{n}{sfx}.json", table)
-            if cut_audit["blocked"]:
-                raise ValueError(f"v{n}: 컷 검사 미해결 덮개 — cut_guard_v{n}{sfx}.json 확인·화면 재선택 필요")
+            unresolved = [r for r in cut_audit["rows"] if r.get("status") == "needs_reselection"]
+            if unresolved:
+                # 2026-09-22 사용자 결정 "켜되 차단 말고 기록만": 못 고친 덮개는 원 컷 그대로 렌더하고 크게 남긴다
+                # (fast 속도에서 3편 중 2편이 0.2~0.3s 잔존 샷으로 막혀 아예 볼 수 없던 것). 자리는 cut_guard_v{n}.json.
+                for r in unresolved:
+                    job.log(f"[cut-guard] ⚠ v{n} 행{r['row']}: 미해결 — {r.get('reason')} · 원 컷 그대로 렌더(검수에서 화면 재선택)")
+                job.record_step("cut_guard_unresolved", version=n, rows=[r["row"] for r in unresolved])
         job.path(f"master_table_v{n}{sfx}.md").write_text(RP.table_md(table, title=a.title), encoding="utf-8")
         if a.until == "table":
             continue

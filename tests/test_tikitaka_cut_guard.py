@@ -154,3 +154,11 @@ def test_grid_table_canonicalizes_speed_dust_at_ceiling():
     assert raw > 1.2                                             # 먼지 재현
     assert math.isclose(raw, 1.2, rel_tol=0.0, abs_tol=1e-9)
     clip_len({"clip_start_sec": start, "clip_end_sec": end, "playback_speed": 1.2})   # 정리된 값은 렌더 계약 안
+
+
+def test_cli_records_unresolved_covers_instead_of_blocking_render():
+    """켜되 차단 말고 기록만(2026-09-22 사용자 결정) — 미해결 덮개가 있어도 raise 하지 않고 로그·run_log 로 남긴다."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app" / "tikitaka" / "cli.py").read_text(encoding="utf-8")
+    assert "컷 검사 미해결 덮개" not in src
+    assert 'record_step("cut_guard_unresolved"' in src and "[cut-guard] ⚠" in src
