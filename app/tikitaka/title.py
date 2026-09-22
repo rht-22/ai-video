@@ -71,6 +71,28 @@ TITLE_PROMPT = r"""
 """
 
 
+_LEN_FREE = "- 글자 수를 맞추려고 단어·이름·밀접한 구절을 어색하게 나누지 않는다. 두 줄 길이가 달라도 괜찮다."
+_LEN_TOTAL = "- 길면 표현을 짧게 다시 쓴다. 공백 포함 총 24자 안팎을 목표로 하되 의미 단위를 우선한다."
+
+
+def title_prompt(title_fit: dict | None = None) -> str:
+    """제목 프롬프트. title_fit({font, sizes} — 채널 템플릿의 제목 폰트·줄별 상한 크기)이 있으면 '총 24자 안팎' 대신
+    **줄당 글자 수를 처음부터** 정해 준다(2026-09-21 사용자 결정 "폭 검사를 넣는 게 아니라 처음에 글자 수를 정해야").
+    글자 수는 v3 와 같은 자(safe_zone.title_char_budget — 폰 안전 폭 880px · 글자 크기 고정). 없으면 종전과 바이트 동일."""
+    if not title_fit or not title_fit.get("sizes"):
+        return TITLE_PROMPT
+    from app.v3.safe_zone import title_char_budget
+    sizes = [int(x) for x in title_fit["sizes"]]
+    a, b = title_char_budget(sizes[0]), title_char_budget(sizes[1] if len(sizes) > 1 else sizes[0])
+    rule = (f"- **길이(필수 — 처음부터 이 안에서 구상한다)**: line1 은 공백을 뺀 글자 **{a}자 이내**, line2 는 **{b}자 이내**"
+            f"(띄어쓰기는 줄당 1~2번). 제목 글자 크기는 고정이라 이보다 길면 폰 화면에서 잘린다. 다 쓴 뒤 자르지 말고, "
+            f"조사·수식어·부연을 덜고 더 짧은 말을 골라 **짧게 쓴다** — 짧을수록 눈에 들어온다. "
+            f"상황 설명을 다 담으려 하지 말고 가장 선명한 한 가지만 남긴다. 아래 예시 중 이보다 긴 줄은 구조만 참고한다.")
+    free = "- 글자 수를 맞추려고 단어·이름·밀접한 구절을 어색하게 나누지 않는다. 각 줄이 위 상한 안이면 두 줄 길이가 달라도 괜찮다."
+    assert _LEN_FREE in TITLE_PROMPT and _LEN_TOTAL in TITLE_PROMPT
+    return TITLE_PROMPT.replace(_LEN_TOTAL, "").replace(_LEN_FREE, rule + "\n" + free)
+
+
 def normalize_title(value):
     """Keep semantic line breaks in the existing downstream string contract."""
     if isinstance(value, dict):

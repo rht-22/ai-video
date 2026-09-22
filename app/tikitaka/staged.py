@@ -33,7 +33,7 @@ from app.tikitaka.guide import in_excluded, guide_block
 from app.tikitaka.digest import digest_block
 from app.tikitaka.prompts import REBUILD_PROMPT
 from app.tikitaka.timing import narration_plan_sec, bind_dialogue
-from app.tikitaka.title import TITLE_PROMPT
+from app.tikitaka.title import title_prompt
 
 SCHEMA = "tikitaka_staged/v2"
 SA_SHARE = (0.5, 0.75)           # 뼈대의 대사·현장음 합계가 목표 길이에서 차지할 몫 — 나머지는 걸음 ② 의 내레이션(종전 대본 실측 N 비중 30~60%)
@@ -278,7 +278,7 @@ def outline_prompt(*, title: str, episode_label: str, duration_label: str, scrip
              _section("[System Role]").format(**kw), "\n", _section("입력").format(**kw), "\n",
              _section("[제1원칙").format(**kw), "\n", _section("[제2원칙").format(**kw), "\n",
              OUTLINE_RULES.format(**kw), "\n", _section("스토리 포맷 상자").format(**kw), "\n",
-             OUTLINE_VOCAB.format(**kw), eye, "\n", OUTLINE_OUTPUT.format(**kw), "\n## 소스 스크립트\n", script, "\n", TITLE_PROMPT]
+             OUTLINE_VOCAB.format(**kw), eye, "\n", OUTLINE_OUTPUT.format(**kw), "\n## 소스 스크립트\n", script, "\n", title_prompt((guide or {}).get("title_fit"))]
     return "".join(parts)
 
 

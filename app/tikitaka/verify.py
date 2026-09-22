@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from app.tikitaka.title import TITLE_PROMPT
+from app.tikitaka.title import title_prompt
 from app.tikitaka.common import Job, fmt_tc, ms3
 from app.tikitaka.llm import Gemini
 from app.tikitaka.rebuild import (validate_versions, source_script, polish_literal_actions, polish_guide, apply_name_map, TARGET_MIN_SEC,
@@ -189,7 +189,7 @@ def verify_version(job: Job, gemini: Gemini, rebuild: dict, version_n: int, inde
                    "피드백의 seen 설명을 우선 근거로 삼고, 고친 문장과 이유를 changes에도 명시하라. "
                    "화면 길이 부족만 문제라면 내레이션 문구를 유지하고 "
                    "덮개 확장·추가·뒤 대사 화면 재사용으로 충분한 ID를 지정하라.")
-    prompt += TITLE_PROMPT
+    prompt += title_prompt((guide or {}).get("title_fit"))
     if index.get("grid_facts"):
         from app.tikitaka.production import planning_rules, preflight
         prompt += planning_rules() + f"\n초안의 조립 사전검사(추정): {preflight(draft, index, transcript, exclude)}"

@@ -9,10 +9,17 @@
 산출(outputs/<work>/_source/concat_<tag>/):
   source.mp4      — 1920×1080 · 29.97fps · AAC 48k 스테레오 · 라우드니스 -16 LUFS 로 통일한 합본
   manifest.json   — 합본 시각 ↔ 원 클립(id·제목·회차·업로드 시각·트림한 앞뒤 초) 대응표. 장부·검수가 이걸로 원 클립 좌표를 되찾는다
+  source_notes.md — 합본 구성 메모(클립 경계 · 선공개 구간 주의). 제작 가이드 형식이라 tikitaka 에 `--guide` 로 함께 넘기면
+                    대본 프롬프트의 [제작 가이드] 절에 그대로 실린다(⚠ --guide 를 주면 자동 탐색이 꺼지므로 작품 가이드도 같이 넘길 것)
   clips/<id>.mp4  — 내려받은 원본(재실행 시 재사용)
 
 규칙:
   - 순서는 --ids 로 준 순서 그대로(회차 → 업로드 시각 순으로 넘길 것). 자동 정렬은 하지 않는다 — 순서가 곧 시간축이라 사람이 본다.
+  - **예외 — 선공개 영상은 항상 맨 앞**(2026-09-21 사용자 지시): 제목이 --prerelease-regex(기본 '선공개')에 걸리거나 --prerelease-ids 로
+    지목한 클립은 --ids 어디에 있든 합본 머리로 옮긴다(선공개끼리는 준 순서 유지). 선공개 = 본방 전날 본편의 **한 장면을 통째로** 먼저 푼 것
+    (예고편식 몽타주가 아니다 — 안의 흐름은 본편 그대로). 다만 본편의 어느 시점 장면인지 알 수 없으므로
+    회차를 단정하지 않고(episode=null · 제목의 'N-M화' 표기만 episode_label 로) manifest·source_notes 에
+    "실제 원본 시간 순서와 다를 수 있다"를 명시한다.
   - 앞 범퍼: 파일 머리의 '검정 화면 ∧ 무음'(최대 3초). 뒤 엔드카드: 파일 끝에 붙은 **무음 1.5초 이상**(최대 12초) — 권리사 엔드카드는
     검정이 아니라 브랜드 카드(티빙: 빨강 쐐기 + '티빙 바로가기')라 검정 검출로는 못 잡고, 무음이 정확한 신호였다(6클립 실측 8.5s).
     잘린 양은 manifest 에 남긴다.
@@ -37,6 +44,43 @@ TAIL_MAX_SEC = 12.0       # 뒤 엔드카드 상한 — 티빙 엔드카드는 �
 TAIL_MIN_SIL_SEC = 1.5    # 파일 끝에 붙은 무음이 이 이상일 때만 엔드카드로 본다(조용히 끝나는 장면 보호)
 BLACK_TH = 0.10          # blackdetect pixel threshold
 SIL_DB = -45             # silencedetect noise floor
+
+
+PRERELEASE_NOTE = "선공개 영상이라 실제 원본 시간 순서 흐름과 다를 수 있다"
+
+
+def is_prerelease(meta: dict, regex: str, forced_ids: set[str]) -> bool:
+    return meta["id"] in forced_ids or bool(regex and re.search(regex, meta.get("title") or ""))
+
+
+def order_prerelease_first(metas: list[dict]) -> list[dict]:
+    """선공개(prerelease=True)를 머리로 — 두 무리 안의 순서는 준 그대로(안정). 순수 — 테스트 대상."""
+    return [m for m in metas if m.get("prerelease")] + [m for m in metas if not m.get("prerelease")]
+
+
+def _mmss(sec: float) -> str:
+    return f"{int(sec // 60):02d}:{sec % 60:04.1f}"
+
+
+def source_notes(manifest: dict) -> str:
+    """합본 구성 메모(제작 가이드 형식 본문). 구조 키 줄(`키: 값`)은 쓰지 않는다 — 가이드 파서가 설정으로 읽으면 안 된다. 순수 — 테스트 대상."""
+    clips = manifest["clips"]
+    lines = [f"# 소스 구성 — {manifest['work'].replace('_', ' ')} {manifest['tag']} 합본", "",
+             "이 소스는 권리사 유튜브 클립 여러 개를 이어 붙인 합본이다. 클립 경계는 장면 전환이지 시간 연속이 아니다 — "
+             "경계를 사이에 둔 두 장면의 시간 흐름(직후·그날·다음 날)을 단정하지 않는다.", ""]
+    for c in clips:
+        ep = "선공개" if c.get("prerelease") else (f"{c['episode']}화" if c.get("episode") else "회차 미상")
+        lines.append(f"- {_mmss(c['concat_start_sec'])}~{_mmss(c['concat_end_sec'])} [{ep}] {c['title']}")
+    pre = [c for c in clips if c.get("prerelease")]
+    if pre:
+        span = ", ".join(f"{_mmss(c['concat_start_sec'])}~{_mmss(c['concat_end_sec'])}" for c in pre)
+        lines += ["", f"⚠ 선공개 구간({span}): {PRERELEASE_NOTE}. 선공개는 예고편(여러 장면을 짧게 이어 붙인 편집)이 아니라 "
+                  "본방 전날 권리사가 **본편의 한 장면을 통째로** 먼저 공개한 것이다 — 그 안의 흐름은 본편 그대로라 다른 클립과 똑같이 쓸 수 있다. "
+                  "다만 합본 맨 앞에 있을 뿐 본편의 어느 회차·어느 시점 장면인지는 알 수 없다(가장 먼저 일어난 일이 아닐 수 있다). "
+                  "그러니 이 장면을 근거 없이 '이야기의 시작'·'사건의 발단'으로 놓거나, 다른 클립 장면과의 선후('그 전에'·'그 뒤'·'사실 시작은')를 "
+                  "내레이션으로 단정하지 않는다 — 선후는 대사·화면 내용이 직접 말해 줄 때만 쓴다. "
+                  "뒤 클립에 같은 장면이 다시 나올 수 있다(같은 장면을 한 편에 두 번 쓰지 않는다)."]
+    return "\n".join(lines) + "\n"
 
 
 def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
@@ -107,6 +151,8 @@ def main(argv=None) -> int:
     ap.add_argument("--ids", nargs="+", required=True, help="유튜브 ID, 이을 순서대로")
     ap.add_argument("--ytdlp", default=shutil.which("yt-dlp") or "yt-dlp")
     ap.add_argument("--episode-regex", default=r"(\d{1,2})화", help="제목에서 회차 번호를 뽑는 정규식(그룹 1). 기본 'N화'")
+    ap.add_argument("--prerelease-regex", default="선공개", help="제목이 이 정규식에 걸리면 선공개 — 합본 맨 앞으로. 빈 문자열이면 제목 판정 끔")
+    ap.add_argument("--prerelease-ids", nargs="*", default=[], help="제목과 무관하게 선공개로 취급할 유튜브 ID")
     ap.add_argument("--no-trim", action="store_true", help="양끝 범퍼 트림 생략")
     ap.add_argument("--lufs", type=float, default=-16.0)
     a = ap.parse_args(argv)
@@ -119,8 +165,18 @@ def main(argv=None) -> int:
     t = 0.0
     inputs: list[str] = []
     filters: list[str] = []
-    for i, vid in enumerate(a.ids):
+    metas = []
+    for vid in a.ids:
         meta = metadata(vid, a.ytdlp, a.episode_regex)
+        if is_prerelease(meta, a.prerelease_regex, set(a.prerelease_ids)):
+            label = re.search(r"\d{1,2}\s*[-~]\s*\d{1,2}\s*[화회]", meta["title"])
+            meta.update(prerelease=True, episode=None, episode_label=label.group(0) if label else None, order_note=PRERELEASE_NOTE)
+        metas.append(meta)
+    ordered = order_prerelease_first(metas)
+    if [m["id"] for m in ordered] != list(a.ids):
+        print(f"[선공개] 맨 앞으로 옮김: {' '.join(m['id'] for m in ordered if m.get('prerelease'))}", flush=True)
+    for i, meta in enumerate(ordered):
+        vid = meta["id"]
         path = download(vid, clips_dir, a.ytdlp)
         dur = probe_duration(path)
         head, tail = (0.0, 0.0) if a.no_trim else bumper_trim(path, dur)
@@ -135,7 +191,8 @@ def main(argv=None) -> int:
             f"fps=30000/1001,setsar=1,format=yuv420p[v{i}];"
             f"[{i}:a]atrim=start={head}:end={dur - tail},asetpts=PTS-STARTPTS,aresample=48000,"
             f"aformat=channel_layouts=stereo[a{i}]")
-        print(f"[{i+1}/{len(a.ids)}] {vid} {meta['episode']}화 {dur:.1f}s trim {head}/{tail} → {t:.1f}~{t + kept:.1f}  {meta['title'][:50]}", flush=True)
+        ep_txt = "선공개" if meta.get("prerelease") else f"{meta['episode']}화"
+        print(f"[{i+1}/{len(a.ids)}] {vid} {ep_txt} {dur:.1f}s trim {head}/{tail} → {t:.1f}~{t + kept:.1f}  {meta['title'][:50]}", flush=True)
         t += kept
     concat = "".join(f"[v{i}][a{i}]" for i in range(len(a.ids))) + f"concat=n={len(a.ids)}:v=1:a=1[v][ac];[ac]loudnorm=I={a.lufs}:TP=-1.5:LRA=11,aresample=48000[a]"
     filter_complex = ";".join(filters) + ";" + concat
@@ -148,7 +205,10 @@ def main(argv=None) -> int:
     manifest = {"work": a.work, "tag": a.tag, "created_kst": datetime.now(KST).isoformat(),
                 "source": str(final.relative_to(ROOT)), "total_sec": round(total, 3),
                 "planned_total_sec": round(t, 3), "lufs_target": a.lufs, "clips": entries}
+    if any(e.get("prerelease") for e in entries):
+        manifest["prerelease_note"] = PRERELEASE_NOTE
     (out_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    (out_dir / "source_notes.md").write_text(source_notes(manifest), encoding="utf-8")
     print(f"\n합본 {final} — {total:.1f}s (계획 {t:.1f}s) · manifest {out_dir / 'manifest.json'}")
     if abs(total - t) > 0.5:
         print(f"⚠ 합본 길이가 계획과 {total - t:+.2f}s 다르다 — 트림·fps 변환을 확인할 것", file=sys.stderr)

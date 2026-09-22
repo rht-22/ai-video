@@ -150,6 +150,15 @@ def main(argv: list[str] | None = None) -> int:
     copy_text = a.copy if a.copy is not None else ((guide or {}).get("copy") or None)
     copy_pos = a.copy_pos or (guide or {}).get("copy_pos") or "below"
     if guide:
+    if preset and a.pipeline == "grid-review":
+        # 제목 줄당 글자 수 — 채널 템플릿의 제목 폰트·상한 크기에서 계산해 제목 프롬프트에 **처음부터** 싣는다(v3 와 같은 자).
+        from app.tikitaka.grid import fingerprint
+        from app.v3.pipeline import title_fit_spec
+        title_fit = title_fit_spec(a.style_preset, preset["design"])
+        if title_fit:
+            guide = dict(guide or {"files": [], "avoid": [], "text": ""})
+            guide["title_fit"] = title_fit
+            guide["sha"] = fingerprint([guide.get("sha"), "title_fit", Path(title_fit["font"] or "").name, title_fit["sizes"]])
         job.log(f"[guide] 제작 가이드 {len(guide['files'])}개 로드({guide['sha']}) — 지양 단어 {guide['avoid']} · 로고 {logo} · 카피 {copy_text!r}({copy_pos})")
         job.log("[guide]   " + " · ".join(guide["files"]))
     if logo and not logo.exists():

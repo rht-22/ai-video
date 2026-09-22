@@ -118,6 +118,10 @@ def _fit_cover_windows(windows, target, *, take_from_end=False):
         # genuine slow-down is still forbidden and frame count is unchanged.
         if math.isclose(actual_speed, 1.0, rel_tol=0.0, abs_tol=1e-9):
             actual_speed = 1.0
+        elif math.isclose(actual_speed, 1.2, rel_tol=0.0, abs_tol=1e-9):
+            # Same dust at the 1.2 ceiling (1.200000000000017 killed clip_len at
+            # render — 로또 v6 행27, 2026-09-22). A real >1.2 is still rejected.
+            actual_speed = 1.2
         result.append({"src": sid, "span_ids": list(sp.get("joined_span_ids") or [sid]), "in": start, "out": end,
                        "dur": dur, "playback_speed": actual_speed,
                        "authority": "grid+tts", "desc": sp["scene_script"],

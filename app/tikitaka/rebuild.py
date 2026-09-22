@@ -11,7 +11,7 @@ import json
 
 import re
 
-from app.tikitaka.title import TITLE_PROMPT, normalize_title
+from app.tikitaka.title import title_prompt, normalize_title
 from app.tikitaka.common import Job, fmt_tc, MAX_SHORTS_SEC, ms3
 from app.tikitaka.llm import Gemini
 from app.tikitaka.prompts import REBUILD_PROMPT
@@ -468,7 +468,7 @@ def rebuild(job: Job, gemini: Gemini, index: dict, transcript: dict, *, title: s
                                    target_min=TARGET_MIN_SEC, target_max=TARGET_MAX_SEC, hard_max=int(MAX_SHORTS_SEC), script=script,
                                    guide=guide_block(guide), material_note=material, seq_hook_rule=SEQ_HOOK_RULES[bool(seq_hook)],
                                    digest=digest_block(digest))
-    prompt += TITLE_PROMPT
+    prompt += title_prompt((guide or {}).get("title_fit"))
     if index.get("grid_facts"):
         from app.tikitaka.production import planning_rules
         prompt += planning_rules()

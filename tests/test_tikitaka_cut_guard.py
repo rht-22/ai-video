@@ -141,3 +141,16 @@ def test_unrepairable_cover_blocks_but_intact_short_shot_only_warns(tmp_path,mon
     assert not audit['blocked']
     assert audit['rows'][0]['status']=='needs_review'
     assert result['rows']==table['rows']
+
+
+def test_grid_table_canonicalizes_speed_dust_at_ceiling():
+    """배속 되계산의 소수점 먼지 — 1.0 쪽처럼 1.2 쪽도 정리한다(2026-09-22 로또 v6 행27 실사고: 1.200000000000017 로 clip_len 즉사)."""
+    import math
+    from app.tikitaka.grid_table import FPS
+    from app.v3.assemble import clip_len
+    end, start, speed = 808.6, 807.0, 1.2                        # 실사고 값 — (1.6/1.2)*30 = 40 프레임
+    frames = max(1, math.ceil(((end - start) / speed) * FPS - 1e-7))
+    raw = (end - start) / (frames / FPS)
+    assert raw > 1.2                                             # 먼지 재현
+    assert math.isclose(raw, 1.2, rel_tol=0.0, abs_tol=1e-9)
+    clip_len({"clip_start_sec": start, "clip_end_sec": end, "playback_speed": 1.2})   # 정리된 값은 렌더 계약 안
