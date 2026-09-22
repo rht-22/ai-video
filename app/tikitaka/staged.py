@@ -358,6 +358,20 @@ def item_windows(version: dict, index: dict, transcript: dict) -> list[tuple[flo
     return out
 
 
+def neighbor_anchors(windows: list[tuple[float, float, str, int]], pos: int) -> list[float]:
+    """수리 후보의 기준 시각 — 계획이 없는 N 은 **그 자리 앞뒤 S/A 항목의 원본 시각**을 기준으로 후보 100개를 고른다(2026-09-22 실사고:
+    종전 0.0초 폴백이 소스 맨 앞 조각을 후보로 올려 훅 내레이션이 선공개 침대 장면 묘사문으로 재작성됐다). 앞 항목의 끝·뒤 항목의 시작.
+    S/A 가 하나도 없으면 [0.0](종전). 순수 — 테스트 대상."""
+    before = [w for w in windows if w[3] < pos]
+    after = [w for w in windows if w[3] > pos]
+    out = []
+    if before:
+        out.append(max(before, key=lambda w: w[3])[1])
+    if after:
+        out.append(min(after, key=lambda w: w[3])[0])
+    return out or [0.0]
+
+
 def scope_scenes(version: dict, index: dict, transcript: dict, *, neighbor: int = SCOPE_NEIGHBOR_SCENES) -> list[str]:
     """이 편의 화면 표에 실을 장면 — S·A 가 속한 장면 + about_ids 의 장면 ± 이웃. 순수 — 테스트 대상."""
     scenes = index.get("scenes") or []
@@ -740,7 +754,7 @@ def enforce_staged_plans(job, gemini, version: dict, index: dict, transcript: di
             sources = {**moments, **lines}
             anchors = [sources[s]["start"] for s in ((candidate.get("production_plan") or {}).get("evidence_ids") or []) if s in sources]
             anchors += [spans[x["span_id"]]["t_in"] for x in ((item.get("production_plan") or {}).get("cover") or []) if x.get("span_id") in spans]
-            anchors = anchors or [0.0]
+            anchors = anchors or neighbor_anchors(item_windows(version, index, transcript), pos)
             avail = [sid for sid, sp in spans.items() if sid in index["grid_facts"] and not overlap(sp["t_in"], sp["t_out"], hard)]
             nearby = sorted(avail, key=lambda sid: min(abs(spans[sid]["t_in"] - t) for t in anchors))[:100]
             material = [{"span_id": sid, "start": spans[sid]["t_in"], "sec": round(spans[sid]["t_out"] - spans[sid]["t_in"], 2),

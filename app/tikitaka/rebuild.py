@@ -539,11 +539,11 @@ def rebuild(job: Job, gemini: Gemini, index: dict, transcript: dict, *, title: s
         all_versions = data["versions"]
         data["versions"] = eligible_versions
         try:
-            apply_rerank(job, gemini, data, title=title, episode=episode_label, basis="draft")
+            apply_rerank(job, gemini, data, title=title, episode=episode_label, basis="draft", pov=(guide or {}).get("pov"))
         finally:
             data["versions"] = all_versions
     else:
-        apply_rerank(job, gemini, data, title=title, episode=episode_label, basis="draft")   # 리빌딩 호출의 순위는 예시에 끌린다 — 별도 호출로
+        apply_rerank(job, gemini, data, title=title, episode=episode_label, basis="draft", pov=(guide or {}).get("pov"))   # 리빌딩 호출의 순위는 예시에 끌린다 — 별도 호출로
     n_issues = sum(len(v["issues"]) for v in data["versions"])
     job.save(cache_name, data)
     for v in data["versions"]:
@@ -874,7 +874,7 @@ def apply_name_map(version: dict, actors: dict[str, str], *, log=print) -> int:
 RERANK_PROMPT = """너는 드라마 쇼츠 채널의 편집장이다. 아래는 작품 「{title}」 {episode} 로 만든 쇼츠 대본 {k}개다(번호·전략·제목·항목).
 **조회수 기대가 높은 순**으로 줄 세워라. 기준: ① 첫 3초 훅의 강도(대사 자체의 자극·의외성) ② 갈등의 선명함과 대사 티키타카 밀도
 ③ 결말의 미끼(다음이 궁금한가) ④ 같은 장면을 재탕한 대본은 뒤로 ⑤ 선형 계열(구간 순차형·루프형·장면 통째 압축형·점층 빌드업형·공감형)은
-흐름이 매끄럽고 끝이 잘 닫히는지. 번호는 아무 의미가 없다 — 앞 번호를 우대하지 마라. 각 대본을 실제로 읽고 비교해 정한다.
+흐름이 매끄럽고 끝이 잘 닫히는지. 번호는 아무 의미가 없다 — 앞 번호를 우대하지 마라. 각 대본을 실제로 읽고 비교해 정한다.{pov_note}
 
 {blocks}
 
@@ -899,12 +899,15 @@ def version_block(v: dict) -> str:
     return "\n".join(out)
 
 
-def rerank(gemini: Gemini, versions: list[dict], *, title: str, episode: str, log=print) -> dict:
+def rerank(gemini: Gemini, versions: list[dict], *, title: str, episode: str, pov: str | None = None, log=print) -> dict:
     """대본 목록 → {ranking, recommended, reason, notes}. 실패하면 번호순(기록). 순수하지 않음(호출 1회) — 파서는 rank_versions 재사용."""
     valid = [v["n"] for v in versions]
     blocks = "\n\n".join(version_block(v) for v in versions)
     try:
-        raw = gemini.text_json(RERANK_PROMPT.format(title=title, episode=episode, k=len(versions), blocks=blocks), kind="rerank", thinking="medium",
+        from app.tikitaka.guide import pov_rule
+        pov_note = ("\n⓪ **관점이 정해진 작품이다** — 아래 관점의 인물·축 위에서 제목·훅을 세운 대본을 앞에, 주변 인물의 공감·리액션 프레임으로 "
+                    "세운 대본은 뒤로(①~⑤보다 먼저 본다).\n" + pov_rule(pov)) if pov else ""
+        raw = gemini.text_json(RERANK_PROMPT.format(title=title, episode=episode, k=len(versions), blocks=blocks, pov_note=pov_note), kind="rerank", thinking="medium",
                                max_output_tokens=8192)
     except Exception as e:  # noqa: BLE001
         log(f"[rerank] ⚠ 재순위 실패 → 번호순 유지: {type(e).__name__}: {str(e)[:160]}")
@@ -918,10 +921,10 @@ def rerank(gemini: Gemini, versions: list[dict], *, title: str, episode: str, lo
     return {"ranking": ranking, "recommended": ranking[0] if ranking else rec, "reason": str(raw.get("reason") or "")[:200], "notes": notes, "ok": True}
 
 
-def apply_rerank(job: Job, gemini: Gemini, data: dict, *, title: str, episode: str, basis: str = "draft") -> dict:
+def apply_rerank(job: Job, gemini: Gemini, data: dict, *, title: str, episode: str, basis: str = "draft", pov: str | None = None) -> dict:
     """rebuild 데이터의 ranking/recommended/reason 을 재순위로 교체(제자리). 리빌딩 모델의 원래 값은 model_ranking 으로 보존.
     basis: 'draft'(리빌딩 초안) | 'verified'(확인 패스 최종본 — 호출부가 versions 를 최종본으로 바꿔 준다)."""
-    res = rerank(gemini, data["versions"], title=title, episode=episode, log=job.log)
+    res = rerank(gemini, data["versions"], title=title, episode=episode, pov=pov, log=job.log)
     if not res["ok"]:
         return data
     data.setdefault("model_ranking", {"ranking": data.get("ranking"), "recommended": data.get("recommended"), "reason": data.get("reason")})

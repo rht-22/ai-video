@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+import copy
+
 import json
 from pathlib import Path
 
@@ -43,10 +45,12 @@ VERIFY_PROMPT = """# 📜 티키타카 스크립트 리빌딩 — 영상 확인 
 4. 이야기를 통째로 바꿔야 할 **명백한 이유**(초안의 핵심 장면이 화면에 없다, 훨씬 강한 장면을 확인했다)가 있을 때만 바꾸고
    `changes` 에 이유를 적는다. 확인하지 않은 장면은 쓰지 않는다.
 5. 원본 대사는 줄(L-xxx) ID 로만, 화자가 바뀌어도 의미가 이어지는 연속 줄은 함께 묶는다. 대화·듀엣의 응답과 문장 끝을 빠뜨리지 않는다. 비연속 줄은 별도 S 항목으로 나눈다. 합계 {target_min}~{target_max}초(N=글자수/4초, S=줄 길이, A=순간 길이).
-6. 내레이션은 설명만 늘어놓지 말고 절반쯤은 **크리에이터의 리액션·의견**(시청자에게 말 걸기 · 1인칭 감상 · 드립 · 팩폭)으로 — 초안이
-   해설 위주면 몇 줄을 의견형으로 바꾼다(8~30자 · 화면에 있는 사실만).
-7. **내레이션이 바로 뒤 대사의 내용을 미리 말하지 않는다** — 대사가 말할 것을 내레이션이 먼저 요약하면 같은 말이 두 번 나온다(실측: "무시하기로
-   합의!" 뒤에 "인사도 안 해" 대사). 내레이션은 앞 대사의 반응/의견이거나 건너뛴 시간을 잇는 말이어야 한다.
+6. **문제가 없는 문장은 글자 그대로 옮긴다** — 화면 대조에서 걸리지 않은 N 문장·제목·S/A 항목은 한 글자도 바꾸지 않는다(해설 위주여도 그대로 둔다 —
+   의견형으로 바꾸라는 요구는 없다). 바꾼 문장은 **전부** `changes` 에 이유와 함께 적는다. N 의 `production_plan` 도 초안 것을 그대로 옮기고,
+   화면이 문제일 때만 그 N 의 계획을 고친다.
+7. **내레이션이 바로 뒤 대사의 내용을 먼저 말하지 않는다** — 대사가 말할 것을 내레이션이 요약하면 같은 말이 두 번 나온다(실측: "무시하기로
+   합의!" 뒤에 "인사도 안 해" 대사). 뒤 대사를 소개하고 싶으면 **내용 대신 지시어로 가리킨다** — "그러자 A 가 이렇게 말합니다." "B 의 대답은
+   이랬죠." (✗ "무시하기로 합의!" → ○ "그리고 둘은 이렇게 합의합니다."). 걸리면 그렇게 고쳐 쓰고 `changes` 에 적는다.
 8. **제목이 약속한 것은 대본 안에 있어야 한다** — 제목이 "전말·이유·정체·결말"을 말하면 그 내용이 실제로 나오는 대사/장면이 있어야 한다.
    없으면 제목을 대본 내용에 맞게 고쳐라(제목이 대본을 과장하면 시청자가 속았다고 느낀다).
 9. 1.2초 미만의 짧은 대사 조각은 앞뒤 줄과 묶거나(화자 전환을 포함한 연속 줄) 뺀다 — "싹 무시해." 처럼 맥락 없는 꼬리만 남기지 않는다. 단독으로
@@ -58,7 +62,7 @@ VERIFY_PROMPT = """# 📜 티키타카 스크립트 리빌딩 — 영상 확인 
     speaker_fixes 로 고치고, 내레이션의 인물명은 그 줄의 화자·장면 등장 인물과 일치해야 한다. 인과·동기도 [작품 이해]에 있는 것만 말한다.{strategy_note}{guide}{digest}
 
 ## 항목 어휘
-{{"type":"N","text":"…","effect":"[…]"|null}} · {{"type":"S","line_ids":["L-045","L-046"],"effect":…}} · {{"type":"A","moment_id":"S-012","effect":…}}
+{{"type":"N","text":"…","effect":"[…]"|null,"production_plan":{{초안의 것 그대로 — 화면이 문제일 때만 수정}}}} · {{"type":"S","line_ids":["L-045","L-046"],"effect":…}} · {{"type":"A","moment_id":"S-012","effect":…}}
 
 ## 출력 JSON 하나(코드블록 금지)
 {{"n": {n}, "strategy": "{strategy}", "title": {{"line1": "상황·조건", "line2": "핵심 행동·반응"}}, "structure": "…",
@@ -74,6 +78,26 @@ VERIFY_PROMPT = """# 📜 티키타카 스크립트 리빌딩 — 영상 확인 
 ## 소스 스크립트
 {script}
 """
+
+
+def inherit_plans(draft: dict, final: dict) -> int:
+    """확인 패스 응답의 N 에 production_plan 이 없으면 초안 계획을 승계한다(2026-09-22 실사고: 응답이 출력 어휘대로만 내 계획 9개가
+    전부 사라지고, 게이트 수리가 기준 시각 0.0초 폴백으로 소스 맨 앞 조각(선공개 침대 장면)을 골라 훅이 「침대에 누워 …」가 됐다).
+    짝: ① 같은 문장 ② 아니면 k번째 N 끼리(개수가 같을 때). 순수 — 승계 건수를 돌려준다."""
+    d_ns = [it for it in draft.get("items") or [] if it.get("type") == "N" and it.get("production_plan")]
+    f_ns = [it for it in final.get("items") or [] if it.get("type") == "N"]
+    by_text = {" ".join(str(it.get("text") or "").split()): it["production_plan"] for it in d_ns}
+    n = 0
+    for k, it in enumerate(f_ns):
+        if it.get("production_plan"):
+            continue
+        plan = by_text.get(" ".join(str(it.get("text") or "").split()))
+        if plan is None and len(d_ns) == len(f_ns):
+            plan = d_ns[k]["production_plan"]
+        if plan:
+            it["production_plan"] = copy.deepcopy(plan)
+            n += 1
+    return n
 
 
 def apply_speaker_fixes(job: Job, transcript: dict, index: dict, fixes, *, cast: list[str]) -> dict[str, str]:
@@ -255,6 +279,9 @@ def finalize_verified(job: Job, gemini: Gemini, rebuild: dict, version_n: int, i
     if guide:
         polish_guide(gemini, final, guide, log=job.log)
         apply_name_map(final, guide.get("actors") or {}, log=job.log)
+    inherited = inherit_plans(draft, final)
+    if inherited:
+        job.log(f"[verify] 화면 계획 승계 {inherited}건 — 확인 패스 응답에 production_plan 이 빠진 N 은 초안 계획을 그대로 쓴다")
     if rebuild.get("script_flow") == "staged":
         from app.tikitaka.staged import carry_slots, opening_record
         carry_slots(draft, final, index, transcript)

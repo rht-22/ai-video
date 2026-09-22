@@ -896,7 +896,9 @@ def test_prompts_ask_for_creator_voice_narration():
     from app.tikitaka.prompts import REBUILD_PROMPT
     from app.tikitaka.verify import VERIFY_PROMPT
     assert "크리에이터(편집자)의 리액션·의견" in REBUILD_PROMPT and "설명만 하는 해설 금지" in REBUILD_PROMPT
-    assert "크리에이터의 리액션·의견" in VERIFY_PROMPT
+    # 2026-09-22 사용자 결정: 확인 패스는 해설 위주여도 그대로 둔다(의견형 강제 삭제) — 대신 보존 규칙·지시어 규칙이 있어야 한다
+    assert "크리에이터의 리액션·의견" not in VERIFY_PROMPT
+    assert "글자 그대로 옮긴다" in VERIFY_PROMPT and "이렇게 말합니다" in VERIFY_PROMPT
 
 
 # ── N 행 컷 0개 폴백 (2026-09-11 2화 v5 실측: 뒤쪽 샷이 활용 불가 구간에 통째로 막힘) ─────────

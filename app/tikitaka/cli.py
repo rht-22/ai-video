@@ -61,6 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--layout", choices=("fill", "band"), default=None, help="grid-review 미지정=V3 템플릿 · fill=5:6 · band=16:9 · legacy 기본=fill")
     ap.add_argument("--no-framing", action="store_true", help="5.5단계 Gemini 주인물 크롭을 건너뛴다(중앙 크롭)")
     ap.add_argument("--guide", action="append", default=None, help="제작 가이드 파일(반복 가능). 미지정이면 guides/tikitaka/<작품명>.md · <작품명>/<회차>.md 자동 탐색")
+    ap.add_argument("--pov", default=None, help="관점 — 제목·훅·재순위가 이 인물의 눈으로(예: \"공은태 — 13억 뒤 처음 선을 긋는 팀장, 상대는 선배 대리\"). 가이드의 '관점:' 키보다 우선. 없으면 종전(사건 자체)")
     ap.add_argument("--logo", default=None, help="작품명 대신 넣을 로고 이미지(PNG 알파). 가이드의 '로고:' 키보다 우선")
     ap.add_argument("--script-flow", choices=("single", "staged"), default="single",
                     help="대본 흐름. single = 한 번의 호출로 문장·화면 동시(종전) · staged = 뼈대 → 편별 문장·화면(grid-review 전용). 실측 비교 뒤 single 은 지운다")
@@ -159,6 +160,13 @@ def main(argv: list[str] | None = None) -> int:
             guide = dict(guide or {"files": [], "avoid": [], "text": ""})
             guide["title_fit"] = title_fit
             guide["sha"] = fingerprint([guide.get("sha"), "title_fit", Path(title_fit["font"] or "").name, title_fit["sizes"]])
+    if a.pov:
+        from app.tikitaka.grid import fingerprint
+        guide = dict(guide or {"files": [], "avoid": [], "text": ""})
+        guide["pov"] = a.pov.strip()
+        guide["sha"] = fingerprint([guide.get("sha"), "pov", guide["pov"]])
+    if guide and guide.get("pov"):
+        job.log(f"[guide] 관점: {guide['pov']}")
     logo = Path(a.logo) if a.logo else (Path(guide["logo"]) if guide and guide.get("logo") else None)
     copy_text = a.copy if a.copy is not None else ((guide or {}).get("copy") or None)
     copy_pos = a.copy_pos or (guide or {}).get("copy_pos") or "below"
@@ -326,7 +334,7 @@ def main(argv: list[str] | None = None) -> int:
     if digest and not rebuild.get("digest"):
         job.log("[digest] ⚠ 리빌딩 캐시는 작품 이해 문서 없이 만든 것이다 — 처음부터 반영하려면 --redo rebuild")
     if not rebuild.get("rerank"):                                     # 재순위 단계 이전에 만든 캐시 — 초안 기준으로 한 번 매긴다(멱등)
-        R.apply_rerank(job, gemini, rebuild, title=a.title, episode=a.episode, basis="draft")
+        R.apply_rerank(job, gemini, rebuild, title=a.title, episode=a.episode, basis="draft", pov=(guide or {}).get("pov"))
         job.save(rebuild_name, rebuild)
     job.path(f"rebuild_versions{sfx}.md").write_text(RP.versions_md(rebuild, title=a.title), encoding="utf-8")
     if a.until == "rebuild":
@@ -469,7 +477,7 @@ def main(argv: list[str] | None = None) -> int:
             vf = f"verified_v{v['n']}{sfx}.json"
             finals.append(job.load(vf)["version"] if job.has(vf) else v)
         data = dict(rebuild, versions=finals)
-        R.apply_rerank(job, gemini, data, title=a.title, episode=a.episode, basis="verified")
+        R.apply_rerank(job, gemini, data, title=a.title, episode=a.episode, basis="verified", pov=(guide or {}).get("pov"))
         for key in ("ranking", "recommended", "reason", "rerank", "model_ranking"):
             if key in data:
                 rebuild[key] = data[key]

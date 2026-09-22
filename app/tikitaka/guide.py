@@ -11,6 +11,8 @@
                                   S/A 항목·N 컷 어디에도 못 쓴다(코드 강제). "없음" 이면 무시. 회차 파일에 두는 것이 보통
   해시태그: #쿠팡플레이 #지금불륜이문제가아닙니다  ← 발행 메모(publish_v{n}.json)에 실린다
   배우: 박경희=김혜수, 안수정=조여정        ← 극중 이름 → 배우 이름. 제목·내레이션·효과자막(프롬프트+치환 벨트)과 자막 화자 라벨에 적용
+  관점: 공은태 — 13억이 생긴 뒤 처음 선을 긋는 팀장. 상대는 삐딱선 타는 선배 대리   ← 제목·훅·재순위가 이 인물의 눈·이 축으로(2026-09-22).
+                                  CLI `--pov` 가 편 단위로 덮는다. **없으면 종전 그대로**(사건·해프닝 자체를 보여준다 — 자동 추정 없음)
 
 자동 탐색: `guides/tikitaka/<작품명>.md` + `guides/tikitaka/<작품명>/<회차>.md` (둘 다 있으면 둘 다 — 회차 파일이 뒤에 와서
 같은 키는 회차가 이긴다). CLI `--guide` 를 주면 그 파일들만 쓴다. CLI `--logo/--copy/--copy-pos` 는 가이드 키보다 우선한다.
@@ -25,7 +27,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GUIDE_DIR = REPO_ROOT / "guides" / "tikitaka"
 
-_KEY_RE = re.compile(r"^\s*(?:[-*]\s*)?(지양\s*단어|금지어|피할\s*단어|로고|카피\s*문구|카피\s*위치|카피|활용\s*불가|제외\s*구간|해시태그|배우|배우\s*표기)\s*[:：]\s*(.+?)\s*$")
+_KEY_RE = re.compile(r"^\s*(?:[-*]\s*)?(지양\s*단어|금지어|피할\s*단어|로고|카피\s*문구|카피\s*위치|카피|활용\s*불가|제외\s*구간|해시태그|배우|배우\s*표기|관점|시점|pov)\s*[:：]\s*(.+?)\s*$")
 _SPLIT_RE = re.compile(r"\s*[,、/]\s*")
 _RANGE_RE = re.compile(r"(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\s*[~\-–]\s*(엔딩|끝|end|(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?)", re.I)
 
@@ -52,7 +54,7 @@ def parse_ranges(val: str) -> list[dict]:
 
 def parse_guide_text(text: str) -> dict:
     """가이드 본문 → {avoid: [...], logo, copy, copy_pos}. 구조 키 줄만 읽고 나머지는 본문(프롬프트용)이다. 순수 — 테스트 대상."""
-    out: dict = {"avoid": [], "logo": None, "copy": None, "copy_pos": None, "exclude": [], "hashtags": [], "actors": {}}
+    out: dict = {"avoid": [], "logo": None, "copy": None, "copy_pos": None, "exclude": [], "hashtags": [], "actors": {}, "pov": None}
     for line in text.splitlines():
         m = _KEY_RE.match(line)
         if not m:
@@ -73,6 +75,8 @@ def parse_guide_text(text: str) -> dict:
                 out["exclude"].extend(parse_ranges(val))
         elif key == "해시태그":
             out["hashtags"].extend(t if t.startswith("#") else f"#{t}" for t in re.split(r"[\s,]+", val) if t.strip("#"))
+        elif key in ("관점", "시점", "pov"):
+            out["pov"] = val.strip("'\"")
         elif key in ("배우", "배우표기"):                       # "박경희=김혜수, 안수정=조여정" — 극중 이름 → 배우 이름
             for pair in _SPLIT_RE.split(val):
                 if "=" in pair or "→" in pair or ":" in pair:
@@ -112,7 +116,8 @@ def load_guides(paths: list[Path]) -> dict | None:
     if not paths:
         return None
     texts: list[str] = []
-    merged: dict = {"avoid": [], "logo": None, "copy": None, "copy_pos": None, "exclude": [], "hashtags": [], "actors": {}, "files": [], "sha": ""}
+    merged: dict = {"avoid": [], "logo": None, "copy": None, "copy_pos": None, "exclude": [], "hashtags": [], "actors": {}, "pov": None,
+                    "files": [], "sha": ""}
     h = hashlib.sha1()
     for p in paths:
         p = Path(p)
@@ -132,6 +137,8 @@ def load_guides(paths: list[Path]) -> dict | None:
             merged["copy_pos"] = part["copy_pos"]
         merged["exclude"].extend(part["exclude"])
         merged["actors"].update(part["actors"])
+        if part.get("pov"):
+            merged["pov"] = part["pov"]                     # 뒤 파일(회차)이 이긴다 — 다른 키와 같은 규약
         for t in part["hashtags"]:
             if t not in merged["hashtags"]:
                 merged["hashtags"].append(t)
@@ -157,6 +164,8 @@ def guide_block(guide: dict | None) -> str:
         lines.append("- **인물 표기는 배우 이름으로**: " + ", ".join(f"{c}→{a}" for c, a in actors.items()) +
                      " — 제목·내레이션·효과자막에서 극중 이름 대신 배우 이름을 쓴다(자막 화자 라벨도 배우 이름으로 나간다). "
                      "목록에 없는 인물은 극중 이름 그대로.")
+    if guide.get("pov"):
+        lines.append(pov_rule(guide["pov"]))
     ex = guide.get("exclude") or []
     if ex:
         from app.tikitaka.common import fmt_tc
@@ -165,6 +174,13 @@ def guide_block(guide: dict | None) -> str:
         lines.append(f"- **활용 불가 구간(원본 절대 시각)**: {spans} — 이 구간의 대사·순간·장면은 소스 스크립트에서 이미 뺐고, "
                      "어떤 항목(S/A/N 컷)에도 쓰면 안 된다. 그 구간의 내용을 내레이션으로 설명하지도 마라.")
     return "\n".join(lines)
+
+
+def pov_rule(pov: str) -> str:
+    """관점 규칙 한 줄 — 뼈대·리빌딩·확인 패스(guide_block)와 재순위(RERANK_PROMPT)가 **같은 문장**을 쓴다. 순수."""
+    return (f"- **관점(사람이 정함)**: {pov} — 제목·훅·내레이션은 **이 인물의 눈으로, 이 축 위에서** 잡는다. "
+            "주변 인물의 리액션·공감(눈치 보는 팀원·놀라는 관객)으로 초점을 옮기지 않는다 — 그런 장면은 이 인물이 만든 상황의 결과로만 쓴다. "
+            "제목의 주어는 이 인물(또는 이 축의 상대)이다.")
 
 
 def excluded_ranges(guide: dict | None, duration: float) -> list[tuple[float, float]]:
