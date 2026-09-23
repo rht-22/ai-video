@@ -95,13 +95,6 @@ def bundle(table, grid, *, title):
             # dust, while keeping a real slow-down outside the contract.
             if abs(speed - 1.0) <= 1e-9:
                 speed = 1.0
-            # grid_table has already quantized the output clock. Re-deriving it
-            # from source/speed and flooring can lose one frame to float error,
-            # making a valid cover appear shorter than its TTS.
-            derived = (float(cut["out"])-s)/speed+hold
-            dur = round(float(cut.get("dur", derived))*FPS)/FPS
-            if dur <= 0:
-                raise ValueError("grid adapter: sub-frame clip")
             end = float(cut["out"])
             spids = list(cut.get("span_ids") or [])
             ids.extend(spids)
@@ -120,6 +113,14 @@ def bundle(table, grid, *, title):
                 c["subject_pos"] = cut["subject_pos"]
             if cut.get("reframe"):
                 c["reframe"] = copy.deepcopy(cut["reframe"])
+            # Offsets must follow the renderer's clock (source/speed+hold on the
+            # output-frame grid), never the table's cached `dur`: a hand edit of
+            # in/out that kept an old playback_speed left dur=2.5 on a 2.133s
+            # clip and pushed every later subtitle/TTS 0.367s late (로또 v8 행14,
+            # 2026-09-23). Rounding (not flooring) keeps float dust frame-exact.
+            dur = assemble.clip_duration(assemble.clip_len(c), FPS)
+            if dur <= 0:
+                raise ValueError("grid adapter: sub-frame clip")
             timeline.append(c)
             if row["mode"] == "S":
                 for sub in row.get("sub_lines") or []:

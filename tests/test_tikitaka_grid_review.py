@@ -131,6 +131,38 @@ def test_finish_bundle_preserves_grid_output_frame_after_speed_rounding():
     assert finish.assemble.clip_len(plan["timeline"][0]) == pytest.approx(5/3)
 
 
+def test_finish_bundle_offsets_follow_renderer_clock_after_sped_up_cover():
+    # 로또 v8 행14 (2026-09-23): a hand edit set in/out/dur=2.5 but kept the old
+    # 1.176x speed, so the renderer made a 2.133s clip while bundle advanced by
+    # 2.5s and every later subtitle/TTS cue was 0.367s late.
+    def row(mode, a, z, **kw):
+        cut = {"in": a, "out": z, "dur": z - a, "span_ids": ["sp0"],
+               "authority": "grid+tts" if mode == "N" else "stt", **kw}
+        return {"i": 0, "mode": mode, "text": "x", "tts": "/tmp/x.mp3", "cuts": [cut], "dur": z - a}
+    cover = row("N", 0.0, 2.4, playback_speed=1.2)       # renders 2.0s, stale dur 2.4
+    cover["dur"] = 1.9                                    # TTS fits the real clip
+    spoken = row("S", 3.0, 5.0)
+    spoken["sub_lines"] = [{"start": 3.5, "end": 4.5, "text": "자신 있으신 겁니까?"}]
+    tail = row("N", 6.0, 7.0)
+    table = {"version": {"n": 1, "title": "t"}, "rows": [cover, spoken, tail]}
+    plan, _, segments, resources = finish.bundle(table, {}, title="t")
+    offsets = finish.assemble.edited_offsets(plan["timeline"], plan["output_fps"])
+    def to_source(t):
+        s, e, off = max((o for o in offsets if o[2] <= t + 1e-9), key=lambda o: o[2])
+        return s + (t - off)
+    assert segments[0]["start_sec"] == pytest.approx(2.5)
+    for seg in segments:
+        assert to_source(seg["start_sec"]) == pytest.approx(seg["source_time_sec"], abs=1e-3)
+    cues = [f["cue"] for f in resources["tts_cue_files"]]
+    assert [c["start_sec"] for c in cues] == pytest.approx([0.0, 4.0])
+    for cue in cues:
+        assert to_source(cue["start_sec"]) == pytest.approx(cue["source_time_sec"], abs=1e-3)
+    # The stale dur must not hide narration running past the real cover.
+    cover["dur"] = 2.3
+    with pytest.raises(ValueError, match="TTS audio exceeds"):
+        finish.bundle(table, {}, title="t")
+
+
 def test_cover_speed_one_is_canonical_after_float_quantizing():
     # Decimal source timestamps can make the ratio a few ulps smaller than
     # one.  That is not an intentional slow-down and must not trip the v3
