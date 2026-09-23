@@ -499,6 +499,16 @@ def main(argv: list[str] | None = None) -> int:
                 "review": f"review_v{n}{sfx}.json", "pipeline": "grid-review",
                 **({k: table["version"][k] for k in ("opening", "narration_dropped")
                     if isinstance(table.get("version"), dict) and table["version"].get(k)})})
+            # VES 로 넘길 편별 묶음(videos/vN/) — 렌더와 같은 프로세스에서 묶어 렌더 당시 코드·설정을 남긴다.
+            # 묶음 실패는 완성본·발행 메모를 되돌리지 않는다(수동: python -m app.tikitaka.bundle <잡 폴더>).
+            from app.tikitaka import bundle as BU
+            try:
+                res = BU.export(job.out_dir, f"v{n}{sfx}", render=BU.render_provenance(
+                    design=design, style_preset=a.style_preset, design_preset=a.design_preset,
+                    voice=a.voice, speed=a.speed, cover_cut_guard=a.cover_cut_guard))
+                job.log(f"[bundle] v{n}{sfx}: {res.status}{' — ' + res.detail if res.detail else ''}")
+            except Exception as e:
+                job.log(f"[bundle] ⚠ v{n}{sfx} 묶음 실패: {e}")
             continue
         if not a.no_framing and a.layout == "fill":              # 5.5 화면 잡기(Gemini · 클로즈/투샷/와이드) — band 레이아웃은 크롭이 없다
             FR.frame_cuts(job, gemini, table, scene_cuts=cuts)   # 컷 안 샷 경계는 샷별로 따로 판정
