@@ -34,6 +34,55 @@ def cascade_redo(steps: set[str]) -> set[str]:
     return out
 
 
+def range_include(spec: str, duration: float) -> list[tuple[float, float]]:
+    """--range 값 → [(시작, 끝)] 절대초. 끝 생략은 영상 끝. 순수."""
+    from app.tikitaka.guide import parse_ranges
+    return [(r["start"], r["end"] if r["end"] is not None else duration) for r in parse_ranges(spec.replace(",", " / "))]
+
+
+def range_tag(include: list[tuple[float, float]]) -> str:
+    """재료 구간의 자동 산출 태그 — r0300-0700. 순수."""
+    return "r" + "-".join(f"{int(s0)//60:02d}{int(s0)%60:02d}-{int(e0)//60:02d}{int(e0)%60:02d}" for s0, e0 in include)
+
+
+def requested_versions(version: str, all_versions: bool = False) -> set[int] | None:
+    """--version 이 고른 번호. auto·--all-versions·해석 불가면 None(버전 한정 없음). 순수."""
+    if all_versions or version == "auto":
+        return None
+    try:
+        return {int(x) for x in version.split(",") if x.strip()} or None
+    except ValueError:
+        return None                                                     # 잘못된 번호는 뒤의 버전 검사가 오류로 알린다
+
+
+def clear_redo_outputs(out_dir: Path, redo: set[str], *, tag: str = "", versions: set[int] | None = None) -> None:
+    """--redo 단계의 캐시를 비운다. 버전 파일(*_v*)은 versions 로 한정하고, 완성 MP4 는 지우지 않고 .prev_ 로 보관한다."""
+    import time
+    stamp = time.time_ns()
+    tag_re = re.compile(r"_v\d+_(.+?)\.(json|md|mp4|txt)$")     # 태그 산출(v3_fast · v11_r0300-0700)은 그 태그 실행에서만 지운다
+    ver_re = re.compile(r"_v(\d+)(?:_|\.)")
+    for step, files in REDO_FILES:
+        if step in redo:
+            for pat in files:
+                pats = [pat] + ([pat.replace(".json", f"_{tag}.json")] if tag and "*" not in pat else [])
+                for pt in pats:
+                    for p in list(out_dir.glob(pt)):
+                        m = tag_re.search(p.name)
+                        if tag and (not m or m.group(1) != tag) and "*" in pt:
+                            continue                                    # 태그 실행: 다른 태그·무태그 버전 파일은 보존
+                        if not tag and m:
+                            continue                                    # 무태그 실행: 태그 파일 보존
+                        if "_v*" in pt and versions is not None:
+                            vm = ver_re.search(p.name)
+                            if not vm or int(vm.group(1)) not in versions:
+                                continue                                # --version 밖의 버전 산출은 보존
+                        if p.suffix == ".mp4":
+                            # Exports are deliverables: a failed re-render must not leave the version without a final.
+                            p.rename(p.with_name(f"{p.name}.prev_{stamp}"))
+                        else:
+                            p.unlink()
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m app.tikitaka", description="티키타카 쇼츠 파이프라인")
     ap.add_argument("--pipeline", choices=("grid-review", "legacy"), default="grid-review",
@@ -196,19 +245,13 @@ def main(argv: list[str] | None = None) -> int:
                 job.path(name).rename(job.path(f"{name}.prev_{time.time_ns()}"))
         if job.path("grid_cache").exists():
             job.path("grid_cache").rename(job.path(f"grid_cache_prev_{time.time_ns()}"))
-    tag_re = re.compile(r"_v\d+_(.+?)\.(json|md|mp4|txt)$")     # 태그 산출(v3_fast · v11_r0300-0700)은 그 태그 실행에서만 지운다
-    for step, files in REDO_FILES:
-        if step in redo:
-            for pat in files:
-                pats = [pat] + ([pat.replace(".json", f"_{a.tag}.json")] if a.tag and "*" not in pat else [])
-                for pt in pats:
-                    for p in out_dir.glob(pt):
-                        m = tag_re.search(p.name)
-                        if a.tag and (not m or m.group(1) != a.tag) and "*" in pt:
-                            continue                                    # 태그 실행: 다른 태그·무태그 버전 파일은 보존
-                        if not a.tag and m:
-                            continue                                    # 무태그 실행: 태그 파일 보존
-                        p.unlink()
+    if a.range and not a.tag:
+        # The derived tag must exist before --redo cleanup, or a ranged run clears untagged caches.
+        early_include = range_include(a.range, P.probe(job)["duration_sec"])
+        if not early_include:
+            ap.error(f"--range 형식 오류: {a.range!r} (MM:SS~MM:SS)")
+        a.tag = range_tag(early_include)
+    clear_redo_outputs(out_dir, redo, tag=a.tag, versions=requested_versions(a.version, a.all_versions))
     if "polish" in redo and "transcribe" not in redo and (out_dir / "transcript.json").exists():
         tr = json.loads((out_dir / "transcript.json").read_text(encoding="utf-8"))   # 교정만 다시: 원문으로 되돌리고 플래그 해제
         for l in tr.get("lines", []):
@@ -313,13 +356,11 @@ def main(argv: list[str] | None = None) -> int:
     range_label = None
     range_exclude: list[tuple[float, float]] = []
     if a.range:
-        include = [(r["start"], r["end"] if r["end"] is not None else info["duration_sec"]) for r in G.parse_ranges(a.range.replace(",", " / "))]
+        include = range_include(a.range, info["duration_sec"])
         if not include:
             ap.error(f"--range 형식 오류: {a.range!r} (MM:SS~MM:SS)")
         range_exclude = G.ranges_complement(include, info["duration_sec"])
         range_label = ", ".join(f"{fmt_tc(s0)[:5]}~{fmt_tc(e0)[:5]}" for s0, e0 in include)
-        if not a.tag:
-            a.tag = "r" + "-".join(f"{int(s0)//60:02d}{int(s0)%60:02d}-{int(e0)//60:02d}{int(e0)%60:02d}" for s0, e0 in include)
         job.log(f"[cli] 재료 구간 {range_label} → 밖은 배제 · 산출 태그 {a.tag}")
         exclude = sorted(exclude + range_exclude)
     sfx = f"_{a.tag}" if a.tag else ""
