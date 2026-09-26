@@ -11,11 +11,13 @@ review_<suffix>/final_prev_<ns>.mp4, 이전 묶음은 videos/<suffix>.prev_<ns>/
 
 수정 항목의 뜻(편집실 collectOv 와 같은 규약 — 보낸 항목만 바뀌고 나머지는 지금 렌더 그대로):
   clips[]      원본 절대초 · 전량 교체. 편집본 길이 = (끝-시작)/배속 + 붙잡기, 30fps 격자(편집실 clipDur 와 같은 자)
+               원음: 내레이션이 나오는 동안만 끈다 — 내레이션을 빼면 다시 켠다(narration_mute)
   subtitles[]  편집본 초 · 전량 교체. source_time_sec 가 있으면 새 구간 위의 그 원본 시각으로 옮긴다(장면 따라가기)
   tts[]        원본 시각(source_time_sec) 기준 · 전량 교체. 문구·목소리·속도로 합성(같은 값이면 TTS 캐시 재사용)
   title        top_title 교체. 제목 창(segments)은 렌더러가 아직 모른다 → 거절
   texts[]      AI 보조 자막·자유 텍스트 · 전량 교체(원본 시각 기준)
-  images·design  아직 반영하지 못한다 → 거절(조용히 빼고 렌더하지 않는다)
+  design       이 편 디자인 덮어쓰기(자막 크기·색 등 엔진 디자인 키) — 렌더 당시 디자인 위에 얹고, 다음 적용의 기준이 된다
+  images       아직 반영하지 못한다 → 거절(조용히 빼고 렌더하지 않는다)
 구간만 바꾸면 손대지 않은 자막·내레이션·보조 자막은 원본 시각으로 새 구간 위에 다시 놓고, 새 구간에 없는 것은 빠진다(기록).
 
 적용 상태는 video_edits/<suffix>/apply/<edit_id>.json 에 남긴다(편집실 목록이 '렌더 중'·'실패'를 보여 준다).
@@ -41,7 +43,7 @@ from app.tikitaka.common import Job
 
 FPS = BU.FPS
 APPLY_DIR = "apply"
-SUPPORTED = {"clips", "subtitles", "tts", "title", "texts"}
+SUPPORTED = {"clips", "subtitles", "tts", "title", "texts", "design"}
 KEY_NAMES = {"images": "이미지", "design": "디자인", "title.segments": "제목 창"}
 LABEL_FIELDS = BU.LABEL_KEYS
 
@@ -314,6 +316,35 @@ def remap_zooms(zooms: list[dict], same: dict[int, int], log: list[dict]) -> lis
     return out
 
 
+def narration_mute(timeline: list[dict], cue_files: list[dict], log: list[dict]) -> list[dict]:
+    """원음은 내레이션이 나오는 동안만 끈다(2026-09-26 사용자 결정 — 내레이션 넣으면 자동 음소거).
+    - 내레이션이 걸친 일반 구간: use_original_audio=False → 엔진이 내레이션 창(원본 시각)만 끄고 나머지는 살린다
+    - 내레이션이 없는 일반 구간: 원음 켬
+    - 덮개(cover) 구간은 원래 통째로 무음이다. 내레이션이 빠졌고 1배속·붙잡기 없음이면 일반 구간으로 되돌려 원음을 켠다.
+      배속·붙잡기 덮개는 엔진이 원음을 허용하지 않아 무음으로 남는다(기록)."""
+    spans = [(float(f["cue"]["start_sec"]), float(f["cue"]["end_sec"])) for f in cue_files]
+    out = []
+    for i, (c, off) in enumerate(zip(timeline, offsets(timeline))):
+        c = dict(c)
+        end = off + clip_sec(c)
+        voiced = any(_overlap(off, end, a, z) > 1e-3 for a, z in spans)
+        if c.get("cover"):
+            if not voiced:
+                if float(c.get("playback_speed") or 1.0) == 1.0 and not c.get("hold_sec"):
+                    c.pop("cover", None)
+                    c["use_original_audio"] = True
+                    log.append({"kind": "audio", "clip": i, "result": "내레이션이 빠진 덮개 — 원음 켬"})
+                else:
+                    log.append({"kind": "audio", "clip": i, "result": "내레이션이 빠졌지만 배속·붙잡기 구간이라 무음 유지"})
+        else:
+            want = not voiced
+            if bool(c.get("use_original_audio", True)) != want:
+                log.append({"kind": "audio", "clip": i, "result": "원음 켬" if want else "내레이션 동안 원음 끔"})
+            c["use_original_audio"] = want
+        out.append(c)
+    return out
+
+
 def rebuild_beats(story: dict, timeline: list[dict]) -> dict:
     story = copy.deepcopy(story)
     for b in story.get("beats") or []:
@@ -325,7 +356,7 @@ def rebuild_beats(story: dict, timeline: list[dict]) -> dict:
 
 def apply_overrides(ov: dict, *, plan: dict, segments: list[dict], resources: dict, story: dict,
                     style: dict, grid: dict, job: Job, synth=None, captions=None,
-                    voice: str = "", speed: str = "normal") -> dict:
+                    voice: str = "", speed: str = "normal", design: dict | None = None) -> dict:
     """순수에 가깝게 — 파일은 TTS 합성·구절 자막 캐시만 쓴다. 반환: 새 재료 + 적용 기록."""
     check_overrides(ov)
     log: list[dict] = []
@@ -386,6 +417,9 @@ def apply_overrides(ov: dict, *, plan: dict, segments: list[dict], resources: di
                          if float(old["start_sec"]) - 1e-3 <= c["start_sec"] < float(old["end_sec"]) + 1e-3]
             resources["tts_caption_segments"] = caps
 
+    if tts_changed or moved:
+        tl = narration_mute(tl, resources.get("tts_cue_files") or [], log)
+
     if "texts" in ov:
         v3["labels"] = editor_labels(ov["texts"], tl, log)
         log.append({"kind": "texts", "count": len(v3["labels"])})
@@ -405,12 +439,22 @@ def apply_overrides(ov: dict, *, plan: dict, segments: list[dict], resources: di
         plan.setdefault("layout", {})["top_title"] = top
         log.append({"kind": "title", "top_title": top})
 
+    design = copy.deepcopy(design or {})
+    if "design" in ov:
+        changes = ov["design"]
+        if not isinstance(changes, dict) or not all(isinstance(k, str) and isinstance(v, (str, int, float, bool))
+                                                     for k, v in changes.items()):
+            raise ApplyRefused("디자인 수정 형식이 올바르지 않아요.")
+        changed = {k: v for k, v in changes.items() if design.get(k) != v}
+        design.update(changes)
+        log.append({"kind": "design", "changed": changed})
+
     plan["timeline"] = tl
     plan["output_fps"] = FPS
     story = rebuild_beats(story, tl)
     story["narration_cues"] = [copy.deepcopy(f["cue"]) for f in resources.get("tts_cue_files") or []]
     return {"plan": plan, "segments": segments, "resources": resources, "story": story, "style": style,
-            "log": log, "duration_sec": total, "clips_changed": moved}
+            "design": design, "log": log, "duration_sec": total, "clips_changed": moved}
 
 
 # ── 실행 ────────────────────────────────────────────────────────────────────
@@ -499,7 +543,8 @@ def _render(job_dir: Path, suffix: str, video: dict, prov: dict, edit: dict, cov
     got = apply_overrides(edit["overrides"], plan=work.load("edit_plan.json"), segments=work.load("subtitle_segments.json"),
                           resources=work.load("checkpoint_resources.json"), story=work.load("checkpoint_story.json")["story"],
                           style=style_saved["style"], grid=work.load("grid.json"), job=job,
-                          voice=prov.get("voice") or "", speed=prov.get("speed") or "normal")
+                          voice=prov.get("voice") or "", speed=prov.get("speed") or "normal",
+                          design=prov.get("design") or {})
     for item in got["log"]:
         log(f"[수정 적용] {json.dumps(item, ensure_ascii=False)}")
     from app.tikitaka import finish
@@ -508,7 +553,7 @@ def _render(job_dir: Path, suffix: str, video: dict, prov: dict, edit: dict, cov
     if got["clips_changed"] or "tts" in edit["overrides"]:
         # 라벨 얼굴 회피가 보는 초안 — 새 구간·내레이션으로 다시 만든다
         finish.render_draft(source, got["plan"]["timeline"], work.path("draft_480.mp4"), got["resources"], log=work.log)
-    design = copy.deepcopy(prov.get("design") or {})
+    design = got["design"]
     style_preset = prov.get("style_preset") or "drama_clip"
     shot_ask = None
     if design.get("face_tracking", True):
@@ -548,7 +593,7 @@ def _render(job_dir: Path, suffix: str, video: dict, prov: dict, edit: dict, cov
     shutil.copy2(final, temp); os.replace(temp, output)
     applied = list(dict.fromkeys(list(prov.get("applied_edits") or []) + covered))
     settings = {k: v for k, v in prov.items() if k not in {"git_sha", "git_dirty", "recorded_at", "argv"}}
-    new_prov = BU.render_provenance(**{**settings, "applied_edits": applied,
+    new_prov = BU.render_provenance(**{**settings, "design": design, "applied_edits": applied,
                                        "edit_apply": {"edit_id": edit["edit_id"], "created_by": edit.get("created_by"),
                                                       "based_on_render_fingerprint": video["render_fingerprint"],
                                                       "skipped_ai": ["watch_trim", "stage4_style", "cover_framing"]}})

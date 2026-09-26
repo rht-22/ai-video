@@ -47,8 +47,8 @@ def test_time_mapping_follows_editor_rules():
 
 
 def test_unsupported_keys_are_refused_not_dropped(tmp_path):
-    with pytest.raises(A.ApplyRefused, match="디자인"):
-        A.apply_overrides({"design": {"title_color": "#fff"}}, **material(tmp_path))
+    with pytest.raises(A.ApplyRefused, match="이미지"):
+        A.apply_overrides({"images": [{"src": "x.png"}]}, **material(tmp_path))
     with pytest.raises(A.ApplyRefused, match="제목 창"):
         A.apply_overrides({"title": {"top_title": "t", "segments": [{"text": "x"}]}}, **material(tmp_path))
 
@@ -106,3 +106,31 @@ def test_emphasis_follows_its_line_when_lines_shift(tmp_path):
     subs = [{"start_sec": 5.2, "end_sec": 6.0, "text": "대사 둘", "source_time_sec": 50.2}]     # 첫 줄 삭제
     got = A.apply_overrides({"subtitles": subs}, **m)
     assert got["style"]["v3_style"]["emphasis"] == [{"line": "L0", "index": 0, "text": "둘", "start_sec": 5.3, "end_sec": 5.8}]
+
+
+def test_design_edits_sit_on_the_rendered_design(tmp_path):
+    base = {"subtitle_size": 62, "title_color": "#FFFFFF", "work_value": "/logo.png"}
+    got = A.apply_overrides({"design": {"subtitle_size": 63, "subtitle_color": "#ffffff"}}, **material(tmp_path), design=base)
+    assert got["design"] == {"subtitle_size": 63, "subtitle_color": "#ffffff", "title_color": "#FFFFFF", "work_value": "/logo.png"}
+    assert base["subtitle_size"] == 62                     # 렌더 기록은 건드리지 않는다
+    assert {"kind": "design", "changed": {"subtitle_size": 63, "subtitle_color": "#ffffff"}} in got["log"]
+    with pytest.raises(A.ApplyRefused, match="디자인"):
+        A.apply_overrides({"design": {"subtitle_size": [63]}}, **material(tmp_path))
+
+
+def test_original_audio_is_off_only_where_narration_plays(tmp_path):
+    def synth(job, text, voice, speed):
+        p = tmp_path / "n.mp3"; p.write_bytes(b"x"); return p, 1.0
+    # 내레이션을 대사 구간(30~33초)으로 옮긴다 → 그 구간은 내레이션 동안 원음 끔, 덮개(10~12초)는 내레이션이 빠졌다
+    got = A.apply_overrides({"tts": [{"text": "새 해설", "source_time_sec": 30.5, "voice": "v"}]}, **material(tmp_path),
+                            synth=synth, captions=lambda j, r: [])
+    tl = got["plan"]["timeline"]
+    assert "cover" not in tl[0] and tl[0]["use_original_audio"] is True      # 1배속 덮개 → 원음 되살림
+    assert tl[1]["use_original_audio"] is False                               # 해설이 걸친 대사 구간
+    assert tl[2]["use_original_audio"] is True
+    # 내레이션을 모두 빼면 대사 구간은 다시 원음 켬, 배속 덮개는 무음 유지(엔진이 배속 원음을 막는다)
+    m = material(tmp_path); m["plan"]["timeline"][0]["playback_speed"] = 1.1
+    got = A.apply_overrides({"tts": []}, **m, captions=lambda j, r: [])
+    tl = got["plan"]["timeline"]
+    assert tl[0]["cover"] and tl[0]["use_original_audio"] is False
+    assert any("무음 유지" in x.get("result", "") for x in got["log"])
