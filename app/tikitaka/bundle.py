@@ -28,7 +28,7 @@ provenance.render(렌더 당시 코드 버전·실행 인자·디자인)는 파�
 기존 잡 폴더에는 그 기록이 없다 → 수동 묶음은 null(지어내지 않는다). export 는 수동 시점 코드 버전일 뿐이다.
 전사가 바뀌면 cli.archive_transcript_dependents 가 mark_stale 로 기존 묶음에 stale 표시를 남긴다(파일은 그대로).
 
-편집실 수정 기록(`tikitaka_edit/v1`) — 자리만 잡는다(적용하는 쪽은 아직 없다):
+편집실 수정 기록(`tikitaka_edit/v1`) — 적용(다시 렌더)은 app.tikitaka.apply_edit:
   <잡>/video_edits/<suffix>/<edit_id>.json   한 번 제출 = 파일 하나, 덮어쓰지 않는다(추가만)
   묶음(videos/<suffix>/)은 렌더마다 통째로 교체되므로 입력인 수정 기록을 그 안에 두지 않는다.
   전사 수정 무효화(cli.archive_transcript_dependents)·--redo 패턴에도 걸리지 않는 이름이다 — 검수자 수정이 캐시와 함께 치워지면 안 된다.
